@@ -290,6 +290,42 @@ Invoke-RestMethod -Uri "http://localhost:8000/bm/analyze-transcription" `
   -Body $body
 ```
 
+### Analizar Audio (Fase 2.3)
+
+**1. Usando URL de grabación directa (vía Twilio o público)**
+```powershell
+$body = @{
+    call_id = "manual-audio-test-001"
+    prompt_id = 1
+    analysis_type = "audio"
+    recording_url = "https://api.twilio.com/2010-04-01/Accounts/.../Recordings/...mp3"
+    metadata = @{
+        source = "manual_test"
+        agente_telefonico = "Agente Prueba"
+        call_direction = "OUTBOUND"
+    }
+} | ConvertTo-Json -Depth 10
+
+Invoke-RestMethod -Uri "http://localhost:8000/bm/analyze-audio" `
+  -Method Post `
+  -ContentType "application/json; charset=utf-8" `
+  -Body $body
+```
+
+**2. Descargando llamada directamente desde HubSpot por call_id**
+```powershell
+$body = @{
+    call_id = "491043972285"
+    prompt_id = 1
+    analysis_type = "audio"
+} | ConvertTo-Json
+
+Invoke-RestMethod -Uri "http://localhost:8000/bm/analyze-audio" `
+  -Method Post `
+  -ContentType "application/json; charset=utf-8" `
+  -Body $body
+```
+
 ---
 
 ## Fase 2 — Pendiente
@@ -298,7 +334,6 @@ Los siguientes endpoints están declarados pero devuelven **501 Not Implemented*
 
 | Endpoint | Requiere |
 |---|---|
-| `POST /bm/analyze-audio` | `HUBSPOT_ACCESS_TOKEN`, `AZURE_OPENAI_AUDIO_DEPLOYMENT` |
 | `POST /bm/transcribe` | `HUBSPOT_ACCESS_TOKEN`, `TWILIO_ACCOUNT_SID`, `AZURE_OPENAI_TRANSCRIPTION_DEPLOYMENT` |
 
 Para activar Fase 2:

@@ -2,6 +2,7 @@
 Azure OpenAI service — wraps the official OpenAI SDK using Azure configuration.
 The system is exclusively bound to Azure OpenAI. Direct OpenAI is not supported.
 """
+import base64
 import io
 import logging
 from typing import Any
@@ -118,6 +119,53 @@ async def analyze_audio_url(audio_url: str, prompt_text: str, model: str | None 
         model=deployment,
         messages=messages,
         response_format={"type": "json_object"},
+    )
+    return response.choices[0].message.content or ""
+
+
+async def analyze_audio_bytes(audio_bytes: bytes, prompt_text: str, audio_format: str = "mp3") -> str:
+    """
+    Analyze audio from raw bytes using Azure OpenAI multimodal audio model.
+    Encodes audio to base64 and sends it in the `input_audio` standard format.
+    Returns raw JSON string from the model.
+    """
+    client = _get_azure_client("audio")
+    deployment = settings.azure_openai_audio_deployment
+
+    if not deployment:
+        raise ValueError("Azure OpenAI audio deployment is not configured. Set AZURE_OPENAI_AUDIO_DEPLOYMENT.")
+
+    encoded_audio = base64.b64encode(audio_bytes).decode("utf-8")
+
+    # Force strict JSON in the instruction as requested
+    system_prompt = (
+        "Eres un experto analizador de llamadas. "
+        "Devuelve exclusivamente JSON válido, sin markdown ni texto adicional."
+    )
+
+    messages = [
+        {
+            "role": "system",
+            "content": system_prompt
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt_text},
+                {
+                    "type": "input_audio",
+                    "input_audio": {
+                        "data": encoded_audio,
+                        "format": audio_format
+                    }
+                }
+            ],
+        }
+    ]
+
+    response = await client.chat.completions.create(
+        model=deployment,
+        messages=messages,
     )
     return response.choices[0].message.content or ""
 

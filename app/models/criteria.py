@@ -15,14 +15,14 @@ class PromptCriterion(Base):
     prompt_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("bm_prompts.prompt_id", ondelete="CASCADE"), nullable=True
     )
-    criterion_key: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    criterion_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    criterion_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    criterion_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     criterion_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     criterion_type: Mapped[str | None] = mapped_column(
-        String(50), nullable=True
+        Text, nullable=True
     )  # score_1_10 | percentage | boolean | text | category | number
-    output_key: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    feed_key: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    output_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    feed_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     allowed_values: Mapped[Any | None] = mapped_column(JSON, nullable=True)
     applies_to_types: Mapped[Any | None] = mapped_column(JSON, nullable=True)
     order_index: Mapped[int | None] = mapped_column(Integer, nullable=True, default=100)

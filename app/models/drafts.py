@@ -16,12 +16,12 @@ class PromptDraft(Base):
     prompt_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("bm_prompts.prompt_id", ondelete="CASCADE"), nullable=True
     )
-    draft_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    draft_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     draft_data: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
-    updated_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    updated_by_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    updated_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_by_email: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str | None] = mapped_column(
-        String(50), default="draft", nullable=True
+        Text, default="draft", nullable=True
     )  # draft | discarded | published
     created_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

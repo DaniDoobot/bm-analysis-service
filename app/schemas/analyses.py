@@ -95,6 +95,11 @@ class AnalyzeAudioRequest(BaseModel):
     call_id: str
     prompt_id: int | None = None
     prompt_version_id: int | None = None
+    analysis_type: str = "audio"
+    metadata: dict[str, Any] | None = None
+    recording_url: str | None = None
+    audio_url: str | None = None
+    force: bool = False
 
 
 class TranscribeRequest(BaseModel):

@@ -17,26 +17,26 @@ class Settings(BaseSettings):
     )
 
     # ── Database ──────────────────────────────────────────────────────────────
-    database_url: str = "postgresql+asyncpg://emerald_borer:rxuxzrccfky5dhkotrpnv3dh@127.0.0.1:5433/n8n"
+    database_url: str = ""
 
     # ── Azure OpenAI ──────────────────────────────────────────────────────────
     azure_openai_api_version: str = "2025-01-01-preview"
 
     azure_openai_text_endpoint: str = "https://azure-openai-gpt-4-ecustomer.openai.azure.com/"
-    azure_openai_text_api_key: str = "192a3799f9594ee1b77cc6c0191f8710"
+    azure_openai_text_api_key: str = ""
     azure_openai_text_deployment: str = "gpt-4.1"
 
     azure_openai_audio_endpoint: str = "https://gpt4-ecustomer-embedded.openai.azure.com/"
-    azure_openai_audio_api_key: str = "387c53ae7c3144c289f3a94800e80f8c"
+    azure_openai_audio_api_key: str = ""
     azure_openai_audio_deployment: str = "gpt-audio-1.5"
 
     azure_openai_transcription_endpoint: str = "https://azure-openai-gpt-4-ecustomer.openai.azure.com/"
-    azure_openai_transcription_api_key: str = "192a3799f9594ee1b77cc6c0191f8710"
+    azure_openai_transcription_api_key: str = ""
     azure_openai_transcription_deployment: str = "gpt-4.1"
 
     # ── HubSpot ───────────────────────────────────────────────────────────────
     hubspot_access_token: str = ""
-    hubspot_portal_id: str = ""
+    hubspot_portal_id: str = "140451581"
 
     # ── Twilio ────────────────────────────────────────────────────────────────
     twilio_account_sid: str = ""

@@ -1,8 +1,15 @@
 """
 Transcription analysis service.
-Handles analyzing an existing transcription using the active text prompt.
+Handles analyzing an existing transcription using the active prompt.
+
+Prompt resolution rules:
+  - If prompt_id is provided → use it directly.
+  - If prompt_id is NOT provided → use the active prompt of type="audio" (default).
+    The audio prompt is the canonical one with the 45 active criteria and correct categories.
+    Fallback to type="text" only if no audio prompt exists.
 """
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +23,20 @@ from app.utils.json_utils import safe_parse_json
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+# Exhaustive list of allowed tipo_llamada values
+_ALLOWED_TIPOS: frozenset[str] = frozenset({
+    "cita",
+    "informacion_sin_cita",
+    "confirmacion",
+    "cancelacion",
+    "reagendo",
+    "falta_con_reagendo",
+    "falta_sin_reagendo",
+    "no_interesado",
+    "no_apto",
+    "otros",
+})
+
 
 async def analyze_transcription_pipeline(
     db: AsyncSession,
@@ -28,116 +49,159 @@ async def analyze_transcription_pipeline(
 ) -> dict[str, Any]:
     """
     Core pipeline to analyze an existing transcription.
+
+    Returns a structured dict with ok/status/stage on every code path —
+    never raises an unhandled exception.
     """
     if not call_id:
-        return {"ok": False, "status": "error", "error_message": "call_id is required."}
+        return {
+            "ok": False,
+            "status": "error",
+            "stage": "validation",
+            "error_message": "call_id is required.",
+        }
     if not transcription:
-        return {"ok": False, "status": "error", "error_message": "transcription is required."}
+        return {
+            "ok": False,
+            "status": "error",
+            "stage": "validation",
+            "error_message": "transcription is required.",
+        }
 
-    # 1. Resolve Prompt
+    now = datetime.now(timezone.utc)
+
+    # ── 1. Resolve Prompt ──────────────────────────────────────────────────
     resolved_prompt_id = prompt_id
     resolved_version_id = prompt_version_id
-    prompt_content = None
+    prompt_content: str | None = None
 
-    if not resolved_prompt_id or not resolved_version_id:
-        # Fallback 1: Active "audio" prompt (preferred as it has all categories)
-        active_prompt = await get_active_prompt(db, "audio")
-        if not active_prompt:
-            # Fallback 2: Active "text" prompt
-            logger.info("No active audio prompt found, falling back to text prompt for transcription analysis.")
-            active_prompt = await get_active_prompt(db, "text")
-
-        if not active_prompt:
-            return {"ok": False, "status": "error", "error_message": "No active prompt found for text or audio."}
-        
-        resolved_prompt_id = active_prompt.get("prompt_id")
-        resolved_version_id = (
-            active_prompt.get("prompt_version_id")
-            or active_prompt.get("active_version_id")
-            or active_prompt.get("current_version_id")
-            or active_prompt.get("version_id")
-            or active_prompt.get("id")
-        )
-        prompt_content = (
-            active_prompt.get("prompt")
-            or active_prompt.get("prompt_content")
-            or active_prompt.get("content")
-        )
-        
-        if not resolved_version_id or not prompt_content:
-            keys_avail = list(active_prompt.keys())
-            return {
-                "ok": False, 
-                "status": "error", 
-                "error_message": f"No se pudo resolver la versión activa del prompt. Claves disponibles: {keys_avail}"
-            }
-    else:
-        # We need to fetch the content if IDs were explicitly provided. 
-        # But for now, we assume if they are provided, we should fetch them. Let's do a simple query.
-        # To avoid extra queries if the user doesn't strictly need it, we'll fetch via _get_current_version.
+    if resolved_prompt_id:
+        # Explicit prompt_id provided: fetch its current active version
         from app.services.prompts_service import _get_current_version
         v = await _get_current_version(db, resolved_prompt_id)
         if not v:
-            return {"ok": False, "status": "error", "error_message": f"Prompt ID {resolved_prompt_id} not found."}
+            return {
+                "ok": False,
+                "status": "error",
+                "stage": "validation",
+                "error_message": f"Prompt ID {resolved_prompt_id} not found or has no current version.",
+            }
         resolved_version_id = v.id
         prompt_content = v.prompt
 
-    if not prompt_content:
-        return {"ok": False, "status": "error", "error_message": "Resolved prompt has no content."}
+    else:
+        # No explicit prompt_id → default to the active "audio" prompt.
+        # This is the canonical prompt for Boston Medical (45 criteria, correct categories).
+        active_prompt = await get_active_prompt(db, "audio")
 
-    # 2. Call Azure OpenAI
+        if not active_prompt:
+            # Only fall back to "text" if there is genuinely no audio prompt
+            logger.info(
+                "No active audio prompt found; falling back to text prompt for transcription analysis."
+            )
+            active_prompt = await get_active_prompt(db, "text")
+
+        if not active_prompt:
+            return {
+                "ok": False,
+                "status": "error",
+                "stage": "validation",
+                "error_message": "No active prompt found (tried audio, then text).",
+            }
+
+        resolved_prompt_id = active_prompt.get("prompt_id")
+        resolved_version_id = (
+            active_prompt.get("prompt_version_id")
+            or active_prompt.get("current_version_id")
+        )
+        prompt_content = active_prompt.get("prompt")
+
+        if not resolved_version_id or not prompt_content:
+            return {
+                "ok": False,
+                "status": "error",
+                "stage": "validation",
+                "error_message": (
+                    f"Could not resolve active prompt version. "
+                    f"Available keys: {list(active_prompt.keys())}"
+                ),
+            }
+
+    if not prompt_content:
+        return {
+            "ok": False,
+            "status": "error",
+            "stage": "validation",
+            "error_message": "Resolved prompt has no content.",
+        }
+
+    # ── 2. Call Azure OpenAI ───────────────────────────────────────────────
     messages = [
         {
             "role": "system",
-            "content": f"{prompt_content}\n\nDevuelve exclusivamente JSON válido, sin markdown ni texto adicional."
+            "content": (
+                f"{prompt_content}\n\n"
+                "Devuelve exclusivamente JSON válido, sin markdown ni texto adicional."
+            ),
         },
         {
             "role": "user",
-            "content": f"Transcripción de la llamada:\n\n{transcription}"
-        }
+            "content": f"Transcripción de la llamada:\n\n{transcription}",
+        },
     ]
 
     try:
         raw_response = await openai_service.complete_text(
             messages=messages,
             response_format="json_object",
-            model=settings.azure_openai_text_deployment
+            model=settings.azure_openai_text_deployment,
         )
     except Exception as e:
         logger.error("Error calling Azure OpenAI: %s", e, exc_info=True)
-        return {"ok": False, "status": "error", "error_message": f"Azure OpenAI error: {str(e)}"}
+        return {
+            "ok": False,
+            "status": "error",
+            "stage": "azure",
+            "error_message": f"Azure OpenAI error: {str(e)}",
+        }
 
-    # 3. Parse JSON
+    # ── 3. Parse JSON ──────────────────────────────────────────────────────
     parsed = safe_parse_json(raw_response)
     if not parsed or not isinstance(parsed, dict):
         logger.error("AI returned non-JSON response: %s", raw_response[:500])
         return {
             "ok": False,
             "status": "error",
+            "stage": "parse",
             "error_message": "El modelo no devolvió un JSON válido.",
-            "stage": "json_parsing",
-            "raw_response": raw_response
+            "details": raw_response[:500] if raw_response else None,
         }
 
-    # Validate tipo_llamada
-    allowed_tipos = [
-        "cita", "informacion_sin_cita", "confirmacion", "cancelacion", 
-        "reagendo", "falta_con_reagendo", "falta_sin_reagendo", 
-        "no_interesado", "no_apto", "otros"
-    ]
+    # ── 4. Validate AI output ──────────────────────────────────────────────
     tipo_llamada = parsed.get("tipo_llamada")
-    if tipo_llamada not in allowed_tipos:
+    if tipo_llamada not in _ALLOWED_TIPOS:
+        logger.warning(
+            "tipo_llamada no permitido: %r (call_id=%s, prompt_id=%s)",
+            tipo_llamada,
+            call_id,
+            resolved_prompt_id,
+        )
         return {
             "ok": False,
             "status": "error",
-            "error_message": f"tipo_llamada no permitido: {tipo_llamada}",
             "stage": "validation",
-            "raw_response": raw_response
+            "error_message": f"tipo_llamada no permitido: {tipo_llamada!r}",
+            "details": {
+                "received": tipo_llamada,
+                "allowed": sorted(_ALLOWED_TIPOS),
+            },
         }
 
-    # 4. Persistence
-    call_metadata = metadata or {}
+    # ── 5. Persist ────────────────────────────────────────────────────────
+    call_metadata: dict[str, Any] = dict(metadata or {})
     call_metadata["call_id"] = call_id
+    # Ensure run_ts is always a timezone-aware datetime, never a string
+    call_metadata.setdefault("run_ts", now)
 
     try:
         analysis_record = await save_analysis(
@@ -155,20 +219,20 @@ async def analyze_transcription_pipeline(
             result_json=parsed,
             payload={
                 "transcription": transcription,
-                "raw_response": raw_response
+                "raw_response": raw_response,
             },
-            transcription=transcription
+            transcription=transcription,
         )
     except Exception as e:
         logger.error("Error saving analysis to DB: %s", e, exc_info=True)
         return {
-            "ok": False, 
-            "status": "error", 
-            "error_message": f"DB Save error: {str(e)}",
-            "stage": "save_analysis"
+            "ok": False,
+            "status": "error",
+            "stage": "save_analysis",
+            "error_message": f"DB save error: {str(e)}",
         }
 
-    # 5. Build response
+    # ── 6. Build response ─────────────────────────────────────────────────
     summary = {
         "tipo_llamada": parsed.get("tipo_llamada"),
         "evaluacion_global": parsed.get("evaluacion_global"),
@@ -189,5 +253,5 @@ async def analyze_transcription_pipeline(
         "call_id": call_id,
         "analysis_id": analysis_record.analysis_id,
         "summary": summary,
-        "result": parsed
+        "result": parsed,
     }
