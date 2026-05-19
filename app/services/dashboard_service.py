@@ -179,6 +179,17 @@ def categorize_text(text: str) -> str:
     return "Otros"
 
 
+def _get_objection_metrics(rows: list[Any]) -> tuple[int, int]:
+    calls = 0
+    items = 0
+    for r in rows:
+        if _has_objections(r.result):
+            calls += 1
+            texts = extract_objection_items(r.result)
+            items += len(texts) if texts else 1
+    return calls, items
+
+
 # ── Existing dashboard summary ────────────────────────────────────────────────
 async def get_dashboard_summary(
     db: AsyncSession,
@@ -251,7 +262,7 @@ async def get_dashboard_summary(
     durs = [d for d in durs if d is not None]
     avg_dur = round(sum(durs) / len(durs)) if durs else None
 
-    total_objeciones = sum(1 for r in actual_rows if _has_objections(r.result))
+    total_objection_calls, total_objection_items = _get_objection_metrics(actual_rows)
 
     total_analyses_ant = len(anterior_rows)
     evals_ant = [r.evaluacion_global for r in anterior_rows if r.evaluacion_global is not None]
@@ -265,7 +276,7 @@ async def get_dashboard_summary(
     durs_ant = [d for d in durs_ant if d is not None]
     avg_dur_ant = sum(durs_ant) / len(durs_ant) if durs_ant else 0.0
 
-    total_objeciones_ant = sum(1 for r in anterior_rows if _has_objections(r.result))
+    total_objection_calls_ant, total_objection_items_ant = _get_objection_metrics(anterior_rows)
 
     comparisons = {
         "total_analyses_delta_pct": _calc_delta(total_analyses, total_analyses_ant),
@@ -273,7 +284,9 @@ async def get_dashboard_summary(
         "avg_evaluacion_global_delta_pct": _calc_delta(avg_eval, avg_eval_ant),
         "cita_rate_delta_pct": _calc_delta(cita_rate, cita_rate_ant),
         "avg_duration_delta_pct": _calc_delta(avg_dur or 0.0, avg_dur_ant),
-        "total_objeciones_delta_pct": _calc_delta(total_objeciones, total_objeciones_ant)
+        "total_objeciones_delta_pct": _calc_delta(total_objection_items, total_objection_items_ant),
+        "total_objection_calls_delta_pct": _calc_delta(total_objection_calls, total_objection_calls_ant),
+        "total_objection_items_delta_pct": _calc_delta(total_objection_items, total_objection_items_ant)
     }
 
     buckets = []
@@ -398,7 +411,9 @@ async def get_dashboard_summary(
             "avg_evaluacion_global": avg_eval,
             "cita_rate": cita_rate,
             "avg_duration_seconds": avg_dur,
-            "total_objeciones": total_objeciones
+            "total_objeciones": total_objection_items,  # compatibility fallback (points to items)
+            "total_objection_calls": total_objection_calls,
+            "total_objection_items": total_objection_items
         },
         "comparisons": comparisons,
         "calls_evolution": calls_evolution,
