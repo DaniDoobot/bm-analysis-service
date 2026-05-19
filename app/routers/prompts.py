@@ -3,6 +3,7 @@ import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_db
@@ -25,10 +26,42 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/bm", tags=["Prompts"])
 
 
+class AssignBaseStructureRequest(BaseModel):
+    base_structure_id: int
+
+
 @router.get("/prompts", response_model=list[PromptWithCurrentVersion])
-async def list_prompts(db: Annotated[AsyncSession, Depends(get_db)]):
-    """Return all prompts with their current version (if any)."""
-    return await prompts_service.list_prompts(db)
+async def list_prompts(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    type: Annotated[str | None, Query(description="audio | text")] = None,
+    base_structure_id: Annotated[int | None, Query(description="Filter by base structure ID")] = None,
+    base_structure_key: Annotated[str | None, Query(description="Filter by base structure Key")] = None,
+):
+    """Return all prompts with their current version (if any), with optional filtering."""
+    return await prompts_service.list_prompts(
+        db,
+        prompt_type=type,
+        base_structure_id=base_structure_id,
+        base_structure_key=base_structure_key,
+    )
+
+
+@router.put("/prompts/{prompt_id}/base-structure")
+async def assign_base_structure(
+    prompt_id: int,
+    body: AssignBaseStructureRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Assign a base structure to an existing prompt (metadata reference only).
+    """
+    try:
+        return await prompts_service.assign_base_structure(
+            db, prompt_id=prompt_id, base_structure_id=body.base_structure_id
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 
 
 @router.get("/prompts/active", response_model=ActivePromptOut)

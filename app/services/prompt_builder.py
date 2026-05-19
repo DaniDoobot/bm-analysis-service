@@ -31,6 +31,8 @@ async def build_prompt_with_ai(
     instructions: str | None,
     draft_data: Any | None = None,
     base_structure_id: int | None = None,
+    version_name: str | None = None,
+    change_note: str | None = None,
 ) -> dict[str, Any]:
     """
     Generate a new prompt version using AI.
@@ -51,12 +53,19 @@ async def build_prompt_with_ai(
     if criteria is None:
         criteria = []
 
-    # 3.2. Fetch base structure if provided
+    # 3.2. Fetch base structure based on priority:
+    # 1. base_structure_id received in request.
+    # 2. base_structure_id associated with the prompt in the DB.
+    # 3. fallback legacy (None) if neither is set.
+    resolved_base_structure_id = base_structure_id
+    if resolved_base_structure_id is None and prompt_obj.base_structure_id is not None:
+        resolved_base_structure_id = prompt_obj.base_structure_id
+
     base_structure = None
-    if base_structure_id is not None:
+    if resolved_base_structure_id is not None:
         from app.models.prompts import PromptBaseStructure
         res_struct = await db.execute(
-            select(PromptBaseStructure).where(PromptBaseStructure.id == base_structure_id)
+            select(PromptBaseStructure).where(PromptBaseStructure.id == resolved_base_structure_id)
         )
         base_structure = res_struct.scalars().first()
 
@@ -165,11 +174,12 @@ async def build_prompt_with_ai(
         "prompt_name": prompt_obj.prompt_name,
         "prompt_type": prompt_obj.prompt_type,
         "base_version_id": base_version_id,
-        "generated_name": parsed.get("generated_name", f"prompt_ai_{_ts()}"),
-        "change_summary": parsed.get("change_summary", ""),
+        "generated_name": version_name or parsed.get("generated_name", f"prompt_ai_{_ts()}"),
+        "change_summary": change_note or parsed.get("change_summary", ""),
         "generated_prompt": generated_prompt,
         "criteria_count": len(criteria),
     }
+
 
 
 def _build_meta_prompt(

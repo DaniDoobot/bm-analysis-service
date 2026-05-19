@@ -17,6 +17,9 @@ class PromptOut(BaseModel):
     is_active: bool
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    base_structure_id: int | None = None
+    base_structure_key: str | None = None
+    base_structure_name: str | None = None
 
 
 class PromptWithCurrentVersion(PromptOut):
@@ -41,6 +44,9 @@ class PromptVersionOut(BaseModel):
     source: str | None = None
     is_current: bool = False
     created_at: datetime | None = None
+    base_structure_id: int | None = None
+    base_structure_key: str | None = None
+    base_structure_name: str | None = None
 
     @model_validator(mode="after")
     def apply_fallback(self) -> 'PromptVersionOut':
@@ -59,6 +65,10 @@ class ActivePromptOut(BaseModel):
     current_version_id: int | None = None
     version_label: str | None = None
     prompt: str | None = None
+    base_structure_id: int | None = None
+    base_structure_key: str | None = None
+    base_structure_name: str | None = None
+
 
 
 # ── Save Prompt Request ───────────────────────────────────────────────────────

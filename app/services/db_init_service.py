@@ -220,6 +220,34 @@ async def init_db():
                 await conn.run_sync(Base.metadata.create_all)
                 logger.info("Table 'bm_prompt_base_structures' created successfully.")
 
+        # 1.5. Ensure columns exist on bm_prompts table dynamically and non-destructively
+        async with engine.begin() as conn:
+            for col_name, col_type in [
+                ("base_structure_id", "INTEGER"),
+                ("base_structure_key", "TEXT"),
+                ("base_structure_name", "TEXT"),
+            ]:
+                res = await conn.execute(
+                    text(f"""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.columns 
+                            WHERE table_schema = 'public' 
+                              AND table_name = 'bm_prompts' 
+                              AND column_name = '{col_name}'
+                        );
+                    """)
+                )
+                col_exists = res.scalar()
+                if not col_exists:
+                    logger.info("Adding column '%s' to 'bm_prompts' table...", col_name)
+                    await conn.execute(
+                        text(f"ALTER TABLE bm_prompts ADD COLUMN {col_name} {col_type} NULL;")
+                    )
+                    logger.info("Column '%s' added successfully.", col_name)
+                else:
+                    logger.info("Column '%s' already exists on 'bm_prompts' table.", col_name)
+
+
         # 2. Seed structures in a safe, non-destructive session
         from app.dependencies import get_db
         async with AsyncSession(engine) as db:

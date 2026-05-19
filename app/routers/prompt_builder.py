@@ -23,6 +23,8 @@ class BuildWithAIRequest(BaseModel):
     draft_data: Any | None = None
     updated_by: str | None = None
     updated_by_email: str | None = None
+    version_name: str | None = None
+    change_note: str | None = None
 
 
 @router.post("/prompt/build-with-ai")
@@ -42,7 +44,10 @@ async def build_with_ai_endpoint(
         instructions=active_instructions,
         draft_data=body.draft_data,
         base_structure_id=body.base_structure_id,
+        version_name=body.version_name,
+        change_note=body.change_note,
     )
+
     
     from fastapi.encoders import jsonable_encoder
     from fastapi.responses import JSONResponse

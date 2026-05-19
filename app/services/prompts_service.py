@@ -16,11 +16,23 @@ from app.schemas.prompts import (
 )
 
 
-async def list_prompts(db: AsyncSession) -> list[dict]:
+async def list_prompts(
+    db: AsyncSession,
+    prompt_type: str | None = None,
+    base_structure_id: int | None = None,
+    base_structure_key: str | None = None,
+) -> list[dict]:
     """Return all prompts joined with their current version."""
-    result = await db.execute(
-        select(Prompt).order_by(Prompt.prompt_id)
-    )
+    stmt = select(Prompt)
+    if prompt_type:
+        stmt = stmt.where(Prompt.prompt_type == prompt_type)
+    if base_structure_id is not None:
+        stmt = stmt.where(Prompt.base_structure_id == base_structure_id)
+    if base_structure_key is not None:
+        stmt = stmt.where(Prompt.base_structure_key == base_structure_key)
+    stmt = stmt.order_by(Prompt.prompt_id)
+
+    result = await db.execute(stmt)
     prompts = result.scalars().all()
 
     out = []
@@ -37,6 +49,9 @@ async def list_prompts(db: AsyncSession) -> list[dict]:
             "current_version_id": current.id if current else None,
             "version_label": current.version_label if current else None,
             "prompt": current.prompt if current else None,
+            "base_structure_id": p.base_structure_id,
+            "base_structure_key": p.base_structure_key,
+            "base_structure_name": p.base_structure_name,
         }
         out.append(row)
     return out
@@ -64,16 +79,44 @@ async def get_active_prompt(db: AsyncSession, prompt_type: str) -> dict | None:
         "current_version_id": current.id if current else None,  # Keep for backwards compatibility just in case
         "version_label": current.version_label if current else None,
         "prompt": current.prompt if current else None,
+        "base_structure_id": p.base_structure_id,
+        "base_structure_key": p.base_structure_key,
+        "base_structure_name": p.base_structure_name,
     }
 
 
-async def list_versions(db: AsyncSession, prompt_id: int) -> list[PromptVersion]:
+async def list_versions(db: AsyncSession, prompt_id: int) -> list[dict]:
+    # Fetch prompt to include base structure in versions list
+    prompt_res = await db.execute(select(Prompt).where(Prompt.prompt_id == prompt_id))
+    p = prompt_res.scalars().first()
+
     result = await db.execute(
         select(PromptVersion)
         .where(PromptVersion.prompt_id == prompt_id)
         .order_by(PromptVersion.created_at.desc())
     )
-    return result.scalars().all()
+    versions = result.scalars().all()
+
+    out = []
+    for v in versions:
+        out.append({
+            "id": v.id,
+            "prompt_id": v.prompt_id,
+            "prompt": v.prompt,
+            "version_label": v.version_label,
+            "version_name": v.version_name,
+            "updated_by": v.updated_by,
+            "updated_by_email": v.updated_by_email,
+            "change_note": v.change_note,
+            "source": v.source,
+            "is_current": v.is_current,
+            "created_at": v.created_at,
+            "base_structure_id": p.base_structure_id if p else None,
+            "base_structure_key": p.base_structure_key if p else None,
+            "base_structure_name": p.base_structure_name if p else None,
+        })
+    return out
+
 
 
 async def save_prompt_version(db: AsyncSession, body: SavePromptRequest) -> PromptVersion:
@@ -195,6 +238,40 @@ async def update_base_structure(
     return struct
 
 
+async def assign_base_structure(db: AsyncSession, prompt_id: int, base_structure_id: int) -> dict[str, Any]:
+    """
+    Assign a base structure to an existing prompt (only updates the prompt metadata references).
+    Does not modify versions, text, criteria or active prompt.
+    """
+    # 1. Fetch prompt
+    result = await db.execute(select(Prompt).where(Prompt.prompt_id == prompt_id))
+    prompt_obj = result.scalars().first()
+    if not prompt_obj:
+        raise ValueError(f"Prompt with ID {prompt_id} not found.")
+
+    # 2. Fetch base structure
+    struct = await get_base_structure(db, base_structure_id)
+    if not struct:
+        raise ValueError(f"Base structure with ID {base_structure_id} not found.")
+
+    # 3. Update the fields
+    prompt_obj.base_structure_id = struct.id
+    prompt_obj.base_structure_key = struct.structure_key
+    prompt_obj.base_structure_name = struct.structure_name
+
+    await db.commit()
+    await db.refresh(prompt_obj)
+
+    return {
+        "ok": True,
+        "message": f"Successfully assigned base structure '{struct.structure_name}' to prompt {prompt_id}.",
+        "prompt_id": prompt_obj.prompt_id,
+        "base_structure_id": prompt_obj.base_structure_id,
+        "base_structure_key": prompt_obj.base_structure_key,
+        "base_structure_name": prompt_obj.base_structure_name,
+    }
+
+
 async def create_prompt_from_base(db: AsyncSession, body: CreateFromBaseRequest) -> dict[str, Any]:
     """
     Create a new prompt from a base structure.
@@ -213,10 +290,14 @@ async def create_prompt_from_base(db: AsyncSession, body: CreateFromBaseRequest)
         is_active=True,
         created_by=body.created_by,
         created_by_email=body.created_by_email,
+        base_structure_id=struct.id,
+        base_structure_key=struct.structure_key,
+        base_structure_name=struct.structure_name,
     )
     db.add(new_prompt)
     await db.commit()
     await db.refresh(new_prompt)
+
 
     # 3. Create the first prompt version
     version_label = _generate_label()

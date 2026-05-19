@@ -205,5 +205,178 @@ async def run_validation_pipeline():
     logger.info("\nALL INTEGRATION VALIDATION PIPELINES COMPLETED SUCCESSFULLY!")
 
 
+async def run_extended_validation_pipeline():
+    logger.info("\n=========================================")
+    logger.info("RUNNING EXTENDED VALIDATION PIPELINE E2E")
+    logger.info("=========================================")
+    await init_db()
+
+    engine = get_engine()
+    async with AsyncSession(engine) as db:
+        # A. Crear nueva estructura base: POST /bm/prompt-base-structures
+        logger.info("Step A: Creating a new base structure...")
+        from app.schemas.prompts import PromptBaseStructureCreate, PromptBaseStructureUpdate
+        from app.services.prompts_service import (
+            create_base_structure,
+            update_base_structure,
+            assign_base_structure,
+            list_prompts,
+            list_versions,
+        )
+        
+        new_struct_req = PromptBaseStructureCreate(
+            structure_key="custom_test_structure",
+            structure_name="Custom Test Structure Name",
+            description="A temporary custom base structure for E2E testing",
+            prompt_type="audio",
+            base_prompt="### CUSTOM BASE PROMPT\nThis is a custom base prompt template.\nEnsure we check for custom_key.",
+            default_criteria=[
+                {
+                    "criterion_key": "custom_key",
+                    "criterion_name": "Custom Key Criterion",
+                    "criterion_description": "Custom description",
+                    "criterion_type": "boolean",
+                    "output_key": "custom_key",
+                    "feed_key": "custom_key_feed",
+                    "order_index": 10,
+                    "is_required": True,
+                    "is_active": True
+                }
+            ],
+            created_by="Tester",
+            created_by_email="tester@doobot.ai"
+        )
+        
+        custom_struct = await create_base_structure(db, new_struct_req)
+        logger.info("Created base structure: ID=%d, Key=%s, Name=%s", custom_struct.id, custom_struct.structure_key, custom_struct.structure_name)
+        assert custom_struct.structure_key == "custom_test_structure"
+
+        # B. Editarla: PUT /bm/prompt-base-structures/{id}
+        logger.info("Step B: Editing the base structure...")
+        update_req = PromptBaseStructureUpdate(
+            description="An updated temporary custom base structure for E2E testing",
+            base_prompt="### UPDATED CUSTOM BASE PROMPT\nThis is an updated custom base prompt template.",
+        )
+        updated_struct = await update_base_structure(db, custom_struct.id, update_req)
+        logger.info("Updated base structure: Description='%s', BasePrompt='%s'", updated_struct.description, updated_struct.base_prompt)
+        assert "UPDATED" in updated_struct.base_prompt
+
+        # C. Crear prompt desde esa estructura: POST /bm/prompts/create-from-base
+        logger.info("Step C: Creating a prompt from the base structure...")
+        from app.schemas.prompts import CreateFromBaseRequest
+        from app.services.prompts_service import create_prompt_from_base
+        
+        create_req = CreateFromBaseRequest(
+            base_structure_id=updated_struct.id,
+            prompt_name="E2E Prompt from Custom Structure",
+            prompt_type="audio",
+            created_by="Tester",
+            created_by_email="tester@doobot.ai",
+            copy_default_criteria=True
+        )
+        create_res = await create_prompt_from_base(db, create_req)
+        prompt_id = create_res["prompt_id"]
+        logger.info("Created prompt ID: %d", prompt_id)
+        
+        # D. Confirmar que el prompt creado tiene base_structure_id/key/name
+        logger.info("Step D: Verifying base structure attributes are stored in bm_prompts...")
+        from app.models.prompts import Prompt
+        prompt_res = await db.execute(select(Prompt).where(Prompt.prompt_id == prompt_id))
+        prompt_obj = prompt_res.scalars().first()
+        assert prompt_obj is not None
+        logger.info("Prompt in DB: base_structure_id=%s, base_structure_key=%s, base_structure_name=%s", 
+                    prompt_obj.base_structure_id, prompt_obj.base_structure_key, prompt_obj.base_structure_name)
+        assert prompt_obj.base_structure_id == updated_struct.id
+        assert prompt_obj.base_structure_key == updated_struct.structure_key
+        assert prompt_obj.base_structure_name == updated_struct.structure_name
+
+        # E. Listar prompts filtrando por base_structure_id
+        logger.info("Step E: Filtering prompts by base_structure_id...")
+        filtered_prompts = await list_prompts(db, base_structure_id=updated_struct.id)
+        logger.info("Filtered prompts count (by ID): %d", len(filtered_prompts))
+        assert len(filtered_prompts) == 1
+        assert filtered_prompts[0]["prompt_id"] == prompt_id
+        
+        # Also filter by base_structure_key
+        filtered_prompts_key = await list_prompts(db, base_structure_key=updated_struct.structure_key)
+        logger.info("Filtered prompts count (by Key): %d", len(filtered_prompts_key))
+        assert len(filtered_prompts_key) == 1
+        assert filtered_prompts_key[0]["prompt_id"] == prompt_id
+
+        # E2. Verify that GET /bm/prompt-versions returns these fields!
+        logger.info("Step E2: Listing prompt versions and verifying fields exist...")
+        versions = await list_versions(db, prompt_id=prompt_id)
+        assert len(versions) > 0
+        logger.info("Version base_structure_id returned: %s", versions[0].get("base_structure_id"))
+        assert versions[0].get("base_structure_id") == updated_struct.id
+        assert versions[0].get("base_structure_key") == updated_struct.structure_key
+        assert versions[0].get("base_structure_name") == updated_struct.structure_name
+
+        # F. Reasignar un prompt a otra estructura base (PUT /bm/prompts/{prompt_id}/base-structure behavior)
+        logger.info("Step F: Reassigning the prompt to a blank structure...")
+        # Get blank structure
+        blank_res = await db.execute(select(PromptBaseStructure).where(PromptBaseStructure.structure_key == "blank"))
+        blank_struct = blank_res.scalars().first()
+        assert blank_struct is not None
+        
+        reassign_res = await assign_base_structure(db, prompt_id=prompt_id, base_structure_id=blank_struct.id)
+        logger.info("Reassignment result: %s", reassign_res)
+        assert reassign_res["ok"] is True
+        
+        # Re-fetch and verify it has changed
+        await db.refresh(prompt_obj)
+        logger.info("Prompt in DB after reassign: base_structure_id=%s, base_structure_key=%s", 
+                    prompt_obj.base_structure_id, prompt_obj.base_structure_key)
+        assert prompt_obj.base_structure_id == blank_struct.id
+        assert prompt_obj.base_structure_key == blank_struct.structure_key
+        
+        # G. Ejecutar build-with-ai sin pasar base_structure_id y confirmar que usa la estructura asociada al prompt (blank)
+        logger.info("Step G: Running build-with-ai without base_structure_id parameter...")
+        build_res_associated = await build_prompt_with_ai(
+            db=db,
+            prompt_id=prompt_id,
+            instructions="Genera un prompt de prueba.",
+            version_name="Versión AI Test",
+            change_note="Prueba de regeneración"
+        )
+        logger.info("Build with associated structure result: ok=%s", build_res_associated["ok"])
+        logger.info("Build response name: %s", build_res_associated.get("generated_name"))
+        logger.info("Build response change: %s", build_res_associated.get("change_summary"))
+        assert build_res_associated.get("generated_name") == "Versión AI Test"
+        assert build_res_associated.get("change_summary") == "Prueba de regeneración"
+
+        # H. Ejecutar build-with-ai pasando base_structure_id explícito y confirmar que usa ese, aunque el prompt tenga otro asociado.
+        logger.info("Step H: Running build-with-ai with explicit base_structure_id...")
+        build_res_explicit = await build_prompt_with_ai(
+            db=db,
+            prompt_id=prompt_id,
+            instructions="Genera un prompt de prueba.",
+            base_structure_id=updated_struct.id,
+            version_name="Versión AI Test 2",
+            change_note="Prueba de regeneración 2"
+        )
+        logger.info("Build with explicit structure result: ok=%s", build_res_explicit["ok"])
+        assert build_res_explicit.get("generated_name") == "Versión AI Test 2"
+        assert build_res_explicit.get("change_summary") == "Prueba de regeneración 2"
+
+        # Clean up temporary E2E test structures and prompts
+        logger.info("Cleaning up E2E temporary records...")
+        from app.models.criteria import PromptCriterion
+        await db.execute(delete(PromptCriterion).where(PromptCriterion.prompt_id == prompt_id))
+        await db.execute(delete(PromptVersion).where(PromptVersion.prompt_id == prompt_id))
+        await db.execute(delete(Prompt).where(Prompt.prompt_id == prompt_id))
+        await db.execute(delete(PromptBaseStructure).where(PromptBaseStructure.id == custom_struct.id))
+        await db.commit()
+        logger.info("E2E Cleanup completed successfully.")
+
+    logger.info("=========================================")
+    logger.info("EXTENDED VALIDATION PIPELINE COMPLETED SUCCESSFULLY!")
+    logger.info("=========================================")
+
+
 if __name__ == "__main__":
-    asyncio.run(run_validation_pipeline())
+    async def run_all():
+        await run_validation_pipeline()
+        await run_extended_validation_pipeline()
+    asyncio.run(run_all())
+

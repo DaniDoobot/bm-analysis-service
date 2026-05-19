@@ -25,6 +25,10 @@ class Prompt(Base):
     updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+    base_structure_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    base_structure_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    base_structure_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+
 
 
 class PromptVersion(Base):
