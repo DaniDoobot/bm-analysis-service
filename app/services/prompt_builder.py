@@ -306,12 +306,23 @@ def _format_criteria(criteria: list[PromptCriterion]) -> str:
 
 def _build_output_format(criteria: list[PromptCriterion]) -> str:
     lines = []
+    # Keep track of already emitted keys to prevent duplicates
+    seen_keys = {"tipo_llamada"}
+    
+    # 1. Add tipo_llamada first
     lines.append('  "tipo_llamada": "cita"|"informacion_sin_cita"|"confirmacion"|"cancelacion"|"reagendo"|"falta_con_reagendo"|"falta_sin_reagendo"|"no_interesado"|"no_apto"|"otros"')
     
     for c in criteria:
-        # add a comma to the previous line!
-        lines[-1] = lines[-1] + ","
         if c.output_key:
+            # Skip if we already emitted this output_key (including tipo_llamada)
+            if c.output_key in seen_keys:
+                continue
+            
+            seen_keys.add(c.output_key)
+            
+            # add a comma to the previous line!
+            lines[-1] = lines[-1] + ","
+            
             if c.criterion_type == "category" and c.allowed_values:
                 if isinstance(c.allowed_values, list):
                     vals_str = "|".join([f'"{v}"' for v in c.allowed_values]) + "|null"
@@ -325,6 +336,12 @@ def _build_output_format(criteria: list[PromptCriterion]) -> str:
                 lines.append(f'  "{c.output_key}": "<{c.criterion_type}>"')
                 
         if c.feed_key:
+            # Skip if we already emitted this feed_key
+            if c.feed_key in seen_keys:
+                continue
+            
+            seen_keys.add(c.feed_key)
+            
             lines[-1] = lines[-1] + ","
             lines.append(f'  "{c.feed_key}": "<texto explicativo o justificación>"')
             
