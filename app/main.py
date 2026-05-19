@@ -13,6 +13,7 @@ from app.routers import (
     analyses,
     audio_analysis,
     criteria,
+    dashboard,
     drafts,
     health,
     prompt_builder,
@@ -68,6 +69,7 @@ app.include_router(prompts.router)
 app.include_router(criteria.router)
 app.include_router(drafts.router)
 app.include_router(analyses.router)
+app.include_router(dashboard.router)
 app.include_router(audio_analysis.router)
 app.include_router(transcription_analysis.router)
 app.include_router(prompt_builder.router)
