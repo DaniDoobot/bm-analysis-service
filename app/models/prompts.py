@@ -34,6 +34,7 @@ class PromptVersion(Base):
     )
     prompt: Mapped[str | None] = mapped_column("prompt_content", Text, nullable=True)
     version_label: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_by: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_by_email: Mapped[str | None] = mapped_column(Text, nullable=True)
     change_note: Mapped[str | None] = mapped_column(Text, nullable=True)

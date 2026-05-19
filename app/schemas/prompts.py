@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
@@ -34,12 +34,19 @@ class PromptVersionOut(BaseModel):
     prompt_id: int | None = None
     prompt: str | None = None
     version_label: str | None = None
+    version_name: str | None = None
     updated_by: str | None = None
     updated_by_email: str | None = None
     change_note: str | None = None
     source: str | None = None
     is_current: bool = False
     created_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def apply_fallback(self) -> 'PromptVersionOut':
+        if not self.version_name:
+            self.version_name = self.change_note or self.version_label
+        return self
 
 
 # ── Active Prompt (for analysis use) ─────────────────────────────────────────
@@ -65,6 +72,8 @@ class SavePromptRequest(BaseModel):
     change_note: str | None = None
     source: str | None = "manual"
     version_label: str | None = None
+    version_name: str | None = None
+    generated_name: str | None = None
 
 
 # ── Activate Version Request ──────────────────────────────────────────────────

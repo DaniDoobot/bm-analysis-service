@@ -81,11 +81,13 @@ async def save_prompt_version(db: AsyncSession, body: SavePromptRequest) -> Prom
 
     # Build version label if not provided
     version_label = body.version_label or _generate_label()
+    version_name = body.version_name or body.generated_name
 
     new_version = PromptVersion(
         prompt_id=body.prompt_id,
         prompt=body.prompt,
         version_label=version_label,
+        version_name=version_name,
         updated_by=body.updated_by,
         updated_by_email=body.updated_by_email,
         change_note=body.change_note,
