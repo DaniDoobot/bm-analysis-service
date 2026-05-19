@@ -172,6 +172,26 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
             "error_message": "Resolved prompt has no content.",
         }
 
+    # ── 4.2. Validate Active Criteria are in prompt_text ──────────────
+    from app.services.criteria_service import get_active_criteria
+    active_criteria = await get_active_criteria(db, resolved_prompt_id)
+    missing_keys = []
+    for c in active_criteria:
+        if c.output_key and c.output_key not in prompt_text:
+            missing_keys.append(c.output_key)
+
+    if missing_keys:
+        return {
+            "ok": False,
+            "status": "error",
+            "stage": "validation",
+            "error_message": "Hay criterios activos que no están incluidos en el prompt activo. Regenera y activa una nueva versión del prompt.",
+            "details": {
+                "missing_keys": missing_keys
+            }
+        }
+
+
     logger.info("Resolved prompt_id=%s, version_id=%s for call_id=%s", resolved_prompt_id, resolved_version_id, call_id)
 
     # ── 5. Call Azure OpenAI Audio ──────────────────────────────────────────
