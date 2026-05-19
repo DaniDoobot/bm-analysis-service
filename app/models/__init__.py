@@ -2,14 +2,16 @@
 from app.models.analyses import Analysis, AnalysisResult, CallAnalysisCurrent
 from app.models.criteria import PromptCriterion
 from app.models.drafts import PromptDraft
-from app.models.prompts import Prompt, PromptVersion
+from app.models.prompts import Prompt, PromptVersion, PromptBaseStructure
 
 __all__ = [
     "Prompt",
     "PromptVersion",
+    "PromptBaseStructure",
     "PromptCriterion",
     "PromptDraft",
     "Analysis",
     "CallAnalysisCurrent",
     "AnalysisResult",
 ]
+

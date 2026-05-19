@@ -80,3 +80,65 @@ class SavePromptRequest(BaseModel):
 
 class ActivateVersionRequest(BaseModel):
     id: int
+
+
+# ── Prompt Base Structure ─────────────────────────────────────────────────────
+
+class PromptBaseStructureOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    structure_key: str
+    structure_name: str
+    description: str | None = None
+    prompt_type: str
+    is_active: bool
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    created_by: str | None = None
+    created_by_email: str | None = None
+
+
+class PromptBaseStructureDetailOut(PromptBaseStructureOut):
+    base_prompt: str
+    default_criteria: list[dict[str, Any]] | None = None
+
+
+class PromptBaseStructureCreate(BaseModel):
+    structure_key: str
+    structure_name: str
+    description: str | None = None
+    prompt_type: str = "audio"
+    base_prompt: str
+    default_criteria: list[dict[str, Any]] | None = None
+    created_by: str | None = None
+    created_by_email: str | None = None
+
+
+class PromptBaseStructureUpdate(BaseModel):
+    structure_name: str | None = None
+    description: str | None = None
+    prompt_type: str | None = None
+    base_prompt: str | None = None
+    default_criteria: list[dict[str, Any]] | None = None
+    is_active: bool | None = None
+
+
+class CreateFromBaseRequest(BaseModel):
+    base_structure_id: int
+    prompt_name: str
+    prompt_type: str = "audio"
+    created_by: str | None = None
+    created_by_email: str | None = None
+    copy_default_criteria: bool = True
+
+
+class CreateFromBaseResponse(BaseModel):
+    ok: bool
+    prompt_id: int
+    prompt_version_id: int | None = None
+    prompt_name: str
+    prompt_type: str
+    prompt: str | None = None
+    criteria_count: int
+

@@ -12,6 +12,12 @@ from app.schemas.prompts import (
     PromptVersionOut,
     PromptWithCurrentVersion,
     SavePromptRequest,
+    PromptBaseStructureOut,
+    PromptBaseStructureDetailOut,
+    PromptBaseStructureCreate,
+    PromptBaseStructureUpdate,
+    CreateFromBaseRequest,
+    CreateFromBaseResponse,
 )
 from app.services import prompts_service
 
@@ -66,3 +72,62 @@ async def activate_prompt_version(
     if not version:
         raise HTTPException(status_code=404, detail=f"Version {body.id} not found")
     return {"ok": True, "status": "activated", "version": PromptVersionOut.model_validate(version)}
+
+
+# ── Prompt Base Structures Endpoints ──────────────────────────────────────────
+
+@router.get("/prompt-base-structures", response_model=list[PromptBaseStructureOut])
+async def list_prompt_base_structures(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    type: Annotated[str | None, Query(description="audio | text")] = None,
+):
+    """Return active base structures, optionally filtered by type."""
+    return await prompts_service.list_base_structures(db, prompt_type=type)
+
+
+@router.get("/prompt-base-structures/{id}", response_model=PromptBaseStructureDetailOut)
+async def get_prompt_base_structure(
+    id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Return detailed base structure by ID."""
+    struct = await prompts_service.get_base_structure(db, structure_id=id)
+    if not struct:
+        raise HTTPException(status_code=404, detail=f"Base structure {id} not found.")
+    return struct
+
+
+@router.post("/prompt-base-structures", response_model=PromptBaseStructureDetailOut)
+async def create_prompt_base_structure(
+    body: PromptBaseStructureCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Create a new prompt base structure."""
+    return await prompts_service.create_base_structure(db, body)
+
+
+@router.put("/prompt-base-structures/{id}", response_model=PromptBaseStructureDetailOut)
+async def update_prompt_base_structure(
+    id: int,
+    body: PromptBaseStructureUpdate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Update an existing prompt base structure."""
+    struct = await prompts_service.update_base_structure(db, structure_id=id, body=body)
+    if not struct:
+        raise HTTPException(status_code=404, detail=f"Base structure {id} not found.")
+    return struct
+
+
+@router.post("/prompts/create-from-base", response_model=CreateFromBaseResponse)
+async def create_prompt_from_base(
+    body: CreateFromBaseRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Create a new prompt and versions/criteria populated from base structure."""
+    try:
+        res = await prompts_service.create_prompt_from_base(db, body=body)
+        return res
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+

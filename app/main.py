@@ -85,3 +85,9 @@ async def startup_event():
     logger.info("CORS origins: %s", settings.allowed_origins)
     if not settings.database_url:
         logger.warning("DATABASE_URL is not set!")
+
+    # Safely initialize base structures in the background
+    import asyncio
+    from app.services.db_init_service import init_db
+    asyncio.create_task(init_db())
+

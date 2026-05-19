@@ -17,6 +17,7 @@ router = APIRouter(prefix="/bm", tags=["AI Prompt Builder"])
 
 class BuildWithAIRequest(BaseModel):
     prompt_id: int
+    base_structure_id: int | None = None
     instructions: str | None = None
     general_instructions: str | None = None  # Alias for fallback
     draft_data: Any | None = None
@@ -40,6 +41,7 @@ async def build_with_ai_endpoint(
         prompt_id=body.prompt_id,
         instructions=active_instructions,
         draft_data=body.draft_data,
+        base_structure_id=body.base_structure_id,
     )
     
     from fastapi.encoders import jsonable_encoder
