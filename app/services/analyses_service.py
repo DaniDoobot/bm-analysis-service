@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.analyses import Analysis, AnalysisResult, CallAnalysisCurrent
 from app.schemas.analyses import AnalysisDetailResponse
 from app.services.analysis_results_mapper import group_results, build_summary
+from app.utils.hubspot_owners import resolve_owner_name, resolve_agent_display
 
 logger = logging.getLogger(__name__)
 
@@ -220,11 +221,24 @@ async def enrich_analyses(db: AsyncSession, items: list[Any]) -> list[Any]:
 
         agent = getattr(item, 'agente_telefonico', None)
         owner_id = getattr(item, 'hubspot_owner_id', None)
-        display_name = agent
         
+        # 1. Try static resolution first
+        resolved_name = resolve_owner_name(owner_id)
+        if resolved_name:
+            setattr(item, 'agente_telefonico', resolved_name)
+            setattr(item, 'agente_telefonico_display', resolved_name)
+            continue
+            
+        # 2. Try DB fallback resolution
+        db_resolved_name = None
         if owner_id in agent_map and (not agent or (isinstance(agent, str) and agent.isdigit())):
-            display_name = agent_map[owner_id]
-
+            db_resolved_name = agent_map[owner_id]
+            
+        # 3. Use resolve_agent_display for fallback display
+        display_name = resolve_agent_display(db_resolved_name or agent, owner_id)
+        
         setattr(item, 'agente_telefonico_display', display_name)
+        if display_name and not str(display_name).isdigit():
+            setattr(item, 'agente_telefonico', display_name)
 
     return items

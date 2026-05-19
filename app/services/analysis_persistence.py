@@ -120,6 +120,12 @@ async def save_analysis(
     if call_timestamp is not None and call_timestamp.tzinfo is None:
         call_timestamp = call_timestamp.replace(tzinfo=timezone.utc)
 
+    # ── Resolve agent name defensively ────────────────────────────────────
+    from app.utils.hubspot_owners import resolve_agent_display
+    raw_agent = call_metadata.get("agente_telefonico")
+    owner_id = call_metadata.get("hubspot_owner_id")
+    resolved_agent = resolve_agent_display(raw_agent, owner_id)
+
     # ── Strip legacy keys from result ─────────────────────────────────────
     clean_result = _strip_legacy_keys(result_json)
 
@@ -134,8 +140,8 @@ async def save_analysis(
             source=call_metadata.get("source", "api"),
             run_ts=run_ts,
             fecha_eval=fecha_eval,
-            agente_telefonico=call_metadata.get("agente_telefonico"),
-            hubspot_owner_id=call_metadata.get("hubspot_owner_id"),
+            agente_telefonico=resolved_agent,
+            hubspot_owner_id=owner_id,
             prompt_id=prompt_metadata.get("prompt_id"),
             prompt_version_id=prompt_metadata.get("prompt_version_id"),
             transcription=transcription,
