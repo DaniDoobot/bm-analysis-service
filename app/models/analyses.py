@@ -93,6 +93,10 @@ class CallAnalysisCurrent(Base):
     result: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     payload: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
 
+    @property
+    def analysis_id(self) -> int | None:
+        return self.latest_analysis_id
+
 
 class AnalysisResult(Base):
     __tablename__ = "bm_analysis_results"

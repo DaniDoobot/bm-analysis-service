@@ -56,6 +56,48 @@ async def list_analyses(
     return result.scalars().all()
 
 
+async def list_analyses_history(
+    db: AsyncSession,
+    analysis_type: str | None = None,
+    call_id: str | None = None,
+    agent: str | None = None,
+    tipo_llamada: str | None = None,
+    prompt_id: int | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[Analysis]:
+    """List all analyses from bm_analyses (history) with optional filters."""
+    query = select(Analysis)
+
+    if analysis_type:
+        query = query.where(Analysis.analysis_type == analysis_type)
+    if call_id:
+        query = query.where(Analysis.call_id == call_id)
+    if agent:
+        query = query.where(Analysis.agente_telefonico.ilike(f"%{agent}%"))
+    if tipo_llamada:
+        query = query.where(Analysis.tipo_llamada == tipo_llamada)
+    if prompt_id is not None:
+        query = query.where(Analysis.prompt_id == prompt_id)
+    if date_from:
+        try:
+            query = query.where(Analysis.created_at >= date_from)
+        except Exception:
+            logger.warning("Invalid date_from value: %s — skipping filter", date_from)
+    if date_to:
+        try:
+            query = query.where(Analysis.created_at <= date_to)
+        except Exception:
+            logger.warning("Invalid date_to value: %s — skipping filter", date_to)
+
+    query = query.order_by(Analysis.analysis_id.desc()).limit(limit).offset(offset)
+
+    result = await db.execute(query)
+    return result.scalars().all()
+
+
 async def get_analysis_detail(
     db: AsyncSession,
     analysis_id: int | None = None,

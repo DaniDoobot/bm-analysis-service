@@ -11,6 +11,7 @@ class AnalysisListItem(BaseModel):
 
     call_id: str
     analysis_type: str
+    analysis_id: int | None = None
     latest_analysis_id: int | None = None
     hubspot_url: str | None = None
     call_direction: str | None = None
