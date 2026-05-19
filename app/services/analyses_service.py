@@ -53,7 +53,9 @@ async def list_analyses(
     query = query.order_by(CallAnalysisCurrent.updated_at.desc()).limit(limit).offset(offset)
 
     result = await db.execute(query)
-    return result.scalars().all()
+    items = list(result.scalars().all())
+    await enrich_analyses(db, items)
+    return items
 
 
 async def list_analyses_history(
@@ -95,7 +97,9 @@ async def list_analyses_history(
     query = query.order_by(Analysis.analysis_id.desc()).limit(limit).offset(offset)
 
     result = await db.execute(query)
-    return result.scalars().all()
+    items = list(result.scalars().all())
+    await enrich_analyses(db, items)
+    return items
 
 
 async def get_analysis_detail(
@@ -130,6 +134,8 @@ async def get_analysis_detail(
     if not analysis:
         return None
 
+    await enrich_analyses(db, [analysis])
+
     # Get analysis results
     res_result = await db.execute(
         select(AnalysisResult)
@@ -148,3 +154,77 @@ async def get_analysis_detail(
         results=list(results),
         grouped=grouped,
     )
+
+
+async def enrich_analyses(db: AsyncSession, items: list[Any]) -> list[Any]:
+    if not items:
+        return items
+
+    prompt_ids = {item.prompt_id for item in items if getattr(item, 'prompt_id', None)}
+    version_ids = {item.prompt_version_id for item in items if getattr(item, 'prompt_version_id', None)}
+
+    prompt_map = {}
+    if prompt_ids:
+        from app.models.prompts import Prompt
+        pr = await db.execute(select(Prompt.prompt_id, Prompt.prompt_name, Prompt.prompt_type).where(Prompt.prompt_id.in_(prompt_ids)))
+        for pid, pname, ptype in pr.fetchall():
+            prompt_map[pid] = (pname, ptype)
+
+    version_map = {}
+    if version_ids:
+        from app.models.prompts import PromptVersion
+        vr = await db.execute(select(PromptVersion.id, PromptVersion.version_label).where(PromptVersion.id.in_(version_ids)))
+        for vid, vlabel in vr.fetchall():
+            version_map[vid] = vlabel
+
+    owner_ids_to_resolve = set()
+    for item in items:
+        agent = getattr(item, 'agente_telefonico', None)
+        owner_id = getattr(item, 'hubspot_owner_id', None)
+        if owner_id:
+            if not agent or (isinstance(agent, str) and agent.isdigit()):
+                owner_ids_to_resolve.add(owner_id)
+
+    agent_map = {}
+    if owner_ids_to_resolve:
+        from app.models.analyses import Analysis
+        for oid in owner_ids_to_resolve:
+            qr = await db.execute(
+                select(Analysis.agente_telefonico)
+                .where(Analysis.hubspot_owner_id == oid)
+                .where(Analysis.agente_telefonico.is_not(None))
+                .where(~Analysis.agente_telefonico.op('~')('^[0-9]+$'))
+                .order_by(Analysis.analysis_id.desc())
+                .limit(1)
+            )
+            val = qr.scalar()
+            if val:
+                agent_map[oid] = val
+
+    for item in items:
+        pid = getattr(item, 'prompt_id', None)
+        vid = getattr(item, 'prompt_version_id', None)
+
+        pname = f"Prompt #{pid}" if pid else None
+        ptype = None
+        if pid and pid in prompt_map:
+            pname, ptype = prompt_map[pid]
+        
+        vlabel = f"Versión #{vid}" if vid else None
+        if vid and vid in version_map and version_map[vid]:
+            vlabel = version_map[vid]
+
+        setattr(item, 'prompt_name', pname)
+        setattr(item, 'prompt_type', ptype)
+        setattr(item, 'prompt_version_label', vlabel)
+
+        agent = getattr(item, 'agente_telefonico', None)
+        owner_id = getattr(item, 'hubspot_owner_id', None)
+        display_name = agent
+        
+        if owner_id in agent_map and (not agent or (isinstance(agent, str) and agent.isdigit())):
+            display_name = agent_map[owner_id]
+
+        setattr(item, 'agente_telefonico_display', display_name)
+
+    return items

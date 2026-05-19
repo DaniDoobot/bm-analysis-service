@@ -20,9 +20,13 @@ class AnalysisListItem(BaseModel):
     fecha_eval: Any | None = None
     updated_at: datetime | str | None = None
     agente_telefonico: str | None = None
+    agente_telefonico_display: str | None = None
     hubspot_owner_id: str | None = None
     prompt_id: int | None = None
+    prompt_name: str | None = None
+    prompt_type: str | None = None
     prompt_version_id: int | None = None
+    prompt_version_label: str | None = None
     status: str | None = None
     tipo_llamada: str | None = None
     evaluacion_global: Any | None = None
@@ -44,9 +48,13 @@ class AnalysisDetail(BaseModel):
     run_ts: datetime | str | None = None
     fecha_eval: Any | None = None
     agente_telefonico: str | None = None
+    agente_telefonico_display: str | None = None
     hubspot_owner_id: str | None = None
     prompt_id: int | None = None
+    prompt_name: str | None = None
+    prompt_type: str | None = None
     prompt_version_id: int | None = None
+    prompt_version_label: str | None = None
     transcription: str | None = None
     transcription_provider: str | None = None
     transcription_model: str | None = None
