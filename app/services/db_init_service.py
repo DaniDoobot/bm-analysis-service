@@ -223,26 +223,51 @@ async def init_db():
         # 2. Seed structures in a safe, non-destructive session
         from app.dependencies import get_db
         async with AsyncSession(engine) as db:
-            # Populate boston_medical_audio dynamic base prompt if possible
+            # Populate boston_medical_audio dynamic base prompt and default_criteria if possible
             boston_audio_struct = DEFAULT_STRUCTURES[0]
-            if not boston_audio_struct["base_prompt"]:
+            try:
                 # Query active prompt 1 current version
-                try:
-                    result = await db.execute(
-                        select(PromptVersion)
-                        .where(PromptVersion.prompt_id == 1, PromptVersion.is_current == True)
-                        .limit(1)
-                    )
-                    v = result.scalars().first()
-                    if v and v.prompt:
-                        boston_audio_struct["base_prompt"] = v.prompt
-                        logger.info("Loaded default boston_medical_audio base prompt from active prompt version 1.")
-                    else:
-                        boston_audio_struct["base_prompt"] = FALLBACK_BOSTON_PROMPT
-                        logger.info("No active version found for prompt 1. Using fallback Boston Medical base prompt.")
-                except Exception as e:
+                result = await db.execute(
+                    select(PromptVersion)
+                    .where(PromptVersion.prompt_id == 1, PromptVersion.is_current == True)
+                    .limit(1)
+                )
+                v = result.scalars().first()
+                if v and v.prompt:
+                    boston_audio_struct["base_prompt"] = v.prompt
+                    logger.info("Loaded default boston_medical_audio base prompt from active prompt version 1.")
+                else:
                     boston_audio_struct["base_prompt"] = FALLBACK_BOSTON_PROMPT
-                    logger.warning("Error fetching active prompt version 1 for seeding: %s. Using fallback.", e)
+                    logger.info("No active version found for prompt 1. Using fallback Boston Medical base prompt.")
+
+                # Query active criteria of prompt 1
+                from app.models.criteria import PromptCriterion
+                crit_res = await db.execute(
+                    select(PromptCriterion)
+                    .where(PromptCriterion.prompt_id == 1, PromptCriterion.is_active == True)
+                    .order_by(PromptCriterion.order_index.asc())
+                )
+                crit_list = crit_res.scalars().all()
+                if crit_list:
+                    mapped = []
+                    for c in crit_list:
+                        mapped.append({
+                            "criterion_key": c.criterion_key,
+                            "criterion_name": c.criterion_name,
+                            "criterion_description": c.criterion_description,
+                            "criterion_type": c.criterion_type,
+                            "output_key": c.output_key,
+                            "feed_key": c.feed_key,
+                            "is_active": c.is_active,
+                            "is_required": c.is_required,
+                            "order_index": c.order_index
+                        })
+                    boston_audio_struct["default_criteria"] = mapped
+                    logger.info("Loaded %d active criteria for boston_medical_audio default_criteria from prompt 1.", len(mapped))
+            except Exception as e:
+                if not boston_audio_struct["base_prompt"]:
+                    boston_audio_struct["base_prompt"] = FALLBACK_BOSTON_PROMPT
+                logger.warning("Error fetching active prompt version 1 / criteria for seeding: %s. Using default fallback.", e)
 
             # Insert default records if structure_key doesn't exist
             for struct_data in DEFAULT_STRUCTURES:
@@ -254,7 +279,58 @@ async def init_db():
                 existing = q_res.scalars().first()
                 
                 if existing:
-                    logger.info("Structure base key '%s' already exists in database. Skipping to prevent overwrite.", key)
+                    if key == "boston_medical_audio":
+                        # Check if it has the fallback 4 criteria (saludo_identificacion, empatia, claridad, gestion_objeciones)
+                        is_fallback = False
+                        if existing.default_criteria and len(existing.default_criteria) <= 4:
+                            fallback_keys = {"saludo_identificacion", "empatia", "claridad", "gestion_objeciones"}
+                            existing_keys = {c.get("criterion_key") for c in existing.default_criteria if c}
+                            if existing_keys.issubset(fallback_keys):
+                                is_fallback = True
+
+                        if is_fallback:
+                            logger.info("Detected legacy 4-criteria fallback in boston_medical_audio in DB. Upgrading dynamically...")
+                            from app.models.criteria import PromptCriterion
+                            crit_res = await db.execute(
+                                select(PromptCriterion)
+                                .where(PromptCriterion.prompt_id == 1, PromptCriterion.is_active == True)
+                                .order_by(PromptCriterion.order_index.asc())
+                            )
+                            crit_list = crit_res.scalars().all()
+                            if crit_list:
+                                upgraded_criteria = []
+                                for c in crit_list:
+                                    upgraded_criteria.append({
+                                        "criterion_key": c.criterion_key,
+                                        "criterion_name": c.criterion_name,
+                                        "criterion_description": c.criterion_description,
+                                        "criterion_type": c.criterion_type,
+                                        "output_key": c.output_key,
+                                        "feed_key": c.feed_key,
+                                        "is_active": c.is_active,
+                                        "is_required": c.is_required,
+                                        "order_index": c.order_index
+                                    })
+                                existing.default_criteria = upgraded_criteria
+                                logger.info("Upgraded existing boston_medical_audio default_criteria in DB dynamically to %d real active criteria.", len(upgraded_criteria))
+
+                                # Synchronize base prompt too if it has changed
+                                try:
+                                    result_v = await db.execute(
+                                        select(PromptVersion)
+                                        .where(PromptVersion.prompt_id == 1, PromptVersion.is_current == True)
+                                        .limit(1)
+                                    )
+                                    v = result_v.scalars().first()
+                                    if v and v.prompt:
+                                        existing.base_prompt = v.prompt
+                                        logger.info("Synchronized boston_medical_audio base prompt with prompt version 1.")
+                                except Exception as ep:
+                                    logger.warning("Failed to sync base prompt: %s", ep)
+                            else:
+                                logger.info("No active criteria found in DB for prompt 1. Keeping fallback.")
+                    else:
+                        logger.info("Structure base key '%s' already exists in database. Skipping to prevent overwrite.", key)
                 else:
                     new_struct = PromptBaseStructure(
                         structure_key=key,

@@ -269,6 +269,63 @@ async def create_prompt_from_base(db: AsyncSession, body: CreateFromBaseRequest)
     }
 
 
+async def refresh_boston_medical_base_structure(db: AsyncSession) -> dict[str, Any]:
+    """
+    Manually refreshes the 'boston_medical_audio' structure from prompt 1
+    and its active criteria.
+    """
+    # 1. Fetch active prompt version 1
+    current_version = await _get_current_version(db, 1)
+    if not current_version or not current_version.prompt:
+        raise ValueError("No active prompt version found for prompt_id=1.")
+
+    # 2. Fetch active criteria of prompt 1
+    from app.models.criteria import PromptCriterion
+    crit_res = await db.execute(
+        select(PromptCriterion)
+        .where(PromptCriterion.prompt_id == 1, PromptCriterion.is_active == True)
+        .order_by(PromptCriterion.order_index.asc())
+    )
+    crit_list = crit_res.scalars().all()
+
+    # 3. Query base structure 'boston_medical_audio'
+    result = await db.execute(
+        select(PromptBaseStructure).where(PromptBaseStructure.structure_key == "boston_medical_audio")
+    )
+    struct = result.scalars().first()
+    if not struct:
+        raise ValueError("Base structure 'boston_medical_audio' not found in database.")
+
+    # 4. Map criteria
+    mapped = []
+    for c in crit_list:
+        mapped.append({
+            "criterion_key": c.criterion_key,
+            "criterion_name": c.criterion_name,
+            "criterion_description": c.criterion_description,
+            "criterion_type": c.criterion_type,
+            "output_key": c.output_key,
+            "feed_key": c.feed_key,
+            "is_active": c.is_active,
+            "is_required": c.is_required,
+            "order_index": c.order_index
+        })
+
+    # 5. Update and commit
+    struct.base_prompt = current_version.prompt
+    struct.default_criteria = mapped
+    await db.commit()
+    await db.refresh(struct)
+
+    return {
+        "ok": True,
+        "message": "Boston Medical base structure successfully refreshed from active prompt 1 and its active criteria.",
+        "structure_id": struct.id,
+        "criteria_count": len(mapped),
+        "default_criteria": mapped
+    }
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 async def _get_current_version(db: AsyncSession, prompt_id: int) -> PromptVersion | None:

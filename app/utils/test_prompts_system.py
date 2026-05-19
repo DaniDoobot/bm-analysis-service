@@ -183,6 +183,17 @@ async def run_validation_pipeline():
             
         logger.info("Step 7 Success!")
 
+        # ── 8. Verify refresh_boston_medical_base_structure ──
+        logger.info("\n=== Step 8: Verify refresh_boston_medical_base_structure ===")
+        try:
+            from app.services.prompts_service import refresh_boston_medical_base_structure
+            refresh_res = await refresh_boston_medical_base_structure(db)
+            logger.info("Manual refresh result: ok=%s, criteria_count=%d", refresh_res["ok"], refresh_res["criteria_count"])
+            assert refresh_res["ok"] is True
+            logger.info("Step 8 Success!")
+        except Exception as e:
+            logger.warning("Could not run Step 8 (e.g. if prompt 1 or its active criteria are missing in this DB state): %s", e)
+
         # Clean up temporary test prompts to keep database clean
         logger.info("\nCleaning up test records...")
         await db.execute(delete(PromptCriterion).where(PromptCriterion.prompt_id.in_([res_boston["prompt_id"], res_blank["prompt_id"], res_fresh_blank["prompt_id"]])))

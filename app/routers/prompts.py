@@ -131,3 +131,18 @@ async def create_prompt_from_base(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+
+@router.post("/prompt-base-structures/boston-medical/refresh")
+async def refresh_boston_medical_base_structure(
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Manually synchronizes the 'boston_medical_audio' structure from active prompt 1
+    and its active criteria.
+    """
+    try:
+        return await prompts_service.refresh_boston_medical_base_structure(db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
