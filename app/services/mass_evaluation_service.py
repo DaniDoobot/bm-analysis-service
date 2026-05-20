@@ -582,16 +582,15 @@ class MassEvaluationService:
                 fresh_job_res = await db.execute(fresh_job_stmt)
                 fresh_job_obj = fresh_job_res.scalars().first()
 
+                final_status = "completed"
+                if calls_failed > 0:
+                    final_status = "completed_with_errors"
+
                 if fresh_run_obj:
                     fresh_run_obj.calls_analyzed = calls_analyzed
                     fresh_run_obj.calls_skipped = calls_skipped
                     fresh_run_obj.calls_failed = calls_failed
-                    
-                    if calls_failed > 0:
-                        fresh_run_obj.status = "completed_with_errors"
-                    else:
-                        fresh_run_obj.status = "completed"
-                        
+                    fresh_run_obj.status = final_status
                     fresh_run_obj.finished_at = datetime.now(timezone.utc)
                     fresh_run_obj.run_summary = {
                         "analyzed": calls_analyzed,
@@ -613,7 +612,7 @@ class MassEvaluationService:
                         )
 
                 await db.commit()
-                logger.info("Mass evaluation job %d, run %d finished with status: %s", job_id, run_id, fresh_run_obj.status if fresh_run_obj else "unknown")
+                logger.info("Mass evaluation job %d, run %d finished with status: %s", job_id, run_id, final_status)
                 
             except Exception as e_run:
                 logger.error("Mass evaluation job %d run %d failed in background: %s", job_id, run_id, e_run, exc_info=True)

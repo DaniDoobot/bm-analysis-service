@@ -432,7 +432,41 @@ async def init_db():
                                 "Deactivating duplicate active prompt: ID %d, Name '%s' (type '%s')",
                                 p.prompt_id, p.prompt_name, p_type
                             )
-            
+            # Clean up duplicate is_current prompt versions
+            logger.info("Cleaning up duplicate is_current prompt versions...")
+            try:
+                # Find prompt_ids that have more than one version marked as is_current
+                dup_stmt = (
+                    select(PromptVersion.prompt_id)
+                    .where(PromptVersion.is_current == True)
+                    .group_by(PromptVersion.prompt_id)
+                    .having(text("COUNT(*) > 1"))
+                )
+                dup_res = await db.execute(dup_stmt)
+                dup_prompt_ids = dup_res.scalars().all()
+                
+                for p_id in dup_prompt_ids:
+                    logger.info("Found duplicate current versions for prompt_id=%d", p_id)
+                    # Fetch all current versions for this prompt_id, sorted by id desc
+                    v_stmt = (
+                        select(PromptVersion)
+                        .where(PromptVersion.prompt_id == p_id, PromptVersion.is_current == True)
+                        .order_by(PromptVersion.id.desc())
+                    )
+                    v_res = await db.execute(v_stmt)
+                    versions = v_res.scalars().all()
+                    
+                    if len(versions) > 1:
+                        # Keep the first one (highest ID) as is_current=True, and unset the others
+                        highest_v = versions[0]
+                        logger.info("Keeping version ID %d as current for prompt %d", highest_v.id, p_id)
+                        
+                        for other_v in versions[1:]:
+                            other_v.is_current = False
+                            logger.info("Unsetting is_current for duplicate version ID %d", other_v.id)
+            except Exception as e_dup:
+                logger.error("Error cleaning up duplicate prompt versions: %s", e_dup)
+
             await db.commit()
             logger.info("db_init_service initialization completed successfully.")
             
