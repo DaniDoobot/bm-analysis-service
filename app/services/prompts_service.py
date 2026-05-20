@@ -165,6 +165,18 @@ async def activate_version(db: AsyncSession, version_id: int) -> PromptVersion |
         .values(is_current=False)
     )
     version.is_current = True
+
+    # Get parent prompt and set it active, deactivating other prompts of the same type
+    prompt_res = await db.execute(select(Prompt).where(Prompt.prompt_id == version.prompt_id))
+    prompt_obj = prompt_res.scalars().first()
+    if prompt_obj:
+        prompt_obj.is_active = True
+        await db.execute(
+            update(Prompt)
+            .where(Prompt.prompt_type == prompt_obj.prompt_type, Prompt.prompt_id != prompt_obj.prompt_id)
+            .values(is_active=False)
+        )
+
     await db.commit()
     await db.refresh(version)
     return version
@@ -287,7 +299,7 @@ async def create_prompt_from_base(db: AsyncSession, body: CreateFromBaseRequest)
         prompt_name=body.prompt_name,
         prompt_type=body.prompt_type,
         description=struct.description,
-        is_active=True,
+        is_active=body.activate,
         created_by=body.created_by,
         created_by_email=body.created_by_email,
         base_structure_id=struct.id,
@@ -295,8 +307,15 @@ async def create_prompt_from_base(db: AsyncSession, body: CreateFromBaseRequest)
         base_structure_name=struct.structure_name,
     )
     db.add(new_prompt)
-    await db.commit()
-    await db.refresh(new_prompt)
+    await db.flush()
+
+    # If explicitly requested to activate, deactivate all other prompts of the same type
+    if body.activate:
+        await db.execute(
+            update(Prompt)
+            .where(Prompt.prompt_type == body.prompt_type, Prompt.prompt_id != new_prompt.prompt_id)
+            .values(is_active=False)
+        )
 
 
     # 3. Create the first prompt version

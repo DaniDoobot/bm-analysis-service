@@ -17,7 +17,7 @@ from app.db import get_engine
 from app.services.db_init_service import init_db
 from app.models.prompts import PromptBaseStructure, Prompt, PromptVersion
 from app.models.criteria import PromptCriterion
-from app.services.prompts_service import create_prompt_from_base, save_prompt_version
+from app.services.prompts_service import create_prompt_from_base, save_prompt_version, get_active_prompt, activate_version
 from app.schemas.prompts import CreateFromBaseRequest, SavePromptRequest
 from app.services.prompt_builder import build_prompt_with_ai
 from app.services.criteria_service import save_criterion
@@ -93,7 +93,52 @@ async def run_validation_pipeline():
         c_blank_list = db_criteria_blank.scalars().all()
         logger.info("Criteria actually stored in DB for Blank: %d", len(c_blank_list))
         assert len(c_blank_list) == 0, "Blank prompt must have 0 criteria!"
+        
+        # Verify the new prompt is inactive by default (since activate is omitted/False)
+        blank_prompt_obj = await db.get(Prompt, res_blank["prompt_id"])
+        assert blank_prompt_obj.is_active is False, "New prompt must be created as inactive by default!"
         logger.info("Step 3 & 4 Success!")
+
+        # ── Step 4.5: Verify activate=True and explicit activate_version ──
+        logger.info("\n=== Step 4.5: Verify activate=True and activate_version ===")
+        req_active = CreateFromBaseRequest(
+            base_structure_id=blank_struct.id,
+            prompt_name="Test Explicitly Active Prompt",
+            prompt_type="audio",
+            created_by="Test Agent",
+            created_by_email="agent@doobot.ai",
+            copy_default_criteria=True,
+            activate=True
+        )
+        res_active = await create_prompt_from_base(db, req_active)
+        logger.info("Result of creation with activate=True:")
+        logger.info(" - prompt_id: %s", res_active["prompt_id"])
+        logger.info(" - prompt_version_id: %s", res_active["prompt_version_id"])
+        
+        # Verify new prompt is active
+        active_prompt_obj = await db.get(Prompt, res_active["prompt_id"])
+        assert active_prompt_obj.is_active is True, "Prompt must be active when created with activate=True!"
+        
+        # Verify that previously created inactive prompt (res_blank) remains inactive
+        await db.refresh(blank_prompt_obj)
+        assert blank_prompt_obj.is_active is False, "Previously inactive prompt must remain inactive!"
+        
+        # Verify get_active_prompt returns this new active prompt
+        active_retrieved = await get_active_prompt(db, "audio")
+        assert active_retrieved["prompt_id"] == res_active["prompt_id"], "Active prompt should be the newly activated one!"
+        
+        # Now explicitly activate the version of res_blank (which was inactive)
+        logger.info("Activating version %d of prompt %d...", res_blank["prompt_version_id"], res_blank["prompt_id"])
+        await activate_version(db, res_blank["prompt_version_id"])
+        
+        # Verify res_blank has become active
+        await db.refresh(blank_prompt_obj)
+        assert blank_prompt_obj.is_active is True, "Parent prompt must become active on version activation!"
+        
+        # Verify previous active prompt (res_active) has been deactivated
+        await db.refresh(active_prompt_obj)
+        assert active_prompt_obj.is_active is False, "Previous active prompt must be deactivated!"
+        logger.info("Step 4.5 Success!")
 
         # ── 5. Add a manual criterion to the blank prompt ──
         logger.info("\n=== Step 5: Add a manual criterion to blank prompt ===")
@@ -196,9 +241,10 @@ async def run_validation_pipeline():
 
         # Clean up temporary test prompts to keep database clean
         logger.info("\nCleaning up test records...")
-        await db.execute(delete(PromptCriterion).where(PromptCriterion.prompt_id.in_([res_boston["prompt_id"], res_blank["prompt_id"], res_fresh_blank["prompt_id"]])))
-        await db.execute(delete(PromptVersion).where(PromptVersion.prompt_id.in_([res_boston["prompt_id"], res_blank["prompt_id"], res_fresh_blank["prompt_id"]])))
-        await db.execute(delete(Prompt).where(Prompt.prompt_id.in_([res_boston["prompt_id"], res_blank["prompt_id"], res_fresh_blank["prompt_id"]])))
+        test_ids = [res_boston["prompt_id"], res_blank["prompt_id"], res_active["prompt_id"], res_fresh_blank["prompt_id"]]
+        await db.execute(delete(PromptCriterion).where(PromptCriterion.prompt_id.in_(test_ids)))
+        await db.execute(delete(PromptVersion).where(PromptVersion.prompt_id.in_(test_ids)))
+        await db.execute(delete(Prompt).where(Prompt.prompt_id.in_(test_ids)))
         await db.commit()
         logger.info("Cleanup completed successfully.")
 

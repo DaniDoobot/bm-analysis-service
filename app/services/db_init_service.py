@@ -3,7 +3,7 @@ import logging
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_engine, Base
-from app.models.prompts import PromptBaseStructure, PromptVersion
+from app.models.prompts import PromptBaseStructure, PromptVersion, Prompt
 
 logger = logging.getLogger(__name__)
 
@@ -373,6 +373,52 @@ async def init_db():
                     )
                     db.add(new_struct)
                     logger.info("Inserting default structure base: %s", key)
+            
+            # 3. Cleanup duplicate active prompts of the same type prudently
+            for p_type in ["audio", "text"]:
+                stmt = select(Prompt).where(Prompt.prompt_type == p_type, Prompt.is_active == True)
+                res = await db.execute(stmt)
+                active_prompts = res.scalars().all()
+                if len(active_prompts) > 1:
+                    logger.warning(
+                        "Found %d active prompts for type '%s' in database. Performing cleanup...",
+                        len(active_prompts), p_type
+                    )
+                    
+                    target_active = None
+                    # Rule A: If audio type and prompt_id = 1 is active, keep it active
+                    if p_type == "audio":
+                        for p in active_prompts:
+                            if p.prompt_id == 1:
+                                target_active = p
+                                break
+                    
+                    # Rule B: Otherwise, keep the prompt with the most recent updated_at or version
+                    if not target_active:
+                        from datetime import datetime, timezone
+                        def get_sort_key(p):
+                            dt = p.updated_at
+                            if dt is None:
+                                return (datetime.min.replace(tzinfo=timezone.utc), p.prompt_id)
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=timezone.utc)
+                            else:
+                                dt = dt.astimezone(timezone.utc)
+                            return (dt, p.prompt_id)
+                        
+                        sorted_prompts = sorted(active_prompts, key=get_sort_key, reverse=True)
+                        target_active = sorted_prompts[0]
+                    
+                    logger.info("Selected prompt ID %d ('%s') to REMAIN ACTIVE.", target_active.prompt_id, target_active.prompt_name)
+                    
+                    # Deactivate the others
+                    for p in active_prompts:
+                        if p.prompt_id != target_active.prompt_id:
+                            p.is_active = False
+                            logger.info(
+                                "Deactivating duplicate active prompt: ID %d, Name '%s' (type '%s')",
+                                p.prompt_id, p.prompt_name, p_type
+                            )
             
             await db.commit()
             logger.info("db_init_service initialization completed successfully.")

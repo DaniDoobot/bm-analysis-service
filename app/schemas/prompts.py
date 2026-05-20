@@ -141,6 +141,7 @@ class CreateFromBaseRequest(BaseModel):
     created_by: str | None = None
     created_by_email: str | None = None
     copy_default_criteria: bool = True
+    activate: bool = False
 
 
 class CreateFromBaseResponse(BaseModel):
