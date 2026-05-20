@@ -13,6 +13,7 @@ from app.schemas.mass_evaluations import (
     MassEvaluationJobUpdate,
     MassEvaluationResultResponse,
     MassEvaluationRunResponse,
+    MassEvaluationRunLaunchResponse,
 )
 from app.services.mass_evaluation_service import MassEvaluationService
 
@@ -129,7 +130,11 @@ async def run_job(
                 override_date_from=payload.override_date_from,
                 override_date_to=payload.override_date_to
             )
-            return run
+            return {
+                "message": "Run started",
+                "polling_url": f"/bm/mass-evaluation-runs/{run.run_id}",
+                "run": run
+            }
         except ValueError as ve:
             # Handles active execution locks or job not found
             raise HTTPException(

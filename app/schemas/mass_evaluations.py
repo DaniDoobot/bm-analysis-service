@@ -170,3 +170,9 @@ class MassEvaluationJobManualRunRequest(BaseModel):
     override_date_from: datetime | None = None
     override_date_to: datetime | None = None
     dry_run: bool = False
+
+
+class MassEvaluationRunLaunchResponse(BaseModel):
+    message: str = "Run started"
+    polling_url: str
+    run: MassEvaluationRunResponse
