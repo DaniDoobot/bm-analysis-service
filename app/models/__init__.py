@@ -3,6 +3,7 @@ from app.models.analyses import Analysis, AnalysisResult, CallAnalysisCurrent
 from app.models.criteria import PromptCriterion
 from app.models.drafts import PromptDraft
 from app.models.prompts import Prompt, PromptVersion, PromptBaseStructure
+from app.models.mass_evaluations import MassEvaluationJob, MassEvaluationRun, MassEvaluationResult
 
 __all__ = [
     "Prompt",
@@ -13,5 +14,8 @@ __all__ = [
     "Analysis",
     "CallAnalysisCurrent",
     "AnalysisResult",
+    "MassEvaluationJob",
+    "MassEvaluationRun",
+    "MassEvaluationResult",
 ]
 
