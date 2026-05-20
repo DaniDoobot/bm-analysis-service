@@ -63,6 +63,10 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
     duracion_llamada = metadata.get("duracion_llamada")
     source = metadata.get("source", "hubspot")
 
+    call_timestamp_source = "null"
+    if call_timestamp:
+        call_timestamp_source = "request_metadata"
+
     # ── 1. HubSpot Resolution ──────────────────────────────────────────────
     if not target_url:
         logger.info("No direct recording_url provided. Resolving via HubSpot for call_id=%s", call_id)
@@ -72,7 +76,21 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
             target_url = hubspot_data.get("recording_url")
             hubspot_url = hubspot_data.get("hubspot_url")
             call_direction = hubspot_data.get("call_direction") or call_direction
-            call_timestamp = hubspot_data.get("call_timestamp") or call_timestamp
+            
+            # Prioritized HubSpot timestamps
+            hs_timestamp = hubspot_data.get("hs_timestamp")
+            hs_createdate = hubspot_data.get("hs_createdate")
+            if hs_timestamp:
+                call_timestamp = hs_timestamp
+                call_timestamp_source = "hubspot_hs_timestamp"
+            elif hs_createdate:
+                call_timestamp = hs_createdate
+                call_timestamp_source = "hubspot_hs_createdate"
+            else:
+                call_timestamp = hubspot_data.get("call_timestamp") or call_timestamp
+                if call_timestamp and call_timestamp_source == "null":
+                    call_timestamp_source = "hubspot_call_timestamp"
+            
             hubspot_owner_id = hubspot_data.get("hubspot_owner_id") or hubspot_owner_id
             duracion_llamada = hubspot_data.get("call_duration") or duracion_llamada
             agente_telefonico = hubspot_data.get("agente_telefonico") or agente_telefonico
@@ -93,6 +111,24 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
             }
     else:
         logger.info("Using direct recording_url for call_id=%s", call_id)
+
+    # ── 1.5. Twilio Fallback Resolution ────────────────────────────────────
+    if not call_timestamp and target_url:
+        twilio_service = TwilioService()
+        if twilio_service.is_twilio_url(target_url) and twilio_service.account_sid and twilio_service.auth_token:
+            logger.info("Checking Twilio recording metadata fallback for call_id=%s (url=%s)", call_id, target_url)
+            try:
+                tw_meta = await twilio_service.get_recording_metadata(target_url)
+                if tw_meta:
+                    tw_date = tw_meta.get("date_created")
+                    if tw_date:
+                        call_timestamp = tw_date
+                        call_timestamp_source = "twilio_recording_date_created"
+            except Exception as e:
+                logger.warning("Twilio fallback failed for call_id=%s: %s", call_id, e)
+
+    # ── 1.8. Log resolved call timestamp ──
+    logger.info("Call timestamp resolution: call_timestamp_source=%s, call_timestamp=%s", call_timestamp_source, call_timestamp)
 
     if not target_url:
         return {

@@ -222,6 +222,7 @@ async def get_dashboard_summary(
         Analysis.tipo_llamada,
         Analysis.evaluacion_global,
         Analysis.fecha_eval,
+        Analysis.call_timestamp,
         Analysis.status,
         Analysis.result,
         Analysis.payload
@@ -397,6 +398,7 @@ async def get_dashboard_summary(
             "tipo_llamada": r.tipo_llamada,
             "evaluacion_global": float(r.evaluacion_global) if r.evaluacion_global is not None else None,
             "fecha_eval": r.fecha_eval.isoformat() if r.fecha_eval else None,
+            "call_timestamp": r.call_timestamp.isoformat() if r.call_timestamp else None,
             "status": r.status
         })
 
@@ -684,6 +686,7 @@ async def get_agent_evolution(
             "analysis_id": a.analysis_id,
             "call_id": a.call_id,
             "fecha_eval": a.fecha_eval.isoformat() if a.fecha_eval else None,
+            "call_timestamp": a.call_timestamp.isoformat() if a.call_timestamp else None,
             "tipo_llamada": a.tipo_llamada,
             "evaluacion_global": float(a.evaluacion_global) if a.evaluacion_global is not None else None,
             "objeciones": objection_text
@@ -798,6 +801,7 @@ async def get_objections_breakdown(
                     "call_id": a.call_id,
                     "agent": resolved_agent,
                     "fecha_eval": a.fecha_eval.isoformat() if a.fecha_eval else None,
+                    "call_timestamp": a.call_timestamp.isoformat() if a.call_timestamp else None,
                     "text": text
                 })
                 
@@ -855,6 +859,7 @@ async def get_objections_breakdown(
             "analysis_id": a.analysis_id,
             "call_id": a.call_id,
             "fecha_eval": a.fecha_eval.isoformat() if a.fecha_eval else None,
+            "call_timestamp": a.call_timestamp.isoformat() if a.call_timestamp else None,
             "agent": resolved_agent,
             "tipo_llamada": a.tipo_llamada,
             "objeciones": objection_summary_text,

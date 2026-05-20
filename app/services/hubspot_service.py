@@ -66,6 +66,8 @@ class HubSpotService:
             "call_duration": props.get("hs_call_duration"),
             "recording_url": props.get("hs_call_recording_url"),
             "call_timestamp": props.get("hs_timestamp") or props.get("hs_createdate"),
+            "hs_timestamp": props.get("hs_timestamp"),
+            "hs_createdate": props.get("hs_createdate"),
             "hubspot_owner_id": owner_id,
             "agente_telefonico": owner_id,  # Will be enriched if owner lookup is added
             "status": props.get("hs_call_status"),

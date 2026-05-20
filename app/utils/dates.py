@@ -39,10 +39,13 @@ def safe_parse_datetime(value: Any) -> datetime | None:
     if isinstance(value, date):
         return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
 
-    # Millisecond timestamp (HubSpot style)
+    # Timestamp (milliseconds or seconds)
     if isinstance(value, (int, float)):
         try:
-            return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+            if value > 5000000000:
+                return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+            else:
+                return datetime.fromtimestamp(value, tz=timezone.utc)
         except (OSError, OverflowError, ValueError):
             return None
 
@@ -70,10 +73,24 @@ def safe_parse_datetime(value: Any) -> datetime | None:
         except ValueError:
             pass
 
-        # Try millisecond string
+        # Try millisecond or second string
         try:
-            return datetime.fromtimestamp(int(value) / 1000, tz=timezone.utc)
+            val_int = int(value)
+            if val_int > 5000000000:
+                return datetime.fromtimestamp(val_int / 1000, tz=timezone.utc)
+            else:
+                return datetime.fromtimestamp(val_int, tz=timezone.utc)
         except (ValueError, OSError):
+            pass
+
+        # Try RFC 2822 format (e.g. standard Twilio timestamps)
+        try:
+            from email.utils import parsedate_to_datetime
+            dt = parsedate_to_datetime(value)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except (ValueError, TypeError):
             pass
 
     return None

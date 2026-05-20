@@ -1,7 +1,8 @@
 """
-Twilio service — downloads recording audio in-memory.
+Twilio service — downloads recording audio in-memory and retrieves metadata.
 """
 import logging
+from typing import Any
 
 import httpx
 
@@ -45,3 +46,35 @@ class TwilioService:
             response = await client.get(recording_url, **kwargs)
             response.raise_for_status()
             return response.content
+
+    async def get_recording_metadata(self, recording_url: str) -> dict[str, Any] | None:
+        """
+        Fetch recording metadata from Twilio API.
+        Appends or replaces the extension to build a .json URL.
+        Uses Basic Auth with twilio_account_sid and twilio_auth_token.
+        """
+        if not recording_url or not self.is_twilio_url(recording_url):
+            return None
+
+        # Build .json URL correctly
+        base_url = recording_url
+        if base_url.endswith(".mp3"):
+            base_url = base_url[:-4] + ".json"
+        elif base_url.endswith(".wav"):
+            base_url = base_url[:-4] + ".json"
+        elif base_url.endswith(".MP3"):
+            base_url = base_url[:-4] + ".json"
+        elif base_url.endswith(".WAV"):
+            base_url = base_url[:-4] + ".json"
+        elif not base_url.endswith(".json"):
+            base_url = base_url + ".json"
+
+        auth = self._auth()
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.get(base_url, auth=auth, follow_redirects=True)
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            logger.warning("Failed to fetch Twilio recording metadata from %s: %s", base_url, e)
+            return None
