@@ -143,6 +143,61 @@ def get_avg_score(analyses: list[Analysis], key: str) -> float | None:
     return round(sum(scores) / len(scores), 1) if scores else None
 
 
+
+# ── Mass Evaluation Helpers ───────────────────────────────────────────────────
+
+def _effective_ts(row: Any) -> "datetime | None":
+    """Returns call_timestamp if set, otherwise analysis_timestamp."""
+    ts = getattr(row, "call_timestamp", None) or getattr(row, "analysis_timestamp", None)
+    if ts and ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts
+
+
+def extract_score_from_mass(result_json: Any, items_json: Any, key: str) -> "float | None":
+    """Extract numeric score from mass result_json, falling back to items_json."""
+    if result_json and isinstance(result_json, dict):
+        val = result_json.get(key)
+        if val is None and key == "sentiment":
+            val = result_json.get("sentimiento") or result_json.get("evaluacion_sentimiento")
+        if val is None and key == "procedimiento":
+            val = result_json.get("adherencia_procedimiento")
+        if val is not None:
+            try:
+                if isinstance(val, dict):
+                    for sk in ["score", "valor", "value", "puntuacion"]:
+                        if val.get(sk) is not None:
+                            return float(val[sk])
+                return float(val)
+            except (ValueError, TypeError):
+                if isinstance(val, str):
+                    c = val.strip().lower()
+                    if c in ["si", "sí"]:
+                        return 10.0
+                    if c == "no":
+                        return 0.0
+    if items_json:
+        items = items_json if isinstance(items_json, list) else []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_key = item.get("key") or item.get("criterion_key") or item.get("output_key")
+            if item_key == key:
+                v = item.get("value") or item.get("score") or item.get("valor")
+                if v is not None:
+                    try:
+                        return float(v)
+                    except (ValueError, TypeError):
+                        pass
+    return None
+
+
+def get_avg_score_mass(rows: list, key: str) -> "float | None":
+    """Compute average score for a key across MassEvaluationResult rows."""
+    scores = [s for r in rows if (s := extract_score_from_mass(r.result_json, r.items_json, key)) is not None]
+    return round(sum(scores) / len(scores), 1) if scores else None
+
+
 def extract_objection_items(result: Any) -> list[str]:
     items = []
     if not result or not isinstance(result, dict):
@@ -428,63 +483,80 @@ async def get_dashboard_summary(
 
 # ── A) GET /bm/agents ──────────────────────────────────────────────────────────
 async def get_agents_list(db: AsyncSession) -> list[dict[str, Any]]:
-    # Get statistics from db
-    stmt = select(
-        Analysis.hubspot_owner_id,
-        func.count(Analysis.analysis_id).label("total_analyses"),
-        func.max(Analysis.fecha_eval).label("last_analysis_at"),
-        func.avg(Analysis.evaluacion_global).label("avg_evaluacion_global")
+    """Return agents list with metrics calculated from bm_mass_evaluation_results only."""
+    from app.models.mass_evaluations import MassEvaluationResult
+
+    # 1. Per-agent aggregates (count + last timestamp)
+    agg_stmt = select(
+        MassEvaluationResult.hubspot_owner_id,
+        MassEvaluationResult.agent_name,
+        func.count(MassEvaluationResult.mass_analysis_id).label("total_analyses"),
+        func.max(MassEvaluationResult.analysis_timestamp).label("last_analysis_at"),
     ).where(
-        Analysis.status == "completed"
+        MassEvaluationResult.status == "completed",
+        MassEvaluationResult.hubspot_owner_id.is_not(None),
     ).group_by(
-        Analysis.hubspot_owner_id
+        MassEvaluationResult.hubspot_owner_id,
+        MassEvaluationResult.agent_name,
     )
-    
-    result = await db.execute(stmt)
-    db_rows = result.fetchall()
-    
-    db_stats = {r.hubspot_owner_id: r for r in db_rows if r.hubspot_owner_id}
-    
-    results = []
-    
-    # 1. Process static mapping first to ensure they are returned
-    for oid, name in OWNER_TO_NAME.items():
-        stats = db_stats.get(oid)
-        results.append({
+    agg_res = await db.execute(agg_stmt)
+    agg_rows = agg_res.fetchall()
+
+    # Collapse multiple agent_name variants per owner → keep highest count
+    db_stats: dict[str, Any] = {}
+    for r in agg_rows:
+        oid = r.hubspot_owner_id
+        if oid not in db_stats or r.total_analyses > db_stats[oid].total_analyses:
+            db_stats[oid] = r
+
+    # 2. Fetch result_json to compute avg_evaluacion_global in Python
+    rj_stmt = select(
+        MassEvaluationResult.hubspot_owner_id,
+        MassEvaluationResult.result_json,
+    ).where(
+        MassEvaluationResult.status == "completed",
+        MassEvaluationResult.hubspot_owner_id.is_not(None),
+    )
+    rj_res = await db.execute(rj_stmt)
+    owner_evals: dict[str, list[float]] = {}
+    for r in rj_res.fetchall():
+        rj = r.result_json
+        if rj and isinstance(rj, dict):
+            v = rj.get("evaluacion_global")
+            if v is not None:
+                try:
+                    owner_evals.setdefault(r.hubspot_owner_id, []).append(float(v))
+                except (ValueError, TypeError):
+                    pass
+
+    def _fmt(stats: Any, oid: str, name: str) -> dict:
+        evals = owner_evals.get(oid, [])
+        avg_eval = round(sum(evals) / len(evals), 1) if evals else 0.0
+        last_at = None
+        if stats and stats.last_analysis_at:
+            raw = stats.last_analysis_at
+            if raw.tzinfo is None:
+                raw = raw.replace(tzinfo=timezone.utc)
+            last_at = raw.isoformat()
+        return {
             "hubspot_owner_id": oid,
             "agent_name": name,
             "total_analyses": stats.total_analyses if stats else 0,
-            "last_analysis_at": stats.last_analysis_at.isoformat() if stats and stats.last_analysis_at else None,
-            "avg_evaluacion_global": round(float(stats.avg_evaluacion_global), 1) if stats and stats.avg_evaluacion_global is not None else 0.0
-        })
-        
-    # 2. Add extra agents found in DB not in mapping
-    extra_ids = [oid for oid in db_stats.keys() if oid not in OWNER_TO_NAME]
-    if extra_ids:
-        # Resolve their names dynamically from the DB history
-        extra_names = {}
-        for oid in extra_ids:
-            qr = await db.execute(
-                select(Analysis.agente_telefonico)
-                .where(Analysis.hubspot_owner_id == oid)
-                .where(Analysis.agente_telefonico.is_not(None))
-                .where(~Analysis.agente_telefonico.op('~')('^[0-9]+$'))
-                .order_by(Analysis.analysis_id.desc())
-                .limit(1)
-            )
-            val = qr.scalar()
-            extra_names[oid] = val or oid
-            
-        for oid in extra_ids:
-            stats = db_stats[oid]
-            results.append({
-                "hubspot_owner_id": oid,
-                "agent_name": extra_names.get(oid, oid),
-                "total_analyses": stats.total_analyses,
-                "last_analysis_at": stats.last_analysis_at.isoformat() if stats.last_analysis_at else None,
-                "avg_evaluacion_global": round(float(stats.avg_evaluacion_global), 1) if stats.avg_evaluacion_global is not None else 0.0
-            })
-            
+            "last_analysis_at": last_at,
+            "avg_evaluacion_global": avg_eval,
+        }
+
+    results = []
+    # 3. Known mapping first (always shown even with 0 evaluations)
+    for oid, name in OWNER_TO_NAME.items():
+        results.append(_fmt(db_stats.get(oid), oid, name))
+
+    # 4. Extra agents found only in mass eval results
+    for oid in db_stats:
+        if oid not in OWNER_TO_NAME:
+            row = db_stats[oid]
+            results.append(_fmt(row, oid, row.agent_name or oid))
+
     return results
 
 
@@ -492,86 +564,95 @@ async def get_agents_list(db: AsyncSession) -> list[dict[str, Any]]:
 async def get_agent_evolution(
     db: AsyncSession,
     hubspot_owner_id: str,
-    analysis_type: str = "audio",
+    analysis_type: str = "audio",   # kept for API compat; mass evals are always audio
     period: str = "30d",
     bucket_param: str | None = None,
     prompt_version_id: int | None = None
 ) -> dict[str, Any]:
+    """Evolution metrics from bm_mass_evaluation_results only."""
+    from app.models.mass_evaluations import MassEvaluationResult
+
     now = datetime.now(timezone.utc)
-    
+
     # 1. Resolve timeframe
     if period == "7d":
-        delta = timedelta(days=7)
-        start_date = now - delta
+        start_date = now - timedelta(days=7)
     elif period == "30d":
-        delta = timedelta(days=30)
-        start_date = now - delta
+        start_date = now - timedelta(days=30)
     elif period == "90d":
-        delta = timedelta(days=90)
-        start_date = now - delta
+        start_date = now - timedelta(days=90)
     else:
         period = "all"
         start_date = None
-        
-    stmt = select(Analysis).where(
-        Analysis.hubspot_owner_id == hubspot_owner_id,
-        Analysis.analysis_type == analysis_type,
-        Analysis.status == "completed"
+
+    stmt = select(MassEvaluationResult).where(
+        MassEvaluationResult.hubspot_owner_id == hubspot_owner_id,
+        MassEvaluationResult.status == "completed",
     )
     if start_date:
-        stmt = stmt.where(Analysis.fecha_eval >= start_date)
+        # Filter by call_timestamp first; fallback to analysis_timestamp
+        stmt = stmt.where(
+            func.coalesce(
+                MassEvaluationResult.call_timestamp,
+                MassEvaluationResult.analysis_timestamp,
+            ) >= start_date
+        )
     if prompt_version_id is not None:
-        stmt = stmt.where(Analysis.prompt_version_id == prompt_version_id)
-        
-    stmt = stmt.order_by(Analysis.fecha_eval.asc())
-    
+        stmt = stmt.where(MassEvaluationResult.prompt_version_id == prompt_version_id)
+
+    stmt = stmt.order_by(
+        func.coalesce(
+            MassEvaluationResult.call_timestamp,
+            MassEvaluationResult.analysis_timestamp,
+        ).asc()
+    )
+
     result = await db.execute(stmt)
-    analyses = list(result.scalars().all())
-    
+    rows = list(result.scalars().all())
+
     agent_name = resolve_owner_name(hubspot_owner_id)
-    if not agent_name and analyses:
-        # Fallback to DB history
-        for a in reversed(analyses):
-            if a.agente_telefonico and not a.agente_telefonico.isdigit():
-                agent_name = a.agente_telefonico
+    if not agent_name and rows:
+        for r in reversed(rows):
+            if r.agent_name and not r.agent_name.isdigit():
+                agent_name = r.agent_name
                 break
     if not agent_name:
         agent_name = hubspot_owner_id
-        
-    # ── Summary Calculations ──────────────────────────────────────────────────
-    total_analyses = len(analyses)
-    first_analysis_at = analyses[0].fecha_eval.isoformat() if analyses and analyses[0].fecha_eval else None
-    last_analysis_at = analyses[-1].fecha_eval.isoformat() if analyses and analyses[-1].fecha_eval else None
-    
-    avg_eval = get_avg_score(analyses, "evaluacion_global") or 0.0
-    avg_sent = get_avg_score(analyses, "sentiment") or 0.0
-    avg_emp = get_avg_score(analyses, "empatia") or 0.0
-    avg_cla = get_avg_score(analyses, "claridad") or 0.0
-    avg_sim = get_avg_score(analyses, "simpatia") or 0.0
-    avg_pro = get_avg_score(analyses, "procedimiento") or 0.0
-    
-    citas = sum(1 for a in analyses if a.tipo_llamada == "cita")
-    total_tipo = sum(1 for a in analyses if a.tipo_llamada is not None)
-    cita_rate = round((citas / total_tipo) * 100) if total_tipo > 0 else 0
-    total_objs = sum(1 for a in analyses if _has_objections(a.result))
-    
-    # ── Trend Calculation ─────────────────────────────────────────────────────
+
+    total_analyses = len(rows)
+    first_ts = _effective_ts(rows[0]) if rows else None
+    last_ts = _effective_ts(rows[-1]) if rows else None
+
+    avg_eval = get_avg_score_mass(rows, "evaluacion_global") or 0.0
+    avg_sent = get_avg_score_mass(rows, "sentiment") or 0.0
+    avg_emp  = get_avg_score_mass(rows, "empatia") or 0.0
+    avg_cla  = get_avg_score_mass(rows, "claridad") or 0.0
+    avg_sim  = get_avg_score_mass(rows, "simpatia") or 0.0
+    avg_pro  = get_avg_score_mass(rows, "procedimiento") or 0.0
+
+    # tipo_llamada lives inside result_json
+    tipo_counts: dict[str, int] = {}
+    for r in rows:
+        if r.result_json and isinstance(r.result_json, dict):
+            t = r.result_json.get("tipo_llamada")
+            if t:
+                tipo_counts[t] = tipo_counts.get(t, 0) + 1
+    total_tipo = sum(tipo_counts.values())
+    cita_rate = round((tipo_counts.get("cita", 0) / total_tipo) * 100) if total_tipo > 0 else 0
+    total_objs = sum(1 for r in rows if _has_objections(r.result_json))
+
+    # ── Trend ────────────────────────────────────────────────────────────────
     delta_val = 0.0
     delta_pct = 0.0
     direction = "stable"
     interpretation = "Sin datos suficientes para calcular tendencia."
-    
+
     if total_analyses >= 2:
         mid = total_analyses // 2
-        first_half = analyses[:mid]
-        second_half = analyses[mid:]
-        
-        first_avg = get_avg_score(first_half, "evaluacion_global") or 0.0
-        last_avg = get_avg_score(second_half, "evaluacion_global") or 0.0
-        
+        first_avg = get_avg_score_mass(rows[:mid], "evaluacion_global") or 0.0
+        last_avg  = get_avg_score_mass(rows[mid:], "evaluacion_global") or 0.0
         delta_val = round(last_avg - first_avg, 1)
         delta_pct = round(((last_avg - first_avg) / first_avg) * 100, 1) if first_avg > 0 else 0.0
-        
         if delta_val > 0.3:
             direction = "up"
             interpretation = "El agente muestra una mejoría en la evaluación global en el periodo seleccionado."
@@ -581,129 +662,113 @@ async def get_agent_evolution(
         else:
             direction = "stable"
             interpretation = "El desempeño del agente se mantiene estable en la evaluación global."
-            
-    # ── Timeline Grouping ─────────────────────────────────────────────────────
-    bucket_interval = bucket_param if bucket_param in ["day", "week"] else ("week" if period in ["90d", "all"] else "day")
-    
-    buckets_map = {}
-    for a in analyses:
-        fe = a.fecha_eval
-        if not fe:
+    elif total_analyses == 0:
+        direction = "no_data"
+        interpretation = "Sin evaluaciones masivas disponibles para el periodo seleccionado."
+
+    # ── Timeline ─────────────────────────────────────────────────────────────
+    bucket_interval = bucket_param if bucket_param in ["day", "week"] else (
+        "week" if period in ["90d", "all"] else "day"
+    )
+    buckets_map: dict[str, list] = {}
+    for r in rows:
+        ts = _effective_ts(r)
+        if not ts:
             continue
-        if fe.tzinfo is None:
-            fe = fe.replace(tzinfo=timezone.utc)
-            
         if bucket_interval == "day":
-            b_key = fe.strftime("%Y-%m-%d")
+            b_key = ts.strftime("%Y-%m-%d")
         else:
-            start_of_week = fe - timedelta(days=fe.weekday())
-            b_key = start_of_week.strftime("%Y-%m-%d")
-            
-        if b_key not in buckets_map:
-            buckets_map[b_key] = []
-        buckets_map[b_key].append(a)
-        
+            b_key = (ts - timedelta(days=ts.weekday())).strftime("%Y-%m-%d")
+        buckets_map.setdefault(b_key, []).append(r)
+
     timeline = []
-    for b_key in sorted(buckets_map.keys()):
-        bucket_analyses = buckets_map[b_key]
-        b_total = len(bucket_analyses)
-        b_avg_eval = get_avg_score(bucket_analyses, "evaluacion_global")
-        b_avg_sent = get_avg_score(bucket_analyses, "sentiment")
-        b_avg_emp = get_avg_score(bucket_analyses, "empatia")
-        b_avg_cla = get_avg_score(bucket_analyses, "claridad")
-        b_avg_sim = get_avg_score(bucket_analyses, "simpatia")
-        b_avg_pro = get_avg_score(bucket_analyses, "procedimiento")
-        
-        b_citas = sum(1 for r in bucket_analyses if r.tipo_llamada == "cita")
-        b_total_tipo = sum(1 for r in bucket_analyses if r.tipo_llamada is not None)
-        b_cita_rate = round((b_citas / b_total_tipo) * 100) if b_total_tipo > 0 else 0
-        b_total_objs = sum(1 for r in bucket_analyses if _has_objections(r.result))
-        
+    for b_key in sorted(buckets_map):
+        br = buckets_map[b_key]
+        b_tipo = sum(1 for r in br if r.result_json and isinstance(r.result_json, dict) and r.result_json.get("tipo_llamada"))
+        b_citas = sum(1 for r in br if r.result_json and isinstance(r.result_json, dict) and r.result_json.get("tipo_llamada") == "cita")
         timeline.append({
             "bucket": b_key,
-            "total_analyses": b_total,
-            "avg_evaluacion_global": b_avg_eval,
-            "avg_sentiment": b_avg_sent,
-            "avg_empatia": b_avg_emp,
-            "avg_claridad": b_avg_cla,
-            "avg_simpatia": b_avg_sim,
-            "avg_procedimiento": b_avg_pro,
-            "cita_rate": b_cita_rate,
-            "total_objeciones": b_total_objs
+            "total_analyses": len(br),
+            "avg_evaluacion_global": get_avg_score_mass(br, "evaluacion_global"),
+            "avg_sentiment": get_avg_score_mass(br, "sentiment"),
+            "avg_empatia": get_avg_score_mass(br, "empatia"),
+            "avg_claridad": get_avg_score_mass(br, "claridad"),
+            "avg_simpatia": get_avg_score_mass(br, "simpatia"),
+            "avg_procedimiento": get_avg_score_mass(br, "procedimiento"),
+            "cita_rate": round((b_citas / b_tipo) * 100) if b_tipo > 0 else 0,
+            "total_objeciones": sum(1 for r in br if _has_objections(r.result_json)),
         })
-        
-    # ── Criteria Evolution ────────────────────────────────────────────────────
+
+    # ── Criteria evolution ────────────────────────────────────────────────────
     criteria_evolution = []
     if total_analyses >= 2:
         mid = total_analyses // 2
-        first_half = analyses[:mid]
-        second_half = analyses[mid:]
-        
         for key, name in CRITERIA_NAMES.items():
-            first_avg = get_avg_score(first_half, key)
-            last_avg = get_avg_score(second_half, key)
-            if first_avg is not None and last_avg is not None:
-                c_delta = round(last_avg - first_avg, 1)
-                c_dir = "up" if c_delta > 0.1 else ("down" if c_delta < -0.1 else "stable")
+            fa = get_avg_score_mass(rows[:mid], key)
+            la = get_avg_score_mass(rows[mid:], key)
+            if fa is not None and la is not None:
+                cd = round(la - fa, 1)
                 criteria_evolution.append({
                     "criterion_key": key,
                     "criterion_name": name,
-                    "first_avg": first_avg,
-                    "last_avg": last_avg,
-                    "delta": c_delta,
-                    "direction": c_dir
+                    "first_avg": fa,
+                    "last_avg": la,
+                    "delta": cd,
+                    "direction": "up" if cd > 0.1 else ("down" if cd < -0.1 else "stable"),
                 })
-                
+
     # ── Strengths / Weaknesses ────────────────────────────────────────────────
     criteria_scores = []
     for key, name in CRITERIA_NAMES.items():
         if key in ["evaluacion_global", "sentiment"]:
             continue
-        avg_val = get_avg_score(analyses, key)
-        if avg_val is not None:
-            criteria_scores.append({
-                "criterion_key": key,
-                "criterion_name": name,
-                "avg_score": avg_val
-            })
-            
-    strengths_sorted = sorted(criteria_scores, key=lambda x: x["avg_score"], reverse=True)
-    strengths = strengths_sorted[:5]
-    
-    weaknesses_sorted = sorted(criteria_scores, key=lambda x: x["avg_score"])
-    weaknesses = weaknesses_sorted[:5]
-    
-    # ── Latest 10 Analyses ────────────────────────────────────────────────────
-    sorted_desc = sorted(analyses, key=lambda x: x.analysis_id, reverse=True)
+        av = get_avg_score_mass(rows, key)
+        if av is not None:
+            criteria_scores.append({"criterion_key": key, "criterion_name": name, "avg_score": av})
+
+    strengths  = sorted(criteria_scores, key=lambda x: x["avg_score"], reverse=True)[:5]
+    weaknesses = sorted(criteria_scores, key=lambda x: x["avg_score"])[:5]
+
+    # ── Latest 10 analyses ────────────────────────────────────────────────────
+    sorted_desc = sorted(rows, key=lambda r: _effective_ts(r) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
     latest_analyses = []
-    for a in sorted_desc[:10]:
-        objection_text = None
-        if a.result and isinstance(a.result, dict):
-            objection_text = a.result.get("objeciones") or a.result.get("objecion_1")
-            if isinstance(objection_text, list) and objection_text:
-                objection_text = str(objection_text[0])
+    for r in sorted_desc[:10]:
+        rj = r.result_json or {}
+        eg = rj.get("evaluacion_global")
+        try:
+            eg = float(eg) if eg is not None else None
+        except (ValueError, TypeError):
+            eg = None
+        obj = rj.get("objeciones") or rj.get("objecion_1")
+        if isinstance(obj, list) and obj:
+            obj = str(obj[0])
         latest_analyses.append({
-            "analysis_id": a.analysis_id,
-            "call_id": a.call_id,
-            "fecha_eval": a.fecha_eval.isoformat() if a.fecha_eval else None,
-            "call_timestamp": a.call_timestamp.isoformat() if a.call_timestamp else None,
-            "tipo_llamada": a.tipo_llamada,
-            "evaluacion_global": float(a.evaluacion_global) if a.evaluacion_global is not None else None,
-            "objeciones": objection_text
+            "mass_analysis_id": r.mass_analysis_id,
+            "run_id": r.run_id,
+            "job_id": r.job_id,
+            "call_id": r.call_id,
+            "agent_name": r.agent_name or agent_name,
+            "call_timestamp": r.call_timestamp.isoformat() if r.call_timestamp else None,
+            "analysis_timestamp": r.analysis_timestamp.isoformat() if r.analysis_timestamp else None,
+            "call_duration_seconds": r.call_duration_seconds,
+            "direction": r.direction,
+            "prompt_name": r.prompt_name,
+            "prompt_version_name": r.prompt_version_name,
+            "status": r.status,
+            "tipo_llamada": rj.get("tipo_llamada"),
+            "evaluacion_global": eg,
+            "objeciones": obj,
         })
-        
+
     return {
-        "agent": {
-            "hubspot_owner_id": hubspot_owner_id,
-            "agent_name": agent_name
-        },
+        "agent": {"hubspot_owner_id": hubspot_owner_id, "agent_name": agent_name},
         "period": period,
-        "analysis_type": analysis_type,
+        "source": "mass_evaluations",
         "generated_at": now.isoformat(),
         "summary": {
             "total_analyses": total_analyses,
-            "first_analysis_at": first_analysis_at,
-            "last_analysis_at": last_analysis_at,
+            "first_analysis_at": first_ts.isoformat() if first_ts else None,
+            "last_analysis_at": last_ts.isoformat() if last_ts else None,
             "avg_evaluacion_global": avg_eval,
             "avg_sentiment": avg_sent,
             "cita_rate": cita_rate,
@@ -711,20 +776,20 @@ async def get_agent_evolution(
             "avg_claridad": avg_cla,
             "avg_simpatia": avg_sim,
             "avg_procedimiento": avg_pro,
-            "total_objeciones": total_objs
+            "total_objeciones": total_objs,
         },
         "trend": {
-            "evaluacion_global_slope": delta_val, # Simple delta serving as slope representation
+            "evaluacion_global_slope": delta_val,
             "evaluacion_global_direction": direction,
             "evaluacion_global_delta_first_last": delta_val,
             "evaluacion_global_delta_pct": delta_pct,
-            "interpretation": interpretation
+            "interpretation": interpretation,
         },
         "timeline": timeline,
         "criteria_evolution": criteria_evolution,
         "strengths": strengths,
         "weaknesses": weaknesses,
-        "latest_analyses": latest_analyses
+        "latest_analyses": latest_analyses,
     }
 
 
