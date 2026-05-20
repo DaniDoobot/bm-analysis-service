@@ -24,7 +24,7 @@ class MassEvaluationJobCreate(BaseModel):
     duration_max_seconds: int | None = None
     direction: str = "all"  # inbound / outbound / all
     only_with_recording: bool = True
-    max_calls: int = 100
+    max_calls: int = 10
 
     schedule_enabled: bool = False
     schedule_type: str | None = None  # manual / daily / weekly / monthly / cron

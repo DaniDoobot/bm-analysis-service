@@ -176,6 +176,21 @@ async def get_run(
     return run
 
 
+@router.post("/mass-evaluation-runs/{run_id}/cancel", response_model=MassEvaluationRunResponse)
+async def cancel_run(
+    run_id: int,
+    db: AsyncSession = Depends(get_db)
+):
+    """Cancel a running mass evaluation run cooperatively."""
+    try:
+        return await MassEvaluationService.cancel_run(db, run_id=run_id)
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(ve)
+        )
+
+
 # ── Results Endpoints ─────────────────────────────────────────────────────────
 
 @router.get("/mass-evaluation-results", response_model=list[MassEvaluationResultResponse])

@@ -129,6 +129,10 @@ class HubSpotService:
             
         # 2. Agent owner IDs filters
         agent_owner_ids = filters.get("agent_owner_ids")
+        if not agent_owner_ids:
+            from app.utils.hubspot_owners import OWNER_TO_NAME
+            agent_owner_ids = list(OWNER_TO_NAME.keys())
+            
         if agent_owner_ids:
             if len(agent_owner_ids) == 1:
                 hs_filters.append({

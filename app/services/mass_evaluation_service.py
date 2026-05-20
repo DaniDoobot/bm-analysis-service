@@ -153,6 +153,13 @@ class MassEvaluationService:
     @staticmethod
     async def create_job(db: AsyncSession, payload: MassEvaluationJobCreate) -> MassEvaluationJob:
         job = MassEvaluationJob(**payload.model_dump())
+        
+        # Defensive safety cap on max_calls
+        if job.max_calls is None or job.max_calls <= 0:
+            job.max_calls = 10
+        elif job.max_calls > 100:
+            job.max_calls = 100
+
         await enrich_job_prompt_info(db, job)
         
         # Calculate schedule
@@ -183,6 +190,12 @@ class MassEvaluationService:
         for k, v in update_data.items():
             setattr(job, k, v)
             
+        # Defensive safety cap on max_calls
+        if job.max_calls is None or job.max_calls <= 0:
+            job.max_calls = 10
+        elif job.max_calls > 100:
+            job.max_calls = 100
+
         if "prompt_id" in update_data or "prompt_version_id" in update_data:
             await enrich_job_prompt_info(db, job)
             
@@ -410,24 +423,45 @@ class MassEvaluationService:
                 calls = await hs_service.search_calls_for_mass_evaluation(search_filters)
                 run.calls_found = len(calls)
                 
-                # 3. Filter duplicates within the same execution
+                # 3. Filter duplicates within the same execution and apply max_calls slicing
+                max_calls_val = filters_payload.get("max_calls")
+                if max_calls_val is None or max_calls_val <= 0:
+                    max_calls_val = 10
+                elif max_calls_val > 100:
+                    max_calls_val = 100
+
                 seen_call_ids = set()
-                selected_calls = []
+                unique_calls = []
                 for c in calls:
                     c_id = c["call_id"]
                     if c_id not in seen_call_ids:
                         seen_call_ids.add(c_id)
-                        selected_calls.append(c)
+                        unique_calls.append(c)
                         
+                selected_calls = unique_calls[:max_calls_val]
                 run.calls_selected = len(selected_calls)
                 await db.commit()
                 
                 calls_analyzed = 0
                 calls_skipped = 0
                 calls_failed = 0
+                cancelled_by_user = False
                 
                 # Process sequentially to avoid heavy concurrency issues
                 for call in selected_calls:
+                    # Cooperative cancellation check before processing each call
+                    try:
+                        async with AsyncSession(engine) as check_db:
+                            status_stmt = select(MassEvaluationRun.status).where(MassEvaluationRun.run_id == run_id)
+                            status_res = await check_db.execute(status_stmt)
+                            run_db_status = status_res.scalar()
+                            if run_db_status in ["cancelling", "cancel_requested", "cancelled"]:
+                                logger.info("Mass evaluation run %d cancelled cooperatively.", run_id)
+                                cancelled_by_user = True
+                                break
+                    except Exception as e_status:
+                        logger.warning("Failed to check run cancellation status: %s", e_status)
+
                     call_id = call["call_id"]
                     recording_url = call["recording_url"]
                     
@@ -453,6 +487,26 @@ class MassEvaluationService:
                         )
                         db.add(res_row)
                         calls_skipped += 1
+                        
+                        # Incrementally update metrics in DB for polling
+                        try:
+                            fresh_run_stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == run_id)
+                            fresh_run_res = await db.execute(fresh_run_stmt)
+                            fresh_run_obj = fresh_run_res.scalars().first()
+                            if fresh_run_obj:
+                                fresh_run_obj.calls_analyzed = calls_analyzed
+                                fresh_run_obj.calls_skipped = calls_skipped
+                                fresh_run_obj.calls_failed = calls_failed
+                                fresh_run_obj.run_summary = {
+                                    "analyzed": calls_analyzed,
+                                    "skipped": calls_skipped,
+                                    "failed": calls_failed,
+                                    "total": len(selected_calls)
+                                }
+                        except Exception as e_progress:
+                            logger.warning("Failed to update progress in DB: %s", e_progress)
+                        
+                        await db.commit()
                         continue
                         
                     # Process call analysis
@@ -489,10 +543,10 @@ class MassEvaluationService:
                         for criterion in criteria:
                             output_key = criterion.output_key
                             feed_key = criterion.feed_key
-
+ 
                             raw_value = clean_result.get(output_key) if output_key else None
                             feed_value = clean_result.get(feed_key) if feed_key else None
-
+ 
                             # Get clean/typed value
                             typed = map_criterion_value(raw_value, criterion.criterion_type or "text")
                             
@@ -504,7 +558,7 @@ class MassEvaluationService:
                                 resolved_val = typed["value_boolean"]
                             else:
                                 resolved_val = typed["value_text"] or typed["value_category"] or typed["raw_value"]
-
+ 
                             items.append({
                                 "criterion_key": criterion.criterion_key,
                                 "name": criterion.criterion_name,
@@ -568,6 +622,24 @@ class MassEvaluationService:
                         db.add(res_row)
                         calls_failed += 1
                         
+                    # Incrementally update metrics in DB for polling
+                    try:
+                        fresh_run_stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == run_id)
+                        fresh_run_res = await db.execute(fresh_run_stmt)
+                        fresh_run_obj = fresh_run_res.scalars().first()
+                        if fresh_run_obj:
+                            fresh_run_obj.calls_analyzed = calls_analyzed
+                            fresh_run_obj.calls_skipped = calls_skipped
+                            fresh_run_obj.calls_failed = calls_failed
+                            fresh_run_obj.run_summary = {
+                                "analyzed": calls_analyzed,
+                                "skipped": calls_skipped,
+                                "failed": calls_failed,
+                                "total": len(selected_calls)
+                            }
+                    except Exception as e_progress:
+                        logger.warning("Failed to update progress in DB: %s", e_progress)
+
                     # Commit per-call results to prevent loss of progress
                     await db.commit()
                     
@@ -582,9 +654,12 @@ class MassEvaluationService:
                 fresh_job_res = await db.execute(fresh_job_stmt)
                 fresh_job_obj = fresh_job_res.scalars().first()
 
-                final_status = "completed"
-                if calls_failed > 0:
-                    final_status = "completed_with_errors"
+                if cancelled_by_user:
+                    final_status = "cancelled"
+                else:
+                    final_status = "completed"
+                    if calls_failed > 0:
+                        final_status = "completed_with_errors"
 
                 if fresh_run_obj:
                     fresh_run_obj.calls_analyzed = calls_analyzed
@@ -650,6 +725,22 @@ class MassEvaluationService:
         stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == run_id)
         res = await db.execute(stmt)
         return res.scalars().first()
+
+    @staticmethod
+    async def cancel_run(db: AsyncSession, run_id: int) -> MassEvaluationRun:
+        stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == run_id)
+        res = await db.execute(stmt)
+        run = res.scalars().first()
+        if not run:
+            raise ValueError(f"Run ID {run_id} not found.")
+            
+        if run.status not in ["running", "pending"]:
+            raise ValueError(f"Run ID {run_id} cannot be cancelled because its status is '{run.status}'.")
+            
+        run.status = "cancelling"
+        await db.commit()
+        await db.refresh(run)
+        return run
 
     @staticmethod
     async def list_results(
