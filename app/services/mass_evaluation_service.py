@@ -139,7 +139,7 @@ async def enrich_job_prompt_info(db: AsyncSession, job: MassEvaluationJob) -> No
         if job.prompt_version_id:
             stmt_v = select(PromptVersion).where(PromptVersion.id == job.prompt_version_id)
         else:
-            stmt_v = select(PromptVersion).where(PromptVersion.prompt_id == job.prompt_id, PromptVersion.is_current == True)
+            stmt_v = select(PromptVersion).where(PromptVersion.prompt_id == job.prompt_id, PromptVersion.is_current == True).order_by(PromptVersion.id.desc())
             
         res_v = await db.execute(stmt_v)
         v = res_v.scalars().first()
@@ -348,20 +348,44 @@ class MassEvaluationService:
                 return
 
             try:
-                # 1. Resolve prompt snapshot
-                if job.prompt_version_id:
-                    v_stmt = select(PromptVersion).where(PromptVersion.id == job.prompt_version_id)
+                # 1. Resolve and extract ALL parameters to local variables BEFORE any commits.
+                # This completely prevents any lazy-loading/expiration/greenlet errors.
+                prompt_id = job.prompt_id
+                prompt_name = job.prompt_name
+                prompt_version_id = job.prompt_version_id
+                prompt_version_name = job.prompt_version_name
+                prompt_version_label = job.prompt_version_label
+                duration_min_seconds = job.duration_min_seconds
+                duration_max_seconds = job.duration_max_seconds
+                direction = job.direction
+                only_with_recording = job.only_with_recording
+                max_calls = job.max_calls
+                timezone_name = job.timezone
+                schedule_enabled = job.schedule_enabled
+                schedule_type = job.schedule_type
+                schedule_time = job.schedule_time
+                schedule_day_of_week = job.schedule_day_of_week
+                schedule_day_of_month = job.schedule_day_of_month
+                schedule_cron = job.schedule_cron
+
+                # Resolve prompt snapshot content
+                if prompt_version_id:
+                    v_stmt = select(PromptVersion).where(PromptVersion.id == prompt_version_id)
                 else:
-                    v_stmt = select(PromptVersion).where(PromptVersion.prompt_id == job.prompt_id, PromptVersion.is_current == True)
+                    v_stmt = (
+                        select(PromptVersion)
+                        .where(PromptVersion.prompt_id == prompt_id, PromptVersion.is_current == True)
+                        .order_by(PromptVersion.id.desc())
+                    )
                     
                 v_res = await db.execute(v_stmt)
                 v = v_res.scalars().first()
                 if not v or not v.prompt:
-                    raise ValueError(f"Could not resolve prompt text for Prompt ID {job.prompt_id}")
+                    raise ValueError(f"Could not resolve prompt text for Prompt ID {prompt_id}")
                     
                 prompt_snapshot = v.prompt
                 prompt_version_id = v.id
-                
+
                 # 2. Query HubSpot
                 hs_service = HubSpotService()
                 
@@ -376,8 +400,8 @@ class MassEvaluationService:
                     "date_from": date_from,
                     "date_to": date_to,
                     "agent_owner_ids": filters_payload.get("agent_owner_ids"),
-                    "duration_min_seconds": job.duration_min_seconds,
-                    "duration_max_seconds": job.duration_max_seconds,
+                    "duration_min_seconds": duration_min_seconds,
+                    "duration_max_seconds": duration_max_seconds,
                     "direction": filters_payload.get("direction"),
                     "only_with_recording": filters_payload.get("only_with_recording"),
                     "max_calls": filters_payload.get("max_calls")
@@ -418,11 +442,11 @@ class MassEvaluationService:
                             call_timestamp=safe_parse_datetime(call["call_timestamp"]),
                             call_duration_seconds=call["call_duration_seconds"],
                             direction=call["direction"],
-                            prompt_id=job.prompt_id,
+                            prompt_id=prompt_id,
                             prompt_version_id=prompt_version_id,
-                            prompt_name=job.prompt_name,
-                            prompt_version_name=job.prompt_version_name,
-                            prompt_version_label=job.prompt_version_label,
+                            prompt_name=prompt_name,
+                            prompt_version_name=prompt_version_name,
+                            prompt_version_label=prompt_version_label,
                             prompt_snapshot=prompt_snapshot,
                             status="skipped",
                             error_message="No recording URL present."
@@ -454,14 +478,14 @@ class MassEvaluationService:
                         parsed = safe_parse_json(raw_response)
                         if not parsed:
                             raise ValueError("El modelo no devolvió un JSON válido.")
-                            
+                        
                         # Strip legacy keys from result
                         from app.services.analysis_persistence import _strip_legacy_keys
                         clean_result = _strip_legacy_keys(parsed)
                         
                         # Resolve active criteria items
                         items = []
-                        criteria = await get_active_criteria(db, job.prompt_id)
+                        criteria = await get_active_criteria(db, prompt_id)
                         for criterion in criteria:
                             output_key = criterion.output_key
                             feed_key = criterion.feed_key
@@ -492,7 +516,7 @@ class MassEvaluationService:
                             
                         # Resolve agent name display
                         owner_id = call["hubspot_owner_id"]
-                        resolved_agent = OWNER_TO_NAME.get(owner_id) or owner_id
+                        resolved_agent = resolve_agent_display(None, owner_id)
                         
                         # Persist Result
                         res_row = MassEvaluationResult(
@@ -506,11 +530,11 @@ class MassEvaluationService:
                             call_timestamp=safe_parse_datetime(call["call_timestamp"]),
                             call_duration_seconds=call["call_duration_seconds"],
                             direction=call["direction"],
-                            prompt_id=job.prompt_id,
+                            prompt_id=prompt_id,
                             prompt_version_id=prompt_version_id,
-                            prompt_name=job.prompt_name,
-                            prompt_version_name=job.prompt_version_name,
-                            prompt_version_label=job.prompt_version_label,
+                            prompt_name=prompt_name,
+                            prompt_version_name=prompt_version_name,
+                            prompt_version_label=prompt_version_label,
                             prompt_snapshot=prompt_snapshot,
                             status="completed",
                             result_json=clean_result,
@@ -532,11 +556,11 @@ class MassEvaluationService:
                             call_timestamp=safe_parse_datetime(call["call_timestamp"]),
                             call_duration_seconds=call["call_duration_seconds"],
                             direction=call["direction"],
-                            prompt_id=job.prompt_id,
+                            prompt_id=prompt_id,
                             prompt_version_id=prompt_version_id,
-                            prompt_name=job.prompt_name,
-                            prompt_version_name=job.prompt_version_name,
-                            prompt_version_label=job.prompt_version_label,
+                            prompt_name=prompt_name,
+                            prompt_version_name=prompt_version_name,
+                            prompt_version_label=prompt_version_label,
                             prompt_snapshot=prompt_snapshot,
                             status="failed",
                             error_message=str(e_call)
@@ -547,44 +571,64 @@ class MassEvaluationService:
                     # Commit per-call results to prevent loss of progress
                     await db.commit()
                     
-                # Update final run summary counters
-                run.calls_analyzed = calls_analyzed
-                run.calls_skipped = calls_skipped
-                run.calls_failed = calls_failed
+                # 4. Fetch fresh copies of run and job for final updates.
+                # Since the loop commits frequently, run and job are expired.
+                # Loading fresh copies guarantees they are in the active transaction.
+                fresh_run_stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == run_id)
+                fresh_run_res = await db.execute(fresh_run_stmt)
+                fresh_run_obj = fresh_run_res.scalars().first()
                 
-                if calls_failed > 0:
-                    run.status = "completed_with_errors"
-                else:
-                    run.status = "completed"
+                fresh_job_stmt = select(MassEvaluationJob).where(MassEvaluationJob.job_id == job_id)
+                fresh_job_res = await db.execute(fresh_job_stmt)
+                fresh_job_obj = fresh_job_res.scalars().first()
+
+                if fresh_run_obj:
+                    fresh_run_obj.calls_analyzed = calls_analyzed
+                    fresh_run_obj.calls_skipped = calls_skipped
+                    fresh_run_obj.calls_failed = calls_failed
                     
-                run.finished_at = datetime.now(timezone.utc)
-                run.run_summary = {
-                    "analyzed": calls_analyzed,
-                    "skipped": calls_skipped,
-                    "failed": calls_failed,
-                    "total": len(selected_calls)
-                }
-                
-                # Update last run timestamp in Job
-                job.last_run_at = datetime.now(timezone.utc)
-                if job.schedule_enabled:
-                    job.next_run_at = calculate_next_run(
-                        job.schedule_type,
-                        job.schedule_time,
-                        job.schedule_day_of_week,
-                        job.schedule_day_of_month,
-                        job.schedule_cron,
-                        job.timezone
-                    )
+                    if calls_failed > 0:
+                        fresh_run_obj.status = "completed_with_errors"
+                    else:
+                        fresh_run_obj.status = "completed"
+                        
+                    fresh_run_obj.finished_at = datetime.now(timezone.utc)
+                    fresh_run_obj.run_summary = {
+                        "analyzed": calls_analyzed,
+                        "skipped": calls_skipped,
+                        "failed": calls_failed,
+                        "total": len(selected_calls)
+                    }
+
+                if fresh_job_obj:
+                    fresh_job_obj.last_run_at = datetime.now(timezone.utc)
+                    if schedule_enabled:
+                        fresh_job_obj.next_run_at = calculate_next_run(
+                            schedule_type,
+                            schedule_time,
+                            schedule_day_of_week,
+                            schedule_day_of_month,
+                            schedule_cron,
+                            timezone_name
+                        )
+
                 await db.commit()
-                logger.info("Mass evaluation job %d, run %d finished with status: %s", job_id, run_id, run.status)
+                logger.info("Mass evaluation job %d, run %d finished with status: %s", job_id, run_id, fresh_run_obj.status if fresh_run_obj else "unknown")
                 
             except Exception as e_run:
                 logger.error("Mass evaluation job %d run %d failed in background: %s", job_id, run_id, e_run, exc_info=True)
-                run.status = "failed"
-                run.error_message = str(e_run)
-                run.finished_at = datetime.now(timezone.utc)
-                await db.commit()
+                try:
+                    # Fetch fresh instance of run to write status safely
+                    fresh_run_stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == run_id)
+                    fresh_run_res = await db.execute(fresh_run_stmt)
+                    fresh_run_obj = fresh_run_res.scalars().first()
+                    if fresh_run_obj:
+                        fresh_run_obj.status = "failed"
+                        fresh_run_obj.error_message = str(e_run)
+                        fresh_run_obj.finished_at = datetime.now(timezone.utc)
+                        await db.commit()
+                except Exception as e_inner:
+                    logger.error("Failed to mark run as failed in database: %s", e_inner)
 
     @staticmethod
     async def list_runs(db: AsyncSession, job_id: int | None = None, status: str | None = None, limit: int = 100) -> list[MassEvaluationRun]:

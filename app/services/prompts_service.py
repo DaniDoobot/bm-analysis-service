@@ -432,6 +432,7 @@ async def _get_current_version(db: AsyncSession, prompt_id: int) -> PromptVersio
     result = await db.execute(
         select(PromptVersion)
         .where(PromptVersion.prompt_id == prompt_id, PromptVersion.is_current == True)
+        .order_by(PromptVersion.id.desc())
         .limit(1)
     )
     return result.scalars().first()
