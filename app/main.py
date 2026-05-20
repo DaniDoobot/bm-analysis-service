@@ -87,31 +87,13 @@ async def start_mass_evaluations_scheduler():
     from app.db import get_engine
     from app.services.mass_evaluation_service import MassEvaluationService
     from sqlalchemy.ext.asyncio import AsyncSession
-    from sqlalchemy import select
-    from app.models.mass_evaluations import MassEvaluationJob
-    from datetime import datetime, timezone
     
     engine = get_engine()
     
     while True:
         try:
             async with AsyncSession(engine) as db:
-                now = datetime.now(timezone.utc)
-                stmt = select(MassEvaluationJob).where(
-                    MassEvaluationJob.is_active == True,
-                    MassEvaluationJob.schedule_enabled == True,
-                    MassEvaluationJob.next_run_at <= now
-                )
-                res = await db.execute(stmt)
-                due_jobs = res.scalars().all()
-                
-                for job in due_jobs:
-                    logger.info("Scheduler triggered job ID %d ('%s') at %s", job.job_id, job.job_name, now)
-                    try:
-                        await MassEvaluationService.run_job(db, job.job_id, trigger_type="scheduled")
-                    except Exception as ej:
-                        logger.warning("Scheduler skipped running job %d: %s", job.job_id, ej)
-                        
+                await MassEvaluationService.run_due_jobs(db)
             await asyncio.sleep(60)
         except asyncio.CancelledError:
             logger.info("Mass evaluations background scheduler task cancelled.")

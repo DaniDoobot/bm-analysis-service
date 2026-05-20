@@ -317,6 +317,18 @@ class MassEvaluationService:
             "max_calls": job.max_calls
         }
         
+        # Update scheduling fields immediately to avoid duplicate scheduler triggers during background task startup
+        job.last_run_at = datetime.now(timezone.utc)
+        if job.schedule_enabled:
+            job.next_run_at = calculate_next_run(
+                job.schedule_type,
+                job.schedule_time,
+                job.schedule_day_of_week,
+                job.schedule_day_of_month,
+                job.schedule_cron,
+                job.timezone
+            )
+
         # Create Run record
         run = MassEvaluationRun(
             job_id=job_id,
@@ -780,3 +792,45 @@ class MassEvaluationService:
         stmt = select(MassEvaluationResult).where(MassEvaluationResult.mass_analysis_id == mass_analysis_id)
         res = await db.execute(stmt)
         return res.scalars().first()
+
+    @staticmethod
+    async def run_due_jobs(db: AsyncSession) -> dict[str, int]:
+        """Finds due scheduled jobs, launches them if not already running, and updates schedules."""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        
+        # Select all active scheduled jobs that are due
+        stmt = select(MassEvaluationJob).where(
+            MassEvaluationJob.is_active == True,
+            MassEvaluationJob.schedule_enabled == True,
+            MassEvaluationJob.schedule_type != "manual",
+            MassEvaluationJob.next_run_at != None,
+            MassEvaluationJob.next_run_at <= now
+        )
+        res = await db.execute(stmt)
+        due_jobs = res.scalars().all()
+        
+        due_count = len(due_jobs)
+        launched_count = 0
+        
+        for job in due_jobs:
+            # Check if there is already an active running run
+            stmt_lock = select(MassEvaluationRun).where(
+                MassEvaluationRun.job_id == job.job_id,
+                MassEvaluationRun.status == "running"
+            )
+            res_lock = await db.execute(stmt_lock)
+            active_run = res_lock.scalars().first()
+            if active_run:
+                logger.info("Scheduler skipped due job ID %d ('%s') because it is already running.", job.job_id, job.job_name)
+                continue
+                
+            try:
+                # Trigger the run (which handles schedule update, run creation, background spawn and commits)
+                await MassEvaluationService.run_job(db, job.job_id, trigger_type="scheduled")
+                launched_count += 1
+                logger.info("Scheduler successfully launched due job ID %d ('%s').", job.job_id, job.job_name)
+            except Exception as e:
+                logger.error("Scheduler failed to launch due job ID %d ('%s'): %s", job.job_id, job.job_name, e)
+                
+        return {"due_jobs_count": due_count, "launched_jobs_count": launched_count}

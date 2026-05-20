@@ -45,7 +45,7 @@ async def run_validation_pipeline():
             logger.error("Missing seeded structures in database!")
             return
 
-        # ── 1 & 2. Create prompt from boston_medical_audio and verify criteria are copied ──
+        # ── 1 & 2. Create prompt from boston_medical_audio and verify criteria are NOT copied (now simplified) ──
         logger.info("\n=== Step 1 & 2: Create prompt from boston_medical_audio ===")
         req_boston = CreateFromBaseRequest(
             base_structure_id=boston_struct.id,
@@ -67,7 +67,7 @@ async def run_validation_pipeline():
         )
         c_list = db_criteria_boston.scalars().all()
         logger.info("Criteria actually stored in DB for Boston: %d", len(c_list))
-        assert len(c_list) > 0, "Should copy default criteria!"
+        assert len(c_list) == 0, "Should NOT copy default criteria (base structures are now simplified without items)!"
         logger.info("Step 1 & 2 Success!")
 
         # ── 3 & 4. Create prompt from blank base structure and verify 0 criteria ──
@@ -233,11 +233,11 @@ async def run_validation_pipeline():
         try:
             from app.services.prompts_service import refresh_boston_medical_base_structure
             refresh_res = await refresh_boston_medical_base_structure(db)
-            logger.info("Manual refresh result: ok=%s, criteria_count=%d", refresh_res["ok"], refresh_res["criteria_count"])
+            logger.info("Manual refresh result: ok=%s", refresh_res["ok"])
             assert refresh_res["ok"] is True
             logger.info("Step 8 Success!")
         except Exception as e:
-            logger.warning("Could not run Step 8 (e.g. if prompt 1 or its active criteria are missing in this DB state): %s", e)
+            logger.warning("Could not run Step 8 (e.g. if prompt 1 is missing in this DB state): %s", e)
 
         # Clean up temporary test prompts to keep database clean
         logger.info("\nCleaning up test records...")

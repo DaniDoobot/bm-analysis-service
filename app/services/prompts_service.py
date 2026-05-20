@@ -210,7 +210,7 @@ async def create_base_structure(db: AsyncSession, body: PromptBaseStructureCreat
         description=body.description,
         prompt_type=body.prompt_type,
         base_prompt=body.base_prompt,
-        default_criteria=body.default_criteria,
+        default_criteria=None, # Discarded for simplified structures (no items)
         is_active=True,
         created_by=body.created_by,
         created_by_email=body.created_by_email,
@@ -240,8 +240,9 @@ async def update_base_structure(
         struct.prompt_type = body.prompt_type
     if body.base_prompt is not None:
         struct.base_prompt = body.base_prompt
-    if body.default_criteria is not None:
-        struct.default_criteria = body.default_criteria
+    
+    struct.default_criteria = None # Always force None to clear out legacy items
+    
     if body.is_active is not None:
         struct.is_active = body.is_active
 
@@ -333,27 +334,9 @@ async def create_prompt_from_base(db: AsyncSession, body: CreateFromBaseRequest)
     )
     db.add(new_version)
     
-    # 4. Copy default criteria if copy_default_criteria=True and structure is not blank
+    # 4. Copy default criteria: DEPRECATED & IGNORED.
+    # Base structures no longer contain criteria. Specific structures always start with 0 criteria items.
     criteria_count = 0
-    if body.copy_default_criteria and struct.structure_key != "blank" and struct.default_criteria:
-        from app.models.criteria import PromptCriterion
-        for c in struct.default_criteria:
-            new_crit = PromptCriterion(
-                prompt_id=new_prompt.prompt_id,
-                criterion_key=c.get("criterion_key"),
-                criterion_name=c.get("criterion_name"),
-                criterion_description=c.get("criterion_description"),
-                criterion_type=c.get("criterion_type"),
-                output_key=c.get("output_key"),
-                feed_key=c.get("feed_key"),
-                allowed_values=c.get("allowed_values"),
-                applies_to_types=c.get("applies_to_types"),
-                order_index=c.get("order_index", 100),
-                is_required=c.get("is_required", False),
-                is_active=c.get("is_active", True)
-            )
-            db.add(new_crit)
-            criteria_count += 1
 
     await db.commit()
     await db.refresh(new_version)
@@ -372,23 +355,14 @@ async def create_prompt_from_base(db: AsyncSession, body: CreateFromBaseRequest)
 async def refresh_boston_medical_base_structure(db: AsyncSession) -> dict[str, Any]:
     """
     Manually refreshes the 'boston_medical_audio' structure from prompt 1
-    and its active criteria.
+    (text only).
     """
     # 1. Fetch active prompt version 1
     current_version = await _get_current_version(db, 1)
     if not current_version or not current_version.prompt:
         raise ValueError("No active prompt version found for prompt_id=1.")
 
-    # 2. Fetch active criteria of prompt 1
-    from app.models.criteria import PromptCriterion
-    crit_res = await db.execute(
-        select(PromptCriterion)
-        .where(PromptCriterion.prompt_id == 1, PromptCriterion.is_active == True)
-        .order_by(PromptCriterion.order_index.asc())
-    )
-    crit_list = crit_res.scalars().all()
-
-    # 3. Query base structure 'boston_medical_audio'
+    # 2. Query base structure 'boston_medical_audio'
     result = await db.execute(
         select(PromptBaseStructure).where(PromptBaseStructure.structure_key == "boston_medical_audio")
     )
@@ -396,33 +370,16 @@ async def refresh_boston_medical_base_structure(db: AsyncSession) -> dict[str, A
     if not struct:
         raise ValueError("Base structure 'boston_medical_audio' not found in database.")
 
-    # 4. Map criteria
-    mapped = []
-    for c in crit_list:
-        mapped.append({
-            "criterion_key": c.criterion_key,
-            "criterion_name": c.criterion_name,
-            "criterion_description": c.criterion_description,
-            "criterion_type": c.criterion_type,
-            "output_key": c.output_key,
-            "feed_key": c.feed_key,
-            "is_active": c.is_active,
-            "is_required": c.is_required,
-            "order_index": c.order_index
-        })
-
-    # 5. Update and commit
+    # 3. Update only the text and set default_criteria to None
     struct.base_prompt = current_version.prompt
-    struct.default_criteria = mapped
+    struct.default_criteria = None
     await db.commit()
     await db.refresh(struct)
 
     return {
         "ok": True,
-        "message": "Boston Medical base structure successfully refreshed from active prompt 1 and its active criteria.",
+        "message": "Boston Medical base structure successfully refreshed (text only) from active prompt 1.",
         "structure_id": struct.id,
-        "criteria_count": len(mapped),
-        "default_criteria": mapped
     }
 
 

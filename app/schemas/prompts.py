@@ -111,7 +111,7 @@ class PromptBaseStructureOut(BaseModel):
 
 class PromptBaseStructureDetailOut(PromptBaseStructureOut):
     base_prompt: str
-    default_criteria: list[dict[str, Any]] | None = None
+    default_criteria: list[dict[str, Any]] | None = []
 
 
 class PromptBaseStructureCreate(BaseModel):

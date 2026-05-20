@@ -93,6 +93,24 @@ async def delete_job(
     return {"ok": True, "message": f"Job {job_id} deleted successfully."}
 
 
+@router.post("/mass-evaluation-jobs/run-due")
+async def run_due_jobs_endpoint(
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Manually check for and trigger all scheduled mass evaluation jobs that are due.
+    Returns the count of due jobs found and how many were successfully launched.
+    """
+    try:
+        stats = await MassEvaluationService.run_due_jobs(db)
+        return {"ok": True, **stats}
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to execute due jobs scheduler pass: {str(e)}"
+        )
+
+
 @router.post("/mass-evaluation-jobs/{job_id}/run")
 async def run_job(
     job_id: int,
