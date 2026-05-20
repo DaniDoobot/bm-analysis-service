@@ -220,6 +220,19 @@ async def init_db():
                 await conn.run_sync(Base.metadata.create_all)
                 logger.info("Table 'bm_prompt_base_structures' created successfully.")
 
+        # 1.1. Create mass evaluation tables if not exists via Base.metadata
+        async with engine.begin() as conn:
+            res = await conn.execute(
+                text("SELECT EXISTS (SELECT FROM pg_tables WHERE schemaname = 'public' AND tablename = 'bm_mass_evaluation_jobs');")
+            )
+            mass_tables_exist = res.scalar()
+            if mass_tables_exist:
+                logger.info("Mass evaluation tables already exist.")
+            else:
+                logger.info("Mass evaluation tables do not exist. Creating via SQLAlchemy metadata...")
+                await conn.run_sync(Base.metadata.create_all)
+                logger.info("Mass evaluation tables created successfully.")
+
         # 1.5. Ensure columns exist on bm_prompts table dynamically and non-destructively
         async with engine.begin() as conn:
             for col_name, col_type in [
