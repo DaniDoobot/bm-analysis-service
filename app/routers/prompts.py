@@ -127,6 +127,8 @@ async def get_prompt_base_structure(
     struct = await prompts_service.get_base_structure(db, structure_id=id)
     if not struct:
         raise HTTPException(status_code=404, detail=f"Base structure {id} not found.")
+    # Force-clear criteria at the ORM level before serialization
+    struct.default_criteria = None
     return struct
 
 
@@ -136,7 +138,9 @@ async def create_prompt_base_structure(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Create a new prompt base structure."""
-    return await prompts_service.create_base_structure(db, body)
+    struct = await prompts_service.create_base_structure(db, body)
+    struct.default_criteria = None
+    return struct
 
 
 @router.put("/prompt-base-structures/{id}", response_model=PromptBaseStructureDetailOut)
@@ -149,6 +153,8 @@ async def update_prompt_base_structure(
     struct = await prompts_service.update_base_structure(db, structure_id=id, body=body)
     if not struct:
         raise HTTPException(status_code=404, detail=f"Base structure {id} not found.")
+    # Force-clear criteria at the ORM level before serialization
+    struct.default_criteria = None
     return struct
 
 
@@ -179,3 +185,21 @@ async def refresh_boston_medical_base_structure(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.post("/prompt-base-structures/backfill-clear-criteria")
+async def backfill_clear_criteria(
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Emergency backfill: sets default_criteria = NULL for all prompt base structures.
+    Idempotent and safe — use to force-clean legacy data without a restart.
+    """
+    from sqlalchemy import text
+    result = await db.execute(
+        text("UPDATE bm_prompt_base_structures SET default_criteria = NULL WHERE default_criteria IS NOT NULL;")
+    )
+    await db.commit()
+    return {
+        "ok": True,
+        "rows_updated": result.rowcount,
+        "message": "All base structures cleared of default_criteria.",
+    }

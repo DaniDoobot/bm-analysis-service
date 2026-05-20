@@ -111,7 +111,14 @@ class PromptBaseStructureOut(BaseModel):
 
 class PromptBaseStructureDetailOut(PromptBaseStructureOut):
     base_prompt: str
-    default_criteria: list[dict[str, Any]] | None = []
+    default_criteria: list[dict[str, Any]] = []
+
+    @model_validator(mode="after")
+    def strip_criteria(self) -> "PromptBaseStructureDetailOut":
+        # Always return empty list regardless of what the ORM/DB stored.
+        # Base structures must never expose criteria items.
+        self.default_criteria = []
+        return self
 
 
 class PromptBaseStructureCreate(BaseModel):
