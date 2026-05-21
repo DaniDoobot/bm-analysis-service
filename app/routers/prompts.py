@@ -113,13 +113,46 @@ async def activate_prompt_version(
 
 # ── Prompt Base Structures Endpoints ──────────────────────────────────────────
 
+def _base_structure_out(struct) -> dict:
+    return {
+        "id": struct.id,
+        "structure_key": struct.structure_key,
+        "structure_name": struct.structure_name,
+        "description": struct.description,
+        "prompt_type": "text",
+        "is_active": struct.is_active,
+        "created_at": struct.created_at,
+        "updated_at": struct.updated_at,
+        "created_by": struct.created_by,
+        "created_by_email": struct.created_by_email,
+    }
+
+
+def _base_structure_detail_out(struct) -> dict:
+    return {
+        "id": struct.id,
+        "structure_key": struct.structure_key,
+        "structure_name": struct.structure_name,
+        "description": struct.description,
+        "prompt_type": "text",
+        "is_active": struct.is_active,
+        "created_at": struct.created_at,
+        "updated_at": struct.updated_at,
+        "created_by": struct.created_by,
+        "created_by_email": struct.created_by_email,
+        "base_prompt": struct.base_prompt,
+        "default_criteria": [],
+    }
+
+
 @router.get("/prompt-base-structures", response_model=list[PromptBaseStructureOut])
 async def list_prompt_base_structures(
     db: Annotated[AsyncSession, Depends(get_db)],
     type: Annotated[str | None, Query(description="audio | text")] = None,
 ):
     """Return active base structures, optionally filtered by type."""
-    return await prompts_service.list_base_structures(db, prompt_type=type)
+    structures = await prompts_service.list_base_structures(db, prompt_type=type)
+    return [_base_structure_out(s) for s in structures]
 
 
 @router.get("/prompt-base-structures/{id}", response_model=PromptBaseStructureDetailOut)
@@ -131,9 +164,7 @@ async def get_prompt_base_structure(
     struct = await prompts_service.get_base_structure(db, structure_id=id)
     if not struct:
         raise HTTPException(status_code=404, detail=f"Base structure {id} not found.")
-    # Force-clear criteria at the ORM level before serialization
-    struct.default_criteria = None
-    return struct
+    return _base_structure_detail_out(struct)
 
 
 @router.post("/prompt-base-structures", response_model=PromptBaseStructureDetailOut)
@@ -143,8 +174,7 @@ async def create_prompt_base_structure(
 ):
     """Create a new prompt base structure."""
     struct = await prompts_service.create_base_structure(db, body)
-    struct.default_criteria = None
-    return struct
+    return _base_structure_detail_out(struct)
 
 
 @router.put("/prompt-base-structures/{id}", response_model=PromptBaseStructureDetailOut)
@@ -157,9 +187,7 @@ async def update_prompt_base_structure(
     struct = await prompts_service.update_base_structure(db, structure_id=id, body=body)
     if not struct:
         raise HTTPException(status_code=404, detail=f"Base structure {id} not found.")
-    # Force-clear criteria at the ORM level before serialization
-    struct.default_criteria = None
-    return struct
+    return _base_structure_detail_out(struct)
 
 
 @router.post("/prompts/create-from-base", response_model=CreateFromBaseResponse)

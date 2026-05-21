@@ -131,29 +131,17 @@ class PromptBaseStructureOut(BaseModel):
     structure_key: str
     structure_name: str
     description: str | None = None
-    prompt_type: str
+    prompt_type: str = "text"
     is_active: bool
     created_at: datetime | None = None
     updated_at: datetime | None = None
     created_by: str | None = None
     created_by_email: str | None = None
 
-    @model_validator(mode="after")
-    def force_text_type(self) -> "PromptBaseStructureOut":
-        self.prompt_type = "text"
-        return self
-
 
 class PromptBaseStructureDetailOut(PromptBaseStructureOut):
     base_prompt: str
     default_criteria: list[dict[str, Any]] = []
-
-    @model_validator(mode="after")
-    def strip_criteria(self) -> "PromptBaseStructureDetailOut":
-        # Always return empty list regardless of what the ORM/DB stored.
-        # Base structures must never expose criteria items.
-        self.default_criteria = []
-        return self
 
 
 class PromptBaseStructureCreate(BaseModel):
