@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_db
 from app.models.services import Service
+from app.models.typologies import Typology
 from app.models.prompts import Prompt, PromptBaseStructure
 from app.schemas.services import ServiceCreate, ServiceOut, ServiceUpdate
 

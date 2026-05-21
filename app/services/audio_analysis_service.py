@@ -24,6 +24,7 @@ _ALLOWED_TIPOS = frozenset(
         "confirmacion",
         "cancelacion",
         "reagendo",
+        "falta",
         "falta_con_reagendo",
         "falta_sin_reagendo",
         "no_interesado",
@@ -267,7 +268,21 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
         }
 
     tipo_llamada = parsed.get("tipo_llamada")
-    if tipo_llamada not in _ALLOWED_TIPOS:
+    
+    # Dynamically fetch typologies from DB to avoid validation issues with newly added keys
+    try:
+        from sqlalchemy import select
+        from app.models.typologies import Typology
+        t_stmt = select(Typology.typology_key).where(Typology.is_active == True)
+        t_res = await db.execute(t_stmt)
+        active_db_keys = set(t_res.scalars().all())
+    except Exception as e:
+        logger.warning("Failed to fetch active typologies from DB for dynamic validation: %s", e)
+        active_db_keys = set()
+        
+    combined_allowed = _ALLOWED_TIPOS.union(active_db_keys)
+    
+    if tipo_llamada not in combined_allowed:
         logger.warning(
             "tipo_llamada no permitido: %r (call_id=%s)", tipo_llamada, call_id
         )
@@ -276,6 +291,10 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
             "status": "error",
             "stage": "validation",
             "error_message": f"tipo_llamada no permitido: {tipo_llamada!r}",
+            "details": {
+                "received": tipo_llamada,
+                "allowed": sorted(combined_allowed),
+            },
         }
 
     # ── 7. Persist ──────────────────────────────────────────────────────────

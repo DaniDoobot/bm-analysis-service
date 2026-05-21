@@ -187,6 +187,12 @@ async def build_prompt_with_ai(
                 context = generated_prompt[start_idx:end_idx].replace('\n', '\\n')
                 validation_errors.append(f"Uso estructural de clave prohibida '{lk}'. Contexto: '...{context}...'")
                 break
+
+    # 2.2. Prevent legacy typologies leakage
+    legacy_typos = ["informacion_sin_cita", "falta_con_reagendo", "falta_sin_reagendo", "no_interesado", "no_apto"]
+    for lt in legacy_typos:
+        if lt in generated_prompt:
+            validation_errors.append(f"El prompt generado contiene la tipología antigua prohibida '{lt}'.")
             
     # 3. Check for encoding/mojibake issues
     mojibake_patterns = ["Ã", "Â", "â", "³", "±", "Ã³", "Ã±"]
@@ -235,38 +241,38 @@ def _build_meta_prompt(
         task_context = "Genera un prompt completo para que un LLM analice llamadas entre agentes de Boston Medical (clínica de salud sexual masculina) y pacientes potenciales."
 
     # 2. Resolve base rules and baseline structure
-    rules_and_base_structure = []
+    typology_keys_str = ", ".join([t.typology_key for t in typologies]) if typologies else "cita, confirmacion, cancelacion, reagendo, falta, otros"
+    
+    rules_and_base_structure = [
+        "# Reglas irrompibles de análisis",
+        "El prompt generado DEBE exigirle al analizador que cumpla estas reglas irrompibles:",
+        f"1. El analizador clasifica cada llamada en un único tipo_llamada. Los tipos permitidos son estrictamente: {typology_keys_str}. (El prompt generado debe listar y exigir únicamente esta lista exacta, prohibiendo expresamente cualquier otra tipología como informacion_sin_cita, falta_con_reagendo, falta_sin_reagendo, no_interesado, no_apto, etc.).",
+        "2. Evalúa los criterios activos de la base de datos (se listan abajo) y usa sus output_key y feed_key.",
+        "3. Devuelve exclusivamente JSON válido. No usa markdown en la salida final (ni ```json).",
+        "4. Cíñete ESTRICTAMENTE al formato JSON de salida solicitado. No inventes claves, no omitas claves obligatorias y no reutilices claves antiguas o desactualizadas del prompt de referencia.",
+        "5. Reglas sobre valores null y aplicabilidad por tipología:",
+        "   - IMPORTANTE: Evalúa cada criterio ÚNICAMENTE si la tipología de llamada clasificada está dentro de sus 'Tipologías aplicables'. Si la tipología de la llamada NO es aplicable para un criterio determinado, debes devolver estrictamente null en su output_key (y en su feed_key si lo tiene).",
+        "   - Para los criterios aplicables, si el agente no cumple con la conducta esperada, NO devuelvas null: devuelve una puntuación baja, 'No' o el valor negativo que corresponda según el tipo de criterio. Usa null para criterios aplicables solo cuando sea imposible evaluar por falta de datos en el audio o transcripción.",
+        "   - En criterios de cualificación o datos del paciente, devuelve null si el paciente no facilita esa información explícitamente.",
+        "6. En campos textuales de objeciones, objeciones debe ser siempre string; si no hay objeciones, devuelve ''.",
+        "7. Cada output_key del listado de criterios activos debe aparecer en el JSON final. Si el criterio tiene feed_key, también debe aparecer."
+    ]
+
     if base_structure:
         if base_structure.structure_key == "blank":
-            rules_and_base_structure = [
+            rules_and_base_structure.extend([
+                "",
                 "# Diseño de Estructura Libre",
                 "Crea la estructura del prompt de análisis completamente desde cero, asegurando una redacción limpia, fluida y profesional en español.",
                 "Define una estructura adecuada para las instrucciones facilitadas."
-            ]
+            ])
         else:
-            rules_and_base_structure = [
-                "# Estructura base obligatoria de análisis",
-                "El prompt generado DEBE basarse estrictamente y heredar las reglas de la siguiente estructura base:",
+            rules_and_base_structure.extend([
+                "",
+                "# Estructura base obligatoria de referencia",
+                "El prompt generado DEBE basarse, complementar y heredar las directrices estilísticas y conceptuales de la siguiente estructura base, pero adaptándolas SIEMPRE a las reglas irrompibles de arriba (ej. sustituyendo cualquier lista antigua de tipologías por la nueva lista exacta de tipo_llamada permitida):",
                 base_structure.base_prompt
-            ]
-    else:
-        # Default Boston Medical Rules with Dynamic Typologies
-        typology_keys_str = ", ".join([t.typology_key for t in typologies]) if typologies else "cita, confirmacion, cancelacion, reagendo, falta, otros"
-        
-        rules_and_base_structure = [
-            "# Estructura base obligatoria de análisis",
-            "El prompt generado DEBE exigirle al analizador que cumpla estas reglas irrompibles:",
-            f"1. El analizador clasifica cada llamada en un único tipo_llamada. Los tipos permitidos son estrictamente: {typology_keys_str}. (Preserva siempre esta lista exacta, no la acortes ni resumas).",
-            "2. Evalúa los criterios activos de la base de datos (se listan abajo) y usa sus output_key y feed_key.",
-            "3. Devuelve exclusivamente JSON válido. No usa markdown en la salida final (ni ```json).",
-            "4. Cíñete ESTRICTAMENTE al formato JSON de salida solicitado. No inventes claves, no omitas claves obligatorias y no reutilices claves antiguas del prompt de referencia.",
-            "5. Reglas sobre valores null y aplicabilidad por tipología:",
-            "   - IMPORTANTE: Evalúa cada criterio ÚNICAMENTE si la tipología de llamada clasificada está dentro de sus 'Tipologías aplicables'. Si la tipología de la llamada NO es aplicable para un criterio determinado, debes devolver estrictamente null en su output_key (y en su feed_key si lo tiene).",
-            "   - Para los criterios aplicables, si el agente no cumple con la conducta esperada, NO devuelvas null: devuelve una puntuación baja, 'No' o el valor negativo que corresponda según el tipo de criterio. Usa null para criterios aplicables solo cuando sea imposible evaluar por falta de datos en el audio o transcripción.",
-            "   - En criterios de cualificación o datos del paciente, devuelve null si el paciente no facilita esa información explícitamente.",
-            "6. En campos textuales de objeciones, objeciones debe ser siempre string; si no hay objeciones, devuelve ''.",
-            "7. Cada output_key del listado de criterios activos debe aparecer en el JSON final. Si el criterio tiene feed_key, también debe aparecer."
-        ]
+            ])
 
     # 3. If there are no criteria
     if not criteria:
