@@ -23,6 +23,8 @@ from app.services.criteria_service import get_active_criteria
 from app.services.prompts_service import _get_current_version
 from app.utils.json_utils import safe_parse_json
 
+logger = logging.getLogger(__name__)
+
 def sanitize_legacy_typologies_block(prompt_text: str, active_typologies: list[Any]) -> str:
     """
     Sanitizes or neutralizes legacy typology references in prompt templates.
