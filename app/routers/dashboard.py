@@ -13,6 +13,7 @@ from app.services.dashboard_service import (
     get_agents_list,
     get_agent_evolution,
     get_objections_breakdown,
+    get_mass_result_detail,
 )
 from app.utils.hubspot_owners import resolve_owner_id_by_email, resolve_owner_name
 
@@ -168,3 +169,27 @@ async def get_my_agent_details(
         "hubspot_owner_id": owner_id,
         "agent_name": agent_name
     }
+
+
+@router.get("/dashboard/latest-analyses/{identifier}")
+async def get_latest_analysis_detail(
+    identifier: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Get the full detail of a single MassEvaluationResult by ID or call_id.
+    """
+    try:
+        data = await get_mass_result_detail(db, identifier)
+        if not data:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Mass evaluation result with identifier '{identifier}' not found."
+            )
+        return data
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to retrieve mass analysis detail")
+        raise HTTPException(status_code=500, detail=str(e))
+

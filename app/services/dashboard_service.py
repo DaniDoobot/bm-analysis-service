@@ -501,6 +501,7 @@ async def get_dashboard_summary(
         tipo = r.result_json.get("tipo_llamada") if r.result_json else None
         latest_analyses.append({
             "analysis_id": r.mass_analysis_id,
+            "mass_result_id": r.mass_analysis_id,
             "call_id": r.call_id,
             "agente_telefonico": resolved_agent,
             "tipo_llamada": tipo,
@@ -1008,4 +1009,70 @@ async def get_objections_breakdown(
         "top_objections": top_objections,
         "by_agent": by_agent,
         "items": items
+    }
+
+
+async def get_mass_result_detail(db: AsyncSession, identifier: str) -> dict[str, Any] | None:
+    """Retrieve full detail of a single MassEvaluationResult by ID or call_id."""
+    row = None
+    try:
+        id_val = int(identifier)
+        stmt = select(MassEvaluationResult).where(MassEvaluationResult.mass_analysis_id == id_val)
+        res = await db.execute(stmt)
+        row = res.scalars().first()
+    except ValueError:
+        pass
+        
+    if not row:
+        stmt = select(MassEvaluationResult).where(MassEvaluationResult.call_id == identifier).order_by(MassEvaluationResult.mass_analysis_id.desc())
+        res = await db.execute(stmt)
+        row = res.scalars().first()
+        
+    if not row:
+        return None
+        
+    rj = row.result_json or {}
+    
+    def _norm(val: Any) -> Any:
+        if isinstance(val, dict):
+            return {k: _norm(v) for k, v in val.items()}
+        elif isinstance(val, list):
+            return [_norm(v) for v in val]
+        else:
+            return to_float(val) if isinstance(val, decimal.Decimal) else val
+            
+    normalized_result_json = _norm(rj)
+    normalized_items_json = _norm(row.items_json)
+    
+    eg = extract_score_from_mass(rj, row.items_json, "evaluacion_global")
+    call_type = rj.get("tipo_llamada") or rj.get("call_type") or "desconocido"
+    resumen = rj.get("resumen") or rj.get("resumen_llamada") or rj.get("summary") or ""
+    
+    objection_texts = extract_objection_items(rj)
+    
+    transcript = rj.get("transcripción") or rj.get("transcripcion") or rj.get("transcript")
+    if not transcript and row.hubspot_metadata:
+        transcript = row.hubspot_metadata.get("transcript") or row.hubspot_metadata.get("transcription")
+    
+    return {
+        "id": row.mass_analysis_id,
+        "mass_result_id": row.mass_analysis_id,
+        "call_id": row.call_id,
+        "agent_name": resolve_agent_display(row.agent_name, row.hubspot_owner_id) or row.agent_name or "Desconocido",
+        "hubspot_owner_id": row.hubspot_owner_id,
+        "call_timestamp": row.call_timestamp.isoformat() if row.call_timestamp else None,
+        "analysis_timestamp": row.analysis_timestamp.isoformat() if row.analysis_timestamp else None,
+        "status": row.status,
+        "duration_seconds": to_float(row.call_duration_seconds),
+        "call_type": call_type,
+        "evaluacion_global": to_float(eg) if eg is not None else None,
+        "resultado_json": normalized_result_json,
+        "individual_results": normalized_items_json,
+        "objeciones": objection_texts,
+        "resumen": resumen,
+        "transcript": transcript,
+        "batch_id": row.job_id,
+        "mass_evaluation_id": row.job_id,
+        "run_id": row.run_id,
+        "recording_url": row.recording_url
     }
