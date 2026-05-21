@@ -104,6 +104,102 @@ def sanitize_legacy_typologies_block(prompt_text: str, active_typologies: list[A
     return prompt_text
 
 
+def sanitize_inputs_completely(
+    draft_data: Any | None,
+    criteria: list[PromptCriterion],
+    active_typologies: list[Any],
+    criterion_typologies_map: dict[int, list[str]]
+) -> tuple[Any | None, list[PromptCriterion], dict[int, list[str]]]:
+    """
+    Sanitizes draft_data, database criteria, and relationship maps completely
+    to ensure zero legacy typologies leak or cause 500 errors.
+    """
+    active_keys = [t.typology_key for t in active_typologies] if active_typologies else ["cita", "confirmacion", "cancelacion", "reagendo", "falta", "otros"]
+    
+    legacy_mapping = {
+        "informacion_sin_cita": "cita",
+        "falta_con_reagendo": "falta",
+        "falta_sin_reagendo": "falta",
+        "no_interesado": "otros",
+        "no_apto": "otros"
+    }
+
+    # Helper to clean an allowed_values list or string
+    def clean_allowed_values(key: str, val: Any) -> Any:
+        if key in ("tipo_llamada", "tipo_de_llamada"):
+            return list(active_keys)
+        if not val:
+            return val
+        if isinstance(val, list):
+            new_list = []
+            for item in val:
+                if item in legacy_mapping:
+                    new_list.append(legacy_mapping[item])
+                else:
+                    new_list.append(item)
+            return sorted(list(set(new_list)))
+        if isinstance(val, str):
+            items = [i.strip() for i in val.split(",") if i.strip()]
+            new_items = []
+            for item in items:
+                if item in legacy_mapping:
+                    new_items.append(legacy_mapping[item])
+                else:
+                    new_items.append(item)
+            return ", ".join(sorted(list(set(new_items))))
+        return val
+
+    # Helper to clean applies_to_types list
+    def clean_applies_to(applies: Any) -> list[str]:
+        if not applies or not isinstance(applies, list):
+            return list(active_keys)
+        new_applies = []
+        for item in applies:
+            if item in legacy_mapping:
+                new_applies.append(legacy_mapping[item])
+            elif item in active_keys:
+                new_applies.append(item)
+        cleaned = sorted(list(set(new_applies)))
+        if not cleaned:
+            return list(active_keys)
+        return cleaned
+
+    # 1. Sanitize draft_data
+    if draft_data and isinstance(draft_data, dict):
+        # 1.1 Sanitize draft prompt text
+        if "prompt" in draft_data and isinstance(draft_data["prompt"], str):
+            draft_data["prompt"] = sanitize_legacy_typologies_block(draft_data["prompt"], active_typologies)
+            
+        # 1.2 Sanitize draft criteria
+        draft_criteria = draft_data.get("criteria")
+        if draft_criteria and isinstance(draft_criteria, list):
+            for c_dict in draft_criteria:
+                if not isinstance(c_dict, dict):
+                    continue
+                c_key = c_dict.get("criterion_key") or c_dict.get("output_key") or ""
+                
+                # Clean allowed_values
+                if "allowed_values" in c_dict:
+                    c_dict["allowed_values"] = clean_allowed_values(c_key, c_dict["allowed_values"])
+                    
+                # Clean applies_to_types
+                if "applies_to_types" in c_dict:
+                    c_dict["applies_to_types"] = clean_applies_to(c_dict["applies_to_types"])
+
+    # 2. Sanitize database criteria
+    for c in criteria:
+        c_key = c.criterion_key or c.output_key or ""
+        if c.allowed_values:
+            c.allowed_values = clean_allowed_values(c_key, c.allowed_values)
+            
+    # 3. Sanitize criterion typologies map
+    if criterion_typologies_map:
+        for c_id, keys in list(criterion_typologies_map.items()):
+            criterion_typologies_map[c_id] = clean_applies_to(keys)
+
+    return draft_data, criteria, criterion_typologies_map
+
+
 async def build_prompt_with_ai(
     db: AsyncSession,
     prompt_id: int,
@@ -177,12 +273,72 @@ async def build_prompt_with_ai(
         c_keys = assoc_res.scalars().all()
         criterion_typologies_map[c.criterion_id] = list(c_keys)
 
+    # 3.6. Check for legacy typologies before sanitization for logging purposes
+    legacy_typos = ["informacion_sin_cita", "falta_con_reagendo", "falta_sin_reagendo", "no_interesado", "no_apto"]
+    
+    def detect_legacy_in_obj(obj: Any) -> bool:
+        if not obj:
+            return False
+        if isinstance(obj, str):
+            return any(lt in obj for lt in legacy_typos)
+        if isinstance(obj, (list, tuple, set)):
+            return any(detect_legacy_in_obj(x) for x in obj)
+        if isinstance(obj, dict):
+            return any(detect_legacy_in_obj(k) or detect_legacy_in_obj(v) for k, v in obj.items())
+        if hasattr(obj, "__dict__"):
+            return any(detect_legacy_in_obj(v) for k, v in obj.__dict__.items() if not k.startswith("_"))
+        try:
+            return any(lt in str(obj) for lt in legacy_typos)
+        except Exception:
+            return False
+
+    legacy_detected_before = (
+        detect_legacy_in_obj(current_prompt_text) or
+        detect_legacy_in_obj(base_structure.base_prompt if base_structure else None) or
+        detect_legacy_in_obj(draft_data) or
+        detect_legacy_in_obj(criteria) or
+        detect_legacy_in_obj(criterion_typologies_map)
+    )
+
+    # 3.7. Perform complete input, draft, and criteria sanitization of legacy typologies
+    draft_data, criteria, criterion_typologies_map = sanitize_inputs_completely(
+        draft_data=draft_data,
+        criteria=criteria,
+        active_typologies=typologies,
+        criterion_typologies_map=criterion_typologies_map
+    )
+
     # 3.8. Sanitize templates of legacy typologies before sending them to OpenAI
     sanitized_current_prompt = sanitize_legacy_typologies_block(current_prompt_text, typologies) if current_prompt_text else None
     
     sanitized_base_prompt = None
     if base_structure and base_structure.base_prompt:
         sanitized_base_prompt = sanitize_legacy_typologies_block(base_structure.base_prompt, typologies)
+
+    # 3.9. Check legacy presence after sanitization and write execution logs
+    legacy_detected_after = (
+        detect_legacy_in_obj(sanitized_current_prompt) or
+        detect_legacy_in_obj(sanitized_base_prompt) or
+        detect_legacy_in_obj(draft_data) or
+        detect_legacy_in_obj(criteria) or
+        detect_legacy_in_obj(criterion_typologies_map)
+    )
+
+    logger.info(
+        "Build-with-AI execution info:\n"
+        " - prompt_id: %s\n"
+        " - base_structure_id: %s\n"
+        " - service_id: %s\n"
+        " - typologies activas: %s\n"
+        " - legacy_detected_before_sanitize: %s\n"
+        " - legacy_detected_after_sanitize: %s",
+        prompt_id,
+        resolved_base_structure_id,
+        service_id,
+        [t.typology_key for t in typologies],
+        legacy_detected_before,
+        legacy_detected_after
+    )
 
     # 4. Build the meta-prompt for OpenAI
     meta_prompt = _build_meta_prompt(

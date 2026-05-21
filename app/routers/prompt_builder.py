@@ -38,17 +38,38 @@ async def build_with_ai_endpoint(
     # Use instructions if provided, fallback to general_instructions
     active_instructions = body.instructions or body.general_instructions
 
-    result = await build_prompt_with_ai(
-        db=db,
-        prompt_id=body.prompt_id,
-        instructions=active_instructions,
-        draft_data=body.draft_data,
-        base_structure_id=body.base_structure_id,
-        version_name=body.version_name,
-        change_note=body.change_note,
-    )
+    try:
+        result = await build_prompt_with_ai(
+            db=db,
+            prompt_id=body.prompt_id,
+            instructions=active_instructions,
+            draft_data=body.draft_data,
+            base_structure_id=body.base_structure_id,
+            version_name=body.version_name,
+            change_note=body.change_note,
+        )
+    except Exception as e:
+        logger.exception("Unexpected exception occurred during build-with-ai for prompt_id=%s:", body.prompt_id)
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error interno durante la generación: {str(e)}"
+        )
 
-    
+    if not result or not result.get("ok"):
+        from fastapi import HTTPException
+        error_msg = result.get("error_message") if result else "No se pudo generar una estructura válida."
+        # If error mentions legacy typologies, return the clean non-normalizable message requested
+        if "legacy" in error_msg.lower():
+            raise HTTPException(
+                status_code=400,
+                detail="No se pudo generar una estructura válida porque el borrador contiene tipologías legacy no normalizables."
+            )
+        raise HTTPException(
+            status_code=400,
+            detail=error_msg
+        )
+
     from fastapi.encoders import jsonable_encoder
     from fastapi.responses import JSONResponse
     

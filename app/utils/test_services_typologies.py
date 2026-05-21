@@ -283,6 +283,66 @@ async def run_mock_workflow():
     assert "otros" in sanitized, "Active typologies must be present!"
     
     logger.info("Sanitization helper successfully validated under Mock conditions!")
+
+    # 9. Verify full sanitization of real-world Lovable draft payload
+    logger.info("9. Testing complete sanitization of contaminated real-world draft_data payloads...")
+    from app.services.prompt_builder import sanitize_inputs_completely
+    
+    mock_draft_data = {
+        "prompt": (
+            "### DEFINICIÓN DE TIPOS DE LLAMADA\n"
+            "- informacion_sin_cita: El paciente pide información.\n"
+            "- cita: El paciente agenda.\n"
+            "- falta_con_reagendo: El paciente no asiste pero reagenda.\n"
+            "- falta_sin_reagendo: El paciente no asiste.\n"
+            "- no_interesado: El paciente no tiene interés.\n"
+            "- no_apto: El paciente no cumple requisitos.\n"
+            "- otros: Dudas generales.\n"
+        ),
+        "criteria": [
+            {
+                "criterion_key": "tipo_llamada",
+                "allowed_values": [
+                    "cita", "informacion_sin_cita", "confirmacion", "cancelacion",
+                    "reagendo", "falta_con_reagendo", "falta_sin_reagendo",
+                    "no_interesado", "no_apto", "otros"
+                ],
+                "applies_to_types": ["cita", "informacion_sin_cita"]
+            },
+            {
+                "criterion_key": "saludo",
+                "allowed_values": None,
+                "applies_to_types": ["cita", "informacion_sin_cita", "falta_con_reagendo"]
+            }
+        ]
+    }
+    
+    # We pass empty DB criteria and mapping to see how it performs
+    sanitized_draft, sanitized_db_criteria, sanitized_map = sanitize_inputs_completely(
+        draft_data=mock_draft_data,
+        criteria=[],
+        active_typologies=mock_active_typologies,
+        criterion_typologies_map={}
+    )
+    
+    # Assertions on prompt sanitization
+    assert "informacion_sin_cita" not in sanitized_draft["prompt"], "Draft prompt legacy typologies must be completely removed!"
+    assert "falta_con_reagendo" not in sanitized_draft["prompt"], "Draft prompt legacy typologies must be completely removed!"
+    
+    # Assertions on draft_criteria[0] ("tipo_llamada")
+    tipo_llamada_crit = sanitized_draft["criteria"][0]
+    assert "informacion_sin_cita" not in tipo_llamada_crit["allowed_values"], "allowed_values must be sanitized!"
+    assert "falta_con_reagendo" not in tipo_llamada_crit["allowed_values"], "allowed_values must be sanitized!"
+    assert tipo_llamada_crit["allowed_values"] == ["cita", "confirmacion", "cancelacion", "reagendo", "falta", "otros"], "allowed_values for tipo_llamada must be strictly the active typologies!"
+    
+    assert tipo_llamada_crit["applies_to_types"] == ["cita"], "applies_to_types must map 'informacion_sin_cita' -> 'cita' and deduplicate!"
+    
+    # Assertions on draft_criteria[1] ("saludo")
+    saludo_crit = sanitized_draft["criteria"][1]
+    assert "falta_con_reagendo" not in saludo_crit["applies_to_types"], "applies_to_types must be sanitized!"
+    assert saludo_crit["applies_to_types"] == ["cita", "falta"], "applies_to_types must map 'informacion_sin_cita' -> 'cita' and 'falta_con_reagendo' -> 'falta'!"
+    
+    logger.info("Real-world Lovable draft payload successfully sanitized under Mock conditions!")
     logger.info("--- ALL MOCK TESTS PASSED SUCCESSFULLY! ---")
 
 
