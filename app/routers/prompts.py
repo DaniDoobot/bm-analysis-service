@@ -125,6 +125,7 @@ def _base_structure_out(struct) -> dict:
         "updated_at": struct.updated_at,
         "created_by": struct.created_by,
         "created_by_email": struct.created_by_email,
+        "service_id": struct.service_id,
     }
 
 
@@ -142,6 +143,7 @@ def _base_structure_detail_out(struct) -> dict:
         "created_by_email": struct.created_by_email,
         "base_prompt": struct.base_prompt,
         "default_criteria": [],
+        "service_id": struct.service_id,
     }
 
 

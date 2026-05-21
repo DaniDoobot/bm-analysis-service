@@ -163,8 +163,32 @@ async def save_analysis(
 
         # ── 3. Insert bm_analysis_results ─────────────────────────────────
         prompt_id = prompt_metadata.get("prompt_id")
+        matched_typology = None
         if prompt_id:
-            await _insert_results(db, analysis, clean_result, prompt_id)
+            from app.models.prompts import Prompt
+            from app.models.services import Service
+            from app.models.typologies import Typology
+
+            p_stmt = select(Prompt.service_id).where(Prompt.prompt_id == prompt_id)
+            p_res = await db.execute(p_stmt)
+            service_id = p_res.scalar()
+
+            if not service_id:
+                s_stmt = select(Service.service_id).where(Service.service_key == "front")
+                s_res = await db.execute(s_stmt)
+                service_id = s_res.scalar()
+
+            if service_id:
+                t_stmt = select(Typology).where(Typology.service_id == service_id, Typology.is_active == True)
+                t_res = await db.execute(t_stmt)
+                active_typologies = t_res.scalars().all()
+                typology_by_key = {t.typology_key: t for t in active_typologies}
+
+                tipo_llamada_val = clean_result.get("tipo_llamada")
+                if isinstance(tipo_llamada_val, str) and tipo_llamada_val in typology_by_key:
+                    matched_typology = typology_by_key[tipo_llamada_val]
+
+            await _insert_results(db, analysis, clean_result, prompt_id, matched_typology=matched_typology)
 
         await db.commit()
         await db.refresh(analysis)
@@ -248,31 +272,66 @@ async def _insert_results(
     analysis: Analysis,
     result_json: dict[str, Any],
     prompt_id: int,
+    matched_typology: Any | None = None,
 ) -> None:
     """Insert per-criterion rows in bm_analysis_results."""
     criteria: list[PromptCriterion] = await get_active_criteria(db, prompt_id)
+    c_ids = [c.criterion_id for c in criteria]
+
+    # Fetch criterion-typology associations
+    from app.models.criteria import PromptCriterionTypology
+    assoc_map = {}
+    if c_ids:
+        assoc_stmt = select(PromptCriterionTypology).where(PromptCriterionTypology.criterion_id.in_(c_ids))
+        assoc_res = await db.execute(assoc_stmt)
+        for assoc in assoc_res.scalars().all():
+            if assoc.criterion_id not in assoc_map:
+                assoc_map[assoc.criterion_id] = set()
+            assoc_map[assoc.criterion_id].add(assoc.typology_id)
 
     for criterion in criteria:
         output_key = criterion.output_key
         feed_key = criterion.feed_key
 
-        raw_value = result_json.get(output_key) if output_key else None
-        feed_value = result_json.get(feed_key) if feed_key else None
+        is_applicable = True
+        if matched_typology:
+            allowed_typologies = assoc_map.get(criterion.criterion_id, set())
+            if allowed_typologies:
+                is_applicable = (matched_typology.typology_id in allowed_typologies)
 
-        typed = map_criterion_value(raw_value, criterion.criterion_type or "text")
+        if is_applicable:
+            raw_value = result_json.get(output_key) if output_key else None
+            feed_value = result_json.get(feed_key) if feed_key else None
 
-        row = AnalysisResult(
-            analysis_id=analysis.analysis_id,
-            criterion_id=criterion.criterion_id,
-            criterion_key=criterion.criterion_key,
-            criterion_name=criterion.criterion_name,
-            criterion_type=criterion.criterion_type,
-            value_number=typed["value_number"],
-            value_text=typed["value_text"],
-            value_boolean=typed["value_boolean"],
-            value_category=typed["value_category"],
-            feed=str(feed_value) if feed_value is not None else None,
-            description=criterion.criterion_description,
-            raw_value=typed["raw_value"],
-        )
+            typed = map_criterion_value(raw_value, criterion.criterion_type or "text")
+
+            row = AnalysisResult(
+                analysis_id=analysis.analysis_id,
+                criterion_id=criterion.criterion_id,
+                criterion_key=criterion.criterion_key,
+                criterion_name=criterion.criterion_name,
+                criterion_type=criterion.criterion_type,
+                value_number=typed["value_number"],
+                value_text=typed["value_text"],
+                value_boolean=typed["value_boolean"],
+                value_category=typed["value_category"],
+                feed=str(feed_value) if feed_value is not None else None,
+                description=criterion.criterion_description,
+                raw_value=typed["raw_value"],
+            )
+        else:
+            row = AnalysisResult(
+                analysis_id=analysis.analysis_id,
+                criterion_id=criterion.criterion_id,
+                criterion_key=criterion.criterion_key,
+                criterion_name=criterion.criterion_name,
+                criterion_type=criterion.criterion_type,
+                value_number=None,
+                value_text=None,
+                value_boolean=None,
+                value_category=None,
+                feed=None,
+                description=criterion.criterion_description,
+                raw_value=None,
+            )
         db.add(row)

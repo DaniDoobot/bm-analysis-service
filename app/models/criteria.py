@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -34,4 +34,24 @@ class PromptCriterion(Base):
     updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class PromptCriterionTypology(Base):
+    __tablename__ = "bm_prompt_criterion_typologies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    criterion_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("bm_prompt_criteria.criterion_id", ondelete="CASCADE"), nullable=False
+    )
+    typology_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("bm_typologies.typology_id", ondelete="CASCADE"), nullable=False
+    )
+    created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("criterion_id", "typology_id", name="uq_criterion_typology"),
+    )
+
 

@@ -467,9 +467,6 @@ class MassEvaluationService:
                 timezone_name = job.timezone
                 schedule_enabled = job.schedule_enabled
                 schedule_type = job.schedule_type
-                schedule_time = job.schedule_time
-                schedule_day_of_week = job.schedule_day_of_week
-                schedule_day_of_month = job.schedule_day_of_month
                 schedule_cron = job.schedule_cron
 
                 # Resolve prompt snapshot content
@@ -489,6 +486,54 @@ class MassEvaluationService:
                     
                 prompt_snapshot = v.prompt
                 prompt_version_id = v.id
+
+                # Resolve prompt's service
+                prompt_stmt = select(Prompt).where(Prompt.prompt_id == prompt_id)
+                prompt_res = await db.execute(prompt_stmt)
+                prompt_obj = prompt_res.scalars().first()
+                service_id = prompt_obj.service_id if prompt_obj else None
+
+                # Fetch Service details
+                from app.models.services import Service
+                from app.models.typologies import Typology
+                from app.models.criteria import PromptCriterionTypology
+
+                # Fallback to default service 'front'
+                if not service_id:
+                    s_stmt = select(Service.service_id).where(Service.service_key == "front")
+                    s_res = await db.execute(s_stmt)
+                    service_id = s_res.scalar()
+
+                service_key = "front"
+                service_name = "Front"
+                if service_id:
+                    s_stmt = select(Service).where(Service.service_id == service_id)
+                    s_res = await db.execute(s_stmt)
+                    service_obj = s_res.scalars().first()
+                    if service_obj:
+                        service_key = service_obj.service_key
+                        service_name = service_obj.service_name
+
+                # Fetch active typologies for the service
+                active_typologies = []
+                typology_by_key = {}
+                if service_id:
+                    t_stmt = select(Typology).where(Typology.service_id == service_id, Typology.is_active == True)
+                    t_res = await db.execute(t_stmt)
+                    active_typologies = list(t_res.scalars().all())
+                    typology_by_key = {t.typology_key: t for t in active_typologies}
+
+                # Fetch active criteria and item-typology associations
+                criteria = await get_active_criteria(db, prompt_id)
+                c_ids = [c.criterion_id for c in criteria]
+                assoc_map = {}
+                if c_ids:
+                    assoc_stmt = select(PromptCriterionTypology).where(PromptCriterionTypology.criterion_id.in_(c_ids))
+                    assoc_res = await db.execute(assoc_stmt)
+                    for assoc in assoc_res.scalars().all():
+                        if assoc.criterion_id not in assoc_map:
+                            assoc_map[assoc.criterion_id] = set()
+                        assoc_map[assoc.criterion_id].add(assoc.typology_id)
 
                 # 2. Query HubSpot
                 hs_service = HubSpotService()
@@ -523,7 +568,7 @@ class MassEvaluationService:
                     max_calls_val = 10
                 elif max_calls_val > 500:
                     max_calls_val = 500
-
+ 
                 seen_call_ids = set()
                 unique_calls = []
                 for c in calls:
@@ -555,7 +600,7 @@ class MassEvaluationService:
                                 break
                     except Exception as e_status:
                         logger.warning("Failed to check run cancellation status: %s", e_status)
-
+ 
                     call_id = call["call_id"]
                     recording_url = call["recording_url"]
                     
@@ -577,7 +622,10 @@ class MassEvaluationService:
                             prompt_version_label=prompt_version_label,
                             prompt_snapshot=prompt_snapshot,
                             status="skipped",
-                            error_message="No recording URL present."
+                            error_message="No recording URL present.",
+                            service_id=service_id,
+                            service_key=service_key,
+                            service_name=service_name
                         )
                         db.add(res_row)
                         calls_skipped += 1
@@ -631,36 +679,64 @@ class MassEvaluationService:
                         from app.services.analysis_persistence import _strip_legacy_keys
                         clean_result = _strip_legacy_keys(parsed)
                         
+                        # Resolve tipo_llamada and matched typology snapshot
+                        tipo_llamada_val = clean_result.get("tipo_llamada")
+                        matched_typology = None
+                        if isinstance(tipo_llamada_val, str) and tipo_llamada_val in typology_by_key:
+                            matched_typology = typology_by_key[tipo_llamada_val]
+
+                        typology_id = matched_typology.typology_id if matched_typology else None
+                        typology_key = matched_typology.typology_key if matched_typology else None
+                        typology_name = matched_typology.typology_name if matched_typology else None
+
                         # Resolve active criteria items
                         items = []
-                        criteria = await get_active_criteria(db, prompt_id)
                         for criterion in criteria:
                             output_key = criterion.output_key
                             feed_key = criterion.feed_key
  
-                            raw_value = clean_result.get(output_key) if output_key else None
-                            feed_value = clean_result.get(feed_key) if feed_key else None
+                            # Determine if criterion is applicable
+                            is_applicable = True
+                            if matched_typology:
+                                allowed_typologies = assoc_map.get(criterion.criterion_id, set())
+                                if allowed_typologies:
+                                    is_applicable = (matched_typology.typology_id in allowed_typologies)
+
+                            if is_applicable:
+                                raw_value = clean_result.get(output_key) if output_key else None
+                                feed_value = clean_result.get(feed_key) if feed_key else None
  
-                            # Get clean/typed value
-                            typed = map_criterion_value(raw_value, criterion.criterion_type or "text")
-                            
-                            # Resolve actual value
-                            resolved_val = None
-                            if criterion.criterion_type == "number":
-                                resolved_val = float(typed["value_number"]) if typed["value_number"] is not None else None
-                            elif criterion.criterion_type == "boolean":
-                                resolved_val = typed["value_boolean"]
+                                # Get clean/typed value
+                                typed = map_criterion_value(raw_value, criterion.criterion_type or "text")
+                                
+                                # Resolve actual value
+                                resolved_val = None
+                                if criterion.criterion_type == "number":
+                                    resolved_val = float(typed["value_number"]) if typed["value_number"] is not None else None
+                                elif criterion.criterion_type == "boolean":
+                                    resolved_val = typed["value_boolean"]
+                                else:
+                                    resolved_val = typed["value_text"] or typed["value_category"] or typed["raw_value"]
+ 
+                                items.append({
+                                    "criterion_key": criterion.criterion_key,
+                                    "name": criterion.criterion_name,
+                                    "type": criterion.criterion_type,
+                                    "output_key": output_key,
+                                    "value": resolved_val,
+                                    "feed": str(feed_value) if feed_value is not None else None,
+                                    "not_applicable": False
+                                })
                             else:
-                                resolved_val = typed["value_text"] or typed["value_category"] or typed["raw_value"]
- 
-                            items.append({
-                                "criterion_key": criterion.criterion_key,
-                                "name": criterion.criterion_name,
-                                "type": criterion.criterion_type,
-                                "output_key": output_key,
-                                "value": resolved_val,
-                                "feed": str(feed_value) if feed_value is not None else None
-                            })
+                                items.append({
+                                    "criterion_key": criterion.criterion_key,
+                                    "name": criterion.criterion_name,
+                                    "type": criterion.criterion_type,
+                                    "output_key": output_key,
+                                    "value": None,
+                                    "feed": None,
+                                    "not_applicable": True
+                                })
                             
                         # Resolve agent name display
                         owner_id = call["hubspot_owner_id"]
@@ -687,7 +763,13 @@ class MassEvaluationService:
                             status="completed",
                             result_json=clean_result,
                             items_json=items,
-                            hubspot_metadata=call
+                            hubspot_metadata=call,
+                            service_id=service_id,
+                            service_key=service_key,
+                            service_name=service_name,
+                            typology_id=typology_id,
+                            typology_key=typology_key,
+                            typology_name=typology_name
                         )
                         db.add(res_row)
                         calls_analyzed += 1
@@ -711,7 +793,10 @@ class MassEvaluationService:
                             prompt_version_label=prompt_version_label,
                             prompt_snapshot=prompt_snapshot,
                             status="failed",
-                            error_message=str(e_call)
+                            error_message=str(e_call),
+                            service_id=service_id,
+                            service_key=service_key,
+                            service_name=service_name
                         )
                         db.add(res_row)
                         calls_failed += 1

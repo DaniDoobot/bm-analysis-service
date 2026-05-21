@@ -20,6 +20,8 @@ from app.routers import (
     prompts,
     transcription_analysis,
     mass_evaluations,
+    services,
+    typologies,
 )
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -75,6 +77,8 @@ app.include_router(audio_analysis.router)
 app.include_router(transcription_analysis.router)
 app.include_router(prompt_builder.router)
 app.include_router(mass_evaluations.router)
+app.include_router(services.router)
+app.include_router(typologies.router)
 
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────

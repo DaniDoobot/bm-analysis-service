@@ -75,6 +75,7 @@ async def list_prompts(
             "base_structure_id": p.base_structure_id,
             "base_structure_key": p.base_structure_key,
             "base_structure_name": p.base_structure_name,
+            "service_id": p.service_id,
 
             # Aliases for frontend compatibility
             "name": p.prompt_name,
@@ -130,6 +131,7 @@ async def get_active_prompt(db: AsyncSession, prompt_type: str) -> dict | None:
         "base_structure_id": p.base_structure_id,
         "base_structure_key": p.base_structure_key,
         "base_structure_name": p.base_structure_name,
+        "service_id": p.service_id,
 
         # Aliases for frontend compatibility
         "name": p.prompt_name,
@@ -275,6 +277,7 @@ async def create_base_structure(db: AsyncSession, body: PromptBaseStructureCreat
         is_active=True,
         created_by=body.created_by,
         created_by_email=body.created_by_email,
+        service_id=body.service_id,
     )
     db.add(new_struct)
     await db.commit()
@@ -306,6 +309,8 @@ async def update_base_structure(
     
     if body.is_active is not None:
         struct.is_active = body.is_active
+    if body.service_id is not None:
+        struct.service_id = body.service_id
 
     await db.commit()
     await db.refresh(struct)
@@ -367,6 +372,7 @@ async def create_prompt_from_base(db: AsyncSession, body: CreateFromBaseRequest)
         base_structure_id=struct.id,
         base_structure_key=struct.structure_key,
         base_structure_name=struct.structure_name,
+        service_id=struct.service_id,
     )
     db.add(new_prompt)
     await db.flush()
@@ -410,6 +416,7 @@ async def create_prompt_from_base(db: AsyncSession, body: CreateFromBaseRequest)
         "prompt_type": new_prompt.prompt_type,
         "prompt": new_version.prompt,
         "criteria_count": criteria_count,
+        "service_id": new_prompt.service_id,
     }
 
 

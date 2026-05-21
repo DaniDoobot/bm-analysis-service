@@ -38,9 +38,9 @@ def build_items_visual(items_json: Any) -> list[dict[str, Any]]:
         name = item.get("name") or key
         val = item.get("value")
         c_type = item.get("type") or item.get("criterion_type") or "text"
-        
-        display_value = "Sin dato"
-        if val is not None and str(val).strip().lower() not in ["null", "none", ""]:
+        is_na = item.get("not_applicable") is True
+        display_value = "N/A" if is_na else "Sin dato"
+        if not is_na and val is not None and str(val).strip().lower() not in ["null", "none", ""]:
             if c_type == "score_1_10":
                 try:
                     f_val = float(val)
@@ -92,6 +92,7 @@ def build_items_visual(items_json: Any) -> list[dict[str, Any]]:
             "feedback": item.get("feed") or item.get("comment") or item.get("feedback") or "",
             "output_key": item.get("output_key") or key,
             "criterion_key": key,
-            "category": category_map.get(c_type, "Texto libre")
+            "category": category_map.get(c_type, "Texto libre"),
+            "not_applicable": is_na
         })
     return visuals

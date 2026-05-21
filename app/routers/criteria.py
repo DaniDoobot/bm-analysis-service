@@ -11,6 +11,7 @@ from app.schemas.criteria import (
     SaveCriterionRequest,
     ToggleCriterionRequest,
 )
+from app.schemas.typologies import CriterionTypologyAssociation
 from app.services import criteria_service
 
 logger = logging.getLogger(__name__)
@@ -44,3 +45,23 @@ async def toggle_criterion(
     """Activate or deactivate a criterion."""
     await criteria_service.toggle_criterion(db, body.criterion_id, body.is_active)
     return {"ok": True, "status": "updated", "criterion_id": body.criterion_id, "is_active": body.is_active}
+
+
+@router.get("/prompt-criteria/{criterion_id}/typologies", response_model=list[CriterionTypologyAssociation])
+async def get_criterion_typologies(
+    criterion_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Retrieve all active typologies of the service and whether they are associated with the criterion."""
+    return await criteria_service.get_criterion_typologies(db, criterion_id=criterion_id)
+
+
+@router.put("/prompt-criteria/{criterion_id}/typologies")
+async def update_criterion_typologies(
+    criterion_id: int,
+    typology_ids: list[int],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Update typology associations for a specific criterion."""
+    return await criteria_service.update_criterion_typologies(db, criterion_id=criterion_id, typology_ids=typology_ids)
+

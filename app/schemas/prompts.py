@@ -20,6 +20,7 @@ class PromptOut(BaseModel):
     base_structure_id: int | None = None
     base_structure_key: str | None = None
     base_structure_name: str | None = None
+    service_id: int | None = None
 
     # Archiving support
     is_archived: bool = False
@@ -87,6 +88,7 @@ class ActivePromptOut(BaseModel):
     base_structure_id: int | None = None
     base_structure_key: str | None = None
     base_structure_name: str | None = None
+    service_id: int | None = None
 
     # Extra fields for maximum frontend compatibility:
     name: str | None = None
@@ -137,6 +139,7 @@ class PromptBaseStructureOut(BaseModel):
     updated_at: datetime | None = None
     created_by: str | None = None
     created_by_email: str | None = None
+    service_id: int | None = None
 
 
 class PromptBaseStructureDetailOut(PromptBaseStructureOut):
@@ -153,6 +156,7 @@ class PromptBaseStructureCreate(BaseModel):
     default_criteria: list[dict[str, Any]] | None = None
     created_by: str | None = None
     created_by_email: str | None = None
+    service_id: int | None = None
 
 
 class PromptBaseStructureUpdate(BaseModel):
@@ -162,6 +166,7 @@ class PromptBaseStructureUpdate(BaseModel):
     base_prompt: str | None = None
     default_criteria: list[dict[str, Any]] | None = None
     is_active: bool | None = None
+    service_id: int | None = None
 
 
 class CreateFromBaseRequest(BaseModel):
@@ -182,4 +187,5 @@ class CreateFromBaseResponse(BaseModel):
     prompt_type: str
     prompt: str | None = None
     criteria_count: int
+    service_id: int | None = None
 

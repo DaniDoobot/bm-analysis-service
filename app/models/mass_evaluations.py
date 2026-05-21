@@ -135,6 +135,14 @@ class MassEvaluationResult(Base):
     prompt_version_label: Mapped[str | None] = mapped_column(Text, nullable=True)
     prompt_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
 
+    # Service and typology snapshot
+    service_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    service_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    service_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    typology_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    typology_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    typology_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # Result payload
     status: Mapped[str] = mapped_column(Text, default="completed", server_default="'completed'")  # completed, failed, skipped
     result_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)

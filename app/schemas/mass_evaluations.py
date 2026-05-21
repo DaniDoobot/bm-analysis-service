@@ -343,6 +343,15 @@ class MassEvaluationResultResponse(BaseModel):
     prompt_version_name: str | None
     prompt_version_label: str | None
     prompt_snapshot: str
+    
+    # Service and typology snapshot
+    service_id: int | None = None
+    service_key: str | None = None
+    service_name: str | None = None
+    typology_id: int | None = None
+    typology_key: str | None = None
+    typology_name: str | None = None
+
     status: str
     result_json: dict[str, Any] | None
     items_json: Any

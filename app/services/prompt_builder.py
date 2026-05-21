@@ -47,7 +47,6 @@ async def build_prompt_with_ai(
     current_version = await _get_current_version(db, prompt_id)
     current_prompt_text = current_version.prompt if current_version else None
     base_version_id = current_version.id if current_version else None
-
     # 3. Get active criteria
     criteria = await get_active_criteria(db, prompt_id)
     if criteria is None:
@@ -69,6 +68,39 @@ async def build_prompt_with_ai(
         )
         base_structure = res_struct.scalars().first()
 
+    # 3.5. Fetch active typologies of the service
+    service_id = prompt_obj.service_id
+    if not service_id and base_structure:
+        service_id = base_structure.service_id
+
+    if not service_id:
+        from app.models.services import Service
+        s_res = await db.execute(select(Service.service_id).where(Service.service_key == "front"))
+        service_id = s_res.scalar()
+
+    from app.models.typologies import Typology
+    from app.models.criteria import PromptCriterionTypology
+    
+    typologies = []
+    if service_id:
+        t_res = await db.execute(
+            select(Typology)
+            .where(Typology.service_id == service_id, Typology.is_active == True)
+            .order_by(Typology.sort_order.asc())
+        )
+        typologies = t_res.scalars().all()
+
+    # Fetch criterion-typology mappings
+    criterion_typologies_map = {}
+    for c in criteria:
+        assoc_res = await db.execute(
+            select(Typology.typology_key)
+            .join(PromptCriterionTypology, PromptCriterionTypology.typology_id == Typology.typology_id)
+            .where(PromptCriterionTypology.criterion_id == c.criterion_id, Typology.is_active == True)
+        )
+        c_keys = assoc_res.scalars().all()
+        criterion_typologies_map[c.criterion_id] = list(c_keys)
+
     # 4. Build the meta-prompt for OpenAI
     meta_prompt = _build_meta_prompt(
         current_prompt_text=current_prompt_text,
@@ -76,6 +108,8 @@ async def build_prompt_with_ai(
         general_instructions=instructions,
         draft_data=draft_data,
         base_structure=base_structure,
+        typologies=typologies,
+        criterion_typologies_map=criterion_typologies_map,
     )
 
     messages = [
@@ -125,13 +159,11 @@ async def build_prompt_with_ai(
                 
         # Validar allowed_values para categories
         if c.criterion_type == "category" and c.allowed_values:
-            # We check if the allowed_values (stringified) or its items appear in the prompt
             if isinstance(c.allowed_values, list):
                 for val in c.allowed_values:
                     if str(val) not in generated_prompt:
                         validation_errors.append(f"El valor permitido '{val}' para la categoría '{c.output_key}' no aparece en el prompt generado.")
             elif isinstance(c.allowed_values, str):
-                # Just check if some keywords from the string appear
                 vals = [v.strip() for v in c.allowed_values.split(",") if v.strip()]
                 for val in vals:
                     if val not in generated_prompt:
@@ -181,17 +213,18 @@ async def build_prompt_with_ai(
     }
 
 
-
 def _build_meta_prompt(
     current_prompt_text: str | None,
     criteria: list[PromptCriterion],
     general_instructions: str | None,
     draft_data: Any | None,
     base_structure: Any | None = None,
+    typologies: list[Any] = None,
+    criterion_typologies_map: dict[int, list[str]] = None,
 ) -> str:
     """Build the meta-prompt sent to OpenAI."""
-    criteria_block = _format_criteria(criteria) if criteria else "(No hay criterios activos configurados)"
-    output_format_block = _build_output_format(criteria)
+    criteria_block = _format_criteria(criteria, criterion_typologies_map) if criteria else "(No hay criterios activos configurados)"
+    output_format_block = _build_output_format(criteria, typologies)
 
     # 1. Resolve task context based on base_structure or default to Boston Medical
     task_context = "Genera un prompt completo para que un LLM analice llamadas entre agentes y clientes."
@@ -217,16 +250,19 @@ def _build_meta_prompt(
                 base_structure.base_prompt
             ]
     else:
-        # Default Boston Medical Rules
+        # Default Boston Medical Rules with Dynamic Typologies
+        typology_keys_str = ", ".join([t.typology_key for t in typologies]) if typologies else "cita, confirmacion, cancelacion, reagendo, falta, otros"
+        
         rules_and_base_structure = [
             "# Estructura base obligatoria de análisis",
             "El prompt generado DEBE exigirle al analizador que cumpla estas reglas irrompibles:",
-            "1. El analizador clasifica cada llamada en un único tipo_llamada. Los tipos permitidos son estrictamente: cita, informacion_sin_cita, confirmacion, cancelacion, reagendo, falta_con_reagendo, falta_sin_reagendo, no_interesado, no_apto, otros. (Preserva siempre esta lista exacta, no la acortes ni resumas).",
+            f"1. El analizador clasifica cada llamada en un único tipo_llamada. Los tipos permitidos son estrictamente: {typology_keys_str}. (Preserva siempre esta lista exacta, no la acortes ni resumas).",
             "2. Evalúa los criterios activos de la base de datos (se listan abajo) y usa sus output_key y feed_key.",
             "3. Devuelve exclusivamente JSON válido. No usa markdown en la salida final (ni ```json).",
             "4. Cíñete ESTRICTAMENTE al formato JSON de salida solicitado. No inventes claves, no omitas claves obligatorias y no reutilices claves antiguas del prompt de referencia.",
-            "5. Reglas sobre valores null: distingue entre evaluación del agente y cualificación del paciente.",
-            "   - En criterios de evaluación del agente, si el criterio aplica y el agente no lo cumple, NO devuelvas null: devuelve una puntuación baja, 'No' o el valor negativo que corresponda según el tipo de criterio. Usa null solo cuando el criterio no aplique realmente al tipo de llamada, cuando la llamada sea insuficiente para evaluarlo o cuando el audio/transcripción no permita valorar el comportamiento.",
+            "5. Reglas sobre valores null y aplicabilidad por tipología:",
+            "   - IMPORTANTE: Evalúa cada criterio ÚNICAMENTE si la tipología de llamada clasificada está dentro de sus 'Tipologías aplicables'. Si la tipología de la llamada NO es aplicable para un criterio determinado, debes devolver estrictamente null en su output_key (y en su feed_key si lo tiene).",
+            "   - Para los criterios aplicables, si el agente no cumple con la conducta esperada, NO devuelvas null: devuelve una puntuación baja, 'No' o el valor negativo que corresponda según el tipo de criterio. Usa null para criterios aplicables solo cuando sea imposible evaluar por falta de datos en el audio o transcripción.",
             "   - En criterios de cualificación o datos del paciente, devuelve null si el paciente no facilita esa información explícitamente.",
             "6. En campos textuales de objeciones, objeciones debe ser siempre string; si no hay objeciones, devuelve ''.",
             "7. Cada output_key del listado de criterios activos debe aparecer en el JSON final. Si el criterio tiene feed_key, también debe aparecer."
@@ -296,7 +332,7 @@ def _build_meta_prompt(
     return "\n".join(sections)
 
 
-def _format_criteria(criteria: list[PromptCriterion]) -> str:
+def _format_criteria(criteria: list[PromptCriterion], criterion_typologies_map: dict[int, list[str]] = None) -> str:
     lines = []
     for c in criteria:
         line = (
@@ -310,27 +346,36 @@ def _format_criteria(criteria: list[PromptCriterion]) -> str:
             line += f"\n  Descripción: {c.criterion_description}"
         if c.allowed_values:
             line += f"\n  Valores permitidos: {c.allowed_values}"
+        
+        # Add applicable typologies info
+        applies_to = criterion_typologies_map.get(c.criterion_id) if criterion_typologies_map else None
+        if applies_to:
+            line += f"\n  Tipologías aplicables: {', '.join(applies_to)}"
+        else:
+            line += f"\n  Tipologías aplicables: Todas"
+            
         lines.append(line)
     return "\n".join(lines)
 
 
-def _build_output_format(criteria: list[PromptCriterion]) -> str:
+def _build_output_format(criteria: list[PromptCriterion], typologies: list[Any] = None) -> str:
     lines = []
-    # Keep track of already emitted keys to prevent duplicates
     seen_keys = {"tipo_llamada"}
     
     # 1. Add tipo_llamada first
-    lines.append('  "tipo_llamada": "cita"|"informacion_sin_cita"|"confirmacion"|"cancelacion"|"reagendo"|"falta_con_reagendo"|"falta_sin_reagendo"|"no_interesado"|"no_apto"|"otros"')
+    if typologies:
+        options = "|".join([f'"{t.typology_key}"' for t in typologies])
+    else:
+        options = '"cita"|"confirmacion"|"cancelacion"|"reagendo"|"falta"|"otros"'
+        
+    lines.append(f'  "tipo_llamada": {options}')
     
     for c in criteria:
         if c.output_key:
-            # Skip if we already emitted this output_key (including tipo_llamada)
             if c.output_key in seen_keys:
                 continue
             
             seen_keys.add(c.output_key)
-            
-            # add a comma to the previous line!
             lines[-1] = lines[-1] + ","
             
             if c.criterion_type == "category" and c.allowed_values:
@@ -346,12 +391,10 @@ def _build_output_format(criteria: list[PromptCriterion]) -> str:
                 lines.append(f'  "{c.output_key}": "<{c.criterion_type}>"')
                 
         if c.feed_key:
-            # Skip if we already emitted this feed_key
             if c.feed_key in seen_keys:
                 continue
             
             seen_keys.add(c.feed_key)
-            
             lines[-1] = lines[-1] + ","
             lines.append(f'  "{c.feed_key}": "<texto explicativo o justificación>"')
             
