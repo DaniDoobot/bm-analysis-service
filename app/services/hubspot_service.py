@@ -199,7 +199,7 @@ class HubSpotService:
         # Parse time window start / end filters
         import datetime
         from datetime import time as dt_time
-        import pytz
+        from zoneinfo import ZoneInfo
         
         time_window_start = filters.get("time_window_start")
         time_window_end = filters.get("time_window_end")
@@ -276,9 +276,9 @@ class HubSpotService:
                             
                             # Convert to job's timezone
                             try:
-                                tz = pytz.timezone(timezone_name)
+                                tz = ZoneInfo(timezone_name)
                             except Exception:
-                                tz = pytz.timezone("Europe/Madrid")
+                                tz = ZoneInfo("Europe/Madrid")
                             
                             dt_local = dt.astimezone(tz)
                             local_time = dt_local.time()
