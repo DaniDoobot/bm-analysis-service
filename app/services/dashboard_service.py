@@ -1045,11 +1045,55 @@ async def get_mass_result_detail(db: AsyncSession, identifier: str) -> dict[str,
     normalized_items_json = _norm(row.items_json)
     
     eg = extract_score_from_mass(rj, row.items_json, "evaluacion_global")
-    call_type = rj.get("tipo_llamada") or rj.get("call_type") or "desconocido"
-    resumen = rj.get("resumen") or rj.get("resumen_llamada") or rj.get("summary") or ""
     
+    # 1. agent_name
+    agent_name = resolve_agent_display(row.agent_name, row.hubspot_owner_id) or row.agent_name or None
+    
+    # 2. call_type
+    call_type = rj.get("tipo_llamada") or rj.get("call_type") or None
+    
+    # 3. analysis_timestamp
+    analysis_timestamp = row.analysis_timestamp.isoformat() if row.analysis_timestamp else None
+    
+    # 4. resumen
+    resumen = rj.get("resumen") or rj.get("resumen_llamada") or rj.get("summary") or None
+    
+    # 5. objeciones
     objection_texts = extract_objection_items(rj)
+    objeciones = objection_texts if objection_texts else None
     
+    # 6. cita_resultado
+    cita_resultado = rj.get("cierre_cita") or rj.get("cita_resultado") or rj.get("cita") or rj.get("cierre") or None
+    
+    # 7. individual_results_normalized
+    individual_results_normalized = []
+    if row.items_json:
+        for item in row.items_json:
+            criterio = item.get("name") or item.get("criterion_key") or "Desconocido"
+            val = item.get("value")
+            
+            # score mapping: only if numeric
+            score = None
+            if val is not None and not isinstance(val, bool) and isinstance(val, (int, float, decimal.Decimal)):
+                score = to_float(val)
+                
+            # resultado mapping
+            resultado = None
+            if val is not None:
+                if isinstance(val, bool):
+                    resultado = "Sí" if val else "No"
+                else:
+                    resultado = str(val)
+                    
+            comentario = item.get("feed") or item.get("comment") or None
+            
+            individual_results_normalized.append({
+                "criterio": criterio,
+                "score": score,
+                "resultado": resultado,
+                "comentario": comentario
+            })
+            
     transcript = rj.get("transcripción") or rj.get("transcripcion") or rj.get("transcript")
     if not transcript and row.hubspot_metadata:
         transcript = row.hubspot_metadata.get("transcript") or row.hubspot_metadata.get("transcription")
@@ -1058,18 +1102,20 @@ async def get_mass_result_detail(db: AsyncSession, identifier: str) -> dict[str,
         "id": row.mass_analysis_id,
         "mass_result_id": row.mass_analysis_id,
         "call_id": row.call_id,
-        "agent_name": resolve_agent_display(row.agent_name, row.hubspot_owner_id) or row.agent_name or "Desconocido",
+        "agent_name": agent_name,
         "hubspot_owner_id": row.hubspot_owner_id,
         "call_timestamp": row.call_timestamp.isoformat() if row.call_timestamp else None,
-        "analysis_timestamp": row.analysis_timestamp.isoformat() if row.analysis_timestamp else None,
+        "analysis_timestamp": analysis_timestamp,
         "status": row.status,
         "duration_seconds": to_float(row.call_duration_seconds),
         "call_type": call_type,
         "evaluacion_global": to_float(eg) if eg is not None else None,
         "resultado_json": normalized_result_json,
         "individual_results": normalized_items_json,
-        "objeciones": objection_texts,
+        "objeciones": objeciones,
         "resumen": resumen,
+        "cita_resultado": cita_resultado,
+        "individual_results_normalized": individual_results_normalized,
         "transcript": transcript,
         "batch_id": row.job_id,
         "mass_evaluation_id": row.job_id,
