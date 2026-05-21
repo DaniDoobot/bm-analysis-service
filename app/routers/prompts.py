@@ -37,6 +37,7 @@ async def list_prompts(
     base_structure_id: Annotated[int | None, Query(description="Filter by base structure ID")] = None,
     base_structure_key: Annotated[str | None, Query(description="Filter by base structure Key")] = None,
     active: Annotated[bool | None, Query(description="Filter by active status")] = None,
+    include_archived: Annotated[bool, Query(description="Include archived structures")] = False,
 ):
     """Return all prompts with their current version (if any), with optional filtering."""
     return await prompts_service.list_prompts(
@@ -45,6 +46,7 @@ async def list_prompts(
         base_structure_id=base_structure_id,
         base_structure_key=base_structure_key,
         is_active=active,
+        include_archived=include_archived,
     )
 
 
@@ -205,3 +207,63 @@ async def backfill_clear_criteria(
         "rows_updated": result.rowcount,
         "message": "All base structures cleared of default_criteria.",
     }
+
+
+class ArchiveRequest(BaseModel):
+    user_email: str | None = None
+
+
+@router.patch("/prompts/{prompt_id}/archive")
+async def archive_prompt(
+    prompt_id: int,
+    body: ArchiveRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Archive a prompt structure."""
+    from app.services import archive_service
+    try:
+        prompt = await archive_service.archive_prompt(db, prompt_id, user_email=body.user_email)
+        return {
+            "ok": True,
+            "status": "archived",
+            "prompt_id": prompt.prompt_id,
+            "is_archived": prompt.is_archived,
+            "archived_at": prompt.archived_at,
+            "archived_by_email": prompt.archived_by_email,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.patch("/prompts/{prompt_id}/restore")
+async def restore_prompt(
+    prompt_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Restore an archived prompt as inactive/draft."""
+    from app.services import archive_service
+    try:
+        prompt = await archive_service.restore_prompt(db, prompt_id)
+        return {
+            "ok": True,
+            "status": "restored",
+            "prompt_id": prompt.prompt_id,
+            "is_archived": prompt.is_archived,
+            "is_active": prompt.is_active,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/prompts/{prompt_id}")
+async def delete_prompt(
+    prompt_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Hard delete a prompt structure if safeguards allow."""
+    from app.services import archive_service
+    try:
+        res = await archive_service.delete_prompt(db, prompt_id)
+        return res
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))

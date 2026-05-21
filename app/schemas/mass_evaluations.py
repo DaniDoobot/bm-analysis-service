@@ -1,7 +1,7 @@
 """Pydantic schemas for mass evaluations."""
 from datetime import datetime, time
 from typing import Any
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class MassEvaluationJobCreate(BaseModel):
@@ -10,6 +10,10 @@ class MassEvaluationJobCreate(BaseModel):
     is_active: bool = True
     prompt_id: int
     prompt_version_id: int | None = None
+
+    # Validation override flags
+    allow_inactive_prompt: bool = False
+    test_mode: bool = False
 
     agent_owner_ids: list[str] | None = None
     agent_names: list[str] | None = None
@@ -37,6 +41,38 @@ class MassEvaluationJobCreate(BaseModel):
     created_by: str | None = None
     created_by_email: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_inputs(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        # Normalize date_from
+        d_from = data.get("date_from") or data.get("search_date_from") or data.get("fecha_desde")
+        if d_from == "":
+            d_from = None
+        data["date_from"] = d_from
+
+        # Normalize date_to
+        d_to = data.get("date_to") or data.get("search_date_to") or data.get("fecha_hasta")
+        if d_to == "":
+            d_to = None
+        data["date_to"] = d_to
+
+        # Normalize time_window_start
+        t_start = data.get("time_window_start") or data.get("time_from") or data.get("search_time_from") or data.get("hora_desde")
+        if t_start == "":
+            t_start = None
+        data["time_window_start"] = t_start
+
+        # Normalize time_window_end
+        t_end = data.get("time_window_end") or data.get("time_to") or data.get("search_time_to") or data.get("hora_hasta")
+        if t_end == "":
+            t_end = None
+        data["time_window_end"] = t_end
+
+        return data
+
 
 class MassEvaluationJobUpdate(BaseModel):
     job_name: str | None = None
@@ -44,6 +80,10 @@ class MassEvaluationJobUpdate(BaseModel):
     is_active: bool | None = None
     prompt_id: int | None = None
     prompt_version_id: int | None = None
+
+    # Validation override flags
+    allow_inactive_prompt: bool | None = None
+    test_mode: bool | None = None
 
     agent_owner_ids: list[str] | None = None
     agent_names: list[str] | None = None
@@ -67,6 +107,38 @@ class MassEvaluationJobUpdate(BaseModel):
     schedule_day_of_week: int | None = None
     schedule_day_of_month: int | None = None
     schedule_time: time | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_inputs(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        # Normalize date_from
+        d_from = data.get("date_from") or data.get("search_date_from") or data.get("fecha_desde")
+        if d_from == "":
+            d_from = None
+        data["date_from"] = d_from
+
+        # Normalize date_to
+        d_to = data.get("date_to") or data.get("search_date_to") or data.get("fecha_hasta")
+        if d_to == "":
+            d_to = None
+        data["date_to"] = d_to
+
+        # Normalize time_window_start
+        t_start = data.get("time_window_start") or data.get("time_from") or data.get("search_time_from") or data.get("hora_desde")
+        if t_start == "":
+            t_start = None
+        data["time_window_start"] = t_start
+
+        # Normalize time_window_end
+        t_end = data.get("time_window_end") or data.get("time_to") or data.get("search_time_to") or data.get("hora_hasta")
+        if t_end == "":
+            t_end = None
+        data["time_window_end"] = t_end
+
+        return data
 
 
 class MassEvaluationJobResponse(BaseModel):
@@ -109,6 +181,70 @@ class MassEvaluationJobResponse(BaseModel):
     updated_at: datetime
     created_by: str | None
     created_by_email: str | None
+
+    # HTML Input Compatible String format fields / Aliases:
+    search_date_from: str | None = None
+    search_date_to: str | None = None
+    search_time_from: str | None = None
+    search_time_to: str | None = None
+
+    date_from_str: str | None = None
+    date_to_str: str | None = None
+    time_from: str | None = None
+    time_to: str | None = None
+    
+    fecha_desde: str | None = None
+    fecha_hasta: str | None = None
+    hora_desde: str | None = None
+    hora_hasta: str | None = None
+
+    @model_validator(mode="after")
+    def populate_aliases(self) -> 'MassEvaluationJobResponse':
+        d_from = self.date_from
+        d_to = self.date_to
+        t_start = self.time_window_start
+        t_end = self.time_window_end
+
+        # Convert timezone-aware datetimes to the job's designated timezone to avoid date shifts
+        import zoneinfo
+        tz = None
+        try:
+            tz = zoneinfo.ZoneInfo(self.timezone or "Europe/Madrid")
+        except Exception:
+            # Fall back to local system timezone (astimezone(None)) on Windows without tzdata
+            tz = None
+
+        if tz is not None:
+            d_from_tz = d_from.astimezone(tz) if d_from and d_from.tzinfo else d_from
+            d_to_tz = d_to.astimezone(tz) if d_to and d_to.tzinfo else d_to
+        else:
+            d_from_tz = d_from.astimezone(None) if d_from and d_from.tzinfo else d_from
+            d_to_tz = d_to.astimezone(None) if d_to and d_to.tzinfo else d_to
+
+        # format date to YYYY-MM-DD
+        d_from_str = d_from_tz.strftime("%Y-%m-%d") if d_from_tz else None
+        d_to_str = d_to_tz.strftime("%Y-%m-%d") if d_to_tz else None
+        
+        # format time to HH:MM
+        t_start_str = t_start.strftime("%H:%M") if t_start else None
+        t_end_str = t_end.strftime("%H:%M") if t_end else None
+
+        self.search_date_from = d_from_str
+        self.search_date_to = d_to_str
+        self.search_time_from = t_start_str
+        self.search_time_to = t_end_str
+
+        self.date_from_str = d_from_str
+        self.date_to_str = d_to_str
+        self.time_from = t_start_str
+        self.time_to = t_end_str
+
+        self.fecha_desde = d_from_str
+        self.fecha_hasta = d_to_str
+        self.hora_desde = t_start_str
+        self.hora_hasta = t_end_str
+
+        return self
 
     class Config:
         from_attributes = True

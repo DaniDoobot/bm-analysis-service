@@ -152,7 +152,42 @@ async def enrich_job_prompt_info(db: AsyncSession, job: MassEvaluationJob) -> No
 class MassEvaluationService:
     @staticmethod
     async def create_job(db: AsyncSession, payload: MassEvaluationJobCreate) -> MassEvaluationJob:
-        job = MassEvaluationJob(**payload.model_dump())
+        # Validate Prompt State
+        stmt = select(Prompt).where(Prompt.prompt_id == payload.prompt_id)
+        res = await db.execute(stmt)
+        prompt = res.scalars().first()
+        if not prompt:
+            raise ValueError(f"La estructura con ID {payload.prompt_id} no existe.")
+
+        if prompt.is_archived or prompt.deleted_at is not None:
+            raise ValueError("No se puede crear un job con una estructura inactiva o archivada. Publícala antes de usarla.")
+
+        if not prompt.is_active:
+            if not payload.allow_inactive_prompt or not payload.test_mode:
+                raise ValueError("No se puede crear un job con una estructura inactiva o archivada. Publícala antes de usarla.")
+
+        # Check for active draft warning
+        from app.models.drafts import PromptDraft
+        draft_stmt = select(PromptDraft).where(
+            PromptDraft.prompt_id == prompt.prompt_id,
+            PromptDraft.status.in_(["draft", "pending", "active"])
+        ).limit(1)
+        draft_res = await db.execute(draft_stmt)
+        active_draft = draft_res.scalars().first()
+        if active_draft:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"¡ADVERTENCIA! El prompt ID {prompt.prompt_id} tiene un borrador activo (Draft ID {active_draft.draft_id}). "
+                f"El job de análisis masivo usará la versión publicada en producción (current_version_id), NO el borrador activo de trabajo."
+            )
+
+        # Remove override flags from payload before db insert
+        job_data = payload.model_dump()
+        job_data.pop("allow_inactive_prompt", None)
+        job_data.pop("test_mode", None)
+
+        job = MassEvaluationJob(**job_data)
         
         # Defensive safety cap on max_calls
         if job.max_calls is None or job.max_calls <= 0:
@@ -187,6 +222,41 @@ class MassEvaluationService:
             return None
             
         update_data = payload.model_dump(exclude_unset=True)
+        allow_inactive = update_data.pop("allow_inactive_prompt", False) or False
+        test_mode = update_data.pop("test_mode", False) or False
+
+        # If prompt_id is being updated, perform same checks
+        prompt_id_to_check = update_data.get("prompt_id")
+        if prompt_id_to_check is not None:
+            prompt_stmt = select(Prompt).where(Prompt.prompt_id == prompt_id_to_check)
+            prompt_res = await db.execute(prompt_stmt)
+            prompt = prompt_res.scalars().first()
+            if not prompt:
+                raise ValueError(f"La estructura con ID {prompt_id_to_check} no existe.")
+
+            if prompt.is_archived or prompt.deleted_at is not None:
+                raise ValueError("No se puede crear un job con una estructura inactiva o archivada. Publícala antes de usarla.")
+
+            if not prompt.is_active:
+                if not allow_inactive or not test_mode:
+                    raise ValueError("No se puede crear un job con una estructura inactiva o archivada. Publícala antes de usarla.")
+
+            # Check for active draft warning
+            from app.models.drafts import PromptDraft
+            draft_stmt = select(PromptDraft).where(
+                PromptDraft.prompt_id == prompt.prompt_id,
+                PromptDraft.status.in_(["draft", "pending", "active"])
+            ).limit(1)
+            draft_res = await db.execute(draft_stmt)
+            active_draft = draft_res.scalars().first()
+            if active_draft:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(
+                    f"¡ADVERTENCIA! El prompt ID {prompt.prompt_id} tiene un borrador activo (Draft ID {active_draft.draft_id}). "
+                    f"El job de análisis masivo usará la versión publicada en producción (current_version_id), NO el borrador activo de trabajo."
+                )
+
         for k, v in update_data.items():
             setattr(job, k, v)
             

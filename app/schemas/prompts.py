@@ -21,6 +21,12 @@ class PromptOut(BaseModel):
     base_structure_key: str | None = None
     base_structure_name: str | None = None
 
+    # Archiving support
+    is_archived: bool = False
+    archived_at: datetime | None = None
+    archived_by_email: str | None = None
+    deleted_at: datetime | None = None
+
 
 class PromptWithCurrentVersion(PromptOut):
     current_version_id: int | None = None
@@ -33,6 +39,12 @@ class PromptWithCurrentVersion(PromptOut):
     version: str | None = None
     label: str | None = None
     base: str | None = None
+
+    # Draft state distinction
+    has_active_draft: bool = False
+    draft_status: str | None = None
+    active_draft_id: int | None = None
+    current_version_label: str | None = None
 
 
 # ── Prompt Version ────────────────────────────────────────────────────────────
@@ -81,6 +93,11 @@ class ActivePromptOut(BaseModel):
     version: str | None = None
     label: str | None = None
     base: str | None = None
+
+    # Archiving support
+    is_archived: bool = False
+    archived_at: datetime | None = None
+    archived_by_email: str | None = None
 
 
 

@@ -22,9 +22,12 @@ async def list_prompts(
     base_structure_id: int | None = None,
     base_structure_key: str | None = None,
     is_active: bool | None = None,
+    include_archived: bool = False,
 ) -> list[dict]:
     """Return all prompts joined with their current version."""
-    stmt = select(Prompt)
+    stmt = select(Prompt).where(Prompt.deleted_at == None)
+    if not include_archived:
+        stmt = stmt.where(Prompt.is_archived == False)
     if prompt_type:
         stmt = stmt.where(Prompt.prompt_type == prompt_type)
     if base_structure_id is not None:
@@ -45,6 +48,15 @@ async def list_prompts(
         prompt_text = current.prompt if current else None
         if not prompt_text and p.prompt_id:
             prompt_text = await build_fallback_prompt_from_criteria(db, p.prompt_id)
+
+        # Check for active draft in bm_prompt_drafts
+        from app.models.drafts import PromptDraft
+        draft_stmt = select(PromptDraft).where(
+            PromptDraft.prompt_id == p.prompt_id,
+            PromptDraft.status.in_(["draft", "pending", "active"])
+        ).order_by(PromptDraft.updated_at.desc()).limit(1)
+        draft_res = await db.execute(draft_stmt)
+        active_draft = draft_res.scalars().first()
 
         row = {
             "prompt_id": p.prompt_id,
@@ -67,6 +79,18 @@ async def list_prompts(
             "version": current.version_label if current else None,
             "label": current.version_label if current else None,
             "base": p.base_structure_name,
+
+            # Archiving info
+            "is_archived": p.is_archived,
+            "archived_at": p.archived_at,
+            "archived_by_email": p.archived_by_email,
+            "deleted_at": p.deleted_at,
+
+            # Draft state distinction
+            "has_active_draft": active_draft is not None,
+            "draft_status": active_draft.status if active_draft else None,
+            "active_draft_id": active_draft.draft_id if active_draft else None,
+            "current_version_label": current.version_label if current else None,
         }
         out.append(row)
     return out
@@ -78,6 +102,8 @@ async def get_active_prompt(db: AsyncSession, prompt_type: str) -> dict | None:
         select(Prompt).where(
             Prompt.prompt_type == prompt_type,
             Prompt.is_active == True,
+            Prompt.is_archived == False,
+            Prompt.deleted_at == None,
         ).order_by(Prompt.prompt_id.desc()).limit(1)
     )
     p = result.scalars().first()
@@ -108,6 +134,11 @@ async def get_active_prompt(db: AsyncSession, prompt_type: str) -> dict | None:
         "version": current.version_label if current else None,
         "label": current.version_label if current else None,
         "base": p.base_structure_name,
+
+        # Archiving info
+        "is_archived": p.is_archived,
+        "archived_at": p.archived_at,
+        "archived_by_email": p.archived_by_email,
     }
 
 

@@ -29,6 +29,12 @@ class Prompt(Base):
     base_structure_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     base_structure_name: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Archiving and Soft Delete support
+    is_archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_by_email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
 
 
 class PromptVersion(Base):
