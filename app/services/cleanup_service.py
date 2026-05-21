@@ -369,3 +369,100 @@ async def cleanup_prompt_versions(
         "warnings": warnings,
         "plan_preview": plan,
     }
+
+
+async def cleanup_mass_evaluations(
+    db: AsyncSession,
+    mode: str = "dry_run",
+    performed_by_email: str | None = None,
+) -> dict[str, Any]:
+    """
+    Delete all mass evaluation data (jobs, runs, results) in FK-safe order.
+    dry_run: returns counts without modifying anything.
+    execute: deletes results → runs → jobs.
+    Never touches prompts, criteria, services, typologies or manual analyses.
+    """
+    from app.models.mass_evaluations import MassEvaluationRun
+    from sqlalchemy import func
+
+    now = datetime.now(timezone.utc)
+    warnings: list[str] = []
+
+    logger.info(
+        "Mass evaluation cleanup started — mode=%s performed_by=%s ts=%s",
+        mode, performed_by_email, now.isoformat(),
+    )
+
+    # ── Count current state ───────────────────────────────────────────────────
+    jobs_count_res = await db.execute(select(func.count()).select_from(MassEvaluationJob))
+    jobs_count = jobs_count_res.scalar() or 0
+
+    runs_count_res = await db.execute(select(func.count()).select_from(MassEvaluationRun))
+    runs_count = runs_count_res.scalar() or 0
+
+    results_count_res = await db.execute(select(func.count()).select_from(MassEvaluationResult))
+    results_count = results_count_res.scalar() or 0
+
+    logger.info(
+        "Current counts — jobs=%d runs=%d results=%d",
+        jobs_count, runs_count, results_count,
+    )
+
+    # ── Collect summary for dry_run ───────────────────────────────────────────
+    jobs_res = await db.execute(
+        select(MassEvaluationJob.job_id, MassEvaluationJob.job_name).order_by(MassEvaluationJob.job_id)
+    )
+    jobs_to_delete = [{"job_id": r[0], "job_name": r[1]} for r in jobs_res.all()]
+
+    runs_res = await db.execute(
+        select(MassEvaluationRun.run_id, MassEvaluationRun.job_id, MassEvaluationRun.status)
+        .order_by(MassEvaluationRun.run_id)
+    )
+    runs_to_delete = [{"run_id": r[0], "job_id": r[1], "status": r[2]} for r in runs_res.all()]
+
+    plan = {
+        "jobs_count": jobs_count,
+        "runs_count": runs_count,
+        "results_count": results_count,
+        "jobs_to_delete": jobs_to_delete,
+        "runs_to_delete": runs_to_delete,
+        "results_to_delete_count": results_count,
+        "warnings": warnings,
+    }
+
+    if mode == "dry_run":
+        logger.info("Mass evaluation cleanup dry_run completed — no data modified.")
+        return {"mode": "dry_run", "plan": plan}
+
+    # ── EXECUTE — FK-safe delete order: results → runs → jobs ─────────────────
+    # 1. Delete all results
+    del_results = await db.execute(sa_delete(MassEvaluationResult))
+    deleted_results = del_results.rowcount
+    logger.info("Deleted %d mass evaluation results.", deleted_results)
+
+    # 2. Delete all runs
+    del_runs = await db.execute(sa_delete(MassEvaluationRun))
+    deleted_runs = del_runs.rowcount
+    logger.info("Deleted %d mass evaluation runs.", deleted_runs)
+
+    # 3. Delete all jobs
+    del_jobs = await db.execute(sa_delete(MassEvaluationJob))
+    deleted_jobs = del_jobs.rowcount
+    logger.info("Deleted %d mass evaluation jobs.", deleted_jobs)
+
+    await db.commit()
+
+    logger.info(
+        "Mass evaluation cleanup execute completed — deleted: results=%d runs=%d jobs=%d performed_by=%s",
+        deleted_results, deleted_runs, deleted_jobs, performed_by_email,
+    )
+
+    return {
+        "mode": "execute",
+        "ok": True,
+        "deleted_results": deleted_results,
+        "deleted_runs": deleted_runs,
+        "deleted_jobs": deleted_jobs,
+        "warnings": warnings,
+        "plan_preview": plan,
+    }

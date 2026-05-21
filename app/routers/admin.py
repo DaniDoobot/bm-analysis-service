@@ -120,3 +120,42 @@ async def cleanup_prompt_versions(
             detail=f"Error durante la limpieza de versiones: {str(e)}",
         )
 
+
+class CleanupMassEvaluationsRequest(BaseModel):
+    mode: Literal["dry_run", "execute"] = Field(default="dry_run", description="dry_run to preview, execute to delete all")
+    performed_by_email: str | None = Field(default=None, description="Email of user performing the cleanup")
+
+
+@router.post("/cleanup-mass-evaluations")
+async def cleanup_mass_evaluations(
+    body: CleanupMassEvaluationsRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Delete ALL mass evaluation data (jobs, runs, results).
+
+    - mode=dry_run: Returns counts and details without modifying any data.
+    - mode=execute: Deletes in FK-safe order: results → runs → jobs.
+
+    This operation is IRREVERSIBLE in execute mode.
+    Does NOT touch prompts, criteria, services, typologies or manual analyses.
+    """
+    logger.info(
+        "Admin cleanup-mass-evaluations called: mode=%s performed_by=%s",
+        body.mode, body.performed_by_email,
+    )
+
+    try:
+        from app.services.cleanup_service import cleanup_mass_evaluations as _cleanup_mass
+        result = await _cleanup_mass(
+            db=db,
+            mode=body.mode,
+            performed_by_email=body.performed_by_email,
+        )
+        return {"ok": True, **result}
+    except Exception as e:
+        logger.exception("Error during cleanup-mass-evaluations: %s", e)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error durante la limpieza de evaluaciones masivas: {str(e)}",
+        )
