@@ -4,6 +4,7 @@ import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_db
@@ -13,6 +14,7 @@ from app.services.dashboard_service import (
     get_agent_evolution,
     get_objections_breakdown,
 )
+from app.utils.hubspot_owners import resolve_owner_id_by_email, resolve_owner_name
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/bm", tags=["Dashboard & Analytics"])
@@ -103,3 +105,66 @@ async def objections_breakdown(
     except Exception as e:
         logger.exception("Failed to retrieve objections breakdown")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/me/evolution")
+async def get_my_evolution(
+    email: Annotated[str, Query(description="Email of logged-in agent")],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    type: Annotated[str, Query(description="audio | text")] = "audio",
+    period: Annotated[str, Query(description="7d | 30d | 90d | all")] = "30d",
+    bucket: Annotated[str | None, Query(description="day | week")] = None,
+):
+    """
+    Get chronological performance evolution metrics specifically for the logged-in agent.
+    """
+    owner_id = resolve_owner_id_by_email(email)
+    if not owner_id:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "ok": False,
+                "status": "forbidden",
+                "error_message": "No hay agente asociado a este usuario."
+            }
+        )
+
+    try:
+        data = await get_agent_evolution(
+            db,
+            hubspot_owner_id=owner_id,
+            analysis_type=type,
+            period=period,
+            bucket_param=bucket,
+        )
+        return data
+    except Exception as e:
+        logger.exception("Failed to retrieve logged-in agent performance evolution")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/me/agent")
+async def get_my_agent_details(
+    email: Annotated[str, Query(description="Email of logged-in agent")],
+):
+    """
+    Verify and retrieve details of the agent associated with the provided email.
+    """
+    owner_id = resolve_owner_id_by_email(email)
+    if not owner_id:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "ok": False,
+                "status": "not_found",
+                "error_message": "No hay agente asociado a este email."
+            }
+        )
+
+    agent_name = resolve_owner_name(owner_id) or owner_id
+    return {
+        "ok": True,
+        "email": email.strip().lower(),
+        "hubspot_owner_id": owner_id,
+        "agent_name": agent_name
+    }
