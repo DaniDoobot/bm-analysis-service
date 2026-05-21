@@ -95,32 +95,12 @@ async def init_db():
     try:
         engine = get_engine()
         
-        # 1. Create table if not exists via Base.metadata
+        # 1. Create all missing tables unconditionally via Base.metadata.create_all
+        # SQLAlchemy is native, safe, and idempotent. It only creates tables that do not yet exist.
         async with engine.begin() as conn:
-            # Check if table already exists first
-            res = await conn.execute(
-                text("SELECT EXISTS (SELECT FROM pg_tables WHERE schemaname = 'public' AND tablename = 'bm_prompt_base_structures');")
-            )
-            table_exists = res.scalar()
-            if table_exists:
-                logger.info("Table 'bm_prompt_base_structures' already exists.")
-            else:
-                logger.info("Table 'bm_prompt_base_structures' does not exist. Creating via SQLAlchemy metadata...")
-                await conn.run_sync(Base.metadata.create_all)
-                logger.info("Table 'bm_prompt_base_structures' created successfully.")
-
-        # 1.1. Create mass evaluation tables if not exists via Base.metadata
-        async with engine.begin() as conn:
-            res = await conn.execute(
-                text("SELECT EXISTS (SELECT FROM pg_tables WHERE schemaname = 'public' AND tablename = 'bm_mass_evaluation_jobs');")
-            )
-            mass_tables_exist = res.scalar()
-            if mass_tables_exist:
-                logger.info("Mass evaluation tables already exist.")
-            else:
-                logger.info("Mass evaluation tables do not exist. Creating via SQLAlchemy metadata...")
-                await conn.run_sync(Base.metadata.create_all)
-                logger.info("Mass evaluation tables created successfully.")
+            logger.info("Initializing database tables via SQLAlchemy metadata (unconditional & safe)...")
+            await conn.run_sync(Base.metadata.create_all)
+            logger.info("Database tables initialized successfully.")
 
         # 1.5. Ensure columns exist on bm_prompts table dynamically and non-destructively
         async with engine.begin() as conn:

@@ -4,7 +4,7 @@ from typing import Any
 
 from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
 
@@ -29,6 +29,7 @@ class Prompt(Base):
     base_structure_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     base_structure_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     service_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("bm_services.service_id"), nullable=True)
+    service = relationship("Service", lazy="joined")
 
     # Archiving and Soft Delete support
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -78,5 +79,7 @@ class PromptBaseStructure(Base):
     created_by: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by_email: Mapped[str | None] = mapped_column(Text, nullable=True)
     service_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("bm_services.service_id"), nullable=True)
+    service = relationship("Service", lazy="joined")
+
 
 

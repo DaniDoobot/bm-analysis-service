@@ -126,6 +126,8 @@ def _base_structure_out(struct) -> dict:
         "created_by": struct.created_by,
         "created_by_email": struct.created_by_email,
         "service_id": struct.service_id,
+        "service_key": struct.service.service_key if struct.service else None,
+        "service_name": struct.service.service_name if struct.service else None,
     }
 
 
@@ -144,6 +146,8 @@ def _base_structure_detail_out(struct) -> dict:
         "base_prompt": struct.base_prompt,
         "default_criteria": [],
         "service_id": struct.service_id,
+        "service_key": struct.service.service_key if struct.service else None,
+        "service_name": struct.service.service_name if struct.service else None,
     }
 
 

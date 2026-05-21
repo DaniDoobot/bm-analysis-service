@@ -76,6 +76,8 @@ async def list_prompts(
             "base_structure_key": p.base_structure_key,
             "base_structure_name": p.base_structure_name,
             "service_id": p.service_id,
+            "service_key": p.service.service_key if p.service else None,
+            "service_name": p.service.service_name if p.service else None,
 
             # Aliases for frontend compatibility
             "name": p.prompt_name,
@@ -132,6 +134,8 @@ async def get_active_prompt(db: AsyncSession, prompt_type: str) -> dict | None:
         "base_structure_key": p.base_structure_key,
         "base_structure_name": p.base_structure_name,
         "service_id": p.service_id,
+        "service_key": p.service.service_key if p.service else None,
+        "service_name": p.service.service_name if p.service else None,
 
         # Aliases for frontend compatibility
         "name": p.prompt_name,

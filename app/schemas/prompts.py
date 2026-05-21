@@ -21,6 +21,8 @@ class PromptOut(BaseModel):
     base_structure_key: str | None = None
     base_structure_name: str | None = None
     service_id: int | None = None
+    service_key: str | None = None
+    service_name: str | None = None
 
     # Archiving support
     is_archived: bool = False
@@ -89,6 +91,8 @@ class ActivePromptOut(BaseModel):
     base_structure_key: str | None = None
     base_structure_name: str | None = None
     service_id: int | None = None
+    service_key: str | None = None
+    service_name: str | None = None
 
     # Extra fields for maximum frontend compatibility:
     name: str | None = None
@@ -140,6 +144,8 @@ class PromptBaseStructureOut(BaseModel):
     created_by: str | None = None
     created_by_email: str | None = None
     service_id: int | None = None
+    service_key: str | None = None
+    service_name: str | None = None
 
 
 class PromptBaseStructureDetailOut(PromptBaseStructureOut):
