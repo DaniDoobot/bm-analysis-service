@@ -84,9 +84,10 @@ async def get_active_prompt(
 async def list_prompt_versions(
     prompt_id: Annotated[int, Query()],
     db: Annotated[AsyncSession, Depends(get_db)],
+    include_archived: Annotated[bool, Query(description="Include archived/hidden versions (admin only)")] = False,
 ):
-    """Return all versions of a prompt ordered by created_at desc."""
-    return await prompts_service.list_versions(db, prompt_id=prompt_id)
+    """Return non-archived versions of a prompt by default. Use include_archived=true for full audit history."""
+    return await prompts_service.list_versions(db, prompt_id=prompt_id, include_archived=include_archived)
 
 
 @router.post("/save-prompt")
@@ -246,6 +247,70 @@ async def backfill_clear_criteria(
 
 class ArchiveRequest(BaseModel):
     user_email: str | None = None
+
+
+class UpdateCurrentRequest(BaseModel):
+    prompt: str
+    prompt_name: str | None = None
+    description: str | None = None
+    updated_by: str | None = None
+    updated_by_email: str | None = None
+
+
+@router.put("/prompts/{prompt_id}/current")
+async def update_prompt_current(
+    prompt_id: int,
+    body: UpdateCurrentRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Overwrite the current prompt content without creating a visible new version.
+    This is the 'Save' / 'Edit in place' operation.
+    """
+    try:
+        result = await prompts_service.update_prompt_current(
+            db,
+            prompt_id=prompt_id,
+            prompt_text=body.prompt,
+            prompt_name=body.prompt_name,
+            description=body.description,
+            updated_by=body.updated_by,
+            updated_by_email=body.updated_by_email,
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+class DuplicatePromptRequest(BaseModel):
+    prompt_name: str
+    description: str | None = None
+    created_by: str | None = None
+    created_by_email: str | None = None
+
+
+@router.post("/prompts/{prompt_id}/duplicate")
+async def duplicate_prompt(
+    prompt_id: int,
+    body: DuplicatePromptRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Create a fully independent copy of an existing prompt with its content and criteria.
+    The new prompt starts as inactive/unpublished.
+    """
+    try:
+        result = await prompts_service.duplicate_prompt(
+            db,
+            source_prompt_id=prompt_id,
+            prompt_name=body.prompt_name,
+            description=body.description,
+            created_by=body.created_by,
+            created_by_email=body.created_by_email,
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.patch("/prompts/{prompt_id}/archive")

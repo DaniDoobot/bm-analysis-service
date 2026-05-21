@@ -70,3 +70,53 @@ async def cleanup_structures(
             status_code=400,
             detail=f"Error durante la limpieza: {str(e)}",
         )
+
+
+class CleanupVersionsRequest(BaseModel):
+    keep_prompt_ids: list[int] = Field(default=[1], description="Prompt IDs whose versions will be cleaned")
+    keep_current_versions_only: bool = Field(default=True, description="Archive all non-current versions")
+    mode: Literal["dry_run", "execute"] = Field(default="dry_run", description="dry_run to preview, execute to apply")
+    delete_physical_if_safe: bool = Field(default=False, description="Allow physical deletes of unreferenced versions")
+    performed_by_email: str | None = Field(default=None, description="Email of user performing the cleanup")
+
+
+@router.post("/cleanup-prompt-versions")
+async def cleanup_prompt_versions(
+    body: CleanupVersionsRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Archive (hide) all non-current versions of the specified prompts.
+
+    - mode=dry_run: Returns what WOULD be archived without modifying any data.
+    - mode=execute: Archives all non-current versions. Versions referenced in
+      mass evaluation results are archived (not deleted) to preserve traceability.
+
+    The current version (is_current=True) is always kept untouched.
+    """
+    if not body.keep_prompt_ids:
+        raise HTTPException(status_code=400, detail="keep_prompt_ids cannot be empty.")
+
+    logger.info(
+        "Admin cleanup-prompt-versions called: mode=%s keep_prompts=%s",
+        body.mode, body.keep_prompt_ids,
+    )
+
+    try:
+        from app.services.cleanup_service import cleanup_prompt_versions as _cleanup_versions
+        result = await _cleanup_versions(
+            db=db,
+            keep_prompt_ids=body.keep_prompt_ids,
+            keep_current_versions_only=body.keep_current_versions_only,
+            mode=body.mode,
+            delete_physical_if_safe=body.delete_physical_if_safe,
+            performed_by_email=body.performed_by_email,
+        )
+        return {"ok": True, **result}
+    except Exception as e:
+        logger.exception("Error during cleanup-prompt-versions: %s", e)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error durante la limpieza de versiones: {str(e)}",
+        )
+

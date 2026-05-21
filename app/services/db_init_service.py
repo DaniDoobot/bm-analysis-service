@@ -187,6 +187,26 @@ async def init_db():
                     await conn.execute(text(f"ALTER TABLE bm_mass_evaluation_results ADD COLUMN {col_name} {col_type} NULL;"))
                     logger.info("Column '%s' added successfully to 'bm_mass_evaluation_results'.")
 
+            # 1.6.4 bm_prompt_versions — archiving support columns
+            for col_name, col_type, col_default in [
+                ("is_archived", "BOOLEAN", "DEFAULT FALSE NOT NULL"),
+                ("archived_at", "TIMESTAMPTZ", "NULL"),
+                ("archived_by_email", "TEXT", "NULL"),
+            ]:
+                res = await conn.execute(
+                    text(f"""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.columns
+                            WHERE table_schema = 'public'
+                              AND table_name = 'bm_prompt_versions'
+                              AND column_name = '{col_name}'
+                        );
+                    """)
+                )
+                if not res.scalar():
+                    logger.info("Adding column '%s' to 'bm_prompt_versions' table...", col_name)
+                    await conn.execute(text(f"ALTER TABLE bm_prompt_versions ADD COLUMN {col_name} {col_type} {col_default};"))
+                    logger.info("Column '%s' added successfully to 'bm_prompt_versions'.", col_name)
 
         # 2. Safe backfill: Force default_criteria to NULL and prompt_type to 'text' on ALL base structures.
         # This runs in its own isolated transaction so it always commits, regardless of

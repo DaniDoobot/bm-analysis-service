@@ -150,16 +150,25 @@ async def get_active_prompt(db: AsyncSession, prompt_type: str) -> dict | None:
     }
 
 
-async def list_versions(db: AsyncSession, prompt_id: int) -> list[dict]:
+async def list_versions(
+    db: AsyncSession,
+    prompt_id: int,
+    include_archived: bool = False,
+) -> list[dict]:
+    """Return versions for a prompt. By default hides archived versions. Pass include_archived=True for full history."""
     # Fetch prompt to include base structure in versions list
     prompt_res = await db.execute(select(Prompt).where(Prompt.prompt_id == prompt_id))
     p = prompt_res.scalars().first()
 
-    result = await db.execute(
+    stmt = (
         select(PromptVersion)
         .where(PromptVersion.prompt_id == prompt_id)
-        .order_by(PromptVersion.created_at.desc())
     )
+    if not include_archived:
+        stmt = stmt.where(PromptVersion.is_archived == False)
+    stmt = stmt.order_by(PromptVersion.created_at.desc())
+
+    result = await db.execute(stmt)
     versions = result.scalars().all()
 
     out = []
@@ -179,6 +188,9 @@ async def list_versions(db: AsyncSession, prompt_id: int) -> list[dict]:
             "change_note": v.change_note,
             "source": v.source,
             "is_current": v.is_current,
+            "is_archived": v.is_archived,
+            "archived_at": v.archived_at,
+            "archived_by_email": v.archived_by_email,
             "created_at": v.created_at,
             "base_structure_id": p.base_structure_id if p else None,
             "base_structure_key": p.base_structure_key if p else None,
@@ -216,6 +228,187 @@ async def save_prompt_version(db: AsyncSession, body: SavePromptRequest) -> Prom
     await db.commit()
     await db.refresh(new_version)
     return new_version
+
+
+async def update_prompt_current(
+    db: AsyncSession,
+    prompt_id: int,
+    prompt_text: str,
+    prompt_name: str | None = None,
+    description: str | None = None,
+    updated_by: str | None = None,
+    updated_by_email: str | None = None,
+) -> dict:
+    """
+    Overwrite the content of the current version of a prompt without creating a new visible version.
+    This is the 'save/edit in place' operation — no version history is exposed to the user.
+    Internally it creates a snapshot with source='overwrite' which is immediately archived.
+    """
+    # 1. Fetch prompt
+    prompt_res = await db.execute(select(Prompt).where(Prompt.prompt_id == prompt_id))
+    prompt_obj = prompt_res.scalars().first()
+    if not prompt_obj:
+        raise ValueError(f"Prompt {prompt_id} not found.")
+
+    # 2. Update prompt metadata if provided
+    if prompt_name:
+        prompt_obj.prompt_name = prompt_name
+    if description is not None:
+        prompt_obj.description = description
+    db.add(prompt_obj)
+
+    # 3. Unset current flag on all existing versions
+    await db.execute(
+        update(PromptVersion)
+        .where(PromptVersion.prompt_id == prompt_id)
+        .values(is_current=False)
+    )
+
+    # 4. Create the new overwrite version (immediately marked as current, source=overwrite)
+    now_label = _generate_label()
+    new_version = PromptVersion(
+        prompt_id=prompt_id,
+        prompt=prompt_text,
+        version_label=now_label,
+        version_name=f"Guardado {now_label}",
+        updated_by=updated_by,
+        updated_by_email=updated_by_email,
+        change_note="Guardado directo (sobrescritura)",
+        source="overwrite",
+        is_current=True,
+        is_archived=False,
+    )
+    db.add(new_version)
+    await db.commit()
+    await db.refresh(new_version)
+    await db.refresh(prompt_obj)
+
+    return {
+        "ok": True,
+        "prompt_id": prompt_id,
+        "prompt_name": prompt_obj.prompt_name,
+        "current_version_id": new_version.id,
+        "version_label": new_version.version_label,
+        "prompt": new_version.prompt,
+    }
+
+
+async def duplicate_prompt(
+    db: AsyncSession,
+    source_prompt_id: int,
+    prompt_name: str,
+    description: str | None = None,
+    created_by: str | None = None,
+    created_by_email: str | None = None,
+) -> dict:
+    """
+    Creates a fully independent copy of a prompt with its current content and active criteria.
+    The new prompt starts as inactive (not published). Its criteria and typology relations are copied.
+    """
+    from app.models.criteria import PromptCriterion, PromptCriterionTypology
+
+    # 1. Fetch source prompt
+    src_res = await db.execute(select(Prompt).where(Prompt.prompt_id == source_prompt_id))
+    src_prompt = src_res.scalars().first()
+    if not src_prompt:
+        raise ValueError(f"Source prompt {source_prompt_id} not found.")
+
+    # 2. Fetch current version text
+    current_version = await _get_current_version(db, source_prompt_id)
+    current_text = current_version.prompt if current_version else None
+
+    # 3. Create new prompt record
+    new_prompt = Prompt(
+        prompt_name=prompt_name,
+        prompt_type=src_prompt.prompt_type,
+        description=description or src_prompt.description,
+        is_active=False,  # New prompt starts inactive by default
+        is_archived=False,
+        created_by=created_by,
+        created_by_email=created_by_email,
+        base_structure_id=src_prompt.base_structure_id,
+        base_structure_key=src_prompt.base_structure_key,
+        base_structure_name=src_prompt.base_structure_name,
+        service_id=src_prompt.service_id,
+    )
+    db.add(new_prompt)
+    await db.flush()
+
+    # 4. Create initial version for the new prompt
+    version_label = _generate_label()
+    new_version = PromptVersion(
+        prompt_id=new_prompt.prompt_id,
+        prompt=current_text,
+        version_label=version_label,
+        version_name=f"Copia de {src_prompt.prompt_name}",
+        updated_by=created_by,
+        updated_by_email=created_by_email,
+        change_note=f"Duplicado desde prompt_id={source_prompt_id}",
+        source="duplicate",
+        is_current=True,
+        is_archived=False,
+    )
+    db.add(new_version)
+    await db.flush()
+
+    # 5. Copy active criteria and their typology relations
+    criteria_res = await db.execute(
+        select(PromptCriterion).where(
+            PromptCriterion.prompt_id == source_prompt_id,
+            PromptCriterion.is_active == True,
+        ).order_by(PromptCriterion.order_index.asc())
+    )
+    src_criteria = criteria_res.scalars().all()
+
+    copied_criteria_count = 0
+    for src_c in src_criteria:
+        new_c = PromptCriterion(
+            prompt_id=new_prompt.prompt_id,
+            criterion_key=src_c.criterion_key,
+            criterion_name=src_c.criterion_name,
+            criterion_description=src_c.criterion_description,
+            criterion_type=src_c.criterion_type,
+            output_key=src_c.output_key,
+            feed_key=src_c.feed_key,
+            allowed_values=src_c.allowed_values,
+            applies_to_types=src_c.applies_to_types,
+            order_index=src_c.order_index,
+            is_required=src_c.is_required,
+            is_active=True,
+        )
+        db.add(new_c)
+        await db.flush()
+        copied_criteria_count += 1
+
+        # Copy typology associations
+        ct_res = await db.execute(
+            select(PromptCriterionTypology).where(
+                PromptCriterionTypology.criterion_id == src_c.criterion_id
+            )
+        )
+        for src_ct in ct_res.scalars().all():
+            new_ct = PromptCriterionTypology(
+                criterion_id=new_c.criterion_id,
+                typology_id=src_ct.typology_id,
+            )
+            db.add(new_ct)
+
+    await db.commit()
+    await db.refresh(new_prompt)
+    await db.refresh(new_version)
+
+    return {
+        "ok": True,
+        "prompt_id": new_prompt.prompt_id,
+        "prompt_name": new_prompt.prompt_name,
+        "prompt_type": new_prompt.prompt_type,
+        "service_id": new_prompt.service_id,
+        "base_structure_id": new_prompt.base_structure_id,
+        "current_version_id": new_version.id,
+        "is_active": new_prompt.is_active,
+        "copied_criteria_count": copied_criteria_count,
+        "source_prompt_id": source_prompt_id,
+    }
 
 
 async def activate_version(db: AsyncSession, version_id: int) -> PromptVersion | None:

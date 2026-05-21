@@ -1,17 +1,11 @@
 """
-cleanup_service.py — Administrative cleanup for prompts and base structures.
-
-Logic:
-- Keeps specified prompt_ids and base_structure_ids untouched.
-- Soft-deletes (is_active=False) or archives (is_archived=True) everything else.
-- Never physically deletes data used in mass evaluation results or jobs.
-- Supports dry_run mode: returns what WOULD happen without modifying data.
+cleanup_service.py — Administrative cleanup for prompts, base structures and prompt versions.
 """
 import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, delete as sa_delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.criteria import PromptCriterion, PromptCriterionTypology
@@ -222,6 +216,156 @@ async def run_cleanup(
         "archived_base_structures": archived_structs,
         "deactivated_criteria_count": len(deactivated_criteria),
         "blocked_physical_deletes": blocked_physical_deletes,
+        "warnings": warnings,
+        "plan_preview": plan,
+    }
+
+
+async def cleanup_prompt_versions(
+    db: AsyncSession,
+    keep_prompt_ids: list[int],
+    keep_current_versions_only: bool = True,
+    mode: str = "dry_run",
+    delete_physical_if_safe: bool = False,
+    performed_by_email: str | None = None,
+) -> dict[str, Any]:
+    """
+    Archive (hide) all non-current versions for the given prompts.
+    Versions referenced in bm_mass_evaluation_results are never physically deleted.
+    Returns a dry_run plan or executes the operation.
+    """
+    logger.info(
+        "Version cleanup started — mode=%s keep_prompts=%s keep_current_only=%s",
+        mode, keep_prompt_ids, keep_current_versions_only,
+    )
+
+    now = datetime.now(timezone.utc)
+    warnings: list[str] = []
+
+    versions_to_archive: list[dict] = []
+    versions_to_delete: list[dict] = []
+    versions_blocked: list[dict] = []
+    current_versions_kept: list[dict] = []
+
+    for prompt_id in keep_prompt_ids:
+        # Fetch all versions for this prompt
+        vers_res = await db.execute(
+            select(PromptVersion)
+            .where(PromptVersion.prompt_id == prompt_id)
+            .order_by(PromptVersion.id.desc())
+        )
+        all_versions = vers_res.scalars().all()
+
+        for v in all_versions:
+            if v.is_current:
+                current_versions_kept.append({
+                    "version_id": v.id,
+                    "prompt_id": v.prompt_id,
+                    "version_name": v.version_name,
+                    "version_label": v.version_label,
+                    "action": "keep",
+                })
+                continue
+
+            # Check if already archived
+            if v.is_archived:
+                continue
+
+            # Check if referenced in mass eval results
+            used_res = await db.execute(
+                select(MassEvaluationResult.mass_analysis_id)
+                .where(MassEvaluationResult.prompt_version_id == v.id)
+                .limit(1)
+            )
+            used_in_results = used_res.scalar() is not None
+
+            if used_in_results:
+                versions_blocked.append({
+                    "version_id": v.id,
+                    "prompt_id": v.prompt_id,
+                    "version_name": v.version_name,
+                    "reason": "Referenced in bm_mass_evaluation_results. Will be archived, not deleted.",
+                    "action": "archive_only",
+                })
+                warnings.append(
+                    f"Version id={v.id} ('{v.version_name}') of prompt_id={prompt_id} "
+                    "is referenced in mass evaluation results. Will be archived, not physically deleted."
+                )
+                versions_to_archive.append({
+                    "version_id": v.id,
+                    "prompt_id": v.prompt_id,
+                    "version_name": v.version_name,
+                    "action": "archive",
+                })
+            elif delete_physical_if_safe:
+                versions_to_delete.append({
+                    "version_id": v.id,
+                    "prompt_id": v.prompt_id,
+                    "version_name": v.version_name,
+                    "action": "delete_physical",
+                })
+            else:
+                versions_to_archive.append({
+                    "version_id": v.id,
+                    "prompt_id": v.prompt_id,
+                    "version_name": v.version_name,
+                    "action": "archive",
+                })
+
+    plan = {
+        "current_versions_kept": current_versions_kept,
+        "versions_to_archive": versions_to_archive,
+        "versions_to_delete_if_safe": versions_to_delete,
+        "versions_blocked_by_results": versions_blocked,
+        "warnings": warnings,
+    }
+
+    if mode == "dry_run":
+        logger.info("Version cleanup dry_run completed — no data modified.")
+        return {"mode": "dry_run", "plan": plan}
+
+    # ── EXECUTE ───────────────────────────────────────────────────────────────
+    archived_version_ids: list[int] = []
+    deleted_version_ids: list[int] = []
+
+    # Archive versions (both blocked and safe-to-archive)
+    all_to_archive_ids = [v["version_id"] for v in versions_to_archive]
+    if all_to_archive_ids:
+        arch_res = await db.execute(
+            select(PromptVersion).where(PromptVersion.id.in_(all_to_archive_ids))
+        )
+        for v in arch_res.scalars().all():
+            v.is_archived = True
+            v.archived_at = now
+            v.archived_by_email = performed_by_email
+            db.add(v)
+            archived_version_ids.append(v.id)
+            logger.info("Archived version id=%d (prompt_id=%d, '%s')", v.id, v.prompt_id, v.version_name)
+
+    # Physically delete safe versions (if requested and not blocked)
+    safe_to_delete_ids = [v["version_id"] for v in versions_to_delete]
+    if safe_to_delete_ids and delete_physical_if_safe:
+        for vid in safe_to_delete_ids:
+            v_res = await db.execute(select(PromptVersion).where(PromptVersion.id == vid))
+            v_obj = v_res.scalars().first()
+            if v_obj:
+                await db.delete(v_obj)
+                deleted_version_ids.append(vid)
+                logger.info("Physically deleted version id=%d (prompt_id=%d)", vid, v_obj.prompt_id)
+
+    await db.commit()
+
+    logger.info(
+        "Version cleanup execute completed — archived=%s deleted=%s",
+        archived_version_ids, deleted_version_ids,
+    )
+
+    return {
+        "mode": "execute",
+        "ok": True,
+        "archived_version_ids": archived_version_ids,
+        "deleted_version_ids": deleted_version_ids,
+        "current_versions_kept": current_versions_kept,
         "warnings": warnings,
         "plan_preview": plan,
     }

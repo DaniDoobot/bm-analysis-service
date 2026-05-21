@@ -57,6 +57,10 @@ class PromptVersion(Base):
     created_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    # Archiving support — hides old versions from UI without physical delete
+    is_archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="false")
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_by_email: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class PromptBaseStructure(Base):
