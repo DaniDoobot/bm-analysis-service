@@ -23,7 +23,86 @@ from app.services.criteria_service import get_active_criteria
 from app.services.prompts_service import _get_current_version
 from app.utils.json_utils import safe_parse_json
 
-logger = logging.getLogger(__name__)
+def sanitize_legacy_typologies_block(prompt_text: str, active_typologies: list[Any]) -> str:
+    """
+    Sanitizes or neutralizes legacy typology references in prompt templates.
+    Replaces old typologies sections with the current service typologies list
+    and clears specific occurrences of legacy typology keys.
+    """
+    if not prompt_text:
+        return ""
+
+    if not active_typologies:
+        # Fallback to Front desk typologies as custom Mock classes
+        class MockTypology:
+            def __init__(self, key, name, desc):
+                self.typology_key = key
+                self.typology_name = name
+                self.description = desc
+        active_typologies = [
+            MockTypology("cita", "Cita", "El paciente solicita agendar una nueva cita."),
+            MockTypology("confirmacion", "Confirmación", "El paciente confirma la asistencia a una cita agendada."),
+            MockTypology("cancelacion", "Cancelación", "El paciente cancela la cita agendada."),
+            MockTypology("reagendo", "Reagendo", "El paciente reagenda la cita para otra fecha."),
+            MockTypology("falta", "Falta", "El paciente no asistió a su cita agendada."),
+            MockTypology("otros", "Otros", "Cualquier otra consulta, reclamo o duda.")
+        ]
+
+    # Build the new dynamic typologies section
+    bullet_lines = []
+    for t in active_typologies:
+        desc = getattr(t, "description", None) or f"Llamada clasificada como {getattr(t, 'typology_name', t.typology_key)}."
+        bullet_lines.append(f"- {t.typology_key}: {desc}")
+
+    dynamic_section = (
+        "### DEFINICIÓN DE TIPOS DE LLAMADA\n"
+        "El analizador clasifica cada llamada en un único tipo_llamada. Los tipos permitidos son estrictamente:\n" +
+        "\n".join(bullet_lines) + "\n\n"
+    )
+
+    # 1. Regex to find markdown headers related to call types/typologies
+    import re
+    header_pattern = re.compile(
+        r"(?im)^(#+\s*(?:tipos?\s+de\s+llamada|definición\s+de\s+tipos?|clasificación\s+de\s+llamadas|tipologías\s+del\s+servicio).*?)$"
+    )
+
+    match = header_pattern.search(prompt_text)
+    if match:
+        start_idx = match.start()
+        # Find the next header starting with # after this section
+        next_header_pattern = re.compile(r"(?m)^#+\s+")
+        next_match = next_header_pattern.search(prompt_text, pos=match.end())
+        if next_match:
+            end_idx = next_match.start()
+            # Replace the entire block from the old header to the next header
+            prompt_text = prompt_text[:start_idx] + dynamic_section + prompt_text[end_idx:]
+        else:
+            # If there is no next header, replace until the end of the text
+            prompt_text = prompt_text[:start_idx] + dynamic_section
+    else:
+        # If no explicit header is found, but legacy keywords exist, let's do a safe string replacement
+        legacy_typos = ["informacion_sin_cita", "falta_con_reagendo", "falta_sin_reagendo", "no_interesado", "no_apto"]
+        has_legacy = any(lt in prompt_text for lt in legacy_typos)
+        if has_legacy:
+            # We prepend the dynamic section to the beginning of the prompt,
+            # and explicitly remove legacy bullet lines
+            lines = prompt_text.splitlines()
+            cleaned_lines = []
+            for line in lines:
+                if any(lt in line for lt in legacy_typos):
+                    continue  # skip lines mentioning legacy typologies
+                cleaned_lines.append(line)
+            prompt_text = dynamic_section + "\n" + "\n".join(cleaned_lines)
+
+    # Also, double check any remaining direct keyword references and remove/neutralize them
+    legacy_typos = ["informacion_sin_cita", "falta_con_reagendo", "falta_sin_reagendo", "no_interesado", "no_apto"]
+    for lt in legacy_typos:
+        prompt_text = prompt_text.replace(f'"{lt}"', '"otros"')
+        prompt_text = prompt_text.replace(f"'{lt}'", "'otros'")
+        prompt_text = re.sub(rf"\b{lt}\b", "otros", prompt_text)
+
+    return prompt_text
+
 
 async def build_prompt_with_ai(
     db: AsyncSession,
@@ -52,10 +131,7 @@ async def build_prompt_with_ai(
     if criteria is None:
         criteria = []
 
-    # 3.2. Fetch base structure based on priority:
-    # 1. base_structure_id received in request.
-    # 2. base_structure_id associated with the prompt in the DB.
-    # 3. fallback legacy (None) if neither is set.
+    # 3.2. Fetch base structure based on priority
     resolved_base_structure_id = base_structure_id
     if resolved_base_structure_id is None and prompt_obj.base_structure_id is not None:
         resolved_base_structure_id = prompt_obj.base_structure_id
@@ -101,15 +177,23 @@ async def build_prompt_with_ai(
         c_keys = assoc_res.scalars().all()
         criterion_typologies_map[c.criterion_id] = list(c_keys)
 
+    # 3.8. Sanitize templates of legacy typologies before sending them to OpenAI
+    sanitized_current_prompt = sanitize_legacy_typologies_block(current_prompt_text, typologies) if current_prompt_text else None
+    
+    sanitized_base_prompt = None
+    if base_structure and base_structure.base_prompt:
+        sanitized_base_prompt = sanitize_legacy_typologies_block(base_structure.base_prompt, typologies)
+
     # 4. Build the meta-prompt for OpenAI
     meta_prompt = _build_meta_prompt(
-        current_prompt_text=current_prompt_text,
+        current_prompt_text=sanitized_current_prompt,
         criteria=criteria,
         general_instructions=instructions,
         draft_data=draft_data,
         base_structure=base_structure,
         typologies=typologies,
         criterion_typologies_map=criterion_typologies_map,
+        sanitized_base_prompt=sanitized_base_prompt,
     )
 
     messages = [
@@ -124,86 +208,123 @@ async def build_prompt_with_ai(
         {"role": "user", "content": meta_prompt},
     ]
 
-    try:
-        raw_response = await openai_service.complete_text(
-            messages=messages, response_format="json_object"
-        )
-    except Exception as e:
-        logger.error("Error calling OpenAI: %s", e, exc_info=True)
-        return {"ok": False, "status": "error", "error_message": f"OpenAI error: {str(e)}"}
+    # Try generating up to 2 times if legacy typologies are detected
+    max_attempts = 2
+    attempt = 1
+    current_messages = list(messages)
+    parsed = None
+    generated_prompt = ""
 
-    parsed = safe_parse_json(raw_response)
-    if not parsed or not isinstance(parsed, dict):
-        logger.error("AI returned non-JSON response: %s", raw_response[:500])
-        return {"ok": False, "status": "error", "error_message": "AI did not return valid JSON"}
+    while attempt <= max_attempts:
+        try:
+            raw_response = await openai_service.complete_text(
+                messages=current_messages, response_format="json_object"
+            )
+        except Exception as e:
+            logger.error("Error calling OpenAI: %s", e, exc_info=True)
+            return {"ok": False, "status": "error", "error_message": f"OpenAI error: {str(e)}"}
 
-    generated_prompt = parsed.get("generated_prompt", "")
-    
-    # --- POST-GENERATION VALIDATION ---
-    validation_errors = []
-    
-    # 1. Check for output_key and feed_key presence (at least twice: once in JSON format, once in definitions)
-    for c in criteria:
-        if c.output_key:
-            count = generated_prompt.count(c.output_key)
-            if count == 0:
-                validation_errors.append(f"Falta la clave obligatoria '{c.output_key}'.")
-            elif count == 1:
-                validation_errors.append(f"La clave '{c.output_key}' aparece en el JSON pero no está definida en la sección de criterios del prompt (o viceversa). Debe aparecer al menos 2 veces.")
-        if c.feed_key:
-            count = generated_prompt.count(c.feed_key)
-            if count == 0:
-                validation_errors.append(f"Falta la clave de justificación '{c.feed_key}'.")
-            elif count == 1:
-                validation_errors.append(f"La clave '{c.feed_key}' aparece solo una vez. Debe estar en el formato JSON y tener su definición en el texto.")
+        parsed = safe_parse_json(raw_response)
+        if not parsed or not isinstance(parsed, dict):
+            logger.error("AI returned non-JSON response: %s", raw_response[:500])
+            return {"ok": False, "status": "error", "error_message": "AI did not return valid JSON"}
+
+        generated_prompt = parsed.get("generated_prompt", "")
+        
+        # --- POST-GENERATION VALIDATION ---
+        validation_errors = []
+        
+        # 1. Check for output_key and feed_key presence (at least twice: once in JSON format, once in definitions)
+        for c in criteria:
+            if c.output_key:
+                count = generated_prompt.count(c.output_key)
+                if count == 0:
+                    validation_errors.append(f"Falta la clave obligatoria '{c.output_key}'.")
+                elif count == 1:
+                    validation_errors.append(f"La clave '{c.output_key}' aparece en el JSON pero no está definida en la sección de criterios del prompt (o viceversa). Debe aparecer al menos 2 veces.")
+            if c.feed_key:
+                count = generated_prompt.count(c.feed_key)
+                if count == 0:
+                    validation_errors.append(f"Falta la clave de justificación '{c.feed_key}'.")
+                elif count == 1:
+                    validation_errors.append(f"La clave '{c.feed_key}' aparece solo una vez. Debe estar en el formato JSON y tener su definición en el texto.")
+                    
+            # Validar allowed_values para categories
+            if c.criterion_type == "category" and c.allowed_values:
+                if isinstance(c.allowed_values, list):
+                    for val in c.allowed_values:
+                        if str(val) not in generated_prompt:
+                            validation_errors.append(f"El valor permitido '{val}' para la categoría '{c.output_key}' no aparece en el prompt generado.")
+                elif isinstance(c.allowed_values, str):
+                    vals = [v.strip() for v in c.allowed_values.split(",") if v.strip()]
+                    for val in vals:
+                        if val not in generated_prompt:
+                            validation_errors.append(f"El valor permitido '{val}' para '{c.output_key}' no aparece en el prompt generado.")
                 
-        # Validar allowed_values para categories
-        if c.criterion_type == "category" and c.allowed_values:
-            if isinstance(c.allowed_values, list):
-                for val in c.allowed_values:
-                    if str(val) not in generated_prompt:
-                        validation_errors.append(f"El valor permitido '{val}' para la categoría '{c.output_key}' no aparece en el prompt generado.")
-            elif isinstance(c.allowed_values, str):
-                vals = [v.strip() for v in c.allowed_values.split(",") if v.strip()]
-                for val in vals:
-                    if val not in generated_prompt:
-                        validation_errors.append(f"El valor permitido '{val}' para '{c.output_key}' no aparece en el prompt generado.")
-            
-    # 2. Check for legacy keys contextually
-    legacy_keys = ["campo_1", "campo_2", "campo_3", "campo_4", "campo_5"]
-    for lk in legacy_keys:
-        patterns = [
-            rf"['\"]{lk}['\"]\s*:",
-            rf"['\"]{lk}_feed['\"]\s*:",
-            rf"output_key\s*:\s*{lk}\b",
-            rf"feed_key\s*:\s*{lk}_feed\b",
-            rf"criterion_key\s*:\s*{lk}\b"
-        ]
-        for pat in patterns:
-            match = re.search(pat, generated_prompt)
-            if match:
-                start_idx = max(0, match.start() - 30)
-                end_idx = min(len(generated_prompt), match.end() + 30)
-                context = generated_prompt[start_idx:end_idx].replace('\n', '\\n')
-                validation_errors.append(f"Uso estructural de clave prohibida '{lk}'. Contexto: '...{context}...'")
-                break
+        # 2. Check for legacy keys contextually
+        legacy_keys = ["campo_1", "campo_2", "campo_3", "campo_4", "campo_5"]
+        for lk in legacy_keys:
+            patterns = [
+                rf"['\"]{lk}['\"]\s*:",
+                rf"['\"]{lk}_feed['\"]\s*:",
+                rf"output_key\s*:\s*{lk}\b",
+                rf"feed_key\s*:\s*{lk}_feed\b",
+                rf"criterion_key\s*:\s*{lk}\b"
+            ]
+            for pat in patterns:
+                match = re.search(pat, generated_prompt)
+                if match:
+                    start_idx = max(0, match.start() - 30)
+                    end_idx = min(len(generated_prompt), match.end() + 30)
+                    context = generated_prompt[start_idx:end_idx].replace('\n', '\\n')
+                    validation_errors.append(f"Uso estructural de clave prohibida '{lk}'. Contexto: '...{context}...'")
+                    break
 
-    # 2.2. Prevent legacy typologies leakage
-    legacy_typos = ["informacion_sin_cita", "falta_con_reagendo", "falta_sin_reagendo", "no_interesado", "no_apto"]
-    for lt in legacy_typos:
-        if lt in generated_prompt:
-            validation_errors.append(f"El prompt generado contiene la tipología antigua prohibida '{lt}'.")
-            
-    # 3. Check for encoding/mojibake issues
-    mojibake_patterns = ["Ã", "Â", "â", "³", "±", "Ã³", "Ã±"]
-    for mb in mojibake_patterns:
-        if mb in generated_prompt:
-            validation_errors.append(f"Se detectaron problemas de codificación (carácter '{mb}').")
-            
-    if validation_errors:
-        error_msg = "El prompt generado falló las validaciones estrictas: " + " ".join(validation_errors)
-        logger.error(error_msg)
-        return {"ok": False, "status": "error", "error_message": error_msg}
+        # 2.2. Prevent legacy typologies leakage
+        legacy_typos = ["informacion_sin_cita", "falta_con_reagendo", "falta_sin_reagendo", "no_interesado", "no_apto"]
+        has_legacy_leak = False
+        for lt in legacy_typos:
+            if lt in generated_prompt:
+                has_legacy_leak = True
+                validation_errors.append(f"El prompt generado contiene la tipología antigua prohibida '{lt}'.")
+
+        # If there is a legacy typologies leak and it's the first attempt, try correcting it!
+        if has_legacy_leak and attempt < max_attempts:
+            logger.warning("Attempt %d: Legacy typologies leak detected in generated prompt. Retrying with a stronger corrective instruction...", attempt)
+            # Append raw response and a corrective user instruction
+            current_messages.append({"role": "assistant", "content": raw_response})
+            current_messages.append({
+                "role": "user",
+                "content": (
+                    "¡ERROR CRÍTICO! Has incluido tipologías antiguas prohibidas en el prompt generado. "
+                    "Por favor, vuelve a generar el prompt y asegúrate de eliminar por completo y no mencionar ninguna de las siguientes palabras: "
+                    "informacion_sin_cita, falta_con_reagendo, falta_sin_reagendo, no_interesado, no_apto. "
+                    "Usa estrictamente las nuevas tipologías dinámicas permitidas: " + (", ".join([t.typology_key for t in typologies]) if typologies else "cita, confirmacion, cancelacion, reagendo, falta, otros")
+                )
+            })
+            attempt += 1
+            continue
+
+        # 3. Check for encoding/mojibake issues
+        mojibake_patterns = ["Ã", "Â", "â", "³", "±", "Ã³", "Ã±"]
+        for mb in mojibake_patterns:
+            if mb in generated_prompt:
+                validation_errors.append(f"Se detectaron problemas de codificación (carácter '{mb}').")
+                
+        if validation_errors:
+            if has_legacy_leak:
+                error_msg = (
+                    "No se pudo generar una estructura válida porque el texto base contiene tipologías legacy. "
+                    "Actualiza la estructura base o limpia el bloque de tipologías."
+                )
+            else:
+                error_msg = "El prompt generado falló las validaciones estrictas: " + " ".join(validation_errors)
+                
+            logger.error(error_msg)
+            return {"ok": False, "status": "error", "error_message": error_msg}
+
+        # If we successfully parsed and validated, exit loop
+        break
 
     return {
         "ok": True,
@@ -227,6 +348,7 @@ def _build_meta_prompt(
     base_structure: Any | None = None,
     typologies: list[Any] = None,
     criterion_typologies_map: dict[int, list[str]] = None,
+    sanitized_base_prompt: str | None = None,
 ) -> str:
     """Build the meta-prompt sent to OpenAI."""
     criteria_block = _format_criteria(criteria, criterion_typologies_map) if criteria else "(No hay criterios activos configurados)"
@@ -271,7 +393,7 @@ def _build_meta_prompt(
                 "",
                 "# Estructura base obligatoria de referencia",
                 "El prompt generado DEBE basarse, complementar y heredar las directrices estilísticas y conceptuales de la siguiente estructura base, pero adaptándolas SIEMPRE a las reglas irrompibles de arriba (ej. sustituyendo cualquier lista antigua de tipologías por la nueva lista exacta de tipo_llamada permitida):",
-                base_structure.base_prompt
+                sanitized_base_prompt or base_structure.base_prompt
             ])
 
     # 3. If there are no criteria
@@ -370,9 +492,9 @@ def _build_output_format(criteria: list[PromptCriterion], typologies: list[Any] 
     
     # 1. Add tipo_llamada first
     if typologies:
-        options = "|".join([f'"{t.typology_key}"' for t in typologies])
+        options = "|".join([f'"{t.typology_key}"' for t in typologies]) + "|null"
     else:
-        options = '"cita"|"confirmacion"|"cancelacion"|"reagendo"|"falta"|"otros"'
+        options = '"cita"|"confirmacion"|"cancelacion"|"reagendo"|"falta"|"otros"|null'
         
     lines.append(f'  "tipo_llamada": {options}')
     

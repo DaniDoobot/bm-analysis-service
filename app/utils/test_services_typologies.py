@@ -232,6 +232,57 @@ async def run_mock_workflow():
     assert v_auth["not_applicable"] is True, "Visual output not_applicable should be True"
 
     logger.info("Visual formatters successfully validated under Mock conditions!")
+
+    # 8. Verify sanitization of legacy typologies
+    logger.info("8. Testing sanitization of legacy typologies in templates...")
+    from app.services.prompt_builder import sanitize_legacy_typologies_block
+    
+    legacy_prompt_template = (
+        "### DEFINICIÓN DE TIPOS DE LLAMADA\n"
+        "- informacion_sin_cita: El paciente pide información.\n"
+        "- cita: El paciente agenda.\n"
+        "- falta_con_reagendo: El paciente no asiste pero reagenda.\n"
+        "- falta_sin_reagendo: El paciente no asiste.\n"
+        "- no_interesado: El paciente no tiene interés.\n"
+        "- no_apto: El paciente no cumple requisitos.\n"
+        "- otros: Dudas generales.\n"
+        "\n"
+        "### CRITERIOS DE EVALUACIÓN\n"
+        "Revisa si el agente saluda."
+    )
+    
+    class MockTypology:
+        def __init__(self, key, name, desc):
+            self.typology_key = key
+            self.typology_name = name
+            self.description = desc
+            
+    mock_active_typologies = [
+        MockTypology("cita", "Cita", "El paciente solicita agendar."),
+        MockTypology("confirmacion", "Confirmación", "El paciente confirma."),
+        MockTypology("cancelacion", "Cancelación", "El paciente cancela."),
+        MockTypology("reagendo", "Reagendo", "El paciente reagenda."),
+        MockTypology("falta", "Falta", "El paciente no asistió."),
+        MockTypology("otros", "Otros", "Cualquier otra duda.")
+    ]
+    
+    sanitized = sanitize_legacy_typologies_block(legacy_prompt_template, mock_active_typologies)
+    
+    # Assertions
+    assert "informacion_sin_cita" not in sanitized, "Legacy typologies must be completely removed!"
+    assert "falta_con_reagendo" not in sanitized, "Legacy typologies must be completely removed!"
+    assert "falta_sin_reagendo" not in sanitized, "Legacy typologies must be completely removed!"
+    assert "no_interesado" not in sanitized, "Legacy typologies must be completely removed!"
+    assert "no_apto" not in sanitized, "Legacy typologies must be completely removed!"
+    
+    assert "cita" in sanitized, "Active typologies must be present!"
+    assert "confirmacion" in sanitized, "Active typologies must be present!"
+    assert "cancelacion" in sanitized, "Active typologies must be present!"
+    assert "reagendo" in sanitized, "Active typologies must be present!"
+    assert "falta" in sanitized, "Active typologies must be present!"
+    assert "otros" in sanitized, "Active typologies must be present!"
+    
+    logger.info("Sanitization helper successfully validated under Mock conditions!")
     logger.info("--- ALL MOCK TESTS PASSED SUCCESSFULLY! ---")
 
 
