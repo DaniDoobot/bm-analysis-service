@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import get_settings
 from app.routers import (
+    admin,
     analyses,
     audio_analysis,
     criteria,
@@ -68,6 +69,7 @@ async def generic_exception_handler(request: Request, exc: Exception):
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(health.router)
+app.include_router(admin.router)
 app.include_router(prompts.router)
 app.include_router(criteria.router)
 app.include_router(drafts.router)

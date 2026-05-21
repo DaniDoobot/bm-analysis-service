@@ -155,9 +155,10 @@ def _base_structure_detail_out(struct) -> dict:
 async def list_prompt_base_structures(
     db: Annotated[AsyncSession, Depends(get_db)],
     type: Annotated[str | None, Query(description="audio | text")] = None,
+    include_archived: Annotated[bool, Query(description="Include inactive/archived structures")] = False,
 ):
-    """Return active base structures, optionally filtered by type."""
-    structures = await prompts_service.list_base_structures(db, prompt_type=type)
+    """Return active base structures by default; pass include_archived=true to see all."""
+    structures = await prompts_service.list_base_structures(db, prompt_type=type, include_archived=include_archived)
     return [_base_structure_out(s) for s in structures]
 
 

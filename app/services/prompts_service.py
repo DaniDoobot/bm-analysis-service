@@ -253,9 +253,15 @@ async def activate_version(db: AsyncSession, version_id: int) -> PromptVersion |
 
 # ── Prompt Base Structures CRUD ───────────────────────────────────────────────
 
-async def list_base_structures(db: AsyncSession, prompt_type: str | None = None) -> list[PromptBaseStructure]:
-    """Return all active base structures (always returns them regardless of the type filter to guarantee compatibility and prevent empty results)."""
-    stmt = select(PromptBaseStructure).where(PromptBaseStructure.is_active == True)
+async def list_base_structures(
+    db: AsyncSession,
+    prompt_type: str | None = None,
+    include_archived: bool = False,
+) -> list[PromptBaseStructure]:
+    """Return base structures. By default only active ones; pass include_archived=True to see all."""
+    stmt = select(PromptBaseStructure)
+    if not include_archived:
+        stmt = stmt.where(PromptBaseStructure.is_active == True)
     stmt = stmt.order_by(PromptBaseStructure.id.asc())
     result = await db.execute(stmt)
     return list(result.scalars().all())
