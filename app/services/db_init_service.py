@@ -79,7 +79,7 @@ FALLBACK_BOSTON_PROMPT = (
     "Eres un analizador experto de llamadas comerciales para Boston Medical Group (clínica de salud sexual masculina). "
     "Tu tarea es evaluar el desempeño del agente telefónico en base a los criterios definidos y clasificar la llamada.\n\n"
     "### FORMATO DE SALIDA JSON\n"
-    "Debes devolver la evaluación en formato JSON estructurado, incluyendo la clasificación del tipo de llamada y el valor/justificación de cada criterio."
+    "Debes devolver la evaluación en formato JSON estructurado, incluyendo la clasificación del tipo de llamada, el valor/justificación de cada criterio y obligatoriamente una clave 'resumen' (string | null) de 2-4 frases que sintetice qué ocurrió, la actitud del paciente, la actuación del agente y el resultado final."
 )
 
 

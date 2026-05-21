@@ -187,26 +187,46 @@ def _effective_ts(row: Any) -> "datetime | None":
 
 def extract_score_from_mass(result_json: Any, items_json: Any, key: str) -> "float | None":
     """Extract numeric score from mass result_json, falling back to items_json."""
+    EVALUATIVE_SCORES = {
+        "evaluacion_global", "sentiment", "sentimiento", "evaluacion_sentimiento",
+        "empatia", "simpatia", "claridad", "procedimiento", "adherencia_procedimiento",
+        "saludo_inicio", "n3_preguntas", "despedida_con_refuerzo", 
+        "gestion_objeciones", "uso_nombre_paciente", "uso_preguntas", 
+        "explicaciones_medicas", "claridad_explicacion_economica",
+        "trato_usted", "propension", "siguiente_paso"
+    }
+
+    if key not in EVALUATIVE_SCORES:
+        return None
+
     if result_json and isinstance(result_json, dict):
         val = result_json.get(key)
         if val is None and key == "sentiment":
             val = result_json.get("sentimiento") or result_json.get("evaluacion_sentimiento")
         if val is None and key == "procedimiento":
             val = result_json.get("adherencia_procedimiento")
+            
         if val is not None:
+            if isinstance(val, bool):
+                return None
+                
             try:
                 if isinstance(val, dict):
                     for sk in ["score", "valor", "value", "puntuacion"]:
-                        if val.get(sk) is not None:
-                            return to_float(val[sk])
-                return to_float(val)
+                        v_sub = val.get(sk)
+                        if v_sub is not None and not isinstance(v_sub, bool):
+                            if isinstance(v_sub, (int, float, decimal.Decimal)):
+                                return to_float(v_sub)
+                            elif isinstance(v_sub, str):
+                                return float(v_sub)
+                else:
+                    if isinstance(val, (int, float, decimal.Decimal)):
+                        return to_float(val)
+                    elif isinstance(val, str):
+                        return float(val)
             except (ValueError, TypeError):
-                if isinstance(val, str):
-                    c = val.strip().lower()
-                    if c in ["si", "sí"]:
-                        return 10.0
-                    if c == "no":
-                        return 0.0
+                return None
+                        
     if items_json:
         items = items_json if isinstance(items_json, list) else []
         for item in items:
@@ -215,9 +235,12 @@ def extract_score_from_mass(result_json: Any, items_json: Any, key: str) -> "flo
             item_key = item.get("key") or item.get("criterion_key") or item.get("output_key")
             if item_key == key:
                 v = item.get("value") or item.get("score") or item.get("valor")
-                if v is not None:
+                if v is not None and not isinstance(v, bool):
                     try:
-                        return to_float(v)
+                        if isinstance(v, (int, float, decimal.Decimal)):
+                            return to_float(v)
+                        elif isinstance(v, str):
+                            return float(v)
                     except (ValueError, TypeError):
                         pass
     return None
