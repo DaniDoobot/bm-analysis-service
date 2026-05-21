@@ -21,6 +21,7 @@ async def list_prompts(
     prompt_type: str | None = None,
     base_structure_id: int | None = None,
     base_structure_key: str | None = None,
+    is_active: bool | None = None,
 ) -> list[dict]:
     """Return all prompts joined with their current version."""
     stmt = select(Prompt)
@@ -30,6 +31,8 @@ async def list_prompts(
         stmt = stmt.where(Prompt.base_structure_id == base_structure_id)
     if base_structure_key is not None:
         stmt = stmt.where(Prompt.base_structure_key == base_structure_key)
+    if is_active is not None:
+        stmt = stmt.where(Prompt.is_active == is_active)
     stmt = stmt.order_by(Prompt.prompt_id)
 
     result = await db.execute(stmt)
@@ -38,6 +41,11 @@ async def list_prompts(
     out = []
     for p in prompts:
         current = await _get_current_version(db, p.prompt_id)
+        
+        prompt_text = current.prompt if current else None
+        if not prompt_text and p.prompt_id:
+            prompt_text = await build_fallback_prompt_from_criteria(db, p.prompt_id)
+
         row = {
             "prompt_id": p.prompt_id,
             "prompt_name": p.prompt_name,
@@ -48,7 +56,8 @@ async def list_prompts(
             "updated_at": p.updated_at,
             "current_version_id": current.id if current else None,
             "version_label": current.version_label if current else None,
-            "prompt": current.prompt if current else None,
+            "version_name": current.version_name if current else None,
+            "prompt": prompt_text,
             "base_structure_id": p.base_structure_id,
             "base_structure_key": p.base_structure_key,
             "base_structure_name": p.base_structure_name,
@@ -70,6 +79,11 @@ async def get_active_prompt(db: AsyncSession, prompt_type: str) -> dict | None:
         return None
 
     current = await _get_current_version(db, p.prompt_id)
+    
+    prompt_text = current.prompt if current else None
+    if not prompt_text and p.prompt_id:
+        prompt_text = await build_fallback_prompt_from_criteria(db, p.prompt_id)
+
     return {
         "prompt_id": p.prompt_id,
         "prompt_name": p.prompt_name,
@@ -78,7 +92,7 @@ async def get_active_prompt(db: AsyncSession, prompt_type: str) -> dict | None:
         "prompt_version_id": current.id if current else None,
         "current_version_id": current.id if current else None,  # Keep for backwards compatibility just in case
         "version_label": current.version_label if current else None,
-        "prompt": current.prompt if current else None,
+        "prompt": prompt_text,
         "base_structure_id": p.base_structure_id,
         "base_structure_key": p.base_structure_key,
         "base_structure_name": p.base_structure_name,
@@ -99,10 +113,14 @@ async def list_versions(db: AsyncSession, prompt_id: int) -> list[dict]:
 
     out = []
     for v in versions:
+        prompt_text = v.prompt
+        if not prompt_text and v.prompt_id:
+            prompt_text = await build_fallback_prompt_from_criteria(db, v.prompt_id)
+
         out.append({
             "id": v.id,
             "prompt_id": v.prompt_id,
-            "prompt": v.prompt,
+            "prompt": prompt_text,
             "version_label": v.version_label,
             "version_name": v.version_name,
             "updated_by": v.updated_by,
@@ -398,4 +416,37 @@ async def _get_current_version(db: AsyncSession, prompt_id: int) -> PromptVersio
 def _generate_label() -> str:
     now = datetime.now(timezone.utc)
     return now.strftime("v%Y%m%d-%H%M")
+
+
+async def build_fallback_prompt_from_criteria(db: AsyncSession, prompt_id: int) -> str:
+    """Build a legible preview text representation of the criteria for a prompt when no prompt text is generated."""
+    from app.models.criteria import PromptCriterion
+    stmt = (
+        select(PromptCriterion)
+        .where(PromptCriterion.prompt_id == prompt_id, PromptCriterion.is_active == True)
+        .order_by(PromptCriterion.order_index.asc(), PromptCriterion.criterion_id.asc())
+    )
+    res = await db.execute(stmt)
+    items = res.scalars().all()
+    
+    if not items:
+        return "Estructura sin texto de prompt generado y sin criterios activos."
+        
+    lines = [
+        "### ESTRUCTURA DE EVALUACIÓN PERSONALIZADA (VISTA PREVIA DE CRITERIOS)",
+        "Esta estructura no tiene un prompt de texto consolidado, pero está compuesta por los siguientes criterios activos de evaluación:",
+        ""
+    ]
+    for i, item in enumerate(items, 1):
+        lines.append(f"{i}. {item.criterion_name} (output_key: {item.output_key})")
+        lines.append(f"   - Tipo: {item.criterion_type}")
+        if item.criterion_description:
+            lines.append(f"   - Descripción: {item.criterion_description}")
+        if item.feed_key:
+            lines.append(f"   - Clave de feedback: {item.feed_key}")
+        if item.allowed_values:
+            lines.append(f"   - Valores permitidos: {item.allowed_values}")
+        lines.append("")
+        
+    return "\n".join(lines)
 

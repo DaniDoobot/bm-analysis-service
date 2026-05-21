@@ -25,6 +25,7 @@ class PromptOut(BaseModel):
 class PromptWithCurrentVersion(PromptOut):
     current_version_id: int | None = None
     version_label: str | None = None
+    version_name: str | None = None
     prompt: str | None = None
 
 

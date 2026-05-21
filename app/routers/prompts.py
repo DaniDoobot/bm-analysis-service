@@ -36,6 +36,7 @@ async def list_prompts(
     type: Annotated[str | None, Query(description="audio | text")] = None,
     base_structure_id: Annotated[int | None, Query(description="Filter by base structure ID")] = None,
     base_structure_key: Annotated[str | None, Query(description="Filter by base structure Key")] = None,
+    active: Annotated[bool | None, Query(description="Filter by active status")] = None,
 ):
     """Return all prompts with their current version (if any), with optional filtering."""
     return await prompts_service.list_prompts(
@@ -43,6 +44,7 @@ async def list_prompts(
         prompt_type=type,
         base_structure_id=base_structure_id,
         base_structure_key=base_structure_key,
+        is_active=active,
     )
 
 
