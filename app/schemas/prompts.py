@@ -138,6 +138,11 @@ class PromptBaseStructureOut(BaseModel):
     created_by: str | None = None
     created_by_email: str | None = None
 
+    @model_validator(mode="after")
+    def force_text_type(self) -> "PromptBaseStructureOut":
+        self.prompt_type = "text"
+        return self
+
 
 class PromptBaseStructureDetailOut(PromptBaseStructureOut):
     base_prompt: str

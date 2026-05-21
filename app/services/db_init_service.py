@@ -147,15 +147,18 @@ async def init_db():
                     logger.info("Column '%s' already exists on 'bm_prompts' table.", col_name)
 
 
-        # 2. Safe backfill: Force default_criteria to NULL on ALL base structures.
+        # 2. Safe backfill: Force default_criteria to NULL and prompt_type to 'text' on ALL base structures.
         # This runs in its own isolated transaction so it always commits, regardless of
         # any failures in subsequent seeding steps.
         async with engine.begin() as conn:
-            logger.info("Executing isolated backfill: SET default_criteria = NULL for all bm_prompt_base_structures...")
-            result = await conn.execute(
+            logger.info("Executing isolated backfill: SET default_criteria = NULL and prompt_type = 'text' for all bm_prompt_base_structures...")
+            result_criteria = await conn.execute(
                 text("UPDATE bm_prompt_base_structures SET default_criteria = NULL WHERE default_criteria IS NOT NULL;")
             )
-            logger.info("Backfill complete. Rows updated: %d", result.rowcount)
+            result_type = await conn.execute(
+                text("UPDATE bm_prompt_base_structures SET prompt_type = 'text' WHERE prompt_type IS DISTINCT FROM 'text';")
+            )
+            logger.info("Backfill complete. Criteria rows updated: %d, Type rows updated: %d", result_criteria.rowcount, result_type.rowcount)
 
         # 3. Seed structures in a safe, non-destructive session
         from app.dependencies import get_db
