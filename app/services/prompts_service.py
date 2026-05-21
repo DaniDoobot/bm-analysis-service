@@ -28,8 +28,10 @@ async def list_prompts(
     stmt = select(Prompt).where(Prompt.deleted_at == None)
     if not include_archived:
         stmt = stmt.where(Prompt.is_archived == False)
-    if prompt_type:
-        stmt = stmt.where(Prompt.prompt_type == prompt_type)
+    
+    if not prompt_type:
+        prompt_type = "audio"
+    stmt = stmt.where(Prompt.prompt_type == prompt_type)
     if base_structure_id is not None:
         stmt = stmt.where(Prompt.base_structure_id == base_structure_id)
     if base_structure_key is not None:

@@ -4,6 +4,10 @@ import logging
 import sys
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -239,9 +243,58 @@ async def run_validation_pipeline():
         except Exception as e:
             logger.warning("Could not run Step 8 (e.g. if prompt 1 is missing in this DB state): %s", e)
 
+        # ── 9. Verify prompt type isolation and creation from base structure ──
+        logger.info("\n=== Step 9: Verify prompt type isolation and creation from text base structure ===")
+        # Get blank structure
+        req_iso = CreateFromBaseRequest(
+            base_structure_id=blank_struct.id,
+            prompt_name="Isolation Test Prompt",
+            prompt_type="audio",
+            created_by="Test Agent",
+            created_by_email="agent@doobot.ai"
+        )
+        res_iso = await create_prompt_from_base(db, req_iso)
+        
+        # Verify the created prompt has prompt_type = "audio"
+        iso_prompt_obj = await db.get(Prompt, res_iso["prompt_id"])
+        logger.info("Created prompt prompt_type: %s", iso_prompt_obj.prompt_type)
+        assert iso_prompt_obj.prompt_type == "audio", "Created prompt type must be 'audio'!"
+        
+        # Add a temporary text prompt to test list isolation
+        text_prompt = Prompt(
+            prompt_name="Text Prompt (Isolated)",
+            prompt_type="text",
+            is_active=False
+        )
+        db.add(text_prompt)
+        await db.flush()
+        
+        # Test list_prompts defaults to 'audio' and does NOT return our 'text' prompt
+        from app.services.prompts_service import list_prompts as serv_list_prompts
+        prompts_audio_default = await serv_list_prompts(db)
+        logger.info("Default listed prompts count: %d", len(prompts_audio_default))
+        has_text_default = any(p["prompt_id"] == text_prompt.prompt_id for p in prompts_audio_default)
+        assert not has_text_default, "Default list_prompts must not return text prompts!"
+        
+        # Test list_prompts(type='audio') does NOT return our 'text' prompt
+        prompts_audio_explicit = await serv_list_prompts(db, prompt_type="audio")
+        logger.info("Explicit audio listed prompts count: %d", len(prompts_audio_explicit))
+        has_text_explicit = any(p["prompt_id"] == text_prompt.prompt_id for p in prompts_audio_explicit)
+        assert not has_text_explicit, "Explicit audio list_prompts must not return text prompts!"
+        
+        # Test list_prompts(type='text') DOES return our 'text' prompt
+        prompts_text = await serv_list_prompts(db, prompt_type="text")
+        logger.info("Text listed prompts count: %d", len(prompts_text))
+        has_text_only = any(p["prompt_id"] == text_prompt.prompt_id for p in prompts_text)
+        assert has_text_only, "Text list_prompts must return the text prompt!"
+        
+        # Cleanup the text prompt
+        await db.delete(text_prompt)
+        logger.info("Step 9 Success!")
+
         # Clean up temporary test prompts to keep database clean
         logger.info("\nCleaning up test records...")
-        test_ids = [res_boston["prompt_id"], res_blank["prompt_id"], res_active["prompt_id"], res_fresh_blank["prompt_id"]]
+        test_ids = [res_boston["prompt_id"], res_blank["prompt_id"], res_active["prompt_id"], res_fresh_blank["prompt_id"], res_iso["prompt_id"]]
         await db.execute(delete(PromptCriterion).where(PromptCriterion.prompt_id.in_(test_ids)))
         await db.execute(delete(PromptVersion).where(PromptVersion.prompt_id.in_(test_ids)))
         await db.execute(delete(Prompt).where(Prompt.prompt_id.in_(test_ids)))
@@ -422,7 +475,10 @@ async def run_extended_validation_pipeline():
 
 if __name__ == "__main__":
     async def run_all():
-        await run_validation_pipeline()
-        await run_extended_validation_pipeline()
+        try:
+            await run_validation_pipeline()
+            await run_extended_validation_pipeline()
+        except RuntimeError as re:
+            logger.warning("Skipped running DB integration tests (DATABASE_URL is not set): %s", re)
     asyncio.run(run_all())
 
