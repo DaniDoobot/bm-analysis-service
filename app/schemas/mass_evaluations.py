@@ -47,29 +47,44 @@ class MassEvaluationJobCreate(BaseModel):
         if not isinstance(data, dict):
             return data
 
+        def get_matching_value(keys):
+            # First pass: prioritize any non-None, non-empty values
+            for k in keys:
+                if k in data and data[k] is not None and data[k] != "":
+                    return data[k], True
+            # Second pass: if all matches are None/empty, return the first present one
+            for k in keys:
+                if k in data:
+                    return data[k], True
+            return None, False
+
         # Normalize date_from
-        d_from = data.get("date_from") or data.get("search_date_from") or data.get("fecha_desde")
-        if d_from == "":
-            d_from = None
-        data["date_from"] = d_from
+        val, found = get_matching_value(["date_from", "search_date_from", "fecha_desde"])
+        if found:
+            if val == "":
+                val = None
+            data["date_from"] = val
 
         # Normalize date_to
-        d_to = data.get("date_to") or data.get("search_date_to") or data.get("fecha_hasta")
-        if d_to == "":
-            d_to = None
-        data["date_to"] = d_to
+        val, found = get_matching_value(["date_to", "search_date_to", "fecha_hasta"])
+        if found:
+            if val == "":
+                val = None
+            data["date_to"] = val
 
         # Normalize time_window_start
-        t_start = data.get("time_window_start") or data.get("time_from") or data.get("search_time_from") or data.get("hora_desde")
-        if t_start == "":
-            t_start = None
-        data["time_window_start"] = t_start
+        val, found = get_matching_value(["time_window_start", "time_from", "search_time_from", "hour_from", "hora_desde"])
+        if found:
+            if val == "":
+                val = None
+            data["time_window_start"] = val
 
         # Normalize time_window_end
-        t_end = data.get("time_window_end") or data.get("time_to") or data.get("search_time_to") or data.get("hora_hasta")
-        if t_end == "":
-            t_end = None
-        data["time_window_end"] = t_end
+        val, found = get_matching_value(["time_window_end", "time_to", "search_time_to", "hour_to", "hora_hasta"])
+        if found:
+            if val == "":
+                val = None
+            data["time_window_end"] = val
 
         return data
 
@@ -114,29 +129,44 @@ class MassEvaluationJobUpdate(BaseModel):
         if not isinstance(data, dict):
             return data
 
+        def get_matching_value(keys):
+            # First pass: prioritize any non-None, non-empty values
+            for k in keys:
+                if k in data and data[k] is not None and data[k] != "":
+                    return data[k], True
+            # Second pass: if all matches are None/empty, return the first present one
+            for k in keys:
+                if k in data:
+                    return data[k], True
+            return None, False
+
         # Normalize date_from
-        d_from = data.get("date_from") or data.get("search_date_from") or data.get("fecha_desde")
-        if d_from == "":
-            d_from = None
-        data["date_from"] = d_from
+        val, found = get_matching_value(["date_from", "search_date_from", "fecha_desde"])
+        if found:
+            if val == "":
+                val = None
+            data["date_from"] = val
 
         # Normalize date_to
-        d_to = data.get("date_to") or data.get("search_date_to") or data.get("fecha_hasta")
-        if d_to == "":
-            d_to = None
-        data["date_to"] = d_to
+        val, found = get_matching_value(["date_to", "search_date_to", "fecha_hasta"])
+        if found:
+            if val == "":
+                val = None
+            data["date_to"] = val
 
         # Normalize time_window_start
-        t_start = data.get("time_window_start") or data.get("time_from") or data.get("search_time_from") or data.get("hora_desde")
-        if t_start == "":
-            t_start = None
-        data["time_window_start"] = t_start
+        val, found = get_matching_value(["time_window_start", "time_from", "search_time_from", "hour_from", "hora_desde"])
+        if found:
+            if val == "":
+                val = None
+            data["time_window_start"] = val
 
         # Normalize time_window_end
-        t_end = data.get("time_window_end") or data.get("time_to") or data.get("search_time_to") or data.get("hora_hasta")
-        if t_end == "":
-            t_end = None
-        data["time_window_end"] = t_end
+        val, found = get_matching_value(["time_window_end", "time_to", "search_time_to", "hour_to", "hora_hasta"])
+        if found:
+            if val == "":
+                val = None
+            data["time_window_end"] = val
 
         return data
 
@@ -158,8 +188,8 @@ class MassEvaluationJobResponse(BaseModel):
     date_from: datetime | None
     date_to: datetime | None
     relative_days: int | None
-    time_window_start: time | None
-    time_window_end: time | None
+    time_window_start: Any = None
+    time_window_end: Any = None
     timezone: str
     duration_min_seconds: int | None
     duration_max_seconds: int | None
@@ -197,6 +227,12 @@ class MassEvaluationJobResponse(BaseModel):
     fecha_hasta: str | None = None
     hora_desde: str | None = None
     hora_hasta: str | None = None
+    
+    hour_from: str | None = None
+    hour_to: str | None = None
+    fecha_hasta: str | None = None
+    hora_desde: str | None = None
+    hora_hasta: str | None = None
 
     @model_validator(mode="after")
     def populate_aliases(self) -> 'MassEvaluationJobResponse':
@@ -225,9 +261,23 @@ class MassEvaluationJobResponse(BaseModel):
         d_from_str = d_from_tz.strftime("%Y-%m-%d") if d_from_tz else None
         d_to_str = d_to_tz.strftime("%Y-%m-%d") if d_to_tz else None
         
-        # format time to HH:MM
-        t_start_str = t_start.strftime("%H:%M") if t_start else None
-        t_end_str = t_end.strftime("%H:%M") if t_end else None
+        # format time to HH:MM (safeguarding string/time types)
+        from datetime import time as dt_time
+        
+        t_start_str = None
+        if isinstance(t_start, dt_time):
+            t_start_str = t_start.strftime("%H:%M")
+        elif isinstance(t_start, str) and t_start:
+            t_start_str = t_start[:5]
+            
+        t_end_str = None
+        if isinstance(t_end, dt_time):
+            t_end_str = t_end.strftime("%H:%M")
+        elif isinstance(t_end, str) and t_end:
+            t_end_str = t_end[:5]
+
+        self.time_window_start = t_start_str
+        self.time_window_end = t_end_str
 
         self.search_date_from = d_from_str
         self.search_date_to = d_to_str
@@ -243,6 +293,9 @@ class MassEvaluationJobResponse(BaseModel):
         self.fecha_hasta = d_to_str
         self.hora_desde = t_start_str
         self.hora_hasta = t_end_str
+
+        self.hour_from = t_start_str
+        self.hour_to = t_end_str
 
         return self
 
