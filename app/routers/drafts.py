@@ -64,5 +64,19 @@ async def publish_draft(
     body: DraftActionRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    await drafts_service.set_draft_status(db, body.draft_id, "published")
-    return {"ok": True, "status": "published"}
+    try:
+        new_version = await drafts_service.publish_draft(
+            db,
+            body.draft_id,
+            updated_by=body.updated_by,
+            updated_by_email=body.updated_by_email,
+        )
+        return {
+            "ok": True,
+            "status": "published",
+            "active_version_id": new_version.id,
+            "version_label": new_version.version_label,
+            "version_name": new_version.version_name,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))

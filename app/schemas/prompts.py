@@ -28,6 +28,12 @@ class PromptWithCurrentVersion(PromptOut):
     version_name: str | None = None
     prompt: str | None = None
 
+    # Extra fields for maximum frontend compatibility:
+    name: str | None = None
+    version: str | None = None
+    label: str | None = None
+    base: str | None = None
+
 
 # ── Prompt Version ────────────────────────────────────────────────────────────
 
@@ -69,6 +75,12 @@ class ActivePromptOut(BaseModel):
     base_structure_id: int | None = None
     base_structure_key: str | None = None
     base_structure_name: str | None = None
+
+    # Extra fields for maximum frontend compatibility:
+    name: str | None = None
+    version: str | None = None
+    label: str | None = None
+    base: str | None = None
 
 
 

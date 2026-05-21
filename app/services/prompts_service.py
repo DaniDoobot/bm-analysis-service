@@ -61,6 +61,12 @@ async def list_prompts(
             "base_structure_id": p.base_structure_id,
             "base_structure_key": p.base_structure_key,
             "base_structure_name": p.base_structure_name,
+
+            # Aliases for frontend compatibility
+            "name": p.prompt_name,
+            "version": current.version_label if current else None,
+            "label": current.version_label if current else None,
+            "base": p.base_structure_name,
         }
         out.append(row)
     return out
@@ -96,6 +102,12 @@ async def get_active_prompt(db: AsyncSession, prompt_type: str) -> dict | None:
         "base_structure_id": p.base_structure_id,
         "base_structure_key": p.base_structure_key,
         "base_structure_name": p.base_structure_name,
+
+        # Aliases for frontend compatibility
+        "name": p.prompt_name,
+        "version": current.version_label if current else None,
+        "label": current.version_label if current else None,
+        "base": p.base_structure_name,
     }
 
 
