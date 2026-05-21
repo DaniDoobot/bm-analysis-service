@@ -192,8 +192,8 @@ class MassEvaluationService:
         # Defensive safety cap on max_calls
         if job.max_calls is None or job.max_calls <= 0:
             job.max_calls = 10
-        elif job.max_calls > 100:
-            job.max_calls = 100
+        elif job.max_calls > 500:
+            job.max_calls = 500
 
         await enrich_job_prompt_info(db, job)
         
@@ -263,8 +263,8 @@ class MassEvaluationService:
         # Defensive safety cap on max_calls
         if job.max_calls is None or job.max_calls <= 0:
             job.max_calls = 10
-        elif job.max_calls > 100:
-            job.max_calls = 100
+        elif job.max_calls > 500:
+            job.max_calls = 500
 
         if "prompt_id" in update_data or "prompt_version_id" in update_data:
             await enrich_job_prompt_info(db, job)
@@ -335,7 +335,10 @@ class MassEvaluationService:
             "duration_max_seconds": job.duration_max_seconds,
             "direction": job.direction,
             "only_with_recording": job.only_with_recording,
-            "max_calls": job.max_calls
+            "max_calls": job.max_calls,
+            "time_window_start": job.time_window_start,
+            "time_window_end": job.time_window_end,
+            "timezone": job.timezone,
         }
         
         hs_service = HubSpotService()
@@ -350,7 +353,10 @@ class MassEvaluationService:
                 "agent_owner_ids": job.agent_owner_ids,
                 "direction": job.direction,
                 "only_with_recording": job.only_with_recording,
-                "max_calls": job.max_calls
+                "max_calls": job.max_calls,
+                "time_window_start": job.time_window_start.strftime("%H:%M:%S") if job.time_window_start else None,
+                "time_window_end": job.time_window_end.strftime("%H:%M:%S") if job.time_window_end else None,
+                "timezone": job.timezone,
             },
             "calls": [{"call_id": c["call_id"], "recording_url": c["recording_url"], "hubspot_owner_id": c["hubspot_owner_id"]} for c in calls]
         }
@@ -384,7 +390,10 @@ class MassEvaluationService:
             "duration_max_seconds": job.duration_max_seconds,
             "direction": job.direction,
             "only_with_recording": job.only_with_recording,
-            "max_calls": job.max_calls
+            "max_calls": job.max_calls,
+            "time_window_start": job.time_window_start.strftime("%H:%M:%S") if job.time_window_start else None,
+            "time_window_end": job.time_window_end.strftime("%H:%M:%S") if job.time_window_end else None,
+            "timezone": job.timezone,
         }
         
         # Update scheduling fields immediately to avoid duplicate scheduler triggers during background task startup
@@ -499,7 +508,10 @@ class MassEvaluationService:
                     "duration_max_seconds": duration_max_seconds,
                     "direction": filters_payload.get("direction"),
                     "only_with_recording": filters_payload.get("only_with_recording"),
-                    "max_calls": filters_payload.get("max_calls")
+                    "max_calls": filters_payload.get("max_calls"),
+                    "time_window_start": filters_payload.get("time_window_start"),
+                    "time_window_end": filters_payload.get("time_window_end"),
+                    "timezone": timezone_name,
                 }
                 
                 calls = await hs_service.search_calls_for_mass_evaluation(search_filters)
@@ -509,8 +521,8 @@ class MassEvaluationService:
                 max_calls_val = filters_payload.get("max_calls")
                 if max_calls_val is None or max_calls_val <= 0:
                     max_calls_val = 10
-                elif max_calls_val > 100:
-                    max_calls_val = 100
+                elif max_calls_val > 500:
+                    max_calls_val = 500
 
                 seen_call_ids = set()
                 unique_calls = []

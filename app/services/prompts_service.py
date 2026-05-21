@@ -246,10 +246,8 @@ async def activate_version(db: AsyncSession, version_id: int) -> PromptVersion |
 # ── Prompt Base Structures CRUD ───────────────────────────────────────────────
 
 async def list_base_structures(db: AsyncSession, prompt_type: str | None = None) -> list[PromptBaseStructure]:
-    """Return all active base structures, optionally filtered by prompt_type."""
+    """Return all active base structures (always returns them regardless of the type filter to guarantee compatibility and prevent empty results)."""
     stmt = select(PromptBaseStructure).where(PromptBaseStructure.is_active == True)
-    if prompt_type:
-        stmt = stmt.where(PromptBaseStructure.prompt_type == prompt_type)
     stmt = stmt.order_by(PromptBaseStructure.id.asc())
     result = await db.execute(stmt)
     return list(result.scalars().all())
@@ -269,7 +267,7 @@ async def create_base_structure(db: AsyncSession, body: PromptBaseStructureCreat
         structure_key=body.structure_key,
         structure_name=body.structure_name,
         description=body.description,
-        prompt_type=body.prompt_type,
+        prompt_type="text", # Normalizamos a 'text' para que todas las estructuras base sean de texto
         base_prompt=body.base_prompt,
         default_criteria=None, # Discarded for simplified structures (no items)
         is_active=True,
@@ -298,7 +296,7 @@ async def update_base_structure(
     if body.description is not None:
         struct.description = body.description
     if body.prompt_type is not None:
-        struct.prompt_type = body.prompt_type
+        struct.prompt_type = "text"
     if body.base_prompt is not None:
         struct.base_prompt = body.base_prompt
     

@@ -216,13 +216,14 @@ class ArchiveRequest(BaseModel):
 @router.patch("/prompts/{prompt_id}/archive")
 async def archive_prompt(
     prompt_id: int,
-    body: ArchiveRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
+    body: ArchiveRequest | None = None,
 ):
     """Archive a prompt structure."""
     from app.services import archive_service
+    user_email = body.user_email if body else None
     try:
-        prompt = await archive_service.archive_prompt(db, prompt_id, user_email=body.user_email)
+        prompt = await archive_service.archive_prompt(db, prompt_id, user_email=user_email)
         return {
             "ok": True,
             "status": "archived",

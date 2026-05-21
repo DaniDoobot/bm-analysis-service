@@ -155,7 +155,7 @@ class PromptBaseStructureCreate(BaseModel):
     structure_key: str
     structure_name: str
     description: str | None = None
-    prompt_type: str = "audio"
+    prompt_type: str = "text"
     base_prompt: str
     default_criteria: list[dict[str, Any]] | None = None
     created_by: str | None = None

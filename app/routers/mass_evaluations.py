@@ -223,7 +223,8 @@ async def list_results(
     db: AsyncSession = Depends(get_db)
 ):
     """List detailed mass analysis call results with advanced filtering options."""
-    return await MassEvaluationService.list_results(
+    from app.utils.visual_formatters import build_items_visual
+    results = await MassEvaluationService.list_results(
         db,
         run_id=run_id,
         job_id=job_id,
@@ -233,6 +234,14 @@ async def list_results(
         date_to=date_to,
         limit=limit
     )
+    
+    out = []
+    for r in results:
+        # Avoid relying on model_validator, build response model explicitly
+        d = MassEvaluationResultResponse.model_validate(r)
+        d.items_visual = build_items_visual(r.items_json)
+        out.append(d)
+    return out
 
 
 @router.get("/mass-evaluation-results/{mass_analysis_id}", response_model=MassEvaluationResultResponse)
@@ -241,10 +250,13 @@ async def get_result(
     db: AsyncSession = Depends(get_db)
 ):
     """Retrieve full analysis result and normalized prompt snapshot elements of a call."""
+    from app.utils.visual_formatters import build_items_visual
     result = await MassEvaluationService.get_result(db, mass_analysis_id=mass_analysis_id)
     if not result:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Mass analysis result ID {mass_analysis_id} not found."
         )
-    return result
+    d = MassEvaluationResultResponse.model_validate(result)
+    d.items_visual = build_items_visual(result.items_json)
+    return d

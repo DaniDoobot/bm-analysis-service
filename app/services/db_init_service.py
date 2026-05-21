@@ -12,7 +12,7 @@ DEFAULT_STRUCTURES = [
         "structure_key": "boston_medical_audio",
         "structure_name": "Boston Medical - Audio comercial",
         "description": "Estructura de prompt base original de Boston Medical para audios comerciales.",
-        "prompt_type": "audio",
+        "prompt_type": "text",
         "base_prompt": "",  # Will be populated dynamically or fallback
         "default_criteria": None,
         "is_active": True,
@@ -21,7 +21,7 @@ DEFAULT_STRUCTURES = [
         "structure_key": "boston_medical_appointment",
         "structure_name": "Boston Medical - Confirmación de cita",
         "description": "Evaluación de llamadas para confirmación de citas en clínicas de Boston Medical.",
-        "prompt_type": "audio",
+        "prompt_type": "text",
         "base_prompt": (
             "### CONFIRMACIÓN DE CITA - BOSTON MEDICAL\n"
             "Eres un evaluador de llamadas de confirmación de cita de Boston Medical. "
@@ -37,7 +37,7 @@ DEFAULT_STRUCTURES = [
         "structure_key": "generic_customer_service",
         "structure_name": "Atención al cliente genérico",
         "description": "Estructura estándar para evaluar calidad de servicio y atención al cliente en llamadas comerciales de soporte.",
-        "prompt_type": "audio",
+        "prompt_type": "text",
         "base_prompt": (
             "### ATENCIÓN AL CLIENTE GENÉRICO\n"
             "Analiza la interacción de atención al cliente. "
@@ -52,7 +52,7 @@ DEFAULT_STRUCTURES = [
         "structure_key": "commercial_quality",
         "structure_name": "Evaluación de calidad comercial",
         "description": "Estructura para analizar técnicas de venta, manejo de objeciones comerciales y efectividad de cierre.",
-        "prompt_type": "audio",
+        "prompt_type": "text",
         "base_prompt": (
             "### EVALUACIÓN DE CALIDAD COMERCIAL\n"
             "Evalúa el desempeño comercial en la llamada. "
@@ -67,7 +67,7 @@ DEFAULT_STRUCTURES = [
         "structure_key": "blank",
         "structure_name": "Prompt desde cero",
         "description": "Crea un prompt vacío sin criterios iniciales.",
-        "prompt_type": "audio",
+        "prompt_type": "text",
         "base_prompt": "",
         "default_criteria": None,
         "is_active": True,

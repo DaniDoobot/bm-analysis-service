@@ -632,7 +632,11 @@ async def get_agents_list(db: AsyncSession) -> list[dict[str, Any]]:
     for oid in db_stats:
         if oid not in OWNER_TO_NAME:
             row = db_stats[oid]
-            results.append(_fmt(row, oid, row.agent_name or oid))
+            disp_name = row.agent_name or oid
+            # Exclude unidentified numeric agents from "Todos los agentes"
+            if disp_name.startswith("Agente no identificado") or disp_name.isdigit():
+                continue
+            results.append(_fmt(row, oid, disp_name))
 
     return results
 

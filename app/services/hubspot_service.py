@@ -94,6 +94,7 @@ class HubSpotService:
         """
         Search calls in HubSpot based on provided filters.
         Supports pagination to retrieve all matched calls up to the job's max_calls limit.
+        Apply post-filtering by local call timestamp in job's timezone.
         """
         url = f"{HUBSPOT_API_BASE}/crm/v3/objects/calls/search"
         
@@ -193,6 +194,34 @@ class HubSpotService:
             filter_groups.append({"filters": hs_filters})
             
         max_calls = filters.get("max_calls", 100) or 100
+        limit_to_fetch = max(1000, max_calls)
+        
+        # Parse time window start / end filters
+        import datetime
+        from datetime import time as dt_time
+        import pytz
+        
+        time_window_start = filters.get("time_window_start")
+        time_window_end = filters.get("time_window_end")
+        timezone_name = filters.get("timezone") or "Europe/Madrid"
+        
+        def parse_time_str(t_val: Any) -> Any:
+            if not t_val:
+                return None
+            if isinstance(t_val, dt_time):
+                return t_val
+            if isinstance(t_val, str):
+                parts = [int(x) for x in t_val.split(":")[:3]]
+                if len(parts) == 1:
+                    return dt_time(parts[0], 0, 0)
+                elif len(parts) == 2:
+                    return dt_time(parts[0], parts[1], 0)
+                elif len(parts) >= 3:
+                    return dt_time(parts[0], parts[1], parts[2])
+            return None
+
+        time_window_start_parsed = parse_time_str(time_window_start)
+        time_window_end_parsed = parse_time_str(time_window_end)
         
         properties = [
             "hs_call_recording_url",
@@ -209,12 +238,11 @@ class HubSpotService:
         after = None
         
         async with httpx.AsyncClient(timeout=60) as client:
-            while len(results) < max_calls:
-                page_limit = min(100, max_calls - len(results))
+            while len(results) < limit_to_fetch:
                 payload = {
                     "filterGroups": filter_groups,
                     "properties": properties,
-                    "limit": page_limit
+                    "limit": 100  # always request max page size (100) for API call efficiency
                 }
                 if after:
                     payload["after"] = after
@@ -229,6 +257,47 @@ class HubSpotService:
                     
                 for h in hits:
                     props = h.get("properties", {})
+                    
+                    # Apply time window post-filtering
+                    if time_window_start_parsed or time_window_end_parsed:
+                        call_ts = props.get("hs_timestamp") or props.get("hs_createdate")
+                        if not call_ts:
+                            # Si no hay timestamp, la llamada no pasa el filtro activo
+                            continue
+                        try:
+                            # parse call_ts to datetime
+                            if isinstance(call_ts, str):
+                                try:
+                                    dt = datetime.datetime.fromisoformat(call_ts.replace("Z", "+00:00"))
+                                except ValueError:
+                                    dt = datetime.datetime.strptime(call_ts, "%Y-%m-%dT%H:%M:%S.%fZ")
+                            else:
+                                dt = datetime.datetime.fromtimestamp(float(call_ts) / 1000.0, tz=datetime.timezone.utc)
+                            
+                            # Convert to job's timezone
+                            try:
+                                tz = pytz.timezone(timezone_name)
+                            except Exception:
+                                tz = pytz.timezone("Europe/Madrid")
+                            
+                            dt_local = dt.astimezone(tz)
+                            local_time = dt_local.time()
+                            
+                            # check if within window (with cross-midnight support)
+                            start = time_window_start_parsed or dt_time(0, 0, 0)
+                            end = time_window_end_parsed or dt_time(23, 59, 59)
+                            
+                            if start <= end:
+                                if not (start <= local_time <= end):
+                                    continue
+                            else:
+                                # cross midnight range (e.g. 22:00 to 02:00)
+                                if not (local_time >= start or local_time <= end):
+                                    continue
+                        except Exception as e_time:
+                            logger.warning("Filtro horario falló para llamada %s: %s", h.get("id"), e_time)
+                            continue
+                    
                     dur_ms = props.get("hs_call_duration")
                     dur_sec = int(float(dur_ms) / 1000.0) if dur_ms else None
                     

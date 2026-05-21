@@ -91,7 +91,7 @@ def resolve_agent_display(agente_telefonico: str | None, hubspot_owner_id: str |
 
     # 3. Fallback to owner ID
     if hubspot_owner_id:
-        return str(hubspot_owner_id)
+        return f"Agente no identificado ({hubspot_owner_id})"
 
     # 4. Ultimate fallback
     return agente_telefonico

@@ -49,7 +49,7 @@ async def restore_prompt(db: AsyncSession, prompt_id: int) -> Prompt:
     return prompt
 
 async def delete_prompt(db: AsyncSession, prompt_id: int) -> dict:
-    """Hard delete a prompt structure if it has no associated jobs or results and is not active."""
+    """Hard delete a prompt structure if it has no associated jobs, results, versions or criteria and is not active."""
     # 1. Load prompt
     stmt = select(Prompt).where(Prompt.prompt_id == prompt_id, Prompt.deleted_at == None)
     result = await db.execute(stmt)
@@ -67,7 +67,7 @@ async def delete_prompt(db: AsyncSession, prompt_id: int) -> dict:
     jobs_res = await db.execute(jobs_stmt)
     if jobs_res.scalars().first():
         raise ValueError(
-            "No se puede borrar esta estructura porque tiene histórico asociado. Puedes archivarla."
+            "No se puede borrar porque tiene versiones/análisis asociados. Archívala en su lugar."
         )
 
     # C. Referenced in mass results?
@@ -75,10 +75,27 @@ async def delete_prompt(db: AsyncSession, prompt_id: int) -> dict:
     results_res = await db.execute(results_stmt)
     if results_res.scalars().first():
         raise ValueError(
-            "No se puede borrar esta estructura porque tiene histórico asociado. Puedes archivarla."
+            "No se puede borrar porque tiene versiones/análisis asociados. Archívala en su lugar."
         )
 
-    # D. Perform hard delete
+    # D. Referenced in versions?
+    versions_stmt = select(PromptVersion).where(PromptVersion.prompt_id == prompt_id)
+    versions_res = await db.execute(versions_stmt)
+    if versions_res.scalars().first():
+        raise ValueError(
+            "No se puede borrar porque tiene versiones/análisis asociados. Archívala en su lugar."
+        )
+
+    # E. Referenced in criteria?
+    from app.models.prompts import PromptCriterion
+    criteria_stmt = select(PromptCriterion).where(PromptCriterion.prompt_id == prompt_id)
+    criteria_res = await db.execute(criteria_stmt)
+    if criteria_res.scalars().first():
+        raise ValueError(
+            "No se puede borrar porque tiene versiones/análisis asociados. Archívala en su lugar."
+        )
+
+    # F. Perform hard delete
     await db.delete(prompt)
     await db.commit()
     return {"ok": True, "status": "deleted", "prompt_id": prompt_id}
