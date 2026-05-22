@@ -983,7 +983,9 @@ async def init_db():
                     await conn.execute(text(stmt))
                 logger.info("Looker wide reporting views migration applied successfully.")
             else:
-                logger.warning(f"Looker wide reporting views migration file not found at {migration_path}!")
+                msg = f"CRITICAL: Looker wide reporting views migration file not found at {migration_path}! Rolling back transaction."
+                logger.error(msg)
+                raise FileNotFoundError(msg)
 
 
 
