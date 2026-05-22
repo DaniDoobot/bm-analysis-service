@@ -120,3 +120,34 @@ async def cleanup_prompt_versions(
             detail=f"Error durante la limpieza de versiones: {str(e)}",
         )
 
+
+class CleanupMassEvaluationsRequest(BaseModel):
+    mode: Literal["dry_run", "execute"] = Field(default="dry_run", description="dry_run to preview, execute to apply")
+    performed_by_email: str | None = Field(default=None, description="Email of user performing the cleanup")
+
+
+@router.post("/cleanup-mass-evaluations")
+async def cleanup_mass_evaluations(
+    body: CleanupMassEvaluationsRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Clean up mass evaluations.
+    - mode=dry_run: Returns what WOULD be deleted.
+    - mode=execute: Physically deletes results, runs, and jobs.
+    """
+    try:
+        from app.services.cleanup_service import cleanup_mass_evaluations as _cleanup_mass
+        result = await _cleanup_mass(
+            db=db,
+            mode=body.mode,
+            performed_by_email=body.performed_by_email,
+        )
+        return result
+    except Exception as e:
+        logger.exception("Error during cleanup-mass-evaluations: %s", e)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error durante la limpieza de evaluaciones masivas: {str(e)}",
+        )
+

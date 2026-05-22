@@ -369,3 +369,82 @@ async def cleanup_prompt_versions(
         "warnings": warnings,
         "plan_preview": plan,
     }
+
+
+async def cleanup_mass_evaluations(
+    db: AsyncSession,
+    mode: str,
+    performed_by_email: str | None = None
+) -> dict[str, Any]:
+    """
+    Clean up mass evaluation results, runs, and jobs.
+    In dry_run mode, returns counts of what would be deleted.
+    In execute mode, physically deletes them in order.
+    """
+    from sqlalchemy import func
+    from app.models.mass_evaluations import MassEvaluationJob, MassEvaluationRun, MassEvaluationResult
+
+    logger.info("Mass evaluation cleanup started — mode=%s performed_by=%s", mode, performed_by_email)
+
+    warnings: list[str] = []
+
+    # Count existing
+    res_count = await db.execute(select(func.count(MassEvaluationResult.mass_analysis_id)))
+    results_count = res_count.scalar() or 0
+    
+    run_count = await db.execute(select(func.count(MassEvaluationRun.run_id)))
+    runs_count = run_count.scalar() or 0
+    
+    job_count = await db.execute(select(func.count(MassEvaluationJob.job_id)))
+    jobs_count = job_count.scalar() or 0
+
+    if mode == "dry_run":
+        jobs_res = await db.execute(select(MassEvaluationJob.job_id))
+        jobs_to_delete = jobs_res.scalars().all()
+        
+        runs_res = await db.execute(select(MassEvaluationRun.run_id))
+        runs_to_delete = runs_res.scalars().all()
+        
+        warnings.append("This is a dry run. No data will be modified.")
+        return {
+            "jobs_count": jobs_count,
+            "runs_count": runs_count,
+            "results_count": results_count,
+            "jobs_to_delete": list(jobs_to_delete),
+            "runs_to_delete": list(runs_to_delete),
+            "results_to_delete_count": results_count,
+            "warnings": warnings,
+        }
+
+    # Execute
+    try:
+        # Delete results
+        res_del = await db.execute(sa_delete(MassEvaluationResult))
+        deleted_results = res_del.rowcount
+        
+        # Delete runs
+        run_del = await db.execute(sa_delete(MassEvaluationRun))
+        deleted_runs = run_del.rowcount
+        
+        # Delete jobs
+        job_del = await db.execute(sa_delete(MassEvaluationJob))
+        deleted_jobs = job_del.rowcount
+        
+        await db.commit()
+        
+        logger.info(
+            "Mass evaluations cleanup completed. Deleted jobs=%s, runs=%s, results=%s",
+            deleted_jobs, deleted_runs, deleted_results
+        )
+        
+        return {
+            "ok": True,
+            "deleted_results": deleted_results,
+            "deleted_runs": deleted_runs,
+            "deleted_jobs": deleted_jobs,
+            "warnings": warnings,
+        }
+    except Exception as e:
+        await db.rollback()
+        logger.exception("Error deleting mass evaluations: %s", e)
+        raise

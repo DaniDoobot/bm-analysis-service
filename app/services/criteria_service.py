@@ -16,7 +16,7 @@ from fastapi import HTTPException, status
 CRITERION_TYPES = ["score_1_10", "percentage", "boolean", "text", "category", "number"]
 
 
-async def get_criteria_grouped(db: AsyncSession, prompt_id: int) -> CriteriaGroupedOut:
+async def get_criteria_grouped(db: AsyncSession, prompt_id: int, include_deleted: bool = False) -> CriteriaGroupedOut:
     """Return active criteria grouped by type, plus the current prompt text."""
     # Get current prompt text
     result = await db.execute(
@@ -28,11 +28,13 @@ async def get_criteria_grouped(db: AsyncSession, prompt_id: int) -> CriteriaGrou
     prompt_text = version.prompt if version else None
 
     # Get criteria
-    criteria_result = await db.execute(
-        select(PromptCriterion)
-        .where(PromptCriterion.prompt_id == prompt_id)
-        .order_by(PromptCriterion.order_index.asc().nullslast(), PromptCriterion.criterion_id.asc())
-    )
+    query = select(PromptCriterion).where(PromptCriterion.prompt_id == prompt_id)
+    if not include_deleted:
+        query = query.where(PromptCriterion.deleted_at.is_(None))
+    
+    query = query.order_by(PromptCriterion.order_index.asc().nullslast(), PromptCriterion.criterion_id.asc())
+
+    criteria_result = await db.execute(query)
     all_criteria = criteria_result.scalars().all()
 
     # Group by type
@@ -57,6 +59,7 @@ async def get_active_criteria(db: AsyncSession, prompt_id: int) -> list[PromptCr
         .where(
             PromptCriterion.prompt_id == prompt_id,
             PromptCriterion.is_active == True,
+            PromptCriterion.deleted_at.is_(None),
         )
         .order_by(PromptCriterion.order_index.asc().nullslast(), PromptCriterion.criterion_id.asc())
     )
@@ -206,3 +209,72 @@ async def update_criterion_typologies(db: AsyncSession, criterion_id: int, typol
 
     await db.commit()
     return {"ok": True, "detail": f"Asociación de tipologías para el criterio {criterion_id} actualizada correctamente."}
+
+
+async def delete_criterion(db: AsyncSession, criterion_id: int, performed_by_email: str | None = None) -> dict[str, Any]:
+    """
+    Delete or soft-delete a criterion.
+    - If it's `tipo_llamada` and required, block.
+    - If it's used in analysis results or mass evaluations, soft-delete.
+    - Otherwise, hard-delete.
+    """
+    from datetime import datetime, timezone
+    from app.models.analyses import AnalysisResult
+    from app.models.mass_evaluations import MassEvaluationResult
+
+    # Get criterion
+    c_stmt = select(PromptCriterion).where(PromptCriterion.criterion_id == criterion_id)
+    c_res = await db.execute(c_stmt)
+    criterion = c_res.scalars().first()
+
+    if not criterion:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Criterio con ID {criterion_id} no encontrado."
+        )
+
+    # Protection for tipo_llamada
+    if criterion.criterion_key == "tipo_llamada" and criterion.is_required:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No se puede borrar el item tipo_llamada porque es necesario para clasificar la llamada."
+        )
+
+    # Check if used in AnalysisResult
+    used_in_analysis_stmt = select(AnalysisResult.result_id).where(AnalysisResult.criterion_id == criterion_id).limit(1)
+    used_in_analysis_res = await db.execute(used_in_analysis_stmt)
+    is_used = used_in_analysis_res.scalar() is not None
+
+    # Check if used in MassEvaluationResult
+    if not is_used and criterion.prompt_id:
+        used_in_mass_stmt = select(MassEvaluationResult.mass_analysis_id).where(MassEvaluationResult.prompt_id == criterion.prompt_id).limit(1)
+        used_in_mass_res = await db.execute(used_in_mass_stmt)
+        is_used = used_in_mass_res.scalar() is not None
+
+    action = ""
+
+    if is_used:
+        # Soft delete
+        criterion.is_active = False
+        criterion.deleted_at = datetime.now(timezone.utc)
+        criterion.deleted_by_email = performed_by_email
+        db.add(criterion)
+        
+        # We must also clean up typologies relations logically or physically
+        await db.execute(
+            delete(PromptCriterionTypology).where(PromptCriterionTypology.criterion_id == criterion_id)
+        )
+        action = "soft_deleted"
+    else:
+        # Hard delete
+        await db.delete(criterion)
+        action = "deleted"
+
+    await db.commit()
+
+    return {
+        "ok": True,
+        "criterion_id": criterion_id,
+        "action": action,
+        "message": "Item eliminado correctamente"
+    }

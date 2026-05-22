@@ -10,6 +10,7 @@ from app.schemas.criteria import (
     CriteriaGroupedOut,
     SaveCriterionRequest,
     ToggleCriterionRequest,
+    DeleteCriterionRequest,
 )
 from app.schemas.typologies import CriterionTypologyAssociation
 from app.services import criteria_service
@@ -22,9 +23,10 @@ router = APIRouter(prefix="/bm", tags=["Criteria"])
 async def get_prompt_criteria(
     prompt_id: Annotated[int, Query()],
     db: Annotated[AsyncSession, Depends(get_db)],
+    include_deleted: bool = False,
 ):
     """Return active criteria for a prompt, grouped by criterion_type."""
-    return await criteria_service.get_criteria_grouped(db, prompt_id=prompt_id)
+    return await criteria_service.get_criteria_grouped(db, prompt_id=prompt_id, include_deleted=include_deleted)
 
 
 @router.post("/prompt-criteria/save")
@@ -64,4 +66,21 @@ async def update_criterion_typologies(
 ):
     """Update typology associations for a specific criterion."""
     return await criteria_service.update_criterion_typologies(db, criterion_id=criterion_id, typology_ids=typology_ids)
+
+
+@router.delete("/prompt-criteria/{criterion_id}")
+async def delete_criterion(
+    criterion_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    body: DeleteCriterionRequest | None = None,
+):
+    """Delete or soft-delete a criterion."""
+    try:
+        email = body.performed_by_email if body else None
+        return await criteria_service.delete_criterion(db, criterion_id=criterion_id, performed_by_email=email)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error deleting criterion %s: %s", criterion_id, e)
+        raise HTTPException(status_code=400, detail=f"Error eliminando el criterio: {str(e)}")
 
