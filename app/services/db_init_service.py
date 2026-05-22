@@ -966,6 +966,26 @@ async def init_db():
             """))
             logger.info("Individual analysis Looker views ensured (individual_criteria_flat, individual_summary, all_analysis_criteria_flat).")
 
+            # F) vw_bm_mass_evaluation_report_wide & vw_bm_individual_analysis_report_wide
+            import os
+            migration_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                "migrations",
+                "v003_looker_wide_views.sql"
+            )
+            if os.path.exists(migration_path):
+                logger.info(f"Applying Looker wide reporting views migration from {migration_path}...")
+                with open(migration_path, "r", encoding="utf-8") as mf:
+                    sql_content = mf.read()
+                # Split statements by semicolon and execute them
+                statements = [stmt.strip() for stmt in sql_content.split(";") if stmt.strip()]
+                for stmt in statements:
+                    await conn.execute(text(stmt))
+                logger.info("Looker wide reporting views migration applied successfully.")
+            else:
+                logger.warning(f"Looker wide reporting views migration file not found at {migration_path}!")
+
+
 
         # This runs in its own isolated transaction so it always commits, regardless of
         # any failures in subsequent seeding steps.
