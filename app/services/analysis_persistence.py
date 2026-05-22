@@ -184,16 +184,49 @@ async def save_analysis(
                 active_typologies = t_res.scalars().all()
                 typology_by_key = {t.typology_key: t for t in active_typologies}
 
-                tipo_llamada_val = clean_result.get("tipo_llamada")
-                if isinstance(tipo_llamada_val, str):
-                    if tipo_llamada_val in typology_by_key:
-                        matched_typology = typology_by_key[tipo_llamada_val]
+                # Fetch criteria early to support robust fallback typology matching
+                criteria = await get_active_criteria(db, prompt_id)
+
+                # 1. Try direct keys in clean_result
+                detected_typology_key_raw = clean_result.get("tipo_llamada")
+                
+                # 2. Fallback: find criterion with key 'tipo_llamada' and use its output_key to look up in clean_result
+                if not detected_typology_key_raw:
+                    for criterion in criteria:
+                        if criterion.criterion_key == "tipo_llamada":
+                            out_key = criterion.output_key
+                            if out_key and out_key in clean_result:
+                                detected_typology_key_raw = clean_result.get(out_key)
+                                break
+                                
+                # 3. Fallback: case-insensitive keys in clean_result containing 'tipo' and 'llamada'
+                if not detected_typology_key_raw:
+                    for k, v in clean_result.items():
+                        k_norm = k.lower().replace("_", "").replace("-", "").replace(" ", "")
+                        if "tipollamada" in k_norm:
+                            detected_typology_key_raw = v
+                            break
+
+                detected_typology_key = str(detected_typology_key_raw).strip().lower() if detected_typology_key_raw else None
+                matched_typology = None
+                if detected_typology_key:
+                    if detected_typology_key in typology_by_key:
+                        matched_typology = typology_by_key[detected_typology_key]
                     else:
-                        lower_val = tipo_llamada_val.lower().strip()
                         for k, typ in typology_by_key.items():
-                            if k.lower().strip() == lower_val:
+                            if k.lower().strip() == detected_typology_key:
                                 matched_typology = typ
                                 break
+
+                logger.info(
+                    "Manual/historical typology resolution: call_id=%s service_id=%s detected_raw=%s detected_norm=%s typology_keys=%s matched=%s",
+                    call_id,
+                    service_id,
+                    detected_typology_key_raw,
+                    detected_typology_key,
+                    list(typology_by_key.keys()),
+                    matched_typology,
+                )
 
             await _insert_results(db, analysis, clean_result, prompt_id, matched_typology=matched_typology)
 
