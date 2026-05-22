@@ -23,6 +23,7 @@ from app.routers import (
     mass_evaluations,
     services,
     typologies,
+    service_evolution,
 )
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -81,6 +82,7 @@ app.include_router(prompt_builder.router)
 app.include_router(mass_evaluations.router)
 app.include_router(services.router)
 app.include_router(typologies.router)
+app.include_router(service_evolution.router)
 
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
