@@ -44,14 +44,77 @@ SELECT
     ar.criterion_key,
     COALESCE(ar.criterion_name,
         INITCAP(REPLACE(ar.criterion_key, '_', ' ')))   AS criterion_name,
+        
+    -- Canonical fields for Looker grouping
+    CASE
+        WHEN ar.criterion_key = 'trato_ustad' THEN 'trato_usted'
+        WHEN ar.criterion_key = 'puntalidad' THEN 'puntualidad'
+        ELSE ar.criterion_key
+    END AS canonical_criterion_key,
+    CASE
+        WHEN ar.criterion_key = 'trato_ustad' OR ar.criterion_key = 'trato_usted' THEN 'Trato de usted'
+        WHEN ar.criterion_key = 'saludo_inicio' THEN 'Saludo e Identificación'
+        WHEN ar.criterion_key = 'explicaciones_medicas' THEN 'Explicaciones médicas'
+        WHEN ar.criterion_key IN ('puntalidad', 'puntualidad') THEN 'Puntualidad'
+        WHEN ar.criterion_key = 'cierre_cita' THEN 'Cierre de cita'
+        WHEN ar.criterion_key = 'n3_preguntas' THEN 'Tres preguntas clave'
+        WHEN ar.criterion_key = 'tipo_llamada' THEN 'Tipo de llamada'
+        WHEN ar.criterion_key = 'motivo_no_cita' THEN 'Motivo no cita'
+        WHEN ar.criterion_key = 'duracion_consulta' THEN 'Duración de consulta'
+        WHEN ar.criterion_key = 'precio_consulta' THEN 'Precio de consulta'
+        WHEN ar.criterion_key = 'verifica_patologia' THEN 'Verifica patología'
+        WHEN ar.criterion_key = 'reformula_patologia' THEN 'Reformula patología'
+        WHEN ar.criterion_key = 'conocimiento_boston_medical' THEN 'Conocimiento previo de Boston Medical'
+        WHEN ar.criterion_key = 'direccion_y_referencias' THEN 'Dirección y referencias'
+        WHEN ar.criterion_key = 'medio' THEN 'Medio'
+        WHEN ar.criterion_key = 'edad' THEN 'Edad'
+        WHEN ar.criterion_key = 'patologia' THEN 'Patología'
+        WHEN ar.criterion_key = 'objeciones' THEN 'Objeciones'
+        WHEN ar.criterion_key = 'objecion_1' THEN 'Objeción principal'
+        WHEN ar.criterion_key = 'objecion_2' THEN 'Segunda objeción'
+        WHEN ar.criterion_key = 'objecion_3' THEN 'Tercera objeción'
+        WHEN ar.criterion_key = 'puede_adelantar_cita' THEN 'Puede adelantar cita'
+        WHEN ar.criterion_key = 'pregunta_pareja' THEN 'Pregunta por pareja'
+        WHEN ar.criterion_key = 'recomienda_pareja' THEN 'Recomienda venir con pareja'
+        WHEN ar.criterion_key = 'pareja_conocedora' THEN 'Pareja conocedora de la cita'
+        WHEN ar.criterion_key = 'pareja_asistira' THEN 'Pareja asistirá a la cita'
+        WHEN ar.criterion_key = 'claridad' THEN 'Claridad'
+        WHEN ar.criterion_key = 'procedimiento' THEN 'Explicación del procedimiento'
+        WHEN ar.criterion_key = 'gestion_objeciones' THEN 'Gestión de objeciones'
+        WHEN ar.criterion_key = 'propension' THEN 'Propensión al cierre'
+        WHEN ar.criterion_key = 'uso_preguntas' THEN 'Uso de preguntas'
+        WHEN ar.criterion_key = 'uso_nombre_paciente' THEN 'Uso del nombre del paciente'
+        WHEN ar.criterion_key = 'empatia' THEN 'Empatía'
+        WHEN ar.criterion_key = 'simpatia' THEN 'Simpatía'
+        WHEN ar.criterion_key = 'claridad_explicacion_economica' THEN 'Claridad en explicación económica'
+        WHEN ar.criterion_key = 'claridad_de_explicacion_de_precio_en_consulta' THEN 'Claridad en precio de consulta'
+        WHEN ar.criterion_key = 'despedida_con_refuerzo' THEN 'Despedida con refuerzo'
+        WHEN ar.criterion_key = 'siguiente_paso' THEN 'Siguiente paso establecido'
+        WHEN ar.criterion_key = 'velocidad_hablando_agente' THEN 'Velocidad hablando agente'
+        WHEN ar.criterion_key = 'interrupciones' THEN 'Interrupciones'
+        WHEN ar.criterion_key = 'sentiment' THEN 'Sentimiento de la llamada'
+        WHEN ar.criterion_key = 'hablando_agente' THEN 'Porcentaje hablando agente'
+        WHEN ar.criterion_key = 'hablando_paciente' THEN 'Porcentaje hablando paciente'
+        WHEN ar.criterion_key = 'palabras_minuto_agente' THEN 'Palabras por minuto agente'
+        WHEN ar.criterion_key = 'meses_patologia' THEN 'Meses con la patología'
+        WHEN ar.criterion_key = 'tratamiento_no_en_precio' THEN 'Tratamiento no en precio'
+        ELSE COALESCE(ar.criterion_name, INITCAP(REPLACE(ar.criterion_key, '_', ' ')))
+    END AS canonical_criterion_name,
     ar.criterion_type,
     -- Values
     ar.raw_value,
-    ar.value_number                 AS numeric_value,
+    COALESCE(
+        ar.value_number,
+        CASE WHEN ar.criterion_type = 'percentage' AND ar.raw_value IS NOT NULL
+             THEN NULLIF(regexp_replace(ar.raw_value#>>'{}', '[^0-9.]', '', 'g'), '')::numeric
+        END
+    ) AS numeric_value,
     ar.value_boolean                AS boolean_value,
     ar.value_text                   AS text_value,
     ar.value_category               AS category_value,
-    NULL::numeric                   AS percentage_value,
+    CASE WHEN ar.criterion_type = 'percentage' AND ar.raw_value IS NOT NULL
+         THEN NULLIF(regexp_replace(ar.raw_value#>>'{}', '[^0-9.]', '', 'g'), '')::numeric
+    END                             AS percentage_value,
     ar.feed                         AS feedback,
     -- Traceability
     a.prompt_id,
@@ -82,14 +145,80 @@ SELECT
     acr.criterion_key,
     COALESCE(acr.criterion_name,
         INITCAP(REPLACE(acr.criterion_key, '_', ' ')))  AS criterion_name,
+        
+    -- Canonical fields for Looker grouping
+    CASE
+        WHEN acr.criterion_key = 'trato_ustad' THEN 'trato_usted'
+        WHEN acr.criterion_key = 'puntalidad' THEN 'puntualidad'
+        ELSE acr.criterion_key
+    END AS canonical_criterion_key,
+    CASE
+        WHEN acr.criterion_key = 'trato_ustad' OR acr.criterion_key = 'trato_usted' THEN 'Trato de usted'
+        WHEN acr.criterion_key = 'saludo_inicio' THEN 'Saludo e Identificación'
+        WHEN acr.criterion_key = 'explicaciones_medicas' THEN 'Explicaciones médicas'
+        WHEN acr.criterion_key IN ('puntalidad', 'puntualidad') THEN 'Puntualidad'
+        WHEN acr.criterion_key = 'cierre_cita' THEN 'Cierre de cita'
+        WHEN acr.criterion_key = 'n3_preguntas' THEN 'Tres preguntas clave'
+        WHEN acr.criterion_key = 'tipo_llamada' THEN 'Tipo de llamada'
+        WHEN acr.criterion_key = 'motivo_no_cita' THEN 'Motivo no cita'
+        WHEN acr.criterion_key = 'duracion_consulta' THEN 'Duración de consulta'
+        WHEN acr.criterion_key = 'precio_consulta' THEN 'Precio de consulta'
+        WHEN acr.criterion_key = 'verifica_patologia' THEN 'Verifica patología'
+        WHEN acr.criterion_key = 'reformula_patologia' THEN 'Reformula patología'
+        WHEN acr.criterion_key = 'conocimiento_boston_medical' THEN 'Conocimiento previo de Boston Medical'
+        WHEN acr.criterion_key = 'direccion_y_referencias' THEN 'Dirección y referencias'
+        WHEN acr.criterion_key = 'medio' THEN 'Medio'
+        WHEN acr.criterion_key = 'edad' THEN 'Edad'
+        WHEN acr.criterion_key = 'patologia' THEN 'Patología'
+        WHEN acr.criterion_key = 'objeciones' THEN 'Objeciones'
+        WHEN acr.criterion_key = 'objecion_1' THEN 'Objeción principal'
+        WHEN acr.criterion_key = 'objecion_2' THEN 'Segunda objeción'
+        WHEN acr.criterion_key = 'objecion_3' THEN 'Tercera objeción'
+        WHEN acr.criterion_key = 'puede_adelantar_cita' THEN 'Puede adelantar cita'
+        WHEN acr.criterion_key = 'pregunta_pareja' THEN 'Pregunta por pareja'
+        WHEN acr.criterion_key = 'recomienda_pareja' THEN 'Recomienda venir con pareja'
+        WHEN acr.criterion_key = 'pareja_conocedora' THEN 'Pareja conocedora de la cita'
+        WHEN acr.criterion_key = 'pareja_asistira' THEN 'Pareja asistirá a la cita'
+        WHEN acr.criterion_key = 'claridad' THEN 'Claridad'
+        WHEN acr.criterion_key = 'procedimiento' THEN 'Explicación del procedimiento'
+        WHEN acr.criterion_key = 'gestion_objeciones' THEN 'Gestión de objeciones'
+        WHEN acr.criterion_key = 'propension' THEN 'Propensión al cierre'
+        WHEN acr.criterion_key = 'uso_preguntas' THEN 'Uso de preguntas'
+        WHEN acr.criterion_key = 'uso_nombre_paciente' THEN 'Uso del nombre del paciente'
+        WHEN acr.criterion_key = 'empatia' THEN 'Empatía'
+        WHEN acr.criterion_key = 'simpatia' THEN 'Simpatía'
+        WHEN acr.criterion_key = 'claridad_explicacion_economica' THEN 'Claridad en explicación económica'
+        WHEN acr.criterion_key = 'claridad_de_explicacion_de_precio_en_consulta' THEN 'Claridad en precio de consulta'
+        WHEN acr.criterion_key = 'despedida_con_refuerzo' THEN 'Despedida con refuerzo'
+        WHEN acr.criterion_key = 'siguiente_paso' THEN 'Siguiente paso establecido'
+        WHEN acr.criterion_key = 'velocidad_hablando_agente' THEN 'Velocidad hablando agente'
+        WHEN acr.criterion_key = 'interrupciones' THEN 'Interrupciones'
+        WHEN acr.criterion_key = 'sentiment' THEN 'Sentimiento de la llamada'
+        WHEN acr.criterion_key = 'hablando_agente' THEN 'Porcentaje hablando agente'
+        WHEN acr.criterion_key = 'hablando_paciente' THEN 'Porcentaje hablando paciente'
+        WHEN acr.criterion_key = 'palabras_minuto_agente' THEN 'Palabras por minuto agente'
+        WHEN acr.criterion_key = 'meses_patologia' THEN 'Meses con la patología'
+        WHEN acr.criterion_key = 'tratamiento_no_en_precio' THEN 'Tratamiento no en precio'
+        ELSE COALESCE(acr.criterion_name, INITCAP(REPLACE(acr.criterion_key, '_', ' ')))
+    END AS canonical_criterion_name,
     acr.criterion_type,
     -- Values
     acr.value_raw                   AS raw_value,
-    acr.numeric_value,
+    COALESCE(
+        acr.numeric_value,
+        CASE WHEN acr.criterion_type = 'percentage' AND acr.value_raw IS NOT NULL
+             THEN NULLIF(regexp_replace(acr.value_raw#>>'{}', '[^0-9.]', '', 'g'), '')::numeric
+        END
+    ) AS numeric_value,
     acr.boolean_value,
     acr.text_value,
     acr.category_value,
-    acr.percentage_value,
+    COALESCE(
+        acr.percentage_value,
+        CASE WHEN acr.criterion_type = 'percentage' AND acr.value_raw IS NOT NULL
+             THEN NULLIF(regexp_replace(acr.value_raw#>>'{}', '[^0-9.]', '', 'g'), '')::numeric
+        END
+    ) AS percentage_value,
     acr.feedback,
     -- Traceability
     a.prompt_id,
@@ -276,6 +405,8 @@ SELECT
     criterion_id,
     criterion_key,
     criterion_name,
+    canonical_criterion_key,
+    canonical_criterion_name,
     criterion_type,
     raw_value,
     numeric_value,
@@ -306,6 +437,8 @@ SELECT
     criterion_id,
     criterion_key,
     criterion_name,
+    canonical_criterion_key,
+    canonical_criterion_name,
     criterion_type,
     raw_value,
     numeric_value,

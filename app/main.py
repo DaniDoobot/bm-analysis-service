@@ -114,7 +114,9 @@ async def start_mass_evaluations_scheduler():
 # ── Startup ───────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup_event():
-    logger.info("bm-analysis-service starting up")
+    from app.routers.health import get_version
+    commit_ver = get_version()
+    logger.info("bm-analysis-service starting up (commit: %s)", commit_ver)
     logger.info("AI provider: azure_openai")
     logger.info("Azure text configured: %s", "yes" if settings.azure_openai_text_endpoint and settings.azure_openai_text_deployment else "no")
     logger.info("Azure audio configured: %s", "yes" if settings.azure_openai_audio_endpoint and settings.azure_openai_audio_deployment else "no")

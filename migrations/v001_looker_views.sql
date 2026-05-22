@@ -51,6 +51,62 @@ SELECT
     c.criterion_id,
     c.criterion_key,
     c.criterion_name,
+    
+    -- Canonical fields for Looker grouping
+    CASE
+        WHEN c.criterion_key = 'trato_ustad' THEN 'trato_usted'
+        WHEN c.criterion_key = 'puntalidad' THEN 'puntualidad'
+        ELSE c.criterion_key
+    END AS canonical_criterion_key,
+    CASE
+        WHEN c.criterion_key = 'trato_ustad' OR c.criterion_key = 'trato_usted' THEN 'Trato de usted'
+        WHEN c.criterion_key = 'saludo_inicio' THEN 'Saludo e Identificación'
+        WHEN c.criterion_key = 'explicaciones_medicas' THEN 'Explicaciones médicas'
+        WHEN c.criterion_key IN ('puntalidad', 'puntualidad') THEN 'Puntualidad'
+        WHEN c.criterion_key = 'cierre_cita' THEN 'Cierre de cita'
+        WHEN c.criterion_key = 'n3_preguntas' THEN 'Tres preguntas clave'
+        WHEN c.criterion_key = 'tipo_llamada' THEN 'Tipo de llamada'
+        WHEN c.criterion_key = 'motivo_no_cita' THEN 'Motivo no cita'
+        WHEN c.criterion_key = 'duracion_consulta' THEN 'Duración de consulta'
+        WHEN c.criterion_key = 'precio_consulta' THEN 'Precio de consulta'
+        WHEN c.criterion_key = 'verifica_patologia' THEN 'Verifica patología'
+        WHEN c.criterion_key = 'reformula_patologia' THEN 'Reformula patología'
+        WHEN c.criterion_key = 'conocimiento_boston_medical' THEN 'Conocimiento previo de Boston Medical'
+        WHEN c.criterion_key = 'direccion_y_referencias' THEN 'Dirección y referencias'
+        WHEN c.criterion_key = 'medio' THEN 'Medio'
+        WHEN c.criterion_key = 'edad' THEN 'Edad'
+        WHEN c.criterion_key = 'patologia' THEN 'Patología'
+        WHEN c.criterion_key = 'objeciones' THEN 'Objeciones'
+        WHEN c.criterion_key = 'objecion_1' THEN 'Objeción principal'
+        WHEN c.criterion_key = 'objecion_2' THEN 'Segunda objeción'
+        WHEN c.criterion_key = 'objecion_3' THEN 'Tercera objeción'
+        WHEN c.criterion_key = 'puede_adelantar_cita' THEN 'Puede adelantar cita'
+        WHEN c.criterion_key = 'pregunta_pareja' THEN 'Pregunta por pareja'
+        WHEN c.criterion_key = 'recomienda_pareja' THEN 'Recomienda venir con pareja'
+        WHEN c.criterion_key = 'pareja_conocedora' THEN 'Pareja conocedora de la cita'
+        WHEN c.criterion_key = 'pareja_asistira' THEN 'Pareja asistirá a la cita'
+        WHEN c.criterion_key = 'claridad' THEN 'Claridad'
+        WHEN c.criterion_key = 'procedimiento' THEN 'Explicación del procedimiento'
+        WHEN c.criterion_key = 'gestion_objeciones' THEN 'Gestión de objeciones'
+        WHEN c.criterion_key = 'propension' THEN 'Propensión al cierre'
+        WHEN c.criterion_key = 'uso_preguntas' THEN 'Uso de preguntas'
+        WHEN c.criterion_key = 'uso_nombre_paciente' THEN 'Uso del nombre del paciente'
+        WHEN c.criterion_key = 'empatia' THEN 'Empatía'
+        WHEN c.criterion_key = 'simpatia' THEN 'Simpatía'
+        WHEN c.criterion_key = 'claridad_explicacion_economica' THEN 'Claridad en explicación económica'
+        WHEN c.criterion_key = 'claridad_de_explicacion_de_precio_en_consulta' THEN 'Claridad en precio de consulta'
+        WHEN c.criterion_key = 'despedida_con_refuerzo' THEN 'Despedida con refuerzo'
+        WHEN c.criterion_key = 'siguiente_paso' THEN 'Siguiente paso establecido'
+        WHEN c.criterion_key = 'velocidad_hablando_agente' THEN 'Velocidad hablando agente'
+        WHEN c.criterion_key = 'interrupciones' THEN 'Interrupciones'
+        WHEN c.criterion_key = 'sentiment' THEN 'Sentimiento de la llamada'
+        WHEN c.criterion_key = 'hablando_agente' THEN 'Porcentaje hablando agente'
+        WHEN c.criterion_key = 'hablando_paciente' THEN 'Porcentaje hablando paciente'
+        WHEN c.criterion_key = 'palabras_minuto_agente' THEN 'Palabras por minuto agente'
+        WHEN c.criterion_key = 'meses_patologia' THEN 'Meses con la patología'
+        WHEN c.criterion_key = 'tratamiento_no_en_precio' THEN 'Tratamiento no en precio'
+        ELSE COALESCE(c.criterion_name, INITCAP(REPLACE(c.criterion_key, '_', ' ')))
+    END AS canonical_criterion_name,
     c.criterion_type,
 
     -- Applicability flag
@@ -59,11 +115,21 @@ SELECT
 
     -- Values (typed columns – Looker should use these for aggregation/filtering)
     c.value_raw                 AS raw_value,
-    c.numeric_value,            -- for score_1_10 / number / percentage types
-    c.boolean_value,            -- for boolean type (use for ratio calculations)
-    c.text_value,               -- for text type
-    c.category_value,           -- for category type
-    c.percentage_value,         -- for percentage type (0–100 scale)
+    COALESCE(
+        c.numeric_value,
+        CASE WHEN c.criterion_type = 'percentage' AND c.value_raw IS NOT NULL
+             THEN NULLIF(regexp_replace(c.value_raw#>>'{}', '[^0-9.]', '', 'g'), '')::numeric
+        END
+    ) AS numeric_value,
+    c.boolean_value,
+    c.text_value,
+    c.category_value,
+    COALESCE(
+        c.percentage_value,
+        CASE WHEN c.criterion_type = 'percentage' AND c.value_raw IS NOT NULL
+             THEN NULLIF(regexp_replace(c.value_raw#>>'{}', '[^0-9.]', '', 'g'), '')::numeric
+        END
+    ) AS percentage_value,
     c.feedback,                 -- qualitative feedback / justification
 
     -- Prompt traceability
