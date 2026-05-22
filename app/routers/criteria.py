@@ -34,9 +34,21 @@ async def save_criterion(
     body: SaveCriterionRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Create or update a criterion."""
-    criterion = await criteria_service.save_criterion(db, body)
-    return {"ok": True, "status": "saved", "criterion_id": criterion.criterion_id}
+    """Create, restore, or update a criterion."""
+    logger.info(f"Received request to save criterion. Body: {body.model_dump()}")
+    try:
+        criterion = await criteria_service.save_criterion(db, body)
+        logger.info(f"Successfully saved criterion (ID: {criterion.criterion_id}, key: '{criterion.criterion_key}').")
+        return {"ok": True, "status": "saved", "criterion_id": criterion.criterion_id}
+    except HTTPException as he:
+        logger.warning(f"HTTPException while saving criterion: {he.detail} (status: {he.status_code})")
+        raise he
+    except Exception as e:
+        logger.exception("Unexpected error while saving criterion: %s", e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error interno del servidor al guardar el criterio: {str(e)}"
+        )
 
 
 @router.post("/prompt-criteria/toggle")
