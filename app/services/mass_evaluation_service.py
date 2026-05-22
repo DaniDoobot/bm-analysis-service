@@ -96,6 +96,40 @@ def calculate_next_run(
     return None
 
 
+def normalize_resolved_dates(date_from: datetime | None, date_to: datetime | None, timezone_name: str = "Europe/Madrid") -> tuple[datetime | None, datetime | None]:
+    try:
+        tz = zoneinfo.ZoneInfo(timezone_name)
+    except Exception:
+        tz = zoneinfo.ZoneInfo("Europe/Madrid")
+
+    def is_date_only_val(dt: datetime, target_tz) -> bool:
+        if dt.hour == 0 and dt.minute == 0 and dt.second == 0 and dt.microsecond == 0:
+            return True
+        dt_utc = dt.astimezone(timezone.utc)
+        if dt_utc.hour == 0 and dt_utc.minute == 0 and dt_utc.second == 0 and dt_utc.microsecond == 0:
+            return True
+        dt_tz = dt.astimezone(target_tz)
+        if dt_tz.hour == 0 and dt_tz.minute == 0 and dt_tz.second == 0 and dt_tz.microsecond == 0:
+            return True
+        return False
+
+    if date_from is not None:
+        dt_from_tz = date_from.astimezone(tz) if date_from.tzinfo else date_from.replace(tzinfo=tz)
+        if is_date_only_val(date_from, tz):
+            date_from = datetime.combine(dt_from_tz.date(), time.min).replace(tzinfo=tz)
+        else:
+            date_from = dt_from_tz
+
+    if date_to is not None:
+        dt_to_tz = date_to.astimezone(tz) if date_to.tzinfo else date_to.replace(tzinfo=tz)
+        if is_date_only_val(date_to, tz):
+            date_to = datetime.combine(dt_to_tz.date(), time(23, 59, 59, 999000)).replace(tzinfo=tz)
+        else:
+            date_to = dt_to_tz
+
+    return date_from, date_to
+
+
 def resolve_date_filters(job: MassEvaluationJob, timezone_name: str = "Europe/Madrid") -> tuple[datetime | None, datetime | None]:
     try:
         tz = zoneinfo.ZoneInfo(timezone_name)
@@ -103,6 +137,11 @@ def resolve_date_filters(job: MassEvaluationJob, timezone_name: str = "Europe/Ma
         tz = zoneinfo.ZoneInfo("Europe/Madrid")
         
     now = datetime.now(tz)
+
+    # 1. Si date_from o date_to vienen informados explícitamente, tienen prioridad sobre last_n_days.
+    # 2. Solo calcular date_from/date_to usando last_n_days cuando no exista ningún rango manual.
+    if job.date_from is not None or job.date_to is not None:
+        return normalize_resolved_dates(job.date_from, job.date_to, timezone_name)
 
     if job.date_mode == "relative":
         days = job.relative_days or 1
@@ -122,10 +161,9 @@ def resolve_date_filters(job: MassEvaluationJob, timezone_name: str = "Europe/Ma
         date_to = datetime.combine((start_of_this_week - timedelta(days=1)).date(), time.max).replace(tzinfo=tz)
         return date_from, date_to
 
-    elif job.date_mode in ["fixed_range", "custom"]:
-        return job.date_from, job.date_to
-
-    return None, None
+    # Fallback default: past 24 hours (1 relative day)
+    date_from = now - timedelta(days=1)
+    return date_from, now
 
 
 async def enrich_job_prompt_info(db: AsyncSession, job: MassEvaluationJob) -> None:
@@ -322,6 +360,8 @@ class MassEvaluationService:
         if override_date_to:
             date_to = override_date_to
             
+        date_from, date_to = normalize_resolved_dates(date_from, date_to, job.timezone)
+
         filters = {
             "date_from": date_from,
             "date_to": date_to,
@@ -377,6 +417,8 @@ class MassEvaluationService:
         if override_date_to:
             date_to = override_date_to
             
+        date_from, date_to = normalize_resolved_dates(date_from, date_to, job.timezone)
+
         effective_filters = {
             "date_from": date_from.isoformat() if date_from else None,
             "date_to": date_to.isoformat() if date_to else None,
@@ -1111,3 +1153,159 @@ class MassEvaluationService:
                 logger.error("Scheduler failed to launch due job ID %d ('%s'): %s", job.job_id, job.job_name, e)
                 
         return {"due_jobs_count": due_count, "launched_jobs_count": launched_count}
+
+    @staticmethod
+    async def backfill_mass_criterion_typologies(db: AsyncSession, payload: Any) -> dict[str, Any]:
+        from app.models.mass_evaluations import MassEvaluationCriterionResult, MassEvaluationResult
+        from app.models.typologies import Typology
+        from collections import defaultdict
+
+        # 1. Distinct mass_analysis_id with null typology_key
+        stmt_nulls = select(MassEvaluationCriterionResult.mass_analysis_id).where(
+            MassEvaluationCriterionResult.typology_key.is_(None)
+        ).distinct()
+        res_nulls = await db.execute(stmt_nulls)
+        null_analysis_ids = list(res_nulls.scalars().all())
+
+        if not null_analysis_ids:
+            if payload.mode == "dry_run":
+                return {
+                    "analyses_with_null_typology": 0,
+                    "analyses_resolvable": 0,
+                    "analyses_unresolved": 0,
+                    "rows_to_update": 0,
+                    "examples": []
+                }
+            else:
+                return {
+                    "updated_rows": 0,
+                    "updated_analyses": 0,
+                    "unresolved_analyses": 0,
+                    "warnings": ["No analyses with null typologies found."]
+                }
+
+        # 2. Get all typology_key rows to extract 'tipo_llamada'
+        stmt_tipo = select(MassEvaluationCriterionResult).where(
+            MassEvaluationCriterionResult.mass_analysis_id.in_(null_analysis_ids),
+            MassEvaluationCriterionResult.criterion_key == 'tipo_llamada'
+        )
+        res_tipo = await db.execute(stmt_tipo)
+        tipo_rows = res_tipo.scalars().all()
+
+        tipo_map_by_analysis = {r.mass_analysis_id: r for r in tipo_rows}
+
+        # 3. Load all typologies
+        stmt_typs = select(Typology)
+        res_typs = await db.execute(stmt_typs)
+        all_typologies = res_typs.scalars().all()
+
+        typology_map = {}
+        for t in all_typologies:
+            # Map (service_id, typology_key.lower().strip()) -> Typology
+            key = (t.service_id, t.typology_key.lower().strip())
+            typology_map[key] = t
+
+        # 4. Get all criterion rows where typology_key is NULL for grouping
+        stmt_null_rows = select(MassEvaluationCriterionResult).where(
+            MassEvaluationCriterionResult.mass_analysis_id.in_(null_analysis_ids),
+            MassEvaluationCriterionResult.typology_key.is_(None)
+        )
+        res_null_rows = await db.execute(stmt_null_rows)
+        null_rows = res_null_rows.scalars().all()
+
+        rows_by_analysis = defaultdict(list)
+        for r in null_rows:
+            rows_by_analysis[r.mass_analysis_id].append(r)
+
+        # 5. Process
+        analyses_with_null_typology = len(null_analysis_ids)
+        analyses_resolvable = 0
+        analyses_unresolved = 0
+        rows_to_update = 0
+        examples = []
+
+        resolvable_data = [] # List of tuples: (mass_analysis_id, Typology object, list of affected rows, tipo_row)
+
+        for mass_analysis_id in null_analysis_ids:
+            tipo_row = tipo_map_by_analysis.get(mass_analysis_id)
+            if not tipo_row:
+                analyses_unresolved += 1
+                continue
+
+            detected_value = tipo_row.category_value or tipo_row.text_value
+            service_id = tipo_row.service_id
+
+            if not detected_value or not service_id:
+                analyses_unresolved += 1
+                continue
+
+            norm_val = str(detected_value).lower().strip()
+            t_obj = typology_map.get((service_id, norm_val))
+
+            if not t_obj:
+                analyses_unresolved += 1
+                continue
+
+            analyses_resolvable += 1
+            affected_rows = rows_by_analysis.get(mass_analysis_id, [])
+            rows_to_update += len(affected_rows)
+
+            resolvable_data.append((mass_analysis_id, t_obj, affected_rows, tipo_row))
+
+            if len(examples) < 10:
+                examples.append({
+                    "mass_analysis_id": mass_analysis_id,
+                    "call_id": tipo_row.call_id,
+                    "detected_value": detected_value,
+                    "resolved_typology_key": t_obj.typology_key,
+                    "resolved_typology_name": t_obj.typology_name,
+                    "rows_affected": len(affected_rows)
+                })
+
+        if payload.mode == "dry_run":
+            return {
+                "analyses_with_null_typology": analyses_with_null_typology,
+                "analyses_resolvable": analyses_resolvable,
+                "analyses_unresolved": analyses_unresolved,
+                "rows_to_update": rows_to_update,
+                "examples": examples
+            }
+
+        # payload.mode == "execute"
+        updated_rows = 0
+        updated_analyses = 0
+        unresolved_analyses = analyses_unresolved
+        warnings = []
+
+        for mass_analysis_id, t_obj, affected_rows, tipo_row in resolvable_data:
+            try:
+                # Update criterion results
+                for r in affected_rows:
+                    r.typology_id = t_obj.typology_id
+                    r.typology_key = t_obj.typology_key
+                    r.typology_name = t_obj.typology_name
+
+                # Update parent result if present
+                stmt_parent = select(MassEvaluationResult).where(MassEvaluationResult.mass_analysis_id == mass_analysis_id)
+                res_parent = await db.execute(stmt_parent)
+                parent = res_parent.scalars().first()
+                if parent:
+                    parent.typology_id = t_obj.typology_id
+                    parent.typology_key = t_obj.typology_key
+                    parent.typology_name = t_obj.typology_name
+
+                updated_rows += len(affected_rows)
+                updated_analyses += 1
+            except Exception as ex:
+                warnings.append(f"Error updating analysis ID {mass_analysis_id}: {str(ex)}")
+                unresolved_analyses += 1
+
+        if updated_analyses > 0:
+            await db.commit()
+
+        return {
+            "updated_rows": updated_rows,
+            "updated_analyses": updated_analyses,
+            "unresolved_analyses": unresolved_analyses,
+            "warnings": warnings
+        }

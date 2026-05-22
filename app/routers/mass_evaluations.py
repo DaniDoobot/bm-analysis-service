@@ -14,6 +14,7 @@ from app.schemas.mass_evaluations import (
     MassEvaluationResultResponse,
     MassEvaluationRunResponse,
     MassEvaluationRunLaunchResponse,
+    MassCriterionTypologyBackfillRequest,
 )
 from app.services.mass_evaluation_service import MassEvaluationService
 
@@ -276,3 +277,21 @@ async def get_result(
     d = MassEvaluationResultResponse.model_validate(result)
     d.items_visual = build_items_visual(result.items_json)
     return d
+
+
+@router.post("/admin/backfill-mass-criterion-typologies", status_code=status.HTTP_200_OK)
+async def backfill_mass_criterion_typologies(
+    payload: MassCriterionTypologyBackfillRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Backfill typology fields in MassEvaluationCriterionResult and parent MassEvaluationResult
+    for historical mass evaluation rows using the value from 'tipo_llamada' criterion.
+    """
+    try:
+        return await MassEvaluationService.backfill_mass_criterion_typologies(db, payload=payload)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Backfill operation failed: {str(e)}"
+        )

@@ -375,3 +375,8 @@ class MassEvaluationRunLaunchResponse(BaseModel):
     message: str = "Run started"
     polling_url: str
     run: MassEvaluationRunResponse
+
+
+class MassCriterionTypologyBackfillRequest(BaseModel):
+    mode: str  # "dry_run" | "execute"
+    performed_by_email: str
