@@ -54,6 +54,11 @@ async def create_job(
     """Create a new mass evaluation job."""
     try:
         return await MassEvaluationService.create_job(db, payload=payload)
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(ve)
+        )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -68,13 +73,24 @@ async def update_job(
     db: AsyncSession = Depends(get_db)
 ):
     """Update an existing mass evaluation job."""
-    job = await MassEvaluationService.update_job(db, job_id=job_id, payload=payload)
-    if not job:
+    try:
+        job = await MassEvaluationService.update_job(db, job_id=job_id, payload=payload)
+        if not job:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job ID {job_id} not found."
+            )
+        return job
+    except ValueError as ve:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Job ID {job_id} not found."
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(ve)
         )
-    return job
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to update job: {str(e)}"
+        )
 
 
 @router.delete("/mass-evaluation-jobs/{job_id}")

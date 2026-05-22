@@ -135,11 +135,14 @@ async def enrich_job_prompt_info(db: AsyncSession, job: MassEvaluationJob) -> No
     prompt = res.scalars().first()
     if prompt:
         job.prompt_name = prompt.prompt_name
-        # Find specified version or active one
         if job.prompt_version_id:
             stmt_v = select(PromptVersion).where(PromptVersion.id == job.prompt_version_id)
         else:
-            stmt_v = select(PromptVersion).where(PromptVersion.prompt_id == job.prompt_id, PromptVersion.is_current == True).order_by(PromptVersion.id.desc())
+            stmt_v = (
+                select(PromptVersion)
+                .where(PromptVersion.prompt_id == job.prompt_id)
+                .order_by(PromptVersion.is_current.desc(), PromptVersion.id.desc())
+            )
             
         res_v = await db.execute(stmt_v)
         v = res_v.scalars().first()
@@ -160,11 +163,7 @@ class MassEvaluationService:
             raise ValueError(f"La estructura con ID {payload.prompt_id} no existe.")
 
         if prompt.is_archived or prompt.deleted_at is not None:
-            raise ValueError("No se puede crear un job con una estructura inactiva o archivada. Publícala antes de usarla.")
-
-        if not prompt.is_active:
-            if not payload.allow_inactive_prompt or not payload.test_mode:
-                raise ValueError("No se puede crear un job con una estructura inactiva o archivada. Publícala antes de usarla.")
+            raise ValueError("La estructura seleccionada no existe o está archivada.")
 
         # Check for active draft warning
         from app.models.drafts import PromptDraft
@@ -235,11 +234,7 @@ class MassEvaluationService:
                 raise ValueError(f"La estructura con ID {prompt_id_to_check} no existe.")
 
             if prompt.is_archived or prompt.deleted_at is not None:
-                raise ValueError("No se puede crear un job con una estructura inactiva o archivada. Publícala antes de usarla.")
-
-            if not prompt.is_active:
-                if not allow_inactive or not test_mode:
-                    raise ValueError("No se puede crear un job con una estructura inactiva o archivada. Publícala antes de usarla.")
+                raise ValueError("La estructura seleccionada no existe o está archivada.")
 
             # Check for active draft warning
             from app.models.drafts import PromptDraft
@@ -475,8 +470,8 @@ class MassEvaluationService:
                 else:
                     v_stmt = (
                         select(PromptVersion)
-                        .where(PromptVersion.prompt_id == prompt_id, PromptVersion.is_current == True)
-                        .order_by(PromptVersion.id.desc())
+                        .where(PromptVersion.prompt_id == prompt_id)
+                        .order_by(PromptVersion.is_current.desc(), PromptVersion.id.desc())
                     )
                     
                 v_res = await db.execute(v_stmt)
