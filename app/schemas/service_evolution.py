@@ -33,6 +33,7 @@ class ServiceEvolutionSeriesItem(BaseModel):
     avg_simpatia: float | None = None
     avg_claridad: float | None = None
     avg_procedimiento: float | None = None
+    avg_saludo_inicio: float | None = None
     avg_n3_preguntas: float | None = None
     avg_gestion_objeciones: float | None = None
     avg_propension: float | None = None

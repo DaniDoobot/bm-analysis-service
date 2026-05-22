@@ -220,10 +220,12 @@ class ServiceEvolutionService:
         }
 
         # 2. Get Summary metrics
+        # NOTE: evaluacion_global is stored in result_json, not in bm_mass_evaluation_criterion_results,
+        # so we extract it directly from the JSONB column on bm_mass_evaluation_results.
         summary_query = text("""
             SELECT 
                 COUNT(DISTINCT r.mass_analysis_id) AS total_calls,
-                AVG(CASE WHEN c.criterion_key = 'evaluacion_global' AND c.is_applicable = true THEN c.numeric_value END) AS avg_evaluacion_global,
+                AVG((r.result_json->>'evaluacion_global')::numeric) AS avg_evaluacion_global,
                 AVG(CASE WHEN c.criterion_key = 'claridad' AND c.is_applicable = true THEN c.numeric_value END) AS avg_claridad,
                 AVG(CASE WHEN c.criterion_key = 'empatia' AND c.is_applicable = true THEN c.numeric_value END) AS avg_empatia,
                 AVG(CASE WHEN c.criterion_key = 'procedimiento' AND c.is_applicable = true THEN c.numeric_value END) AS avg_procedimiento,
@@ -231,6 +233,7 @@ class ServiceEvolutionService:
             FROM bm_mass_evaluation_results r
             LEFT JOIN bm_mass_evaluation_criterion_results c ON r.mass_analysis_id = c.mass_analysis_id
             WHERE r.status = 'completed'
+              AND r.result_json IS NOT NULL
               AND (CAST(:service_id AS integer) IS NULL OR r.service_id = CAST(:service_id AS integer))
               AND (CAST(:service_key AS text) IS NULL OR r.service_key = CAST(:service_key AS text))
               AND (CAST(:date_from AS timestamptz) IS NULL OR r.created_at >= CAST(:date_from AS timestamptz))
@@ -301,13 +304,18 @@ class ServiceEvolutionService:
         else:
             period_expr = "r.created_at::date"
 
+        # NOTE: evaluacion_global is extracted from result_json (not from criterion_results table).
+        # Column indices:  0=period, 1=service_id, 2=service_name, 3=total_calls,
+        #   4=avg_evaluacion_global, 5=avg_sentiment, 6=avg_empatia, 7=avg_simpatia,
+        #   8=avg_claridad, 9=avg_procedimiento, 10=avg_saludo_inicio, 11=avg_n3_preguntas,
+        #   12=avg_gestion_objeciones, 13=avg_propension, 14=cierre_cita_rate
         series_query = text(f"""
             SELECT 
                 {period_expr} AS period,
                 r.service_id,
                 r.service_name,
                 COUNT(DISTINCT r.mass_analysis_id) AS total_calls,
-                AVG(CASE WHEN c.criterion_key = 'evaluacion_global' AND c.is_applicable = true THEN c.numeric_value END) AS avg_evaluacion_global,
+                AVG((r.result_json->>'evaluacion_global')::numeric) AS avg_evaluacion_global,
                 AVG(CASE WHEN c.criterion_key = 'sentiment' AND c.is_applicable = true THEN c.numeric_value END) AS avg_sentiment,
                 AVG(CASE WHEN c.criterion_key = 'empatia' AND c.is_applicable = true THEN c.numeric_value END) AS avg_empatia,
                 AVG(CASE WHEN c.criterion_key = 'simpatia' AND c.is_applicable = true THEN c.numeric_value END) AS avg_simpatia,
@@ -321,6 +329,7 @@ class ServiceEvolutionService:
             FROM bm_mass_evaluation_results r
             LEFT JOIN bm_mass_evaluation_criterion_results c ON r.mass_analysis_id = c.mass_analysis_id
             WHERE r.status = 'completed'
+              AND r.result_json IS NOT NULL
               AND (CAST(:service_id AS integer) IS NULL OR r.service_id = CAST(:service_id AS integer))
               AND (CAST(:service_key AS text) IS NULL OR r.service_key = CAST(:service_key AS text))
               AND (CAST(:date_from AS timestamptz) IS NULL OR r.created_at >= CAST(:date_from AS timestamptz))
@@ -347,10 +356,11 @@ class ServiceEvolutionService:
                 avg_simpatia=float(row[7]) if row[7] is not None else None,
                 avg_claridad=float(row[8]) if row[8] is not None else None,
                 avg_procedimiento=float(row[9]) if row[9] is not None else None,
-                avg_n3_preguntas=float(row[10]) if row[10] is not None else None,
-                avg_gestion_objeciones=float(row[11]) if row[11] is not None else None,
-                avg_propension=float(row[12]) if row[12] is not None else None,
-                cierre_cita_rate=float(row[13]) if row[13] is not None else None,
+                avg_saludo_inicio=float(row[10]) if row[10] is not None else None,  # row[10]
+                avg_n3_preguntas=float(row[11]) if row[11] is not None else None,   # row[11]
+                avg_gestion_objeciones=float(row[12]) if row[12] is not None else None,  # row[12]
+                avg_propension=float(row[13]) if row[13] is not None else None,     # row[13]
+                cierre_cita_rate=float(row[14]) if row[14] is not None else None,   # row[14]
             ))
 
         # 5. Get Typology split
@@ -359,11 +369,12 @@ class ServiceEvolutionService:
                 r.typology_key,
                 COALESCE(r.typology_name, 'Unclassified') AS typology_name,
                 COUNT(DISTINCT r.mass_analysis_id) AS total_calls,
-                AVG(CASE WHEN c.criterion_key = 'evaluacion_global' AND c.is_applicable = true THEN c.numeric_value END) AS avg_evaluacion_global,
+                AVG((r.result_json->>'evaluacion_global')::numeric) AS avg_evaluacion_global,
                 AVG(CASE WHEN c.criterion_key = 'cierre_cita' AND c.is_applicable = true AND c.boolean_value IS NOT NULL THEN c.boolean_value::int END) AS cierre_cita_rate
             FROM bm_mass_evaluation_results r
             LEFT JOIN bm_mass_evaluation_criterion_results c ON r.mass_analysis_id = c.mass_analysis_id
             WHERE r.status = 'completed'
+              AND r.result_json IS NOT NULL
               AND (CAST(:service_id AS integer) IS NULL OR r.service_id = CAST(:service_id AS integer))
               AND (CAST(:service_key AS text) IS NULL OR r.service_key = CAST(:service_key AS text))
               AND (CAST(:date_from AS timestamptz) IS NULL OR r.created_at >= CAST(:date_from AS timestamptz))
@@ -391,12 +402,13 @@ class ServiceEvolutionService:
                 r.hubspot_owner_id AS agent_owner_id,
                 COALESCE(r.agent_name, 'Unknown') AS agent_name,
                 COUNT(DISTINCT r.mass_analysis_id) AS total_calls,
-                AVG(CASE WHEN c.criterion_key = 'evaluacion_global' AND c.is_applicable = true THEN c.numeric_value END) AS avg_evaluacion_global,
+                AVG((r.result_json->>'evaluacion_global')::numeric) AS avg_evaluacion_global,
                 AVG(CASE WHEN c.criterion_key = 'claridad' AND c.is_applicable = true THEN c.numeric_value END) AS avg_claridad,
                 AVG(CASE WHEN c.criterion_key = 'cierre_cita' AND c.is_applicable = true AND c.boolean_value IS NOT NULL THEN c.boolean_value::int END) AS cierre_cita_rate
             FROM bm_mass_evaluation_results r
             LEFT JOIN bm_mass_evaluation_criterion_results c ON r.mass_analysis_id = c.mass_analysis_id
             WHERE r.status = 'completed'
+              AND r.result_json IS NOT NULL
               AND (CAST(:service_id AS integer) IS NULL OR r.service_id = CAST(:service_id AS integer))
               AND (CAST(:service_key AS text) IS NULL OR r.service_key = CAST(:service_key AS text))
               AND (CAST(:date_from AS timestamptz) IS NULL OR r.created_at >= CAST(:date_from AS timestamptz))
