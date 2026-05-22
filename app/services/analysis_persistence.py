@@ -274,7 +274,8 @@ async def _insert_results(
     prompt_id: int,
     matched_typology: Any | None = None,
 ) -> None:
-    """Insert per-criterion rows in bm_analysis_results."""
+    """Insert per-criterion rows in bm_analysis_criterion_results."""
+    from app.models.analyses import AnalysisCriterionResult
     criteria: list[PromptCriterion] = await get_active_criteria(db, prompt_id)
     c_ids = [c.criterion_id for c in criteria]
 
@@ -305,33 +306,60 @@ async def _insert_results(
 
             typed = map_criterion_value(raw_value, criterion.criterion_type or "text")
 
-            row = AnalysisResult(
+            row = AnalysisCriterionResult(
                 analysis_id=analysis.analysis_id,
+                call_id=analysis.call_id,
+                prompt_id=analysis.prompt_id,
+                prompt_version_id=analysis.prompt_version_id,
                 criterion_id=criterion.criterion_id,
                 criterion_key=criterion.criterion_key,
                 criterion_name=criterion.criterion_name,
                 criterion_type=criterion.criterion_type,
-                value_number=typed["value_number"],
-                value_text=typed["value_text"],
-                value_boolean=typed["value_boolean"],
-                value_category=typed["value_category"],
-                feed=str(feed_value) if feed_value is not None else None,
-                description=criterion.criterion_description,
-                raw_value=typed["raw_value"],
+                value_raw=typed["raw_value"],
+                numeric_value=typed["value_number"],
+                text_value=typed["value_text"],
+                boolean_value=typed["value_boolean"],
+                category_value=typed["value_category"],
+                percentage_value=typed["value_number"] if criterion.criterion_type == "percentage" else None,
+                feedback=str(feed_value) if feed_value is not None else None,
+                feed_key=feed_key,
+                is_applicable=True,
+                not_applicable=False,
+                typology_id=matched_typology.typology_id if matched_typology else None,
+                typology_key=matched_typology.typology_key if matched_typology else None,
+                typology_name=matched_typology.typology_name if matched_typology else None,
             )
         else:
-            row = AnalysisResult(
+            row = AnalysisCriterionResult(
                 analysis_id=analysis.analysis_id,
+                call_id=analysis.call_id,
+                prompt_id=analysis.prompt_id,
+                prompt_version_id=analysis.prompt_version_id,
                 criterion_id=criterion.criterion_id,
                 criterion_key=criterion.criterion_key,
                 criterion_name=criterion.criterion_name,
                 criterion_type=criterion.criterion_type,
-                value_number=None,
-                value_text=None,
-                value_boolean=None,
-                value_category=None,
-                feed=None,
-                description=criterion.criterion_description,
-                raw_value=None,
+                value_raw=None,
+                numeric_value=None,
+                text_value=None,
+                boolean_value=None,
+                category_value=None,
+                percentage_value=None,
+                feedback=None,
+                feed_key=feed_key,
+                is_applicable=False,
+                not_applicable=True,
+                typology_id=matched_typology.typology_id if matched_typology else None,
+                typology_key=matched_typology.typology_key if matched_typology else None,
+                typology_name=matched_typology.typology_name if matched_typology else None,
             )
+        
+        # Inject service info if prompt context is loaded
+        # Note: Analysis row doesn't have service directly in this function without a join,
+        # but the view handles service_name, or we can fetch it if strictly needed.
+        # It's better to fetch service for the typology.
+        if matched_typology:
+            row.service_id = matched_typology.service_id
+            
         db.add(row)
+

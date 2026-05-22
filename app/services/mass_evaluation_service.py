@@ -603,6 +603,13 @@ class MassEvaluationService:
  
                     call_id = call["call_id"]
                     recording_url = call["recording_url"]
+
+                    # Delete any previous result for this job and call to allow overwrite
+                    await db.execute(delete(MassEvaluationResult).where(
+                        MassEvaluationResult.job_id == job_id,
+                        MassEvaluationResult.call_id == call_id
+                    ))
+                    await db.flush()
                     
                     if not recording_url:
                         # Skip
@@ -719,23 +726,37 @@ class MassEvaluationService:
                                     resolved_val = typed["value_text"] or typed["value_category"] or typed["raw_value"]
  
                                 items.append({
+                                    "criterion_id": criterion.criterion_id,
                                     "criterion_key": criterion.criterion_key,
                                     "name": criterion.criterion_name,
                                     "type": criterion.criterion_type,
                                     "output_key": output_key,
                                     "value": resolved_val,
                                     "feed": str(feed_value) if feed_value is not None else None,
-                                    "not_applicable": False
+                                    "not_applicable": False,
+                                    "numeric_value": typed["value_number"],
+                                    "text_value": typed["value_text"],
+                                    "boolean_value": typed["value_boolean"],
+                                    "category_value": typed["value_category"],
+                                    "percentage_value": typed["value_number"] if criterion.criterion_type == "percentage" else None,
+                                    "raw_value": typed["raw_value"],
                                 })
                             else:
                                 items.append({
+                                    "criterion_id": criterion.criterion_id,
                                     "criterion_key": criterion.criterion_key,
                                     "name": criterion.criterion_name,
                                     "type": criterion.criterion_type,
                                     "output_key": output_key,
                                     "value": None,
                                     "feed": None,
-                                    "not_applicable": True
+                                    "not_applicable": True,
+                                    "numeric_value": None,
+                                    "text_value": None,
+                                    "boolean_value": None,
+                                    "category_value": None,
+                                    "percentage_value": None,
+                                    "raw_value": None,
                                 })
                             
                         # Resolve agent name display
@@ -772,6 +793,42 @@ class MassEvaluationService:
                             typology_name=typology_name
                         )
                         db.add(res_row)
+                        await db.flush()
+
+                        # Persist normalized criteria
+                        from app.models.mass_evaluations import MassEvaluationCriterionResult
+                        for item in items:
+                            crit_res = MassEvaluationCriterionResult(
+                                mass_analysis_id=res_row.mass_analysis_id,
+                                run_id=run_id,
+                                job_id=job_id,
+                                call_id=call_id,
+                                hs_object_id=call["hs_object_id"],
+                                prompt_id=prompt_id,
+                                prompt_version_id=prompt_version_id,
+                                criterion_id=item.get("criterion_id"),
+                                criterion_key=item["criterion_key"],
+                                criterion_name=item["name"],
+                                criterion_type=item["type"],
+                                value_raw=item.get("raw_value"),
+                                numeric_value=item.get("numeric_value"),
+                                text_value=item.get("text_value"),
+                                boolean_value=item.get("boolean_value"),
+                                category_value=item.get("category_value"),
+                                percentage_value=item.get("percentage_value"),
+                                feedback=item.get("feed"),
+                                feed_key=None,
+                                is_applicable=not item.get("not_applicable", False),
+                                not_applicable=item.get("not_applicable", False),
+                                service_id=service_id,
+                                service_key=service_key,
+                                service_name=service_name,
+                                typology_id=typology_id,
+                                typology_key=typology_key,
+                                typology_name=typology_name
+                            )
+                            db.add(crit_res)
+                        
                         calls_analyzed += 1
                         
                     except Exception as e_call:

@@ -228,6 +228,62 @@ async def init_db():
                     await conn.execute(text(f"ALTER TABLE bm_prompt_criteria ADD COLUMN {col_name} {col_type} {col_default};"))
                     logger.info("Column '%s' added successfully to 'bm_prompt_criteria'.", col_name)
 
+            # 1.7 Create flat reporting views for normalized criteria results
+            logger.info("Ensuring reporting views exist...")
+            await conn.execute(text("""
+                CREATE OR REPLACE VIEW vw_bm_analysis_criteria_flat AS
+                SELECT
+                    a.analysis_id,
+                    a.call_id,
+                    a.hubspot_url,
+                    a.call_timestamp,
+                    a.agente_telefonico,
+                    a.tipo_llamada,
+                    a.evaluacion_global,
+                    a.prompt_id,
+                    c.criterion_key,
+                    c.criterion_name,
+                    c.criterion_type,
+                    c.numeric_value,
+                    c.text_value,
+                    c.boolean_value,
+                    c.category_value,
+                    c.percentage_value,
+                    c.feedback,
+                    c.is_applicable,
+                    c.service_name,
+                    c.typology_name
+                FROM bm_analyses a
+                JOIN bm_analysis_criterion_results c ON a.analysis_id = c.analysis_id;
+            """))
+
+            await conn.execute(text("""
+                CREATE OR REPLACE VIEW vw_bm_mass_evaluation_criteria_flat AS
+                SELECT
+                    m.mass_analysis_id,
+                    m.run_id,
+                    m.job_id,
+                    m.call_id,
+                    m.agent_name,
+                    m.call_timestamp,
+                    m.prompt_id,
+                    c.criterion_key,
+                    c.criterion_name,
+                    c.criterion_type,
+                    c.numeric_value,
+                    c.text_value,
+                    c.boolean_value,
+                    c.category_value,
+                    c.percentage_value,
+                    c.feedback,
+                    c.is_applicable,
+                    c.service_name,
+                    c.typology_name
+                FROM bm_mass_evaluation_results m
+                JOIN bm_mass_evaluation_criterion_results c ON m.mass_analysis_id = c.mass_analysis_id;
+            """))
+            logger.info("Reporting views ensured.")
+
         # 2. Safe backfill: Force default_criteria to NULL and prompt_type to 'text' on ALL base structures.
         # This runs in its own isolated transaction so it always commits, regardless of
         # any failures in subsequent seeding steps.

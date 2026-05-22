@@ -1,5 +1,6 @@
 """SQLAlchemy models for automated mass evaluations."""
 from datetime import datetime, time
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -9,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     Time,
@@ -163,3 +165,47 @@ class MassEvaluationResult(Base):
         Index("idx_mass_eval_results_hubspot_owner_id", "hubspot_owner_id"),
         Index("idx_mass_eval_results_call_timestamp", "call_timestamp"),
     )
+
+
+class MassEvaluationCriterionResult(Base):
+    __tablename__ = "bm_mass_evaluation_criterion_results"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    mass_analysis_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("bm_mass_evaluation_results.mass_analysis_id", ondelete="CASCADE"), nullable=False
+    )
+    run_id: Mapped[int] = mapped_column(Integer, ForeignKey("bm_mass_evaluation_runs.run_id", ondelete="CASCADE"), nullable=False)
+    job_id: Mapped[int] = mapped_column(Integer, ForeignKey("bm_mass_evaluation_jobs.job_id", ondelete="CASCADE"), nullable=False)
+    call_id: Mapped[str] = mapped_column(Text, nullable=False)
+    hs_object_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prompt_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("bm_prompts.prompt_id", ondelete="SET NULL"), nullable=True)
+    prompt_version_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("bm_prompt_versions.id", ondelete="SET NULL"), nullable=True)
+    criterion_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("bm_prompt_criteria.criterion_id", ondelete="SET NULL"), nullable=True)
+    criterion_key: Mapped[str] = mapped_column(Text, nullable=False)
+    criterion_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    criterion_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    value_raw: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
+    numeric_value: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
+    text_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    boolean_value: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    category_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    percentage_value: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
+    feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
+    feed_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_applicable: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    not_applicable: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    service_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    service_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    service_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    typology_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    typology_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    typology_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), onupdate=func.now(), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("job_id", "call_id", "criterion_key", name="uq_mass_eval_crit_res"),
+        Index("idx_mass_eval_crit_mass_id", "mass_analysis_id"),
+        Index("idx_mass_eval_crit_job_call", "job_id", "call_id"),
+    )
+

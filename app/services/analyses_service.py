@@ -137,13 +137,34 @@ async def get_analysis_detail(
 
     await enrich_analyses(db, [analysis])
 
-    # Get analysis results
+    # Get analysis results from new normalized table
+    from app.models.analyses import AnalysisCriterionResult
+    from app.schemas.analyses import AnalysisResultOut
     res_result = await db.execute(
-        select(AnalysisResult)
-        .where(AnalysisResult.analysis_id == analysis.analysis_id)
-        .order_by(AnalysisResult.result_id)
+        select(AnalysisCriterionResult)
+        .where(AnalysisCriterionResult.analysis_id == analysis.analysis_id)
+        .order_by(AnalysisCriterionResult.id)
     )
-    results = res_result.scalars().all()
+    criteria_results = res_result.scalars().all()
+    
+    results = []
+    for c in criteria_results:
+        results.append(AnalysisResultOut(
+            result_id=c.id,
+            analysis_id=c.analysis_id,
+            criterion_id=c.criterion_id,
+            criterion_key=c.criterion_key,
+            criterion_name=c.criterion_name,
+            criterion_type=c.criterion_type,
+            value_number=c.numeric_value,
+            value_text=c.text_value,
+            value_boolean=c.boolean_value,
+            value_category=c.category_value,
+            feed=c.feedback,
+            description=None,
+            raw_value=c.value_raw,
+            created_at=c.created_at,
+        ))
 
     grouped = group_results(results)
     summary = build_summary(analysis, results)
@@ -152,7 +173,7 @@ async def get_analysis_detail(
         ok=True,
         analysis=analysis,
         summary=summary,
-        results=list(results),
+        results=results,
         grouped=grouped,
     )
 
