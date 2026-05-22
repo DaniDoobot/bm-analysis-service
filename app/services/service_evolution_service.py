@@ -236,8 +236,8 @@ class ServiceEvolutionService:
               AND r.result_json IS NOT NULL
               AND (CAST(:service_id AS integer) IS NULL OR r.service_id = CAST(:service_id AS integer))
               AND (CAST(:service_key AS text) IS NULL OR r.service_key = CAST(:service_key AS text))
-              AND (CAST(:date_from AS timestamptz) IS NULL OR r.created_at >= CAST(:date_from AS timestamptz))
-              AND (CAST(:date_to AS timestamptz) IS NULL OR r.created_at <= CAST(:date_to AS timestamptz))
+              AND (CAST(:date_from AS timestamptz) IS NULL OR r.call_timestamp >= CAST(:date_from AS timestamptz))
+              AND (CAST(:date_to AS timestamptz) IS NULL OR r.call_timestamp <= CAST(:date_to AS timestamptz))
               AND (CAST(:typology_key AS text) IS NULL OR r.typology_key = CAST(:typology_key AS text))
               AND (CAST(:agent_owner_id AS text) IS NULL OR r.hubspot_owner_id = CAST(:agent_owner_id AS text))
         """)
@@ -273,8 +273,8 @@ class ServiceEvolutionService:
                 WHERE r.status = 'completed' AND r.typology_name IS NOT NULL
                   AND (CAST(:service_id AS integer) IS NULL OR r.service_id = CAST(:service_id AS integer))
                   AND (CAST(:service_key AS text) IS NULL OR r.service_key = CAST(:service_key AS text))
-                  AND (CAST(:date_from AS timestamptz) IS NULL OR r.created_at >= CAST(:date_from AS timestamptz))
-                  AND (CAST(:date_to AS timestamptz) IS NULL OR r.created_at <= CAST(:date_to AS timestamptz))
+                  AND (CAST(:date_from AS timestamptz) IS NULL OR r.call_timestamp >= CAST(:date_from AS timestamptz))
+                  AND (CAST(:date_to AS timestamptz) IS NULL OR r.call_timestamp <= CAST(:date_to AS timestamptz))
                   AND (CAST(:typology_key AS text) IS NULL OR r.typology_key = CAST(:typology_key AS text))
                   AND (CAST(:agent_owner_id AS text) IS NULL OR r.hubspot_owner_id = CAST(:agent_owner_id AS text))
                 GROUP BY r.typology_name
@@ -297,12 +297,14 @@ class ServiceEvolutionService:
         )
 
         # 4. Get Series data (granularity-based period grouping)
+        # NOTE: we group by call_timestamp (when the call actually happened), NOT created_at
+        # (when the mass analysis ran). Using created_at collapses everything into one day.
         if granularity == "week":
-            period_expr = "date_trunc('week', r.created_at)::date"
+            period_expr = "date_trunc('week', r.call_timestamp)::date"
         elif granularity == "month":
-            period_expr = "date_trunc('month', r.created_at)::date"
+            period_expr = "date_trunc('month', r.call_timestamp)::date"
         else:
-            period_expr = "r.created_at::date"
+            period_expr = "r.call_timestamp::date"
 
         # NOTE: evaluacion_global is extracted from result_json (not from criterion_results table).
         # Column indices:  0=period, 1=service_id, 2=service_name, 3=total_calls,
@@ -332,8 +334,8 @@ class ServiceEvolutionService:
               AND r.result_json IS NOT NULL
               AND (CAST(:service_id AS integer) IS NULL OR r.service_id = CAST(:service_id AS integer))
               AND (CAST(:service_key AS text) IS NULL OR r.service_key = CAST(:service_key AS text))
-              AND (CAST(:date_from AS timestamptz) IS NULL OR r.created_at >= CAST(:date_from AS timestamptz))
-              AND (CAST(:date_to AS timestamptz) IS NULL OR r.created_at <= CAST(:date_to AS timestamptz))
+              AND (CAST(:date_from AS timestamptz) IS NULL OR r.call_timestamp >= CAST(:date_from AS timestamptz))
+              AND (CAST(:date_to AS timestamptz) IS NULL OR r.call_timestamp <= CAST(:date_to AS timestamptz))
               AND (CAST(:typology_key AS text) IS NULL OR r.typology_key = CAST(:typology_key AS text))
               AND (CAST(:agent_owner_id AS text) IS NULL OR r.hubspot_owner_id = CAST(:agent_owner_id AS text))
             GROUP BY period, r.service_id, r.service_name
@@ -377,8 +379,8 @@ class ServiceEvolutionService:
               AND r.result_json IS NOT NULL
               AND (CAST(:service_id AS integer) IS NULL OR r.service_id = CAST(:service_id AS integer))
               AND (CAST(:service_key AS text) IS NULL OR r.service_key = CAST(:service_key AS text))
-              AND (CAST(:date_from AS timestamptz) IS NULL OR r.created_at >= CAST(:date_from AS timestamptz))
-              AND (CAST(:date_to AS timestamptz) IS NULL OR r.created_at <= CAST(:date_to AS timestamptz))
+              AND (CAST(:date_from AS timestamptz) IS NULL OR r.call_timestamp >= CAST(:date_from AS timestamptz))
+              AND (CAST(:date_to AS timestamptz) IS NULL OR r.call_timestamp <= CAST(:date_to AS timestamptz))
               AND (CAST(:typology_key AS text) IS NULL OR r.typology_key = CAST(:typology_key AS text))
               AND (CAST(:agent_owner_id AS text) IS NULL OR r.hubspot_owner_id = CAST(:agent_owner_id AS text))
             GROUP BY r.typology_key, r.typology_name
@@ -411,8 +413,8 @@ class ServiceEvolutionService:
               AND r.result_json IS NOT NULL
               AND (CAST(:service_id AS integer) IS NULL OR r.service_id = CAST(:service_id AS integer))
               AND (CAST(:service_key AS text) IS NULL OR r.service_key = CAST(:service_key AS text))
-              AND (CAST(:date_from AS timestamptz) IS NULL OR r.created_at >= CAST(:date_from AS timestamptz))
-              AND (CAST(:date_to AS timestamptz) IS NULL OR r.created_at <= CAST(:date_to AS timestamptz))
+              AND (CAST(:date_from AS timestamptz) IS NULL OR r.call_timestamp >= CAST(:date_from AS timestamptz))
+              AND (CAST(:date_to AS timestamptz) IS NULL OR r.call_timestamp <= CAST(:date_to AS timestamptz))
               AND (CAST(:typology_key AS text) IS NULL OR r.typology_key = CAST(:typology_key AS text))
               AND (CAST(:agent_owner_id AS text) IS NULL OR r.hubspot_owner_id = CAST(:agent_owner_id AS text))
             GROUP BY r.hubspot_owner_id, r.agent_name
@@ -445,8 +447,8 @@ class ServiceEvolutionService:
               AND c.numeric_value IS NOT NULL
               AND (CAST(:service_id AS integer) IS NULL OR r.service_id = CAST(:service_id AS integer))
               AND (CAST(:service_key AS text) IS NULL OR r.service_key = CAST(:service_key AS text))
-              AND (CAST(:date_from AS timestamptz) IS NULL OR r.created_at >= CAST(:date_from AS timestamptz))
-              AND (CAST(:date_to AS timestamptz) IS NULL OR r.created_at <= CAST(:date_to AS timestamptz))
+              AND (CAST(:date_from AS timestamptz) IS NULL OR r.call_timestamp >= CAST(:date_from AS timestamptz))
+              AND (CAST(:date_to AS timestamptz) IS NULL OR r.call_timestamp <= CAST(:date_to AS timestamptz))
               AND (CAST(:typology_key AS text) IS NULL OR r.typology_key = CAST(:typology_key AS text))
               AND (CAST(:agent_owner_id AS text) IS NULL OR r.hubspot_owner_id = CAST(:agent_owner_id AS text))
             GROUP BY c.criterion_key
