@@ -47,9 +47,14 @@ app = FastAPI(
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
 origins = settings.allowed_origins
+lovable_specific = "https://00582fba-62f7-4360-8060-b198d11c03d4.lovableproject.com"
+if lovable_specific not in origins and "*" not in origins:
+    origins.append(lovable_specific)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    allow_origin_regex=r"https://.*\.lovableproject\.com",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
