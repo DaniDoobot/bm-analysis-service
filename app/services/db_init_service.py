@@ -257,30 +257,229 @@ async def init_db():
                 JOIN bm_analysis_criterion_results c ON a.analysis_id = c.analysis_id;
             """))
 
+            # Drop views first to avoid InvalidTableDefinitionError if column names or positions changed
+            await conn.execute(text("DROP VIEW IF EXISTS vw_bm_mass_evaluation_criteria_flat CASCADE;"))
+            await conn.execute(text("DROP VIEW IF EXISTS vw_bm_mass_evaluation_results_pivot CASCADE;"))
+            await conn.execute(text("DROP VIEW IF EXISTS vw_bm_mass_evaluation_daily_summary CASCADE;"))
+
             await conn.execute(text("""
                 CREATE OR REPLACE VIEW vw_bm_mass_evaluation_criteria_flat AS
                 SELECT
                     m.mass_analysis_id,
-                    m.run_id,
                     m.job_id,
+                    m.run_id,
                     m.call_id,
-                    m.agent_name,
+                    m.hs_object_id,
                     m.call_timestamp,
+                    m.call_timestamp::date AS call_date,
+                    m.created_at AS analyzed_at,
+                    m.call_duration_seconds AS duration_seconds,
+                    m.direction,
+                    m.hubspot_owner_id AS agent_owner_id,
+                    m.agent_name,
+                    m.status,
+                    m.error_message,
                     m.prompt_id,
+                    m.prompt_name,
+                    m.prompt_version_id,
+                    m.prompt_version_name,
+                    m.prompt_version_label,
+                    c.service_id,
+                    c.service_key,
+                    c.service_name,
+                    c.typology_id,
+                    c.typology_key,
+                    c.typology_name,
+                    c.criterion_id,
                     c.criterion_key,
                     c.criterion_name,
                     c.criterion_type,
+                    c.feed_key,
                     c.numeric_value,
-                    c.text_value,
+                    c.percentage_value,
                     c.boolean_value,
                     c.category_value,
-                    c.percentage_value,
+                    c.text_value,
                     c.feedback,
                     c.is_applicable,
-                    c.service_name,
-                    c.typology_name
+                    c.not_applicable,
+                    c.created_at,
+                    c.updated_at
                 FROM bm_mass_evaluation_results m
                 JOIN bm_mass_evaluation_criterion_results c ON m.mass_analysis_id = c.mass_analysis_id;
+            """))
+
+            await conn.execute(text("""
+                CREATE OR REPLACE VIEW vw_bm_mass_evaluation_results_pivot AS
+                SELECT
+                    m.mass_analysis_id,
+                    m.job_id,
+                    m.run_id,
+                    m.call_id,
+                    m.call_timestamp,
+                    m.call_timestamp::date AS call_date,
+                    m.created_at AS analyzed_at,
+                    m.call_duration_seconds AS duration_seconds,
+                    m.direction,
+                    m.hubspot_owner_id AS agent_owner_id,
+                    m.agent_name,
+                    m.status,
+                    m.prompt_id,
+                    m.prompt_name,
+                    m.prompt_version_id,
+                    m.prompt_version_name,
+                    m.service_id,
+                    m.service_name,
+                    m.typology_key,
+                    m.typology_name,
+
+                    -- Scores numéricos
+                    MAX(CASE WHEN c.criterion_key = 'sentiment' AND c.is_applicable = true THEN c.numeric_value END) AS sentiment,
+                    MAX(CASE WHEN c.criterion_key = 'evaluacion_global' AND c.is_applicable = true THEN c.numeric_value END) AS evaluacion_global,
+                    MAX(CASE WHEN c.criterion_key = 'empatia' AND c.is_applicable = true THEN c.numeric_value END) AS empatia,
+                    MAX(CASE WHEN c.criterion_key = 'simpatia' AND c.is_applicable = true THEN c.numeric_value END) AS simpatia,
+                    MAX(CASE WHEN c.criterion_key = 'claridad' AND c.is_applicable = true THEN c.numeric_value END) AS claridad,
+                    MAX(CASE WHEN c.criterion_key = 'procedimiento' AND c.is_applicable = true THEN c.numeric_value END) AS procedimiento,
+                    MAX(CASE WHEN c.criterion_key = 'saludo_inicio' AND c.is_applicable = true THEN c.numeric_value END) AS saludo_inicio,
+                    MAX(CASE WHEN c.criterion_key = 'trato_usted' AND c.is_applicable = true THEN c.numeric_value END) AS trato_usted,
+                    MAX(CASE WHEN c.criterion_key = 'explicaciones_medicas' AND c.is_applicable = true THEN c.numeric_value END) AS explicaciones_medicas,
+                    MAX(CASE WHEN c.criterion_key = 'claridad_explicacion_economica' AND c.is_applicable = true THEN c.numeric_value END) AS claridad_explicacion_economica,
+                    MAX(CASE WHEN c.criterion_key = 'n3_preguntas' AND c.is_applicable = true THEN c.numeric_value END) AS n3_preguntas,
+                    MAX(CASE WHEN c.criterion_key = 'claridad_de_explicacion_de_precio_en_consulta' AND c.is_applicable = true THEN c.numeric_value END) AS claridad_de_explicacion_de_precio_en_consulta,
+                    MAX(CASE WHEN c.criterion_key = 'interrupciones' AND c.is_applicable = true THEN c.numeric_value END) AS interrupciones,
+                    MAX(CASE WHEN c.criterion_key = 'velocidad_hablando_agente' AND c.is_applicable = true THEN c.numeric_value END) AS velocidad_hablando_agente,
+                    MAX(CASE WHEN c.criterion_key = 'despedida_con_refuerzo' AND c.is_applicable = true THEN c.numeric_value END) AS despedida_con_refuerzo,
+                    MAX(CASE WHEN c.criterion_key = 'siguiente_paso' AND c.is_applicable = true THEN c.numeric_value END) AS siguiente_paso,
+                    MAX(CASE WHEN c.criterion_key = 'gestion_objeciones' AND c.is_applicable = true THEN c.numeric_value END) AS gestion_objeciones,
+                    MAX(CASE WHEN c.criterion_key = 'uso_nombre_paciente' AND c.is_applicable = true THEN c.numeric_value END) AS uso_nombre_paciente,
+                    MAX(CASE WHEN c.criterion_key = 'uso_preguntas' AND c.is_applicable = true THEN c.numeric_value END) AS uso_preguntas,
+                    MAX(CASE WHEN c.criterion_key = 'propension' AND c.is_applicable = true THEN c.numeric_value END) AS propension,
+
+                    -- Feedbacks
+                    MAX(CASE WHEN (c.criterion_key = 'sentiment' OR c.feed_key = 'sentiment_feed') AND c.is_applicable = true THEN c.feedback END) AS sentiment_feed,
+                    MAX(CASE WHEN (c.criterion_key = 'empatia' OR c.feed_key = 'empatia_feed') AND c.is_applicable = true THEN c.feedback END) AS empatia_feed,
+                    MAX(CASE WHEN (c.criterion_key = 'simpatia' OR c.feed_key = 'simpatia_feed') AND c.is_applicable = true THEN c.feedback END) AS simpatia_feed,
+                    MAX(CASE WHEN (c.criterion_key = 'claridad' OR c.feed_key = 'claridad_feed') AND c.is_applicable = true THEN c.feedback END) AS claridad_feed,
+                    MAX(CASE WHEN (c.criterion_key = 'saludo_inicio' OR c.feed_key = 'saludo_inicio_feed') AND c.is_applicable = true THEN c.feedback END) AS saludo_inicio_feed,
+                    MAX(CASE WHEN (c.criterion_key = 'trato_usted' OR c.feed_key = 'trato_usted_feed') AND c.is_applicable = true THEN c.feedback END) AS trato_usted_feed,
+                    MAX(CASE WHEN (c.criterion_key = 'explicaciones_medicas' OR c.feed_key = 'explicaciones_medicas_feed') AND c.is_applicable = true THEN c.feedback END) AS explicaciones_medicas_feed,
+                    MAX(CASE WHEN (c.criterion_key = 'claridad_explicacion_economica' OR c.feed_key = 'claridad_explicacion_economica_feed') AND c.is_applicable = true THEN c.feedback END) AS claridad_explicacion_economica_feed,
+                    MAX(CASE WHEN (c.criterion_key = 'n3_preguntas' OR c.feed_key = 'n3_preguntas_feedback') AND c.is_applicable = true THEN c.feedback END) AS n3_preguntas_feedback,
+                    MAX(CASE WHEN (c.criterion_key = 'claridad_de_explicacion_de_precio_en_consulta' OR c.feed_key = 'claridad_de_explicacion_de_precio_en_consulta_feed') AND c.is_applicable = true THEN c.feedback END) AS claridad_de_explicacion_de_precio_en_consulta_feed,
+                    MAX(CASE WHEN (c.criterion_key = 'interrupciones' OR c.feed_key = 'interrupciones_feed') AND c.is_applicable = true THEN c.feedback END) AS interrupciones_feed,
+                    MAX(CASE WHEN (c.criterion_key = 'velocidad_hablando_agente' OR c.feed_key = 'velocidad_hablando_agente_feed') AND c.is_applicable = true THEN c.feedback END) AS velocidad_hablando_agente_feed,
+                    MAX(CASE WHEN (c.criterion_key = 'despedida_con_refuerzo' OR c.feed_key = 'despedida_con_refuerzo_feed') AND c.is_applicable = true THEN c.feedback END) AS despedida_con_refuerzo_feed,
+                    MAX(CASE WHEN (c.criterion_key = 'gestion_objeciones' OR c.feed_key = 'gestion_objeciones_feed') AND c.is_applicable = true THEN c.feedback END) AS gestion_objeciones_feed,
+                    MAX(CASE WHEN (c.criterion_key = 'uso_nombre_paciente' OR c.feed_key = 'uso_nombre_paciente_feed') AND c.is_applicable = true THEN c.feedback END) AS uso_nombre_paciente_feed,
+                    MAX(CASE WHEN (c.criterion_key = 'uso_preguntas' OR c.feed_key = 'uso_preguntas_feed') AND c.is_applicable = true THEN c.feedback END) AS uso_preguntas_feed,
+
+                    -- Porcentajes / números
+                    MAX(CASE WHEN c.criterion_key = 'hablando_agente' AND c.is_applicable = true THEN c.percentage_value END) AS hablando_agente,
+                    MAX(CASE WHEN c.criterion_key = 'hablando_paciente' AND c.is_applicable = true THEN c.percentage_value END) AS hablando_paciente,
+                    MAX(CASE WHEN c.criterion_key = 'palabras_minuto_agente' AND c.is_applicable = true THEN c.numeric_value END) AS palabras_minuto_agente,
+                    MAX(CASE WHEN c.criterion_key = 'meses_patologia' AND c.is_applicable = true THEN c.numeric_value END) AS meses_patologia,
+                    MAX(CASE WHEN c.criterion_key = 'edad' AND c.is_applicable = true THEN c.numeric_value END) AS edad,
+
+                    -- Booleanos
+                    BOOL_OR(CASE WHEN c.criterion_key = 'verifica_patologia' AND c.is_applicable = true THEN c.boolean_value END) AS verifica_patologia,
+                    BOOL_OR(CASE WHEN c.criterion_key = 'reformula_patologia' AND c.is_applicable = true THEN c.boolean_value END) AS reformula_patologia,
+                    BOOL_OR(CASE WHEN c.criterion_key = 'medio' AND c.is_applicable = true THEN c.boolean_value END) AS medio,
+                    BOOL_OR(CASE WHEN c.criterion_key = 'precio_consulta' AND c.is_applicable = true THEN c.boolean_value END) AS precio_consulta,
+                    BOOL_OR(CASE WHEN c.criterion_key = 'tratamiento_no_en_precio' AND c.is_applicable = true THEN c.boolean_value END) AS tratamiento_no_en_precio,
+                    BOOL_OR(CASE WHEN c.criterion_key = 'duracion_consulta' AND c.is_applicable = true THEN c.boolean_value END) AS duracion_consulta,
+                    BOOL_OR(CASE WHEN c.criterion_key = 'direccion_y_referencias' AND c.is_applicable = true THEN c.boolean_value END) AS direccion_y_referencias,
+                    BOOL_OR(CASE WHEN (c.criterion_key = 'puntalidad' OR c.criterion_key = 'puntualidad') AND c.is_applicable = true THEN c.boolean_value END) AS puntualidad,
+                    BOOL_OR(CASE WHEN c.criterion_key = 'cierre_cita' AND c.is_applicable = true THEN c.boolean_value END) AS cierre_cita,
+                    BOOL_OR(CASE WHEN c.criterion_key = 'conocimiento_boston_medical' AND c.is_applicable = true THEN c.boolean_value END) AS conocimiento_boston_medical,
+                    BOOL_OR(CASE WHEN c.criterion_key = 'puede_adelantar_cita' AND c.is_applicable = true THEN c.boolean_value END) AS puede_adelantar_cita,
+                    BOOL_OR(CASE WHEN c.criterion_key = 'pregunta_pareja' AND c.is_applicable = true THEN c.boolean_value END) AS pregunta_pareja,
+                    BOOL_OR(CASE WHEN c.criterion_key = 'recomienda_pareja' AND c.is_applicable = true THEN c.boolean_value END) AS recomienda_pareja,
+                    BOOL_OR(CASE WHEN c.criterion_key = 'pareja_conocedora' AND c.is_applicable = true THEN c.boolean_value END) AS pareja_conocedora,
+                    BOOL_OR(CASE WHEN c.criterion_key = 'pareja_asistira' AND c.is_applicable = true THEN c.boolean_value END) AS pareja_asistira,
+
+                    -- Categorías / textos
+                    MAX(CASE WHEN c.criterion_key = 'tipo_llamada' AND c.is_applicable = true THEN c.category_value END) AS tipo_llamada,
+                    MAX(CASE WHEN c.criterion_key = 'patologia' AND c.is_applicable = true THEN c.category_value END) AS patologia,
+                    MAX(CASE WHEN c.criterion_key = 'objeciones' AND c.is_applicable = true THEN c.text_value END) AS objeciones,
+                    MAX(CASE WHEN c.criterion_key = 'objecion_1' AND c.is_applicable = true THEN c.category_value END) AS objecion_1,
+                    MAX(CASE WHEN c.criterion_key = 'objecion_2' AND c.is_applicable = true THEN c.category_value END) AS objecion_2,
+                    MAX(CASE WHEN c.criterion_key = 'objecion_3' AND c.is_applicable = true THEN c.category_value END) AS objecion_3,
+                    MAX(CASE WHEN c.criterion_key = 'motivo_no_cita' AND c.is_applicable = true THEN c.category_value END) AS motivo_no_cita,
+                    MAX(CASE WHEN c.criterion_key = 'cuanto_tiempo' AND c.is_applicable = true THEN c.text_value END) AS cuanto_tiempo,
+                    MAX(CASE WHEN c.criterion_key = 'por_que_ahora' AND c.is_applicable = true THEN c.text_value END) AS por_que_ahora
+
+                FROM bm_mass_evaluation_results m
+                JOIN bm_mass_evaluation_criterion_results c ON m.mass_analysis_id = c.mass_analysis_id
+                GROUP BY
+                    m.mass_analysis_id,
+                    m.job_id,
+                    m.run_id,
+                    m.call_id,
+                    m.call_timestamp,
+                    m.created_at,
+                    m.call_duration_seconds,
+                    m.direction,
+                    m.hubspot_owner_id,
+                    m.agent_name,
+                    m.status,
+                    m.prompt_id,
+                    m.prompt_name,
+                    m.prompt_version_id,
+                    m.prompt_version_name,
+                    m.service_id,
+                    m.service_name,
+                    m.typology_key,
+                    m.typology_name;
+            """))
+
+            await conn.execute(text("""
+                CREATE OR REPLACE VIEW vw_bm_mass_evaluation_daily_summary AS
+                SELECT
+                    c.created_at::date AS analysis_date,
+                    date_trunc('week', c.created_at)::date AS week_start,
+                    date_trunc('month', c.created_at)::date AS month_start,
+                    m.hubspot_owner_id AS agent_owner_id,
+                    m.agent_name,
+                    c.service_id,
+                    c.service_name,
+                    c.typology_key,
+                    c.typology_name,
+                    c.criterion_key,
+                    c.criterion_name,
+                    c.criterion_type,
+                    COUNT(*) AS total_rows,
+                    COUNT(CASE WHEN c.is_applicable = true THEN 1 END) AS total_applicable,
+                    COUNT(CASE WHEN c.not_applicable = true THEN 1 END) AS total_not_applicable,
+                    AVG(CASE WHEN c.is_applicable = true THEN c.numeric_value END) AS avg_numeric_value,
+                    AVG(CASE WHEN c.is_applicable = true THEN c.percentage_value END) AS avg_percentage_value,
+                    COUNT(CASE WHEN c.is_applicable = true AND c.boolean_value = true THEN 1 END) AS yes_count,
+                    COUNT(CASE WHEN c.is_applicable = true AND c.boolean_value = false THEN 1 END) AS no_count,
+                    CASE 
+                        WHEN COUNT(CASE WHEN c.is_applicable = true AND c.boolean_value IS NOT NULL THEN 1 END) > 0 
+                        THEN COUNT(CASE WHEN c.is_applicable = true AND c.boolean_value = true THEN 1 END)::numeric / COUNT(CASE WHEN c.is_applicable = true AND c.boolean_value IS NOT NULL THEN 1 END) 
+                        ELSE NULL 
+                    END AS yes_rate,
+                    CASE 
+                        WHEN COUNT(CASE WHEN c.is_applicable = true AND c.boolean_value IS NOT NULL THEN 1 END) > 0 
+                        THEN COUNT(CASE WHEN c.is_applicable = true AND c.boolean_value = false THEN 1 END)::numeric / COUNT(CASE WHEN c.is_applicable = true AND c.boolean_value IS NOT NULL THEN 1 END) 
+                        ELSE NULL 
+                    END AS no_rate,
+                    COUNT(CASE WHEN c.is_applicable = true AND c.text_value IS NOT NULL AND c.text_value != '' THEN 1 END) AS text_count
+                FROM bm_mass_evaluation_results m
+                JOIN bm_mass_evaluation_criterion_results c ON m.mass_analysis_id = c.mass_analysis_id
+                GROUP BY
+                    c.created_at::date,
+                    date_trunc('week', c.created_at)::date,
+                    date_trunc('month', c.created_at)::date,
+                    m.hubspot_owner_id,
+                    m.agent_name,
+                    c.service_id,
+                    c.service_name,
+                    c.typology_key,
+                    c.typology_name,
+                    c.criterion_key,
+                    c.criterion_name,
+                    c.criterion_type;
             """))
             logger.info("Reporting views ensured.")
 
