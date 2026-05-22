@@ -515,12 +515,29 @@ class MassEvaluationService:
                 if service_id:
                     t_stmt = select(Typology).where(Typology.service_id == service_id, Typology.is_active == True)
                     t_res = await db.execute(t_stmt)
-                    active_typologies = list(t_res.scalars().all())
-                    typology_by_key = {t.typology_key: t for t in active_typologies}
+                    typology_by_key = {
+                        t.typology_key: {
+                            "typology_id": t.typology_id,
+                            "typology_key": t.typology_key,
+                            "typology_name": t.typology_name
+                        } 
+                        for t in active_typologies
+                    }
 
                 # Fetch active criteria and item-typology associations
-                criteria = await get_active_criteria(db, prompt_id)
-                c_ids = [c.criterion_id for c in criteria]
+                criteria_orm = await get_active_criteria(db, prompt_id)
+                c_ids = [c.criterion_id for c in criteria_orm]
+                
+                criteria_snapshot = []
+                for c in criteria_orm:
+                    criteria_snapshot.append({
+                        "criterion_id": c.criterion_id,
+                        "criterion_key": c.criterion_key,
+                        "criterion_name": c.criterion_name,
+                        "criterion_type": c.criterion_type,
+                        "output_key": c.output_key,
+                        "feed_key": c.feed_key,
+                    })
                 assoc_map = {}
                 if c_ids:
                     assoc_stmt = select(PromptCriterionTypology).where(PromptCriterionTypology.criterion_id.in_(c_ids))
@@ -687,44 +704,44 @@ class MassEvaluationService:
                         if isinstance(tipo_llamada_val, str) and tipo_llamada_val in typology_by_key:
                             matched_typology = typology_by_key[tipo_llamada_val]
 
-                        typology_id = matched_typology.typology_id if matched_typology else None
-                        typology_key = matched_typology.typology_key if matched_typology else None
-                        typology_name = matched_typology.typology_name if matched_typology else None
+                        typology_id = matched_typology["typology_id"] if matched_typology else None
+                        typology_key = matched_typology["typology_key"] if matched_typology else None
+                        typology_name = matched_typology["typology_name"] if matched_typology else None
 
                         # Resolve active criteria items
                         items = []
-                        for criterion in criteria:
-                            output_key = criterion.output_key
-                            feed_key = criterion.feed_key
+                        for criterion in criteria_snapshot:
+                            output_key = criterion["output_key"]
+                            feed_key = criterion["feed_key"]
  
                             # Determine if criterion is applicable
                             is_applicable = True
                             if matched_typology:
-                                allowed_typologies = assoc_map.get(criterion.criterion_id, set())
+                                allowed_typologies = assoc_map.get(criterion["criterion_id"], set())
                                 if allowed_typologies:
-                                    is_applicable = (matched_typology.typology_id in allowed_typologies)
+                                    is_applicable = (matched_typology["typology_id"] in allowed_typologies)
 
                             if is_applicable:
                                 raw_value = clean_result.get(output_key) if output_key else None
                                 feed_value = clean_result.get(feed_key) if feed_key else None
  
                                 # Get clean/typed value
-                                typed = map_criterion_value(raw_value, criterion.criterion_type or "text")
+                                typed = map_criterion_value(raw_value, criterion["criterion_type"] or "text")
                                 
                                 # Resolve actual value
                                 resolved_val = None
-                                if criterion.criterion_type == "number":
+                                if criterion["criterion_type"] == "number":
                                     resolved_val = float(typed["value_number"]) if typed["value_number"] is not None else None
-                                elif criterion.criterion_type == "boolean":
+                                elif criterion["criterion_type"] == "boolean":
                                     resolved_val = typed["value_boolean"]
                                 else:
                                     resolved_val = typed["value_text"] or typed["value_category"] or typed["raw_value"]
  
                                 items.append({
-                                    "criterion_id": criterion.criterion_id,
-                                    "criterion_key": criterion.criterion_key,
-                                    "name": criterion.criterion_name,
-                                    "type": criterion.criterion_type,
+                                    "criterion_id": criterion["criterion_id"],
+                                    "criterion_key": criterion["criterion_key"],
+                                    "name": criterion["criterion_name"],
+                                    "type": criterion["criterion_type"],
                                     "output_key": output_key,
                                     "value": resolved_val,
                                     "feed": str(feed_value) if feed_value is not None else None,
@@ -733,15 +750,15 @@ class MassEvaluationService:
                                     "text_value": typed["value_text"],
                                     "boolean_value": typed["value_boolean"],
                                     "category_value": typed["value_category"],
-                                    "percentage_value": typed["value_number"] if criterion.criterion_type == "percentage" else None,
+                                    "percentage_value": typed["value_number"] if criterion["criterion_type"] == "percentage" else None,
                                     "raw_value": typed["raw_value"],
                                 })
                             else:
                                 items.append({
-                                    "criterion_id": criterion.criterion_id,
-                                    "criterion_key": criterion.criterion_key,
-                                    "name": criterion.criterion_name,
-                                    "type": criterion.criterion_type,
+                                    "criterion_id": criterion["criterion_id"],
+                                    "criterion_key": criterion["criterion_key"],
+                                    "name": criterion["criterion_name"],
+                                    "type": criterion["criterion_type"],
                                     "output_key": output_key,
                                     "value": None,
                                     "feed": None,
@@ -827,7 +844,11 @@ class MassEvaluationService:
                         calls_analyzed += 1
                         
                     except Exception as e_call:
-                        logger.warning("Call %s failed in mass evaluation job %d: %s", call_id, job_id, e_call)
+                        import traceback
+                        logger.warning(
+                            "Call %s failed in mass evaluation job %d: %s\nStacktrace:\n%s", 
+                            call_id, job_id, e_call, traceback.format_exc()
+                        )
                         res_row = MassEvaluationResult(
                             run_id=run_id,
                             job_id=job_id,
