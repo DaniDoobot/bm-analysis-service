@@ -135,7 +135,7 @@ async def test_inactive_prompt_mass_evaluation():
         async def mock_analyze_2(*args, **kwargs):
             import json
             return json.dumps({
-                "tipo_llamada": "test_typ",
+                "tipo_llamada": "TEST_TYP",
                 "score_val": 4,
                 "score_feed": "Worse feedback"
             })
@@ -155,6 +155,8 @@ async def test_inactive_prompt_mass_evaluation():
         crit_res_2 = (await db.execute(select(MassEvaluationCriterionResult).where(MassEvaluationCriterionResult.mass_analysis_id == res_main_2.mass_analysis_id))).scalars().all()
         assert crit_res_2[0].numeric_value == 4
         assert crit_res_2[0].feedback == "Worse feedback"
+        assert crit_res_2[0].typology_key == "test_typ", "Should match case-insensitively to test_typ"
+        assert crit_res_2[0].typology_name == "Test Typology", "Should propagate correct typology name"
         
         print("Overwrite OK!")
 

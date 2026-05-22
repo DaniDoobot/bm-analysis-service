@@ -185,8 +185,15 @@ async def save_analysis(
                 typology_by_key = {t.typology_key: t for t in active_typologies}
 
                 tipo_llamada_val = clean_result.get("tipo_llamada")
-                if isinstance(tipo_llamada_val, str) and tipo_llamada_val in typology_by_key:
-                    matched_typology = typology_by_key[tipo_llamada_val]
+                if isinstance(tipo_llamada_val, str):
+                    if tipo_llamada_val in typology_by_key:
+                        matched_typology = typology_by_key[tipo_llamada_val]
+                    else:
+                        lower_val = tipo_llamada_val.lower().strip()
+                        for k, typ in typology_by_key.items():
+                            if k.lower().strip() == lower_val:
+                                matched_typology = typ
+                                break
 
             await _insert_results(db, analysis, clean_result, prompt_id, matched_typology=matched_typology)
 

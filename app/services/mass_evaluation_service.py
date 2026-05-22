@@ -521,7 +521,7 @@ class MassEvaluationService:
                             "typology_key": t.typology_key,
                             "typology_name": t.typology_name
                         } 
-                        for t in active_typologies
+                        for t in t_res.scalars().all()
                     }
 
                 # Fetch active criteria and item-typology associations
@@ -701,8 +701,15 @@ class MassEvaluationService:
                         # Resolve tipo_llamada and matched typology snapshot
                         tipo_llamada_val = clean_result.get("tipo_llamada")
                         matched_typology = None
-                        if isinstance(tipo_llamada_val, str) and tipo_llamada_val in typology_by_key:
-                            matched_typology = typology_by_key[tipo_llamada_val]
+                        if isinstance(tipo_llamada_val, str):
+                            if tipo_llamada_val in typology_by_key:
+                                matched_typology = typology_by_key[tipo_llamada_val]
+                            else:
+                                lower_val = tipo_llamada_val.lower().strip()
+                                for k, typ in typology_by_key.items():
+                                    if k.lower().strip() == lower_val:
+                                        matched_typology = typ
+                                        break
 
                         typology_id = matched_typology["typology_id"] if matched_typology else None
                         typology_key = matched_typology["typology_key"] if matched_typology else None
