@@ -17,13 +17,17 @@ router = APIRouter(prefix="/bm/service-evolution", tags=["Service Evolution"])
 
 
 @router.get("/services", response_model=list[ServiceListItem])
-async def get_services(db: AsyncSession = Depends(get_db)):
+async def get_services(
+    date_from: str | None = Query(None, description="Fecha de inicio (ISO 8601 o YYYY-MM-DD) para filtrar recuento de llamadas"),
+    date_to: str | None = Query(None, description="Fecha de fin (ISO 8601 o YYYY-MM-DD) para filtrar recuento de llamadas"),
+    db: AsyncSession = Depends(get_db)
+):
     """
     Retrieve all active services with unique evaluated calls counts and date bounds.
     Useful for populating service selectors.
     """
     try:
-        return await ServiceEvolutionService.get_services(db)
+        return await ServiceEvolutionService.get_services(db, date_from=date_from, date_to=date_to)
     except Exception as e:
         logger.error("Error fetching services for evolution dashboard: %s", e, exc_info=True)
         raise HTTPException(
@@ -35,6 +39,8 @@ async def get_services(db: AsyncSession = Depends(get_db)):
 @router.get("/criteria", response_model=list[CriterionListItem])
 async def get_criteria(
     service_id: int | None = Query(None, description="Filtrar criterios aplicados a un servicio específico"),
+    date_from: str | None = Query(None, description="Fecha de inicio (ISO 8601 o YYYY-MM-DD) para filtrar recuento de criterios"),
+    date_to: str | None = Query(None, description="Fecha de fin (ISO 8601 o YYYY-MM-DD) para filtrar recuento de criterios"),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -42,7 +48,7 @@ async def get_criteria(
     Useful for selecting criteria to graph/analyze.
     """
     try:
-        return await ServiceEvolutionService.get_criteria(db, service_id=service_id)
+        return await ServiceEvolutionService.get_criteria(db, service_id=service_id, date_from=date_from, date_to=date_to)
     except Exception as e:
         logger.error("Error fetching criteria for evolution dashboard: %s", e, exc_info=True)
         raise HTTPException(

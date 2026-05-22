@@ -18,14 +18,65 @@ from app.schemas.service_evolution import (
 logger = logging.getLogger(__name__)
 
 
+def parse_date_bounds(date_from: str | None, date_to: str | None) -> tuple[datetime | None, datetime | None]:
+    """
+    Parses start and end date/timestamp parameters safely.
+    For date-only strings (like YYYY-MM-DD), date_from represents start of day (00:00:00.000000)
+    and date_to represents inclusive end of day (23:59:59.999999).
+    """
+    parsed_date_from = None
+    parsed_date_to = None
+
+    if date_from:
+        is_date_only = len(date_from.strip()) == 10 and "-" in date_from and ":" not in date_from
+        try:
+            parsed_date_from = datetime.fromisoformat(date_from.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                parsed_date_from = datetime.strptime(date_from, "%Y-%m-%d")
+                is_date_only = True
+            except ValueError:
+                logger.warning("Invalid date_from format: %s", date_from)
+                
+        if parsed_date_from and is_date_only:
+            # Already represents 00:00:00, which is correct (start of the day)
+            pass
+
+    if date_to:
+        is_date_only = len(date_to.strip()) == 10 and "-" in date_to and ":" not in date_to
+        try:
+            parsed_date_to = datetime.fromisoformat(date_to.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                parsed_date_to = datetime.strptime(date_to, "%Y-%m-%d")
+                is_date_only = True
+            except ValueError:
+                logger.warning("Invalid date_to format: %s", date_to)
+                
+        if parsed_date_to and is_date_only:
+            # If date only, make inclusive of the end of the day: 23:59:59.999999
+            parsed_date_to = parsed_date_to.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+    return parsed_date_from, parsed_date_to
+
+
 class ServiceEvolutionService:
     @staticmethod
-    async def get_services(db: AsyncSession) -> list[ServiceListItem]:
+    async def get_services(
+        db: AsyncSession,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> list[ServiceListItem]:
         """
         GET /bm/service-evolution/services
         Returns all active services with calls count and analysis date ranges.
         """
-        logger.info("Fetching services list for evolution dashboard...")
+        parsed_date_from, parsed_date_to = parse_date_bounds(date_from, date_to)
+        logger.info(
+            "Fetching services list: date_from=%s (parsed: %s), date_to=%s (parsed: %s)",
+            date_from, parsed_date_from, date_to, parsed_date_to
+        )
+
         query = text("""
             SELECT 
                 s.service_id,
@@ -35,13 +86,19 @@ class ServiceEvolutionService:
                 MIN(r.created_at::date)::text AS first_analysis_date,
                 MAX(r.created_at::date)::text AS last_analysis_date
             FROM bm_services s
-            LEFT JOIN bm_mass_evaluation_results r ON s.service_id = r.service_id AND r.status = 'completed'
+            LEFT JOIN bm_mass_evaluation_results r ON s.service_id = r.service_id 
+              AND r.status = 'completed'
+              AND (CAST(:date_from AS timestamptz) IS NULL OR r.created_at >= CAST(:date_from AS timestamptz))
+              AND (CAST(:date_to AS timestamptz) IS NULL OR r.created_at <= CAST(:date_to AS timestamptz))
             WHERE s.is_active = true
             GROUP BY s.service_id, s.service_key, s.service_name
             ORDER BY s.service_name;
         """)
         
-        result = await db.execute(query)
+        result = await db.execute(query, {
+            "date_from": parsed_date_from,
+            "date_to": parsed_date_to,
+        })
         rows = result.fetchall()
         
         services_list = []
@@ -57,12 +114,22 @@ class ServiceEvolutionService:
         return services_list
 
     @staticmethod
-    async def get_criteria(db: AsyncSession, service_id: int | None = None) -> list[CriterionListItem]:
+    async def get_criteria(
+        db: AsyncSession,
+        service_id: int | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> list[CriterionListItem]:
         """
         GET /bm/service-evolution/criteria
         Returns all criteria key details.
         """
-        logger.info("Fetching criteria list for evolution dashboard, service_id=%s...", service_id)
+        parsed_date_from, parsed_date_to = parse_date_bounds(date_from, date_to)
+        logger.info(
+            "Fetching criteria list: service_id=%s, date_from=%s (parsed: %s), date_to=%s (parsed: %s)",
+            service_id, date_from, parsed_date_from, date_to, parsed_date_to
+        )
+
         query = text("""
             SELECT 
                 c.criterion_key,
@@ -73,11 +140,17 @@ class ServiceEvolutionService:
             JOIN bm_mass_evaluation_results r ON c.mass_analysis_id = r.mass_analysis_id
             WHERE r.status = 'completed'
               AND (CAST(:service_id AS integer) IS NULL OR r.service_id = CAST(:service_id AS integer))
+              AND (CAST(:date_from AS timestamptz) IS NULL OR r.created_at >= CAST(:date_from AS timestamptz))
+              AND (CAST(:date_to AS timestamptz) IS NULL OR r.created_at <= CAST(:date_to AS timestamptz))
             GROUP BY c.criterion_key
             ORDER BY total_applicable DESC;
         """)
         
-        result = await db.execute(query, {"service_id": service_id})
+        result = await db.execute(query, {
+            "service_id": service_id,
+            "date_from": parsed_date_from,
+            "date_to": parsed_date_to,
+        })
         rows = result.fetchall()
         
         criteria_list = []
@@ -106,31 +179,13 @@ class ServiceEvolutionService:
         GET /bm/service-evolution
         Retrieves complete service evolution details with series, typologies, agents, and criteria ranking.
         """
+        parsed_date_from, parsed_date_to = parse_date_bounds(date_from, date_to)
         logger.info(
-            "Service evolution query: service_id=%s, service_key=%s, date_from=%s, date_to=%s, granularity=%s, typology=%s, agent=%s",
-            service_id, service_key, date_from, date_to, granularity, typology_key, agent_owner_id
+            "Service evolution query: service_id=%s, service_key=%s, granularity=%s, typology=%s, agent=%s, "
+            "date_from_raw=%s (parsed: %s), date_to_raw=%s (parsed: %s)",
+            service_id, service_key, granularity, typology_key, agent_owner_id,
+            date_from, parsed_date_from, date_to, parsed_date_to
         )
-
-        # Parse date strings if supplied to ensure correct DB comparison
-        parsed_date_from = None
-        parsed_date_to = None
-        if date_from:
-            try:
-                parsed_date_from = datetime.fromisoformat(date_from.replace("Z", "+00:00"))
-            except ValueError:
-                try:
-                    parsed_date_from = datetime.strptime(date_from, "%Y-%m-%d")
-                except ValueError:
-                    logger.warning("Invalid date_from format: %s", date_from)
-
-        if date_to:
-            try:
-                parsed_date_to = datetime.fromisoformat(date_to.replace("Z", "+00:00"))
-            except ValueError:
-                try:
-                    parsed_date_to = datetime.strptime(date_to, "%Y-%m-%d")
-                except ValueError:
-                    logger.warning("Invalid date_to format: %s", date_to)
 
         # 1. Resolve effective service name
         service_name = None
@@ -200,6 +255,10 @@ class ServiceEvolutionService:
             avg_em = float(sum_row[3]) if sum_row[3] is not None else None
             avg_pr = float(sum_row[4]) if sum_row[4] is not None else None
             cc_rate = float(sum_row[5]) if sum_row[5] is not None else None
+
+        logger.info(
+            "Service evolution query completed. total_calls matched: %s", total_calls
+        )
 
         # 3. Get Main Typology
         main_typo = None
