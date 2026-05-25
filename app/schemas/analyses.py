@@ -33,6 +33,14 @@ class AnalysisListItem(BaseModel):
     result: Any | None = None
     payload: Any | None = None
 
+    # Service & Typology metadata
+    service_id: int | None = None
+    service_key: str | None = None
+    service_name: str | None = None
+    typology_id: int | None = None
+    typology_key: str | None = None
+    typology_name: str | None = None
+
 
 class AnalysisDetail(BaseModel):
     """Full row from bm_analyses."""
@@ -68,6 +76,14 @@ class AnalysisDetail(BaseModel):
     error_message: str | None = None
     created_at: datetime | str | None = None
     updated_at: datetime | str | None = None
+
+    # Service & Typology metadata
+    service_id: int | None = None
+    service_key: str | None = None
+    service_name: str | None = None
+    typology_id: int | None = None
+    typology_key: str | None = None
+    typology_name: str | None = None
 
 
 class AnalysisResultOut(BaseModel):
