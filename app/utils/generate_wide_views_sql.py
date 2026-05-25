@@ -117,11 +117,11 @@ ordered_cte AS (
             ORDER BY criterion_order ASC, canonical_criterion_key ASC
         ) AS item_number
     FROM display_cte
+    WHERE canonical_criterion_key IS DISTINCT FROM 'tipo_llamada'
 ),
 pivoted_cte AS (
     SELECT
         mass_evaluation_result_id,
-        MAX(CASE WHEN canonical_criterion_key = 'tipo_llamada' AND is_applicable THEN COALESCE(category_value, text_value) END) AS tipo_llamada_criterio,
         BOOL_OR(CASE WHEN canonical_criterion_key = 'cierre_cita' AND is_applicable THEN boolean_value END) AS cierre_cita_criterio,
 {pivot_items}
     FROM ordered_cte
@@ -130,15 +130,28 @@ pivoted_cte AS (
 SELECT
     m.mass_analysis_id          AS mass_evaluation_result_id,
     m.call_id                   AS conversation_id,
+    m.hs_object_id,
+    CASE 
+        WHEN m.hs_object_id IS NOT NULL OR m.call_id IS NOT NULL THEN 'https://app.hubspot.com/calls/140451581/review/' || COALESCE(m.hs_object_id, m.call_id)
+        ELSE NULL 
+    END                         AS link_hubspot,
     m.job_id,
     m.run_id,
-    m.hs_object_id,
     m.service_id,
     m.service_key,
     m.service_name,
     m.typology_id,
     m.typology_key,
     m.typology_name,
+    COALESCE(
+        (SELECT COALESCE(category_value, text_value) 
+         FROM bm_mass_evaluation_criterion_results 
+         WHERE mass_analysis_id = m.mass_analysis_id 
+           AND criterion_key = 'tipo_llamada' 
+           AND is_applicable = true 
+         LIMIT 1),
+        m.typology_name
+    )                           AS tipo_llamada,
     m.hubspot_owner_id          AS agent_owner_id,
     m.agent_name,
     m.call_timestamp,
@@ -153,8 +166,7 @@ SELECT
     m.created_at                AS analysis_timestamp,
     COALESCE(m.result_json->>'resumen', m.result_json->>'resumen_llamada', m.result_json->>'summary') AS resumen,
     (m.result_json->>'evaluacion_global')::numeric AS evaluacion_global,
-    COALESCE(p.tipo_llamada_criterio, m.typology_name) AS tipo_llamada,
-    p.cierre_cita_criterio AS cierre_cita,
+    p.cierre_cita_criterio      AS cierre_cita,
     p.nombre_item_1, p.key_item_1, p.tipo_item_1, p.valor_item_1, p.feedback_item_1,
     p.nombre_item_2, p.key_item_2, p.tipo_item_2, p.valor_item_2, p.feedback_item_2,
     p.nombre_item_3, p.key_item_3, p.tipo_item_3, p.valor_item_3, p.feedback_item_3,
@@ -256,11 +268,11 @@ ordered_cte AS (
             ORDER BY criterion_order ASC, canonical_criterion_key ASC
         ) AS item_number
     FROM display_cte
+    WHERE canonical_criterion_key IS DISTINCT FROM 'tipo_llamada'
 ),
 pivoted_cte AS (
     SELECT
         analysis_id,
-        MAX(CASE WHEN canonical_criterion_key = 'tipo_llamada' THEN COALESCE(category_value, text_value) END) AS tipo_llamada_criterio,
         BOOL_OR(CASE WHEN canonical_criterion_key = 'cierre_cita' THEN boolean_value END) AS cierre_cita_criterio,
 {pivot_items}
     FROM ordered_cte
@@ -269,12 +281,11 @@ pivoted_cte AS (
 SELECT
     a.analysis_id,
     a.call_id                       AS conversation_id,
+    CASE 
+        WHEN LOWER(a.source) = 'hubspot' AND a.call_id IS NOT NULL THEN 'https://app.hubspot.com/calls/140451581/review/' || a.call_id
+        ELSE NULL
+    END                             AS link_hubspot,
     a.analysis_type,
-    a.hubspot_owner_id              AS agent_owner_id,
-    a.agente_telefonico             AS agent_name,
-    a.call_timestamp,
-    a.call_timestamp::date          AS call_date,
-    a.fecha_eval::date              AS eval_date,
     a.source,
     CASE 
         WHEN EXISTS (
@@ -282,13 +293,92 @@ SELECT
             WHERE acr.analysis_id = a.analysis_id
         ) THEN 'individual'::text
         ELSE 'individual_legacy'::text
-    END AS source_type,
+    END                             AS source_type,
+    (SELECT MAX(acr.service_id) FROM bm_analysis_criterion_results acr WHERE acr.analysis_id = a.analysis_id) AS service_id,
+    (SELECT MAX(acr.service_key) FROM bm_analysis_criterion_results acr WHERE acr.analysis_id = a.analysis_id) AS service_key,
+    (SELECT MAX(acr.service_name) FROM bm_analysis_criterion_results acr WHERE acr.analysis_id = a.analysis_id) AS service_name,
+    (SELECT MAX(acr.typology_id) FROM bm_analysis_criterion_results acr WHERE acr.analysis_id = a.analysis_id) AS typology_id,
+    COALESCE(
+        (SELECT MAX(acr.typology_key) FROM bm_analysis_criterion_results acr WHERE acr.analysis_id = a.analysis_id),
+        COALESCE(
+            (SELECT COALESCE(category_value, text_value) 
+             FROM bm_analysis_criterion_results 
+             WHERE analysis_id = a.analysis_id 
+               AND criterion_key = 'tipo_llamada' 
+               AND is_applicable = true 
+             LIMIT 1),
+            (SELECT COALESCE(value_category, value_text) 
+             FROM bm_analysis_results 
+             WHERE analysis_id = a.analysis_id 
+               AND criterion_key = 'tipo_llamada' 
+             LIMIT 1),
+            a.tipo_llamada
+        )
+    )                               AS typology_key,
+    COALESCE(
+        (SELECT MAX(acr.typology_name) FROM bm_analysis_criterion_results acr WHERE acr.analysis_id = a.analysis_id),
+        CASE COALESCE(
+            (SELECT COALESCE(category_value, text_value) 
+             FROM bm_analysis_criterion_results 
+             WHERE analysis_id = a.analysis_id 
+               AND criterion_key = 'tipo_llamada' 
+               AND is_applicable = true 
+             LIMIT 1),
+            (SELECT COALESCE(value_category, value_text) 
+             FROM bm_analysis_results 
+             WHERE analysis_id = a.analysis_id 
+               AND criterion_key = 'tipo_llamada' 
+             LIMIT 1),
+            a.tipo_llamada
+        )
+            WHEN 'cita' THEN 'Cita'
+            WHEN 'confirmacion' THEN 'Confirmación'
+            WHEN 'cancelacion' THEN 'Cancelación'
+            WHEN 'reagendo' THEN 'Reagendo'
+            WHEN 'falta' THEN 'Falta'
+            WHEN 'otros' THEN 'Otros'
+            WHEN 'informacion_sin_cita' THEN 'Información sin cita'
+            ELSE INITCAP(REPLACE(COALESCE(
+                (SELECT COALESCE(category_value, text_value) 
+                 FROM bm_analysis_criterion_results 
+                 WHERE analysis_id = a.analysis_id 
+                   AND criterion_key = 'tipo_llamada' 
+                   AND is_applicable = true 
+                 LIMIT 1),
+                (SELECT COALESCE(value_category, value_text) 
+                 FROM bm_analysis_results 
+                 WHERE analysis_id = a.analysis_id 
+                   AND criterion_key = 'tipo_llamada' 
+                 LIMIT 1),
+                a.tipo_llamada
+            ), '_', ' '))
+        END
+    )                               AS typology_name,
+    COALESCE(
+        (SELECT COALESCE(category_value, text_value) 
+         FROM bm_analysis_criterion_results 
+         WHERE analysis_id = a.analysis_id 
+           AND criterion_key = 'tipo_llamada' 
+           AND is_applicable = true 
+         LIMIT 1),
+        (SELECT COALESCE(value_category, value_text) 
+         FROM bm_analysis_results 
+         WHERE analysis_id = a.analysis_id 
+           AND criterion_key = 'tipo_llamada' 
+         LIMIT 1),
+        a.tipo_llamada
+    )                               AS tipo_llamada,
+    a.hubspot_owner_id              AS agent_owner_id,
+    a.agente_telefonico             AS agent_name,
+    a.call_timestamp,
+    a.call_timestamp::date          AS call_date,
+    a.fecha_eval::date              AS eval_date,
     a.prompt_id,
     a.prompt_version_id,
     a.created_at                    AS analysis_timestamp,
     COALESCE(a.result->>'resumen', a.result->>'resumen_llamada', a.result->>'summary') AS resumen,
     a.evaluacion_global,
-    COALESCE(p.tipo_llamada_criterio, a.tipo_llamada) AS tipo_llamada,
+    p.cierre_cita_criterio          AS cierre_cita,
     p.nombre_item_1, p.key_item_1, p.tipo_item_1, p.valor_item_1, p.feedback_item_1,
     p.nombre_item_2, p.key_item_2, p.tipo_item_2, p.valor_item_2, p.feedback_item_2,
     p.nombre_item_3, p.key_item_3, p.tipo_item_3, p.valor_item_3, p.feedback_item_3,
@@ -353,9 +443,9 @@ FROM bm_analyses a
 LEFT JOIN pivoted_cte p ON a.analysis_id = p.analysis_id
 WHERE a.status = 'completed';
 """
-    with open("migrations/v003_looker_wide_views.sql", "w", encoding="utf-8") as f:
+    with open("migrations/v004_looker_wide_views.sql", "w", encoding="utf-8") as f:
         f.write(sql)
-    print("Successfully generated and wrote migrations/v003_looker_wide_views.sql")
+    print("Successfully generated and wrote migrations/v004_looker_wide_views.sql")
 
 if __name__ == '__main__':
     main()

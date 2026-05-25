@@ -971,7 +971,7 @@ async def init_db():
             migration_path = os.path.join(
                 os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
                 "migrations",
-                "v003_looker_wide_views.sql"
+                "v004_looker_wide_views.sql"
             )
             if os.path.exists(migration_path):
                 logger.info(f"Applying Looker wide reporting views migration from {migration_path}...")
