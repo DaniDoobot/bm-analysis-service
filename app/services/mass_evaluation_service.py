@@ -10,9 +10,21 @@ from sqlalchemy import select, update, delete, desc, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.mass_evaluations import MassEvaluationJob, MassEvaluationRun, MassEvaluationResult
+from app.models.mass_evaluations import (
+    MassEvaluationJob,
+    MassEvaluationRun,
+    MassEvaluationResult,
+    MassEvaluationCriterionResult,
+    MassAnalysisAutomation,
+    MassAnalysisAutomationRun,
+)
 from app.models.prompts import Prompt, PromptVersion
-from app.schemas.mass_evaluations import MassEvaluationJobCreate, MassEvaluationJobUpdate
+from app.schemas.mass_evaluations import (
+    MassEvaluationJobCreate,
+    MassEvaluationJobUpdate,
+    MassAnalysisAutomationCreate,
+    MassAnalysisAutomationUpdate,
+)
 from app.services.hubspot_service import HubSpotService
 from app.services.twilio_service import TwilioService
 from app.services.openai_service import analyze_audio_bytes
@@ -335,8 +347,16 @@ class MassEvaluationService:
         return True
 
     @staticmethod
-    async def list_jobs(db: AsyncSession, limit: int = 100) -> list[MassEvaluationJob]:
-        stmt = select(MassEvaluationJob).where(MassEvaluationJob.is_active == True).order_by(desc(MassEvaluationJob.job_id)).limit(limit)
+    async def list_jobs(db: AsyncSession, limit: int = 100, execution_source: str = "on_demand") -> list[MassEvaluationJob]:
+        stmt = (
+            select(MassEvaluationJob)
+            .where(
+                MassEvaluationJob.is_active == True,
+                MassEvaluationJob.execution_source == execution_source
+            )
+            .order_by(desc(MassEvaluationJob.job_id))
+            .limit(limit)
+        )
         res = await db.execute(stmt)
         return list(res.scalars().all())
 
@@ -451,7 +471,8 @@ class MassEvaluationService:
             trigger_type=trigger_type,
             status="running",
             started_at=datetime.now(timezone.utc),
-            effective_filters=effective_filters
+            effective_filters=effective_filters,
+            execution_source=job.execution_source or "on_demand"
         )
         db.add(run)
         await db.commit()
@@ -496,6 +517,7 @@ class MassEvaluationService:
                 prompt_version_id = job.prompt_version_id
                 prompt_version_name = job.prompt_version_name
                 prompt_version_label = job.prompt_version_label
+                execution_source = job.execution_source or "on_demand"
                 duration_min_seconds = job.duration_min_seconds
                 duration_max_seconds = job.duration_max_seconds
                 direction = job.direction
@@ -670,6 +692,7 @@ class MassEvaluationService:
                         res_row = MassEvaluationResult(
                             run_id=run_id,
                             job_id=job_id,
+                            execution_source=execution_source,
                             call_id=call_id,
                             hs_object_id=call["hs_object_id"],
                             hubspot_owner_id=call["hubspot_owner_id"],
@@ -858,6 +881,7 @@ class MassEvaluationService:
                         res_row = MassEvaluationResult(
                             run_id=run_id,
                             job_id=job_id,
+                            execution_source=execution_source,
                             call_id=call_id,
                             hs_object_id=call["hs_object_id"],
                             recording_url=recording_url,
@@ -893,6 +917,7 @@ class MassEvaluationService:
                                 mass_analysis_id=res_row.mass_analysis_id,
                                 run_id=run_id,
                                 job_id=job_id,
+                                execution_source=execution_source,
                                 call_id=call_id,
                                 hs_object_id=call["hs_object_id"],
                                 prompt_id=prompt_id,
@@ -931,6 +956,7 @@ class MassEvaluationService:
                         res_row = MassEvaluationResult(
                             run_id=run_id,
                             job_id=job_id,
+                            execution_source=execution_source,
                             call_id=call_id,
                             hs_object_id=call["hs_object_id"],
                             recording_url=recording_url,
@@ -1019,6 +1045,28 @@ class MassEvaluationService:
 
                 await db.commit()
                 logger.info("Mass evaluation job %d, run %d finished with status: %s", job_id, run_id, final_status)
+
+                # Synchronization hook for MassAnalysisAutomationRun
+                if execution_source == "automation":
+                    try:
+                        auto_stmt = select(MassAnalysisAutomationRun).where(MassAnalysisAutomationRun.run_id == run_id)
+                        auto_res = await db.execute(auto_stmt)
+                        auto_run = auto_res.scalars().first()
+                        if auto_run:
+                            auto_run.status = "completed" if final_status in ["completed", "completed_with_errors"] else final_status
+                            auto_run.finished_at = datetime.now(timezone.utc)
+                            auto_run.calls_found = len(calls) if 'calls' in locals() else 0
+                            auto_run.calls_selected = len(selected_calls) if 'selected_calls' in locals() else 0
+                            auto_run.calls_skipped = calls_skipped
+                            
+                            aut_stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id == auto_run.automation_id)
+                            aut_res = await db.execute(aut_stmt)
+                            aut_obj = aut_res.scalars().first()
+                            if aut_obj:
+                                aut_obj.last_success_at = datetime.now(timezone.utc)
+                            await db.commit()
+                    except Exception as e_hook:
+                        logger.error("Failed to sync automation run status on success: %s", e_hook)
                 
             except Exception as e_run:
                 logger.error("Mass evaluation job %d run %d failed in background: %s", job_id, run_id, e_run, exc_info=True)
@@ -1032,6 +1080,26 @@ class MassEvaluationService:
                         fresh_run_obj.error_message = str(e_run)
                         fresh_run_obj.finished_at = datetime.now(timezone.utc)
                         await db.commit()
+
+                        # Synchronization hook for MassAnalysisAutomationRun
+                        try:
+                            auto_stmt = select(MassAnalysisAutomationRun).where(MassAnalysisAutomationRun.run_id == run_id)
+                            auto_res = await db.execute(auto_stmt)
+                            auto_run = auto_res.scalars().first()
+                            if auto_run:
+                                auto_run.status = "failed"
+                                auto_run.finished_at = datetime.now(timezone.utc)
+                                auto_run.error_message = str(e_run)
+                                
+                                aut_stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id == auto_run.automation_id)
+                                aut_res = await db.execute(aut_stmt)
+                                aut_obj = aut_res.scalars().first()
+                                if aut_obj:
+                                    aut_obj.last_error_at = datetime.now(timezone.utc)
+                                    aut_obj.last_error_message = str(e_run)
+                                await db.commit()
+                        except Exception as e_hook_fail:
+                            logger.error("Failed to sync automation run failure status: %s", e_hook_fail)
                 except Exception as e_inner:
                     logger.error("Failed to mark run as failed in database: %s", e_inner)
 
@@ -1082,6 +1150,7 @@ class MassEvaluationService:
         call_id: str | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
+        execution_source: str | None = None,
         limit: int = 100
     ) -> list[MassEvaluationResult]:
         stmt = select(MassEvaluationResult)
@@ -1098,6 +1167,8 @@ class MassEvaluationService:
             filters.append(MassEvaluationResult.call_timestamp >= date_from)
         if date_to is not None:
             filters.append(MassEvaluationResult.call_timestamp <= date_to)
+        if execution_source is not None:
+            filters.append(MassEvaluationResult.execution_source == execution_source)
             
         if filters:
             stmt = stmt.where(and_(*filters))
@@ -1309,3 +1380,282 @@ class MassEvaluationService:
             "unresolved_analyses": unresolved_analyses,
             "warnings": warnings
         }
+
+    # ── Automation Management ──────────────────────────────────────────────────
+
+    @staticmethod
+    async def create_automation(db: AsyncSession, payload: MassAnalysisAutomationCreate) -> MassAnalysisAutomation:
+        """Create a new automation configuration and its corresponding background job."""
+        # 1. First validate if Prompt exists
+        stmt_p = select(Prompt).where(Prompt.prompt_id == payload.prompt_id)
+        res_p = await db.execute(stmt_p)
+        prompt = res_p.scalars().first()
+        if not prompt:
+            raise ValueError(f"El prompt ID {payload.prompt_id} no existe.")
+
+        # 2. Create the underlying background job with execution_source = 'automation'
+        job = MassEvaluationJob(
+            job_name=f"[Auto] {payload.name}",
+            description=payload.description,
+            is_active=payload.is_active,
+            prompt_id=payload.prompt_id,
+            prompt_version_id=payload.prompt_version_id,
+            agent_owner_ids=payload.agent_owner_ids,
+            duration_min_seconds=payload.min_duration_seconds,
+            direction=payload.direction_filter,
+            only_with_recording=True,
+            max_calls=500,
+            execution_source="automation",
+            date_mode="relative",
+            relative_days=1,
+            timezone="Europe/Madrid",
+            schedule_enabled=False
+        )
+        await enrich_job_prompt_info(db, job)
+        db.add(job)
+        await db.flush()
+
+        # 3. Create the Automation Configuration
+        automation = MassAnalysisAutomation(
+            name=payload.name,
+            description=payload.description,
+            is_active=payload.is_active,
+            interval_minutes=payload.interval_minutes,
+            lookback_minutes=payload.lookback_minutes,
+            delay_minutes=payload.delay_minutes,
+            service_id=payload.service_id,
+            prompt_id=payload.prompt_id,
+            prompt_version_id=payload.prompt_version_id,
+            min_duration_seconds=payload.min_duration_seconds,
+            direction_filter=payload.direction_filter,
+            agent_owner_ids=payload.agent_owner_ids,
+            job_id=job.job_id
+        )
+        db.add(automation)
+        await db.commit()
+        await db.refresh(automation)
+        return automation
+
+    @staticmethod
+    async def update_automation(
+        db: AsyncSession, automation_id: int, payload: MassAnalysisAutomationUpdate
+    ) -> MassAnalysisAutomation | None:
+        """Update an automation configuration and synchronize changes to its background job."""
+        stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id == automation_id)
+        res = await db.execute(stmt)
+        automation = res.scalars().first()
+        if not automation:
+            return None
+
+        update_data = payload.model_dump(exclude_unset=True)
+        for k, v in update_data.items():
+            setattr(automation, k, v)
+
+        # Synchronize changes to underlying permanent job
+        if automation.job_id:
+            stmt_j = select(MassEvaluationJob).where(MassEvaluationJob.job_id == automation.job_id)
+            res_j = await db.execute(stmt_j)
+            job = res_j.scalars().first()
+            if job:
+                if "name" in update_data:
+                    job.job_name = f"[Auto] {payload.name}"
+                if "description" in update_data:
+                    job.description = payload.description
+                if "is_active" in update_data:
+                    job.is_active = payload.is_active
+                if "prompt_id" in update_data:
+                    job.prompt_id = payload.prompt_id
+                if "prompt_version_id" in update_data:
+                    job.prompt_version_id = payload.prompt_version_id
+                if "agent_owner_ids" in update_data:
+                    job.agent_owner_ids = payload.agent_owner_ids
+                if "min_duration_seconds" in update_data:
+                    job.duration_min_seconds = payload.min_duration_seconds
+                if "direction_filter" in update_data:
+                    job.direction = payload.direction_filter
+
+                await enrich_job_prompt_info(db, job)
+
+        await db.commit()
+        await db.refresh(automation)
+        return automation
+
+    @staticmethod
+    async def get_automation(db: AsyncSession, automation_id: int) -> MassAnalysisAutomation | None:
+        """Retrieve details of an automation configuration."""
+        stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id == automation_id)
+        res = await db.execute(stmt)
+        return res.scalars().first()
+
+    @staticmethod
+    async def list_automations(db: AsyncSession, limit: int = 100) -> list[MassAnalysisAutomation]:
+        """List all active automation configurations."""
+        stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.is_active == True).order_by(desc(MassAnalysisAutomation.automation_id)).limit(limit)
+        res = await db.execute(stmt)
+        return list(res.scalars().all())
+
+    @staticmethod
+    async def delete_automation(db: AsyncSession, automation_id: int, soft_delete: bool = True) -> bool:
+        """Deactivate or delete an automation and its background job."""
+        stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id == automation_id)
+        res = await db.execute(stmt)
+        automation = res.scalars().first()
+        if not automation:
+            return False
+
+        if soft_delete:
+            automation.is_active = False
+            if automation.job_id:
+                stmt_j = select(MassEvaluationJob).where(MassEvaluationJob.job_id == automation.job_id)
+                res_j = await db.execute(stmt_j)
+                job = res_j.scalars().first()
+                if job:
+                    job.is_active = False
+            await db.commit()
+        else:
+            if automation.job_id:
+                stmt_j = select(MassEvaluationJob).where(MassEvaluationJob.job_id == automation.job_id)
+                res_j = await db.execute(stmt_j)
+                job = res_j.scalars().first()
+                if job:
+                    await db.delete(job)
+            await db.delete(automation)
+            await db.commit()
+        return True
+
+    @staticmethod
+    async def run_automation_run(
+        db: AsyncSession, automation: MassAnalysisAutomation | int, trigger_type: str = "scheduled"
+    ) -> MassAnalysisAutomationRun:
+        """Computes call search window, generates an automation execution run, and spawns the job."""
+        if isinstance(automation, int):
+            stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id == automation)
+            res = await db.execute(stmt)
+            automation = res.scalars().first()
+            if not automation:
+                raise ValueError(f"La automatización ID {automation} no existe.")
+        else:
+            db.add(automation)
+
+        now = datetime.now(timezone.utc)
+        
+        # temporal window window_from to window_to based on delay and lookback
+        window_from = now - timedelta(minutes=(automation.lookback_minutes or 30) + (automation.delay_minutes or 5))
+        window_to = now - timedelta(minutes=(automation.delay_minutes or 5))
+
+        # Check lock: verify if this automation already has a running automation execution
+        stmt_lock = select(MassAnalysisAutomationRun).where(
+            MassAnalysisAutomationRun.automation_id == automation.automation_id,
+            MassAnalysisAutomationRun.status == "running"
+        )
+        res_lock = await db.execute(stmt_lock)
+        active_auto_run = res_lock.scalars().first()
+        if active_auto_run:
+            raise ValueError(f"La automatización {automation.automation_id} ya tiene una ejecución activa (Run ID {active_auto_run.automation_run_id})")
+
+        # Create Run record
+        auto_run = MassAnalysisAutomationRun(
+            automation_id=automation.automation_id,
+            status="running",
+            started_at=now,
+            window_from=window_from,
+            window_to=window_to,
+            calls_found=0,
+            calls_selected=0,
+            calls_skipped=0
+        )
+        db.add(auto_run)
+        await db.flush()
+
+        try:
+            # Trigger underlying mass evaluation run (which launches background execution task)
+            sub_run = await MassEvaluationService.run_job(
+                db,
+                job_id=automation.job_id,
+                trigger_type=trigger_type,
+                override_date_from=window_from,
+                override_date_to=window_to
+            )
+
+            # Link run and job ids
+            auto_run.job_id = automation.job_id
+            auto_run.run_id = sub_run.run_id
+            
+            automation.last_run_at = now
+            await db.commit()
+            
+        except Exception as e:
+            logger.error("Failed to launch mass evaluation run for automation %d: %s", automation.automation_id, e)
+            auto_run.status = "failed"
+            auto_run.finished_at = datetime.now(timezone.utc)
+            auto_run.error_message = str(e)
+            automation.last_run_at = now
+            automation.last_error_at = datetime.now(timezone.utc)
+            automation.last_error_message = str(e)
+            await db.commit()
+
+        await db.refresh(auto_run)
+        return auto_run
+
+    @staticmethod
+    async def run_due_automations(db: AsyncSession) -> dict[str, int]:
+        """Finds all active automations that are due to execute and triggers them."""
+        now = datetime.now(timezone.utc)
+        
+        # Select all active automations
+        stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.is_active == True)
+        res = await db.execute(stmt)
+        automations = res.scalars().all()
+        
+        due_count = 0
+        launched_count = 0
+        
+        for aut in automations:
+            # Extract attributes locally to avoid expired attribute accesses on commit/expiration
+            automation_id = aut.automation_id
+            automation_name = aut.name
+            interval_minutes = aut.interval_minutes or 30
+            last_run_at = aut.last_run_at
+
+            # Check if due based on interval
+            is_due = False
+            if last_run_at is None:
+                is_due = True
+            else:
+                elapsed = now - last_run_at
+                if elapsed >= timedelta(minutes=interval_minutes):
+                    is_due = True
+                    
+            if not is_due:
+                continue
+                
+            due_count += 1
+            
+            # Check if already running using extracted automation_id
+            stmt_lock = select(MassAnalysisAutomationRun).where(
+                MassAnalysisAutomationRun.automation_id == automation_id,
+                MassAnalysisAutomationRun.status == "running"
+            )
+            res_lock = await db.execute(stmt_lock)
+            active_run = res_lock.scalars().first()
+            if active_run:
+                logger.info("Automation scheduler skipped automation ID %d ('%s') because it is already running.", automation_id, automation_name)
+                continue
+                
+            try:
+                # Trigger via automation_id to avoid lazy-loading issues
+                await MassEvaluationService.run_automation_run(db, automation_id, trigger_type="scheduled")
+                launched_count += 1
+                logger.info("Automation scheduler successfully launched automation ID %d ('%s').", automation_id, automation_name)
+            except Exception as e:
+                logger.error("Automation scheduler failed to launch automation ID %d ('%s'): %s", automation_id, automation_name, e)
+                
+        return {"due_automations_count": due_count, "launched_automations_count": launched_count}
+
+    @staticmethod
+    async def list_automation_runs(db: AsyncSession, automation_id: int, limit: int = 100) -> list[MassAnalysisAutomationRun]:
+        """List all execution logs / runs for a given automation configuration."""
+        stmt = select(MassAnalysisAutomationRun).where(MassAnalysisAutomationRun.automation_id == automation_id).order_by(desc(MassAnalysisAutomationRun.automation_run_id)).limit(limit)
+        res = await db.execute(stmt)
+        return list(res.scalars().all())
+

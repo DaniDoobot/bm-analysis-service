@@ -7,6 +7,14 @@ from app.models.prompts import PromptBaseStructure, PromptVersion, Prompt
 from app.models.services import Service
 from app.models.typologies import Typology
 from app.models.criteria import PromptCriterion, PromptCriterionTypology
+from app.models.mass_evaluations import (
+    MassEvaluationJob,
+    MassEvaluationRun,
+    MassEvaluationResult,
+    MassEvaluationCriterionResult,
+    MassAnalysisAutomation,
+    MassAnalysisAutomationRun,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +235,48 @@ async def init_db():
                     logger.info("Adding column '%s' to 'bm_prompt_criteria' table...", col_name)
                     await conn.execute(text(f"ALTER TABLE bm_prompt_criteria ADD COLUMN {col_name} {col_type} {col_default};"))
                     logger.info("Column '%s' added successfully to 'bm_prompt_criteria'.", col_name)
+
+            # 1.6.6 bm_mass_evaluation_* tables — execution_source support columns
+            for table_name in [
+                "bm_mass_evaluation_jobs",
+                "bm_mass_evaluation_runs",
+                "bm_mass_evaluation_results",
+                "bm_mass_evaluation_criterion_results"
+            ]:
+                res = await conn.execute(
+                    text(f"""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.columns 
+                            WHERE table_schema = 'public' 
+                              AND table_name = '{table_name}' 
+                              AND column_name = 'execution_source'
+                        );
+                    """)
+                )
+                if not res.scalar():
+                    logger.info("Adding column 'execution_source' to '%s' table...", table_name)
+                    await conn.execute(
+                        text(f"ALTER TABLE {table_name} ADD COLUMN execution_source TEXT DEFAULT 'on_demand';")
+                    )
+                    logger.info("Column 'execution_source' added successfully to '%s'.", table_name)
+
+            # 1.6.7 bm_mass_analysis_automations — job_id support column
+            res = await conn.execute(
+                text("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.columns 
+                        WHERE table_schema = 'public' 
+                          AND table_name = 'bm_mass_analysis_automations' 
+                          AND column_name = 'job_id'
+                    );
+                """)
+            )
+            if not res.scalar():
+                logger.info("Adding column 'job_id' to 'bm_mass_analysis_automations' table...")
+                await conn.execute(
+                    text("ALTER TABLE bm_mass_analysis_automations ADD COLUMN job_id INTEGER NULL;")
+                )
+                logger.info("Column 'job_id' added successfully to 'bm_mass_analysis_automations'.")
 
             # Drop individual views first to avoid InvalidTableDefinitionError if column names or positions changed
             await conn.execute(text("DROP VIEW IF EXISTS vw_bm_analysis_criteria_flat CASCADE;"))

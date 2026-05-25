@@ -116,6 +116,32 @@ async def start_mass_evaluations_scheduler():
             await asyncio.sleep(30)
 
 
+# ── Automation Scheduler ──────────────────────────────────────────────────────
+async def start_automation_scheduler():
+    """Background scheduler task checking for due automations every 60 seconds."""
+    logger.info("Automations background scheduler task started.")
+    import asyncio
+    await asyncio.sleep(15)  # Give app some startup headroom
+    
+    from app.db import get_engine
+    from app.services.mass_evaluation_service import MassEvaluationService
+    from sqlalchemy.ext.asyncio import AsyncSession
+    
+    engine = get_engine()
+    
+    while True:
+        try:
+            async with AsyncSession(engine) as db:
+                await MassEvaluationService.run_due_automations(db)
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            logger.info("Automations background scheduler task cancelled.")
+            break
+        except Exception as e:
+            logger.error("Error in automations scheduler loop: %s", e, exc_info=True)
+            await asyncio.sleep(30)
+
+
 # ── Startup ───────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup_event():
@@ -138,4 +164,10 @@ async def startup_event():
     
     # Start mass evaluations background scheduler loop
     asyncio.create_task(start_mass_evaluations_scheduler())
+
+    # Start automations background scheduler if enabled
+    if settings.enable_automation_scheduler:
+        asyncio.create_task(start_automation_scheduler())
+    else:
+        logger.info("Automations background scheduler is DISABLED (ENABLE_AUTOMATION_SCHEDULER=false).")
 

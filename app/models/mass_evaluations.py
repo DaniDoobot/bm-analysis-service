@@ -31,6 +31,9 @@ class MassEvaluationJob(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
 
+    # execution source: on_demand vs automation
+    execution_source: Mapped[str] = mapped_column(Text, default="on_demand", server_default="'on_demand'")
+
     # Prompt specific fields
     prompt_id: Mapped[int] = mapped_column(Integer, nullable=False)
     prompt_version_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -79,6 +82,7 @@ class MassEvaluationJob(Base):
 
     __table_args__ = (
         Index("idx_mass_eval_jobs_active_next", "is_active", "next_run_at"),
+        Index("idx_mass_eval_jobs_execution_source", "execution_source"),
     )
 
 
@@ -88,6 +92,10 @@ class MassEvaluationRun(Base):
     run_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     job_id: Mapped[int] = mapped_column(Integer, ForeignKey("bm_mass_evaluation_jobs.job_id", ondelete="CASCADE"), nullable=False)
     trigger_type: Mapped[str] = mapped_column(Text, nullable=False)  # manual, scheduled
+
+    # execution source: on_demand vs automation
+    execution_source: Mapped[str] = mapped_column(Text, default="on_demand", server_default="'on_demand'")
+
     status: Mapped[str] = mapped_column(Text, default="pending", server_default="'pending'")  # pending, running, completed, completed_with_errors, failed
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -115,6 +123,9 @@ class MassEvaluationResult(Base):
     mass_analysis_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     run_id: Mapped[int] = mapped_column(Integer, ForeignKey("bm_mass_evaluation_runs.run_id", ondelete="CASCADE"), nullable=False)
     job_id: Mapped[int] = mapped_column(Integer, ForeignKey("bm_mass_evaluation_jobs.job_id", ondelete="CASCADE"), nullable=False)
+
+    # execution source: on_demand vs automation
+    execution_source: Mapped[str] = mapped_column(Text, default="on_demand", server_default="'on_demand'")
 
     # Call Identity
     call_id: Mapped[str] = mapped_column(Text, nullable=False)
@@ -164,6 +175,7 @@ class MassEvaluationResult(Base):
         Index("idx_mass_eval_results_call_id", "call_id"),
         Index("idx_mass_eval_results_hubspot_owner_id", "hubspot_owner_id"),
         Index("idx_mass_eval_results_call_timestamp", "call_timestamp"),
+        Index("idx_mass_eval_results_execution_source", "execution_source"),
     )
 
 
@@ -176,6 +188,10 @@ class MassEvaluationCriterionResult(Base):
     )
     run_id: Mapped[int] = mapped_column(Integer, ForeignKey("bm_mass_evaluation_runs.run_id", ondelete="CASCADE"), nullable=False)
     job_id: Mapped[int] = mapped_column(Integer, ForeignKey("bm_mass_evaluation_jobs.job_id", ondelete="CASCADE"), nullable=False)
+
+    # execution source: on_demand vs automation
+    execution_source: Mapped[str] = mapped_column(Text, default="on_demand", server_default="'on_demand'")
+
     call_id: Mapped[str] = mapped_column(Text, nullable=False)
     hs_object_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     prompt_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("bm_prompts.prompt_id", ondelete="SET NULL"), nullable=True)
@@ -207,5 +223,71 @@ class MassEvaluationCriterionResult(Base):
         UniqueConstraint("job_id", "call_id", "criterion_key", name="uq_mass_eval_crit_res"),
         Index("idx_mass_eval_crit_mass_id", "mass_analysis_id"),
         Index("idx_mass_eval_crit_job_call", "job_id", "call_id"),
+        Index("idx_mass_eval_crit_execution_source", "execution_source"),
     )
 
+
+class MassAnalysisAutomation(Base):
+    __tablename__ = "bm_mass_analysis_automations"
+
+    automation_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    interval_minutes: Mapped[int] = mapped_column(Integer, default=30, server_default="30")
+
+    # Linked permanent job
+    job_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("bm_mass_evaluation_jobs.job_id", ondelete="SET NULL"), nullable=True)
+    lookback_minutes: Mapped[int] = mapped_column(Integer, default=30, server_default="30")
+    delay_minutes: Mapped[int] = mapped_column(Integer, default=5, server_default="5")
+    
+    # Target configurations
+    service_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    prompt_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    prompt_version_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    
+    # Call filters
+    min_duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    direction_filter: Mapped[str] = mapped_column(Text, default="all", server_default="'all'") # INBOUND, OUTBOUND, all
+    agent_owner_ids: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True) # JSON list of strings
+    
+    # Audit timestamps
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), onupdate=func.now(), server_default=func.now()
+    )
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Relationships
+    runs = relationship("MassAnalysisAutomationRun", back_populates="automation", cascade="all, delete-orphan")
+
+
+class MassAnalysisAutomationRun(Base):
+    __tablename__ = "bm_mass_analysis_automation_runs"
+
+    automation_run_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    automation_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("bm_mass_analysis_automations.automation_id", ondelete="CASCADE"), nullable=False
+    )
+    
+    status: Mapped[str] = mapped_column(Text, default="pending", server_default="'pending'") # pending, running, completed, failed
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    
+    # Execution details
+    window_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    window_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    calls_found: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    calls_selected: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    calls_skipped: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    
+    # Linked background objects
+    job_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    run_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Relationships
+    automation = relationship("MassAnalysisAutomation", back_populates="runs")

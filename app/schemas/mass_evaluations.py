@@ -380,3 +380,81 @@ class MassEvaluationRunLaunchResponse(BaseModel):
 class MassCriterionTypologyBackfillRequest(BaseModel):
     mode: str  # "dry_run" | "execute"
     performed_by_email: str
+
+
+# ── Automation Schemas ────────────────────────────────────────────────────────
+
+class MassAnalysisAutomationCreate(BaseModel):
+    name: str
+    description: str | None = None
+    is_active: bool = True
+    interval_minutes: int = 30
+    lookback_minutes: int = 30
+    delay_minutes: int = 5
+    service_id: int | None = None
+    prompt_id: int
+    prompt_version_id: int | None = None
+    min_duration_seconds: int | None = None
+    direction_filter: str = "all"  # inbound / outbound / all
+    agent_owner_ids: list[str] | None = None
+
+
+class MassAnalysisAutomationUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    is_active: bool | None = None
+    interval_minutes: int | None = None
+    lookback_minutes: int | None = None
+    delay_minutes: int | None = None
+    service_id: int | None = None
+    prompt_id: int | None = None
+    prompt_version_id: int | None = None
+    min_duration_seconds: int | None = None
+    direction_filter: str | None = None
+    agent_owner_ids: list[str] | None = None
+
+
+class MassAnalysisAutomationResponse(BaseModel):
+    automation_id: int
+    name: str
+    description: str | None
+    is_active: bool
+    interval_minutes: int
+    lookback_minutes: int
+    delay_minutes: int
+    service_id: int | None
+    prompt_id: int
+    prompt_version_id: int | None
+    job_id: int | None
+    min_duration_seconds: int | None
+    direction_filter: str
+    agent_owner_ids: list[str] | None
+    created_at: datetime
+    updated_at: datetime
+    last_run_at: datetime | None
+    last_success_at: datetime | None
+    last_error_at: datetime | None
+    last_error_message: str | None
+
+    class Config:
+        from_attributes = True
+
+
+class MassAnalysisAutomationRunResponse(BaseModel):
+    automation_run_id: int
+    automation_id: int
+    status: str
+    started_at: datetime
+    finished_at: datetime | None
+    window_from: datetime | None
+    window_to: datetime | None
+    calls_found: int
+    calls_selected: int
+    calls_skipped: int
+    job_id: int | None
+    run_id: int | None
+    error_message: str | None
+
+    class Config:
+        from_attributes = True
+
