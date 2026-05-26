@@ -1,10 +1,10 @@
 """HubSpot owners mapping and resolution helper."""
 
 OWNER_TO_NAME = {
-    "1459417733": "Santiago Taboada Alvarez",
+    "1459417733": "Santiago Taboada",
     "1375831790": "Luci Dos Santos Furtado",
     "1539993532": "Fernanda Rodrigues",
-    "1375831787": "Roberto Galan Alvarez",
+    "1375831787": "Roberto Galán",
     "1375831791": "Eugenia Carreno",
     "33013277": "Bryan Herrera",
     "33013276": "Cristina Montenegro",
