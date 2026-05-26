@@ -7,6 +7,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libpq-dev \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
@@ -15,6 +16,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application source
 COPY app/ ./app/
+COPY migrations/ ./migrations/
 
 # Expose port
 EXPOSE 8000

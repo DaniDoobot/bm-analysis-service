@@ -7,6 +7,35 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.drafts import PromptDraft
 
 
+def _criteria_are_equal(db_criteria: list, draft_criteria: list) -> bool:
+    if len(db_criteria) != len(draft_criteria):
+        return False
+        
+    list_a = sorted(db_criteria, key=lambda x: (x.order_index or 0, x.output_key or ""))
+    list_b = sorted(draft_criteria, key=lambda x: (x.get("order_index") or 0, x.get("output_key") or ""))
+    
+    fields_to_compare = [
+        "criterion_key", "criterion_name", "criterion_description",
+        "criterion_type", "output_key", "feed_key", "allowed_values",
+        "applies_to_types", "is_required"
+    ]
+    
+    for ca, cb in zip(list_a, list_b):
+        for field in fields_to_compare:
+            val_a = getattr(ca, field, None)
+            val_b = cb.get(field, None)
+            
+            if isinstance(val_a, list) or isinstance(val_b, list):
+                if list(val_a or []) != list(val_b or []):
+                    return False
+            else:
+                if val_a != val_b:
+                    if not val_a and not val_b:
+                        continue
+                    return False
+    return True
+
+
 async def get_draft(
     db: AsyncSession, prompt_id: int, user_email: str | None = None
 ) -> dict | None:
@@ -23,6 +52,49 @@ async def get_draft(
     draft = result.scalars().first()
     if not draft:
         return None
+
+    # Check if the draft is obsolete (older than the current version or has no real differences)
+    from app.models.prompts import PromptVersion
+    current_res = await db.execute(
+        select(PromptVersion)
+        .where(PromptVersion.prompt_id == prompt_id, PromptVersion.is_current == True)
+        .order_by(PromptVersion.id.desc())
+        .limit(1)
+    )
+    current = current_res.scalars().first()
+    
+    if current:
+        # 1. Check if draft is older than or equal to current version
+        if draft.updated_at <= current.created_at:
+            from sqlalchemy import delete
+            await db.execute(delete(PromptDraft).where(PromptDraft.draft_id == draft.draft_id))
+            await db.commit()
+            return None
+            
+        # 2. Check if the draft has no real changes compared to current version
+        draft_data = draft.draft_data or {}
+        draft_prompt = draft_data.get("prompt")
+        current_prompt = current.prompt
+        
+        prompt_changed = (draft_prompt or "").strip() != (current_prompt or "").strip()
+        
+        from app.models.criteria import PromptCriterion
+        crit_stmt = select(PromptCriterion).where(
+            PromptCriterion.prompt_id == prompt_id,
+            PromptCriterion.is_active == True
+        )
+        res_crit = await db.execute(crit_stmt)
+        db_criteria = res_crit.scalars().all()
+        draft_criteria = draft_data.get("criteria", []) or []
+        
+        criteria_changed = not _criteria_are_equal(db_criteria, draft_criteria)
+        
+        if not prompt_changed and not criteria_changed:
+            from sqlalchemy import delete
+            await db.execute(delete(PromptDraft).where(PromptDraft.draft_id == draft.draft_id))
+            await db.commit()
+            return None
+
     return {
         "draft_id": draft.draft_id,
         "prompt_id": draft.prompt_id,
@@ -72,9 +144,25 @@ async def save_draft(db: AsyncSession, body) -> PromptDraft:
 
 
 async def set_draft_status(db: AsyncSession, draft_id: int, status: str) -> None:
-    await db.execute(
-        update(PromptDraft).where(PromptDraft.draft_id == draft_id).values(status=status)
-    )
+    # Fetch draft to get metadata
+    result = await db.execute(select(PromptDraft).where(PromptDraft.draft_id == draft_id))
+    draft = result.scalars().first()
+    if not draft:
+        return
+        
+    # Clean up existing conflicts for this user/prompt and status to avoid unique constraints
+    if status in ("discarded", "published") and draft.updated_by_email:
+        from sqlalchemy import delete
+        await db.execute(
+            delete(PromptDraft).where(
+                PromptDraft.prompt_id == draft.prompt_id,
+                PromptDraft.updated_by_email == draft.updated_by_email,
+                PromptDraft.status == status,
+                PromptDraft.draft_id != draft_id
+            )
+        )
+        
+    draft.status = status
     await db.commit()
 
 
@@ -178,6 +266,16 @@ async def publish_draft(
             )
             .values(status="discarded")
         )
+
+    # 8.7. Discard (delete) all other active drafts for this prompt
+    from sqlalchemy import delete
+    await db.execute(
+        delete(PromptDraft).where(
+            PromptDraft.prompt_id == draft.prompt_id,
+            PromptDraft.draft_id != draft_id,
+            PromptDraft.status == "draft"
+        )
+    )
 
     # 9. Update draft status
     draft.status = "published"

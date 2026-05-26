@@ -144,7 +144,6 @@ async def cleanup_mass_evaluations(
         "Admin cleanup-mass-evaluations called: mode=%s performed_by=%s",
         body.mode, body.performed_by_email,
     )
-
     try:
         from app.services.cleanup_service import cleanup_mass_evaluations as _cleanup_mass
         result = await _cleanup_mass(

@@ -10,6 +10,7 @@ from app.schemas.criteria import (
     CriteriaGroupedOut,
     SaveCriterionRequest,
     ToggleCriterionRequest,
+    DeleteCriterionRequest,
 )
 from app.schemas.typologies import CriterionTypologyAssociation
 from app.services import criteria_service
@@ -22,9 +23,10 @@ router = APIRouter(prefix="/bm", tags=["Criteria"])
 async def get_prompt_criteria(
     prompt_id: Annotated[int, Query()],
     db: Annotated[AsyncSession, Depends(get_db)],
+    include_deleted: bool = False,
 ):
     """Return active criteria for a prompt, grouped by criterion_type."""
-    return await criteria_service.get_criteria_grouped(db, prompt_id=prompt_id)
+    return await criteria_service.get_criteria_grouped(db, prompt_id=prompt_id, include_deleted=include_deleted)
 
 
 @router.post("/prompt-criteria/save")
@@ -32,9 +34,21 @@ async def save_criterion(
     body: SaveCriterionRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Create or update a criterion."""
-    criterion = await criteria_service.save_criterion(db, body)
-    return {"ok": True, "status": "saved", "criterion_id": criterion.criterion_id}
+    """Create, restore, or update a criterion."""
+    logger.info(f"Received request to save criterion. Body: {body.model_dump()}")
+    try:
+        criterion = await criteria_service.save_criterion(db, body)
+        logger.info(f"Successfully saved criterion (ID: {criterion.criterion_id}, key: '{criterion.criterion_key}').")
+        return {"ok": True, "status": "saved", "criterion_id": criterion.criterion_id}
+    except HTTPException as he:
+        logger.warning(f"HTTPException while saving criterion: {he.detail} (status: {he.status_code})")
+        raise he
+    except Exception as e:
+        logger.exception("Unexpected error while saving criterion: %s", e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error interno del servidor al guardar el criterio: {str(e)}"
+        )
 
 
 @router.post("/prompt-criteria/toggle")
@@ -64,4 +78,21 @@ async def update_criterion_typologies(
 ):
     """Update typology associations for a specific criterion."""
     return await criteria_service.update_criterion_typologies(db, criterion_id=criterion_id, typology_ids=typology_ids)
+
+
+@router.delete("/prompt-criteria/{criterion_id}")
+async def delete_criterion(
+    criterion_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    body: DeleteCriterionRequest | None = None,
+):
+    """Delete or soft-delete a criterion."""
+    try:
+        email = body.performed_by_email if body else None
+        return await criteria_service.delete_criterion(db, criterion_id=criterion_id, performed_by_email=email)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error deleting criterion %s: %s", criterion_id, e)
+        raise HTTPException(status_code=400, detail=f"Error eliminando el criterio: {str(e)}")
 

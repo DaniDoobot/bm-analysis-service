@@ -23,6 +23,9 @@ class CriterionOut(BaseModel):
     is_active: bool = True
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    deleted_at: datetime | None = None
+    deleted_by_email: str | None = None
+
 
 
 class CriteriaGroupedOut(BaseModel):
@@ -50,3 +53,7 @@ class SaveCriterionRequest(BaseModel):
 class ToggleCriterionRequest(BaseModel):
     criterion_id: int
     is_active: bool
+
+
+class DeleteCriterionRequest(BaseModel):
+    performed_by_email: str | None = None

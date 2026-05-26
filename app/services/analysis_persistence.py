@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -184,9 +185,49 @@ async def save_analysis(
                 active_typologies = t_res.scalars().all()
                 typology_by_key = {t.typology_key: t for t in active_typologies}
 
-                tipo_llamada_val = clean_result.get("tipo_llamada")
-                if isinstance(tipo_llamada_val, str) and tipo_llamada_val in typology_by_key:
-                    matched_typology = typology_by_key[tipo_llamada_val]
+                # Fetch criteria early to support robust fallback typology matching
+                criteria = await get_active_criteria(db, prompt_id)
+
+                # 1. Try direct keys in clean_result
+                detected_typology_key_raw = clean_result.get("tipo_llamada")
+                
+                # 2. Fallback: find criterion with key 'tipo_llamada' and use its output_key to look up in clean_result
+                if not detected_typology_key_raw:
+                    for criterion in criteria:
+                        if criterion.criterion_key == "tipo_llamada":
+                            out_key = criterion.output_key
+                            if out_key and out_key in clean_result:
+                                detected_typology_key_raw = clean_result.get(out_key)
+                                break
+                                
+                # 3. Fallback: case-insensitive keys in clean_result containing 'tipo' and 'llamada'
+                if not detected_typology_key_raw:
+                    for k, v in clean_result.items():
+                        k_norm = k.lower().replace("_", "").replace("-", "").replace(" ", "")
+                        if "tipollamada" in k_norm:
+                            detected_typology_key_raw = v
+                            break
+
+                detected_typology_key = str(detected_typology_key_raw).strip().lower() if detected_typology_key_raw else None
+                matched_typology = None
+                if detected_typology_key:
+                    if detected_typology_key in typology_by_key:
+                        matched_typology = typology_by_key[detected_typology_key]
+                    else:
+                        for k, typ in typology_by_key.items():
+                            if k.lower().strip() == detected_typology_key:
+                                matched_typology = typ
+                                break
+
+                logger.info(
+                    "Manual/historical typology resolution: call_id=%s service_id=%s detected_raw=%s detected_norm=%s typology_keys=%s matched=%s",
+                    call_id,
+                    service_id,
+                    detected_typology_key_raw,
+                    detected_typology_key,
+                    list(typology_by_key.keys()),
+                    matched_typology,
+                )
 
             await _insert_results(db, analysis, clean_result, prompt_id, matched_typology=matched_typology)
 
@@ -274,7 +315,8 @@ async def _insert_results(
     prompt_id: int,
     matched_typology: Any | None = None,
 ) -> None:
-    """Insert per-criterion rows in bm_analysis_results."""
+    """Insert per-criterion rows in bm_analysis_criterion_results."""
+    from app.models.analyses import AnalysisCriterionResult
     criteria: list[PromptCriterion] = await get_active_criteria(db, prompt_id)
     c_ids = [c.criterion_id for c in criteria]
 
@@ -305,33 +347,60 @@ async def _insert_results(
 
             typed = map_criterion_value(raw_value, criterion.criterion_type or "text")
 
-            row = AnalysisResult(
+            row = AnalysisCriterionResult(
                 analysis_id=analysis.analysis_id,
+                call_id=analysis.call_id,
+                prompt_id=analysis.prompt_id,
+                prompt_version_id=analysis.prompt_version_id,
                 criterion_id=criterion.criterion_id,
                 criterion_key=criterion.criterion_key,
                 criterion_name=criterion.criterion_name,
                 criterion_type=criterion.criterion_type,
-                value_number=typed["value_number"],
-                value_text=typed["value_text"],
-                value_boolean=typed["value_boolean"],
-                value_category=typed["value_category"],
-                feed=str(feed_value) if feed_value is not None else None,
-                description=criterion.criterion_description,
-                raw_value=typed["raw_value"],
+                value_raw=typed["raw_value"],
+                numeric_value=typed["value_number"],
+                text_value=typed["value_text"],
+                boolean_value=typed["value_boolean"],
+                category_value=typed["value_category"],
+                percentage_value=typed["value_number"] if criterion.criterion_type == "percentage" else None,
+                feedback=str(feed_value) if feed_value is not None else None,
+                feed_key=feed_key,
+                is_applicable=True,
+                not_applicable=False,
+                typology_id=matched_typology.typology_id if matched_typology else None,
+                typology_key=matched_typology.typology_key if matched_typology else None,
+                typology_name=matched_typology.typology_name if matched_typology else None,
             )
         else:
-            row = AnalysisResult(
+            row = AnalysisCriterionResult(
                 analysis_id=analysis.analysis_id,
+                call_id=analysis.call_id,
+                prompt_id=analysis.prompt_id,
+                prompt_version_id=analysis.prompt_version_id,
                 criterion_id=criterion.criterion_id,
                 criterion_key=criterion.criterion_key,
                 criterion_name=criterion.criterion_name,
                 criterion_type=criterion.criterion_type,
-                value_number=None,
-                value_text=None,
-                value_boolean=None,
-                value_category=None,
-                feed=None,
-                description=criterion.criterion_description,
-                raw_value=None,
+                value_raw=None,
+                numeric_value=None,
+                text_value=None,
+                boolean_value=None,
+                category_value=None,
+                percentage_value=None,
+                feedback=None,
+                feed_key=feed_key,
+                is_applicable=False,
+                not_applicable=True,
+                typology_id=matched_typology.typology_id if matched_typology else None,
+                typology_key=matched_typology.typology_key if matched_typology else None,
+                typology_name=matched_typology.typology_name if matched_typology else None,
             )
+        
+        # Inject service info if prompt context is loaded
+        # Note: Analysis row doesn't have service directly in this function without a join,
+        # but the view handles service_name, or we can fetch it if strictly needed.
+        # It's better to fetch service for the typology.
+        if matched_typology:
+            row.service_id = matched_typology.service_id
+            
         db.add(row)
+

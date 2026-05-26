@@ -74,5 +74,6 @@ def get_session_factory():
 
 
 # Keep backwards-compatible names
-engine = None          # use get_engine() instead
-AsyncSessionLocal = None  # use get_session_factory() instead
+engine = get_engine()
+SessionLocal = get_session_factory()
+AsyncSessionLocal = get_session_factory()

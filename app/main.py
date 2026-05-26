@@ -23,6 +23,7 @@ from app.routers import (
     mass_evaluations,
     services,
     typologies,
+    service_evolution,
 )
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -46,9 +47,14 @@ app = FastAPI(
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
 origins = settings.allowed_origins
+lovable_specific = "https://00582fba-62f7-4360-8060-b198d11c03d4.lovableproject.com"
+if lovable_specific not in origins and "*" not in origins:
+    origins.append(lovable_specific)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    allow_origin_regex=r"https://.*\.lovableproject\.com",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -81,6 +87,7 @@ app.include_router(prompt_builder.router)
 app.include_router(mass_evaluations.router)
 app.include_router(services.router)
 app.include_router(typologies.router)
+app.include_router(service_evolution.router)
 
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
@@ -109,10 +116,38 @@ async def start_mass_evaluations_scheduler():
             await asyncio.sleep(30)
 
 
+# ── Automation Scheduler ──────────────────────────────────────────────────────
+async def start_automation_scheduler():
+    """Background scheduler task checking for due automations every 60 seconds."""
+    logger.info("Automations background scheduler task started.")
+    import asyncio
+    await asyncio.sleep(15)  # Give app some startup headroom
+    
+    from app.db import get_engine
+    from app.services.mass_evaluation_service import MassEvaluationService
+    from sqlalchemy.ext.asyncio import AsyncSession
+    
+    engine = get_engine()
+    
+    while True:
+        try:
+            async with AsyncSession(engine) as db:
+                await MassEvaluationService.run_due_automations(db)
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            logger.info("Automations background scheduler task cancelled.")
+            break
+        except Exception as e:
+            logger.error("Error in automations scheduler loop: %s", e, exc_info=True)
+            await asyncio.sleep(30)
+
+
 # ── Startup ───────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup_event():
-    logger.info("bm-analysis-service starting up")
+    from app.routers.health import get_version
+    commit_ver = get_version()
+    logger.info("bm-analysis-service starting up (commit: %s)", commit_ver)
     logger.info("AI provider: azure_openai")
     logger.info("Azure text configured: %s", "yes" if settings.azure_openai_text_endpoint and settings.azure_openai_text_deployment else "no")
     logger.info("Azure audio configured: %s", "yes" if settings.azure_openai_audio_endpoint and settings.azure_openai_audio_deployment else "no")
@@ -129,4 +164,10 @@ async def startup_event():
     
     # Start mass evaluations background scheduler loop
     asyncio.create_task(start_mass_evaluations_scheduler())
+
+    # Start automations background scheduler if enabled
+    if settings.enable_automation_scheduler:
+        asyncio.create_task(start_automation_scheduler())
+    else:
+        logger.info("Automations background scheduler is DISABLED (ENABLE_AUTOMATION_SCHEDULER=false).")
 

@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
 
+    # ── Automation Scheduler ──────────────────────────────────────────────────
+    enable_automation_scheduler: bool = False
+
     # ── CORS ──────────────────────────────────────────────────────────────────
     cors_origins: str = "*"
 

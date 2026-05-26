@@ -60,6 +60,10 @@ async def list_prompts(
         draft_res = await db.execute(draft_stmt)
         active_draft = draft_res.scalars().first()
 
+        # Clean up stale/obsolete active draft if any
+        if active_draft and current:
+            active_draft = await _check_and_cleanup_draft(db, active_draft, current)
+
         row = {
             "prompt_id": p.prompt_id,
             "prompt_name": p.prompt_name,
@@ -224,6 +228,14 @@ async def save_prompt_version(db: AsyncSession, body: SavePromptRequest) -> Prom
         source=body.source or "manual",
         is_current=True,
     )
+    # Discard (delete) all active drafts for this prompt
+    from sqlalchemy import delete
+    from app.models.drafts import PromptDraft
+    await db.execute(
+        delete(PromptDraft)
+        .where(PromptDraft.prompt_id == body.prompt_id, PromptDraft.status == "draft")
+    )
+
     db.add(new_version)
     await db.commit()
     await db.refresh(new_version)
@@ -279,6 +291,15 @@ async def update_prompt_current(
         is_archived=False,
     )
     db.add(new_version)
+
+    # Discard (delete) all active drafts for this prompt
+    from sqlalchemy import delete
+    from app.models.drafts import PromptDraft
+    await db.execute(
+        delete(PromptDraft)
+        .where(PromptDraft.prompt_id == prompt_id, PromptDraft.status == "draft")
+    )
+
     await db.commit()
     await db.refresh(new_version)
     await db.refresh(prompt_obj)
@@ -655,6 +676,86 @@ async def refresh_boston_medical_base_structure(db: AsyncSession) -> dict[str, A
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _criteria_are_equal(db_criteria: list, draft_criteria: list) -> bool:
+    if len(db_criteria) != len(draft_criteria):
+        return False
+        
+    list_a = sorted(db_criteria, key=lambda x: (x.order_index or 0, x.output_key or ""))
+    list_b = sorted(draft_criteria, key=lambda x: (x.get("order_index") or 0, x.get("output_key") or ""))
+    
+    fields_to_compare = [
+        "criterion_key", "criterion_name", "criterion_description",
+        "criterion_type", "output_key", "feed_key", "allowed_values",
+        "applies_to_types", "is_required"
+    ]
+    
+    for ca, cb in zip(list_a, list_b):
+        for field in fields_to_compare:
+            val_a = getattr(ca, field, None)
+            val_b = cb.get(field, None)
+            
+            if isinstance(val_a, list) or isinstance(val_b, list):
+                if list(val_a or []) != list(val_b or []):
+                    return False
+            else:
+                if val_a != val_b:
+                    if not val_a and not val_b:
+                        continue
+                    return False
+    return True
+
+
+async def _check_and_cleanup_draft(db: AsyncSession, active_draft: Any, current: Any) -> Any:
+    """
+    Checks if an active draft is obsolete (older than the current published version
+    or has no real differences compared to the current version).
+    If it is obsolete, deletes it from the DB and returns None.
+    Otherwise, returns the active_draft.
+    """
+    if not active_draft:
+        return None
+    if not current:
+        return active_draft
+        
+    from app.models.drafts import PromptDraft
+    # 1. Check if draft is older than the current version
+    if active_draft.updated_at <= current.created_at:
+        # Draft is obsolete because a newer version was saved/published
+        from sqlalchemy import delete
+        await db.execute(delete(PromptDraft).where(PromptDraft.draft_id == active_draft.draft_id))
+        await db.commit()
+        return None
+        
+    # 2. Check if the draft has no real changes compared to the current version
+    draft_data = active_draft.draft_data or {}
+    draft_prompt = draft_data.get("prompt")
+    current_prompt = current.prompt
+    
+    # Compare prompt text
+    prompt_changed = (draft_prompt or "").strip() != (current_prompt or "").strip()
+    
+    # Compare criteria
+    from app.models.criteria import PromptCriterion
+    crit_stmt = select(PromptCriterion).where(
+        PromptCriterion.prompt_id == active_draft.prompt_id,
+        PromptCriterion.is_active == True
+    )
+    res_crit = await db.execute(crit_stmt)
+    db_criteria = res_crit.scalars().all()
+    draft_criteria = draft_data.get("criteria", []) or []
+    
+    criteria_changed = not _criteria_are_equal(db_criteria, draft_criteria)
+    
+    if not prompt_changed and not criteria_changed:
+        # Draft has no real differences compared to current published version
+        from sqlalchemy import delete
+        await db.execute(delete(PromptDraft).where(PromptDraft.draft_id == active_draft.draft_id))
+        await db.commit()
+        return None
+        
+    return active_draft
+
 
 async def _get_current_version(db: AsyncSession, prompt_id: int) -> PromptVersion | None:
     result = await db.execute(

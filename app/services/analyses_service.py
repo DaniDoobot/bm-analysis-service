@@ -137,13 +137,34 @@ async def get_analysis_detail(
 
     await enrich_analyses(db, [analysis])
 
-    # Get analysis results
+    # Get analysis results from new normalized table
+    from app.models.analyses import AnalysisCriterionResult
+    from app.schemas.analyses import AnalysisResultOut
     res_result = await db.execute(
-        select(AnalysisResult)
-        .where(AnalysisResult.analysis_id == analysis.analysis_id)
-        .order_by(AnalysisResult.result_id)
+        select(AnalysisCriterionResult)
+        .where(AnalysisCriterionResult.analysis_id == analysis.analysis_id)
+        .order_by(AnalysisCriterionResult.id)
     )
-    results = res_result.scalars().all()
+    criteria_results = res_result.scalars().all()
+    
+    results = []
+    for c in criteria_results:
+        results.append(AnalysisResultOut(
+            result_id=c.id,
+            analysis_id=c.analysis_id,
+            criterion_id=c.criterion_id,
+            criterion_key=c.criterion_key,
+            criterion_name=c.criterion_name,
+            criterion_type=c.criterion_type,
+            value_number=c.numeric_value,
+            value_text=c.text_value,
+            value_boolean=c.boolean_value,
+            value_category=c.category_value,
+            feed=c.feedback,
+            description=None,
+            raw_value=c.value_raw,
+            created_at=c.created_at,
+        ))
 
     grouped = group_results(results)
     summary = build_summary(analysis, results)
@@ -152,7 +173,7 @@ async def get_analysis_detail(
         ok=True,
         analysis=analysis,
         summary=summary,
-        results=list(results),
+        results=results,
         grouped=grouped,
     )
 
@@ -202,6 +223,48 @@ async def enrich_analyses(db: AsyncSession, items: list[Any]) -> list[Any]:
             if val:
                 agent_map[oid] = val
 
+    # Query service & typology metadata from bm_analysis_criterion_results
+    analysis_ids = {getattr(item, 'analysis_id', None) or getattr(item, 'latest_analysis_id', None) for item in items}
+    analysis_ids = {aid for aid in analysis_ids if aid is not None}
+
+    service_typology_map = {}
+    if analysis_ids:
+        from app.models.analyses import AnalysisCriterionResult
+        from sqlalchemy import func
+        q_services = await db.execute(
+            select(
+                AnalysisCriterionResult.analysis_id,
+                func.max(AnalysisCriterionResult.service_id).label('service_id'),
+                func.max(AnalysisCriterionResult.service_key).label('service_key'),
+                func.max(AnalysisCriterionResult.service_name).label('service_name'),
+                func.max(AnalysisCriterionResult.typology_id).label('typology_id'),
+                func.max(AnalysisCriterionResult.typology_key).label('typology_key'),
+                func.max(AnalysisCriterionResult.typology_name).label('typology_name')
+            )
+            .where(AnalysisCriterionResult.analysis_id.in_(analysis_ids))
+            .group_by(AnalysisCriterionResult.analysis_id)
+        )
+        for row in q_services.fetchall():
+            m = row._mapping
+            service_typology_map[m['analysis_id']] = {
+                "service_id": m['service_id'],
+                "service_key": m['service_key'],
+                "service_name": m['service_name'],
+                "typology_id": m['typology_id'],
+                "typology_key": m['typology_key'],
+                "typology_name": m['typology_name']
+            }
+
+    typology_mapping = {
+        "cita": "Cita",
+        "confirmacion": "Confirmación",
+        "cancelacion": "Cancelación",
+        "reagendo": "Reagendo",
+        "falta": "Falta",
+        "otros": "Otros",
+        "informacion_sin_cita": "Información sin cita"
+    }
+
     for item in items:
         pid = getattr(item, 'prompt_id', None)
         vid = getattr(item, 'prompt_version_id', None)
@@ -227,18 +290,45 @@ async def enrich_analyses(db: AsyncSession, items: list[Any]) -> list[Any]:
         if resolved_name:
             setattr(item, 'agente_telefonico', resolved_name)
             setattr(item, 'agente_telefonico_display', resolved_name)
-            continue
+        else:
+            # 2. Try DB fallback resolution
+            db_resolved_name = None
+            if owner_id in agent_map and (not agent or (isinstance(agent, str) and agent.isdigit())):
+                db_resolved_name = agent_map[owner_id]
+                
+            # 3. Use resolve_agent_display for fallback display
+            display_name = resolve_agent_display(db_resolved_name or agent, owner_id)
             
-        # 2. Try DB fallback resolution
-        db_resolved_name = None
-        if owner_id in agent_map and (not agent or (isinstance(agent, str) and agent.isdigit())):
-            db_resolved_name = agent_map[owner_id]
-            
-        # 3. Use resolve_agent_display for fallback display
-        display_name = resolve_agent_display(db_resolved_name or agent, owner_id)
+            setattr(item, 'agente_telefonico_display', display_name)
+            if display_name and not str(display_name).isdigit():
+                setattr(item, 'agente_telefonico', display_name)
+
+        # Service & Typology enrichment
+        aid = getattr(item, 'analysis_id', None) or getattr(item, 'latest_analysis_id', None)
+        s_data = service_typology_map.get(aid) if aid else None
         
-        setattr(item, 'agente_telefonico_display', display_name)
-        if display_name and not str(display_name).isdigit():
-            setattr(item, 'agente_telefonico', display_name)
+        s_id = s_data["service_id"] if s_data else None
+        s_key = s_data["service_key"] if s_data else None
+        s_name = s_data["service_name"] if s_data else None
+        t_id = s_data["typology_id"] if s_data else None
+        t_key = s_data["typology_key"] if s_data else None
+        t_name = s_data["typology_name"] if s_data else None
+
+        # Typology fallback from tipo_llamada if not set
+        tipo_llamada = getattr(item, 'tipo_llamada', None)
+        if tipo_llamada:
+            if not t_key:
+                t_key = tipo_llamada
+            if not t_name:
+                t_name = typology_mapping.get(tipo_llamada)
+                if not t_name:
+                    t_name = tipo_llamada.replace("_", " ").title()
+
+        setattr(item, 'service_id', s_id)
+        setattr(item, 'service_key', s_key)
+        setattr(item, 'service_name', s_name)
+        setattr(item, 'typology_id', t_id)
+        setattr(item, 'typology_key', t_key)
+        setattr(item, 'typology_name', t_name)
 
     return items

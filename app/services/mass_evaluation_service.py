@@ -10,9 +10,21 @@ from sqlalchemy import select, update, delete, desc, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.mass_evaluations import MassEvaluationJob, MassEvaluationRun, MassEvaluationResult
+from app.models.mass_evaluations import (
+    MassEvaluationJob,
+    MassEvaluationRun,
+    MassEvaluationResult,
+    MassEvaluationCriterionResult,
+    MassAnalysisAutomation,
+    MassAnalysisAutomationRun,
+)
 from app.models.prompts import Prompt, PromptVersion
-from app.schemas.mass_evaluations import MassEvaluationJobCreate, MassEvaluationJobUpdate
+from app.schemas.mass_evaluations import (
+    MassEvaluationJobCreate,
+    MassEvaluationJobUpdate,
+    MassAnalysisAutomationCreate,
+    MassAnalysisAutomationUpdate,
+)
 from app.services.hubspot_service import HubSpotService
 from app.services.twilio_service import TwilioService
 from app.services.openai_service import analyze_audio_bytes
@@ -96,6 +108,40 @@ def calculate_next_run(
     return None
 
 
+def normalize_resolved_dates(date_from: datetime | None, date_to: datetime | None, timezone_name: str = "Europe/Madrid") -> tuple[datetime | None, datetime | None]:
+    try:
+        tz = zoneinfo.ZoneInfo(timezone_name)
+    except Exception:
+        tz = zoneinfo.ZoneInfo("Europe/Madrid")
+
+    def is_date_only_val(dt: datetime, target_tz) -> bool:
+        if dt.hour == 0 and dt.minute == 0 and dt.second == 0 and dt.microsecond == 0:
+            return True
+        dt_utc = dt.astimezone(timezone.utc)
+        if dt_utc.hour == 0 and dt_utc.minute == 0 and dt_utc.second == 0 and dt_utc.microsecond == 0:
+            return True
+        dt_tz = dt.astimezone(target_tz)
+        if dt_tz.hour == 0 and dt_tz.minute == 0 and dt_tz.second == 0 and dt_tz.microsecond == 0:
+            return True
+        return False
+
+    if date_from is not None:
+        dt_from_tz = date_from.astimezone(tz) if date_from.tzinfo else date_from.replace(tzinfo=tz)
+        if is_date_only_val(date_from, tz):
+            date_from = datetime.combine(dt_from_tz.date(), time.min).replace(tzinfo=tz)
+        else:
+            date_from = dt_from_tz
+
+    if date_to is not None:
+        dt_to_tz = date_to.astimezone(tz) if date_to.tzinfo else date_to.replace(tzinfo=tz)
+        if is_date_only_val(date_to, tz):
+            date_to = datetime.combine(dt_to_tz.date(), time(23, 59, 59, 999000)).replace(tzinfo=tz)
+        else:
+            date_to = dt_to_tz
+
+    return date_from, date_to
+
+
 def resolve_date_filters(job: MassEvaluationJob, timezone_name: str = "Europe/Madrid") -> tuple[datetime | None, datetime | None]:
     try:
         tz = zoneinfo.ZoneInfo(timezone_name)
@@ -103,6 +149,11 @@ def resolve_date_filters(job: MassEvaluationJob, timezone_name: str = "Europe/Ma
         tz = zoneinfo.ZoneInfo("Europe/Madrid")
         
     now = datetime.now(tz)
+
+    # 1. Si date_from o date_to vienen informados explícitamente, tienen prioridad sobre last_n_days.
+    # 2. Solo calcular date_from/date_to usando last_n_days cuando no exista ningún rango manual.
+    if job.date_from is not None or job.date_to is not None:
+        return normalize_resolved_dates(job.date_from, job.date_to, timezone_name)
 
     if job.date_mode == "relative":
         days = job.relative_days or 1
@@ -122,10 +173,9 @@ def resolve_date_filters(job: MassEvaluationJob, timezone_name: str = "Europe/Ma
         date_to = datetime.combine((start_of_this_week - timedelta(days=1)).date(), time.max).replace(tzinfo=tz)
         return date_from, date_to
 
-    elif job.date_mode in ["fixed_range", "custom"]:
-        return job.date_from, job.date_to
-
-    return None, None
+    # Fallback default: past 24 hours (1 relative day)
+    date_from = now - timedelta(days=1)
+    return date_from, now
 
 
 async def enrich_job_prompt_info(db: AsyncSession, job: MassEvaluationJob) -> None:
@@ -135,11 +185,14 @@ async def enrich_job_prompt_info(db: AsyncSession, job: MassEvaluationJob) -> No
     prompt = res.scalars().first()
     if prompt:
         job.prompt_name = prompt.prompt_name
-        # Find specified version or active one
         if job.prompt_version_id:
             stmt_v = select(PromptVersion).where(PromptVersion.id == job.prompt_version_id)
         else:
-            stmt_v = select(PromptVersion).where(PromptVersion.prompt_id == job.prompt_id, PromptVersion.is_current == True).order_by(PromptVersion.id.desc())
+            stmt_v = (
+                select(PromptVersion)
+                .where(PromptVersion.prompt_id == job.prompt_id)
+                .order_by(PromptVersion.is_current.desc(), PromptVersion.id.desc())
+            )
             
         res_v = await db.execute(stmt_v)
         v = res_v.scalars().first()
@@ -160,11 +213,7 @@ class MassEvaluationService:
             raise ValueError(f"La estructura con ID {payload.prompt_id} no existe.")
 
         if prompt.is_archived or prompt.deleted_at is not None:
-            raise ValueError("No se puede crear un job con una estructura inactiva o archivada. Publícala antes de usarla.")
-
-        if not prompt.is_active:
-            if not payload.allow_inactive_prompt or not payload.test_mode:
-                raise ValueError("No se puede crear un job con una estructura inactiva o archivada. Publícala antes de usarla.")
+            raise ValueError("La estructura seleccionada no existe o está archivada.")
 
         # Check for active draft warning
         from app.models.drafts import PromptDraft
@@ -235,11 +284,7 @@ class MassEvaluationService:
                 raise ValueError(f"La estructura con ID {prompt_id_to_check} no existe.")
 
             if prompt.is_archived or prompt.deleted_at is not None:
-                raise ValueError("No se puede crear un job con una estructura inactiva o archivada. Publícala antes de usarla.")
-
-            if not prompt.is_active:
-                if not allow_inactive or not test_mode:
-                    raise ValueError("No se puede crear un job con una estructura inactiva o archivada. Publícala antes de usarla.")
+                raise ValueError("La estructura seleccionada no existe o está archivada.")
 
             # Check for active draft warning
             from app.models.drafts import PromptDraft
@@ -302,8 +347,16 @@ class MassEvaluationService:
         return True
 
     @staticmethod
-    async def list_jobs(db: AsyncSession, limit: int = 100) -> list[MassEvaluationJob]:
-        stmt = select(MassEvaluationJob).where(MassEvaluationJob.is_active == True).order_by(desc(MassEvaluationJob.job_id)).limit(limit)
+    async def list_jobs(db: AsyncSession, limit: int = 100, execution_source: str = "on_demand") -> list[MassEvaluationJob]:
+        stmt = (
+            select(MassEvaluationJob)
+            .where(
+                MassEvaluationJob.is_active == True,
+                MassEvaluationJob.execution_source == execution_source
+            )
+            .order_by(desc(MassEvaluationJob.job_id))
+            .limit(limit)
+        )
         res = await db.execute(stmt)
         return list(res.scalars().all())
 
@@ -327,6 +380,8 @@ class MassEvaluationService:
         if override_date_to:
             date_to = override_date_to
             
+        date_from, date_to = normalize_resolved_dates(date_from, date_to, job.timezone)
+
         filters = {
             "date_from": date_from,
             "date_to": date_to,
@@ -382,6 +437,8 @@ class MassEvaluationService:
         if override_date_to:
             date_to = override_date_to
             
+        date_from, date_to = normalize_resolved_dates(date_from, date_to, job.timezone)
+
         effective_filters = {
             "date_from": date_from.isoformat() if date_from else None,
             "date_to": date_to.isoformat() if date_to else None,
@@ -414,7 +471,8 @@ class MassEvaluationService:
             trigger_type=trigger_type,
             status="running",
             started_at=datetime.now(timezone.utc),
-            effective_filters=effective_filters
+            effective_filters=effective_filters,
+            execution_source=job.execution_source or "on_demand"
         )
         db.add(run)
         await db.commit()
@@ -459,6 +517,7 @@ class MassEvaluationService:
                 prompt_version_id = job.prompt_version_id
                 prompt_version_name = job.prompt_version_name
                 prompt_version_label = job.prompt_version_label
+                execution_source = job.execution_source or "on_demand"
                 duration_min_seconds = job.duration_min_seconds
                 duration_max_seconds = job.duration_max_seconds
                 direction = job.direction
@@ -475,8 +534,8 @@ class MassEvaluationService:
                 else:
                     v_stmt = (
                         select(PromptVersion)
-                        .where(PromptVersion.prompt_id == prompt_id, PromptVersion.is_current == True)
-                        .order_by(PromptVersion.id.desc())
+                        .where(PromptVersion.prompt_id == prompt_id)
+                        .order_by(PromptVersion.is_current.desc(), PromptVersion.id.desc())
                     )
                     
                 v_res = await db.execute(v_stmt)
@@ -520,12 +579,29 @@ class MassEvaluationService:
                 if service_id:
                     t_stmt = select(Typology).where(Typology.service_id == service_id, Typology.is_active == True)
                     t_res = await db.execute(t_stmt)
-                    active_typologies = list(t_res.scalars().all())
-                    typology_by_key = {t.typology_key: t for t in active_typologies}
+                    typology_by_key = {
+                        t.typology_key: {
+                            "typology_id": t.typology_id,
+                            "typology_key": t.typology_key,
+                            "typology_name": t.typology_name
+                        } 
+                        for t in t_res.scalars().all()
+                    }
 
                 # Fetch active criteria and item-typology associations
-                criteria = await get_active_criteria(db, prompt_id)
-                c_ids = [c.criterion_id for c in criteria]
+                criteria_orm = await get_active_criteria(db, prompt_id)
+                c_ids = [c.criterion_id for c in criteria_orm]
+                
+                criteria_snapshot = []
+                for c in criteria_orm:
+                    criteria_snapshot.append({
+                        "criterion_id": c.criterion_id,
+                        "criterion_key": c.criterion_key,
+                        "criterion_name": c.criterion_name,
+                        "criterion_type": c.criterion_type,
+                        "output_key": c.output_key,
+                        "feed_key": c.feed_key,
+                    })
                 assoc_map = {}
                 if c_ids:
                     assoc_stmt = select(PromptCriterionTypology).where(PromptCriterionTypology.criterion_id.in_(c_ids))
@@ -603,12 +679,20 @@ class MassEvaluationService:
  
                     call_id = call["call_id"]
                     recording_url = call["recording_url"]
+
+                    # Delete any previous result for this job and call to allow overwrite
+                    await db.execute(delete(MassEvaluationResult).where(
+                        MassEvaluationResult.job_id == job_id,
+                        MassEvaluationResult.call_id == call_id
+                    ))
+                    await db.flush()
                     
                     if not recording_url:
                         # Skip
                         res_row = MassEvaluationResult(
                             run_id=run_id,
                             job_id=job_id,
+                            execution_source=execution_source,
                             call_id=call_id,
                             hs_object_id=call["hs_object_id"],
                             hubspot_owner_id=call["hubspot_owner_id"],
@@ -679,63 +763,114 @@ class MassEvaluationService:
                         from app.services.analysis_persistence import _strip_legacy_keys
                         clean_result = _strip_legacy_keys(parsed)
                         
-                        # Resolve tipo_llamada and matched typology snapshot
-                        tipo_llamada_val = clean_result.get("tipo_llamada")
-                        matched_typology = None
-                        if isinstance(tipo_llamada_val, str) and tipo_llamada_val in typology_by_key:
-                            matched_typology = typology_by_key[tipo_llamada_val]
+                        # 1. Try direct keys in clean_result
+                        detected_typology_key_raw = clean_result.get("tipo_llamada")
+                        
+                        # 2. Fallback: find criterion with key 'tipo_llamada' and use its output_key to look up in clean_result
+                        if not detected_typology_key_raw:
+                            for criterion in criteria_snapshot:
+                                if criterion.get("criterion_key") == "tipo_llamada":
+                                    out_key = criterion.get("output_key")
+                                    if out_key and out_key in clean_result:
+                                        detected_typology_key_raw = clean_result.get(out_key)
+                                        break
+                                        
+                        # 3. Fallback: case-insensitive keys in clean_result containing 'tipo' and 'llamada'
+                        if not detected_typology_key_raw:
+                            for k, v in clean_result.items():
+                                k_norm = k.lower().replace("_", "").replace("-", "").replace(" ", "")
+                                if "tipollamada" in k_norm:
+                                    detected_typology_key_raw = v
+                                    break
 
-                        typology_id = matched_typology.typology_id if matched_typology else None
-                        typology_key = matched_typology.typology_key if matched_typology else None
-                        typology_name = matched_typology.typology_name if matched_typology else None
+                        detected_typology_key = str(detected_typology_key_raw).strip().lower() if detected_typology_key_raw else None
+                        matched_typology = None
+                        if detected_typology_key:
+                            if detected_typology_key in typology_by_key:
+                                matched_typology = typology_by_key[detected_typology_key]
+                            else:
+                                for k, typ in typology_by_key.items():
+                                    if k.lower().strip() == detected_typology_key:
+                                        matched_typology = typ
+                                        break
+
+                        logger.info(
+                            "Mass eval typology resolution: job_id=%s run_id=%s call_id=%s service_id=%s detected_raw=%s detected_norm=%s typology_keys=%s matched=%s",
+                            job_id,
+                            run_id,
+                            call_id,
+                            service_id,
+                            detected_typology_key_raw,
+                            detected_typology_key,
+                            list(typology_by_key.keys()),
+                            matched_typology,
+                        )
+
+                        typology_id = matched_typology["typology_id"] if matched_typology else None
+                        typology_key = matched_typology["typology_key"] if matched_typology else None
+                        typology_name = matched_typology["typology_name"] if matched_typology else None
 
                         # Resolve active criteria items
                         items = []
-                        for criterion in criteria:
-                            output_key = criterion.output_key
-                            feed_key = criterion.feed_key
+                        for criterion in criteria_snapshot:
+                            output_key = criterion["output_key"]
+                            feed_key = criterion["feed_key"]
  
                             # Determine if criterion is applicable
                             is_applicable = True
                             if matched_typology:
-                                allowed_typologies = assoc_map.get(criterion.criterion_id, set())
+                                allowed_typologies = assoc_map.get(criterion["criterion_id"], set())
                                 if allowed_typologies:
-                                    is_applicable = (matched_typology.typology_id in allowed_typologies)
+                                    is_applicable = (matched_typology["typology_id"] in allowed_typologies)
 
                             if is_applicable:
                                 raw_value = clean_result.get(output_key) if output_key else None
                                 feed_value = clean_result.get(feed_key) if feed_key else None
  
                                 # Get clean/typed value
-                                typed = map_criterion_value(raw_value, criterion.criterion_type or "text")
+                                typed = map_criterion_value(raw_value, criterion["criterion_type"] or "text")
                                 
                                 # Resolve actual value
                                 resolved_val = None
-                                if criterion.criterion_type == "number":
+                                if criterion["criterion_type"] == "number":
                                     resolved_val = float(typed["value_number"]) if typed["value_number"] is not None else None
-                                elif criterion.criterion_type == "boolean":
+                                elif criterion["criterion_type"] == "boolean":
                                     resolved_val = typed["value_boolean"]
                                 else:
                                     resolved_val = typed["value_text"] or typed["value_category"] or typed["raw_value"]
  
                                 items.append({
-                                    "criterion_key": criterion.criterion_key,
-                                    "name": criterion.criterion_name,
-                                    "type": criterion.criterion_type,
+                                    "criterion_id": criterion["criterion_id"],
+                                    "criterion_key": criterion["criterion_key"],
+                                    "name": criterion["criterion_name"],
+                                    "type": criterion["criterion_type"],
                                     "output_key": output_key,
                                     "value": resolved_val,
                                     "feed": str(feed_value) if feed_value is not None else None,
-                                    "not_applicable": False
+                                    "not_applicable": False,
+                                    "numeric_value": typed["value_number"],
+                                    "text_value": typed["value_text"],
+                                    "boolean_value": typed["value_boolean"],
+                                    "category_value": typed["value_category"],
+                                    "percentage_value": typed["value_number"] if criterion["criterion_type"] == "percentage" else None,
+                                    "raw_value": typed["raw_value"],
                                 })
                             else:
                                 items.append({
-                                    "criterion_key": criterion.criterion_key,
-                                    "name": criterion.criterion_name,
-                                    "type": criterion.criterion_type,
+                                    "criterion_id": criterion["criterion_id"],
+                                    "criterion_key": criterion["criterion_key"],
+                                    "name": criterion["criterion_name"],
+                                    "type": criterion["criterion_type"],
                                     "output_key": output_key,
                                     "value": None,
                                     "feed": None,
-                                    "not_applicable": True
+                                    "not_applicable": True,
+                                    "numeric_value": None,
+                                    "text_value": None,
+                                    "boolean_value": None,
+                                    "category_value": None,
+                                    "percentage_value": None,
+                                    "raw_value": None,
                                 })
                             
                         # Resolve agent name display
@@ -746,6 +881,7 @@ class MassEvaluationService:
                         res_row = MassEvaluationResult(
                             run_id=run_id,
                             job_id=job_id,
+                            execution_source=execution_source,
                             call_id=call_id,
                             hs_object_id=call["hs_object_id"],
                             recording_url=recording_url,
@@ -772,13 +908,55 @@ class MassEvaluationService:
                             typology_name=typology_name
                         )
                         db.add(res_row)
+                        await db.flush()
+
+                        # Persist normalized criteria
+                        from app.models.mass_evaluations import MassEvaluationCriterionResult
+                        for item in items:
+                            crit_res = MassEvaluationCriterionResult(
+                                mass_analysis_id=res_row.mass_analysis_id,
+                                run_id=run_id,
+                                job_id=job_id,
+                                execution_source=execution_source,
+                                call_id=call_id,
+                                hs_object_id=call["hs_object_id"],
+                                prompt_id=prompt_id,
+                                prompt_version_id=prompt_version_id,
+                                criterion_id=item.get("criterion_id"),
+                                criterion_key=item["criterion_key"],
+                                criterion_name=item["name"],
+                                criterion_type=item["type"],
+                                value_raw=item.get("raw_value"),
+                                numeric_value=item.get("numeric_value"),
+                                text_value=item.get("text_value"),
+                                boolean_value=item.get("boolean_value"),
+                                category_value=item.get("category_value"),
+                                percentage_value=item.get("percentage_value"),
+                                feedback=item.get("feed"),
+                                feed_key=None,
+                                is_applicable=not item.get("not_applicable", False),
+                                not_applicable=item.get("not_applicable", False),
+                                service_id=service_id,
+                                service_key=service_key,
+                                service_name=service_name,
+                                typology_id=typology_id,
+                                typology_key=typology_key,
+                                typology_name=typology_name
+                            )
+                            db.add(crit_res)
+                        
                         calls_analyzed += 1
                         
                     except Exception as e_call:
-                        logger.warning("Call %s failed in mass evaluation job %d: %s", call_id, job_id, e_call)
+                        import traceback
+                        logger.warning(
+                            "Call %s failed in mass evaluation job %d: %s\nStacktrace:\n%s", 
+                            call_id, job_id, e_call, traceback.format_exc()
+                        )
                         res_row = MassEvaluationResult(
                             run_id=run_id,
                             job_id=job_id,
+                            execution_source=execution_source,
                             call_id=call_id,
                             hs_object_id=call["hs_object_id"],
                             recording_url=recording_url,
@@ -867,6 +1045,28 @@ class MassEvaluationService:
 
                 await db.commit()
                 logger.info("Mass evaluation job %d, run %d finished with status: %s", job_id, run_id, final_status)
+
+                # Synchronization hook for MassAnalysisAutomationRun
+                if execution_source == "automation":
+                    try:
+                        auto_stmt = select(MassAnalysisAutomationRun).where(MassAnalysisAutomationRun.run_id == run_id)
+                        auto_res = await db.execute(auto_stmt)
+                        auto_run = auto_res.scalars().first()
+                        if auto_run:
+                            auto_run.status = "completed" if final_status in ["completed", "completed_with_errors"] else final_status
+                            auto_run.finished_at = datetime.now(timezone.utc)
+                            auto_run.calls_found = len(calls) if 'calls' in locals() else 0
+                            auto_run.calls_selected = len(selected_calls) if 'selected_calls' in locals() else 0
+                            auto_run.calls_skipped = calls_skipped
+                            
+                            aut_stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id == auto_run.automation_id)
+                            aut_res = await db.execute(aut_stmt)
+                            aut_obj = aut_res.scalars().first()
+                            if aut_obj:
+                                aut_obj.last_success_at = datetime.now(timezone.utc)
+                            await db.commit()
+                    except Exception as e_hook:
+                        logger.error("Failed to sync automation run status on success: %s", e_hook)
                 
             except Exception as e_run:
                 logger.error("Mass evaluation job %d run %d failed in background: %s", job_id, run_id, e_run, exc_info=True)
@@ -880,6 +1080,26 @@ class MassEvaluationService:
                         fresh_run_obj.error_message = str(e_run)
                         fresh_run_obj.finished_at = datetime.now(timezone.utc)
                         await db.commit()
+
+                        # Synchronization hook for MassAnalysisAutomationRun
+                        try:
+                            auto_stmt = select(MassAnalysisAutomationRun).where(MassAnalysisAutomationRun.run_id == run_id)
+                            auto_res = await db.execute(auto_stmt)
+                            auto_run = auto_res.scalars().first()
+                            if auto_run:
+                                auto_run.status = "failed"
+                                auto_run.finished_at = datetime.now(timezone.utc)
+                                auto_run.error_message = str(e_run)
+                                
+                                aut_stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id == auto_run.automation_id)
+                                aut_res = await db.execute(aut_stmt)
+                                aut_obj = aut_res.scalars().first()
+                                if aut_obj:
+                                    aut_obj.last_error_at = datetime.now(timezone.utc)
+                                    aut_obj.last_error_message = str(e_run)
+                                await db.commit()
+                        except Exception as e_hook_fail:
+                            logger.error("Failed to sync automation run failure status: %s", e_hook_fail)
                 except Exception as e_inner:
                     logger.error("Failed to mark run as failed in database: %s", e_inner)
 
@@ -930,6 +1150,7 @@ class MassEvaluationService:
         call_id: str | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
+        execution_source: str | None = None,
         limit: int = 100
     ) -> list[MassEvaluationResult]:
         stmt = select(MassEvaluationResult)
@@ -946,6 +1167,8 @@ class MassEvaluationService:
             filters.append(MassEvaluationResult.call_timestamp >= date_from)
         if date_to is not None:
             filters.append(MassEvaluationResult.call_timestamp <= date_to)
+        if execution_source is not None:
+            filters.append(MassEvaluationResult.execution_source == execution_source)
             
         if filters:
             stmt = stmt.where(and_(*filters))
@@ -1001,3 +1224,438 @@ class MassEvaluationService:
                 logger.error("Scheduler failed to launch due job ID %d ('%s'): %s", job.job_id, job.job_name, e)
                 
         return {"due_jobs_count": due_count, "launched_jobs_count": launched_count}
+
+    @staticmethod
+    async def backfill_mass_criterion_typologies(db: AsyncSession, payload: Any) -> dict[str, Any]:
+        from app.models.mass_evaluations import MassEvaluationCriterionResult, MassEvaluationResult
+        from app.models.typologies import Typology
+        from collections import defaultdict
+
+        # 1. Distinct mass_analysis_id with null typology_key
+        stmt_nulls = select(MassEvaluationCriterionResult.mass_analysis_id).where(
+            MassEvaluationCriterionResult.typology_key.is_(None)
+        ).distinct()
+        res_nulls = await db.execute(stmt_nulls)
+        null_analysis_ids = list(res_nulls.scalars().all())
+
+        if not null_analysis_ids:
+            if payload.mode == "dry_run":
+                return {
+                    "analyses_with_null_typology": 0,
+                    "analyses_resolvable": 0,
+                    "analyses_unresolved": 0,
+                    "rows_to_update": 0,
+                    "examples": []
+                }
+            else:
+                return {
+                    "updated_rows": 0,
+                    "updated_analyses": 0,
+                    "unresolved_analyses": 0,
+                    "warnings": ["No analyses with null typologies found."]
+                }
+
+        # 2. Get all typology_key rows to extract 'tipo_llamada'
+        stmt_tipo = select(MassEvaluationCriterionResult).where(
+            MassEvaluationCriterionResult.mass_analysis_id.in_(null_analysis_ids),
+            MassEvaluationCriterionResult.criterion_key == 'tipo_llamada'
+        )
+        res_tipo = await db.execute(stmt_tipo)
+        tipo_rows = res_tipo.scalars().all()
+
+        tipo_map_by_analysis = {r.mass_analysis_id: r for r in tipo_rows}
+
+        # 3. Load all typologies
+        stmt_typs = select(Typology)
+        res_typs = await db.execute(stmt_typs)
+        all_typologies = res_typs.scalars().all()
+
+        typology_map = {}
+        for t in all_typologies:
+            # Map (service_id, typology_key.lower().strip()) -> Typology
+            key = (t.service_id, t.typology_key.lower().strip())
+            typology_map[key] = t
+
+        # 4. Get all criterion rows where typology_key is NULL for grouping
+        stmt_null_rows = select(MassEvaluationCriterionResult).where(
+            MassEvaluationCriterionResult.mass_analysis_id.in_(null_analysis_ids),
+            MassEvaluationCriterionResult.typology_key.is_(None)
+        )
+        res_null_rows = await db.execute(stmt_null_rows)
+        null_rows = res_null_rows.scalars().all()
+
+        rows_by_analysis = defaultdict(list)
+        for r in null_rows:
+            rows_by_analysis[r.mass_analysis_id].append(r)
+
+        # 5. Process
+        analyses_with_null_typology = len(null_analysis_ids)
+        analyses_resolvable = 0
+        analyses_unresolved = 0
+        rows_to_update = 0
+        examples = []
+
+        resolvable_data = [] # List of tuples: (mass_analysis_id, Typology object, list of affected rows, tipo_row)
+
+        for mass_analysis_id in null_analysis_ids:
+            tipo_row = tipo_map_by_analysis.get(mass_analysis_id)
+            if not tipo_row:
+                analyses_unresolved += 1
+                continue
+
+            detected_value = tipo_row.category_value or tipo_row.text_value
+            service_id = tipo_row.service_id
+
+            if not detected_value or not service_id:
+                analyses_unresolved += 1
+                continue
+
+            norm_val = str(detected_value).lower().strip()
+            t_obj = typology_map.get((service_id, norm_val))
+
+            if not t_obj:
+                analyses_unresolved += 1
+                continue
+
+            analyses_resolvable += 1
+            affected_rows = rows_by_analysis.get(mass_analysis_id, [])
+            rows_to_update += len(affected_rows)
+
+            resolvable_data.append((mass_analysis_id, t_obj, affected_rows, tipo_row))
+
+            if len(examples) < 10:
+                examples.append({
+                    "mass_analysis_id": mass_analysis_id,
+                    "call_id": tipo_row.call_id,
+                    "detected_value": detected_value,
+                    "resolved_typology_key": t_obj.typology_key,
+                    "resolved_typology_name": t_obj.typology_name,
+                    "rows_affected": len(affected_rows)
+                })
+
+        if payload.mode == "dry_run":
+            return {
+                "analyses_with_null_typology": analyses_with_null_typology,
+                "analyses_resolvable": analyses_resolvable,
+                "analyses_unresolved": analyses_unresolved,
+                "rows_to_update": rows_to_update,
+                "examples": examples
+            }
+
+        # payload.mode == "execute"
+        updated_rows = 0
+        updated_analyses = 0
+        unresolved_analyses = analyses_unresolved
+        warnings = []
+
+        for mass_analysis_id, t_obj, affected_rows, tipo_row in resolvable_data:
+            try:
+                # Update criterion results
+                for r in affected_rows:
+                    r.typology_id = t_obj.typology_id
+                    r.typology_key = t_obj.typology_key
+                    r.typology_name = t_obj.typology_name
+
+                # Update parent result if present
+                stmt_parent = select(MassEvaluationResult).where(MassEvaluationResult.mass_analysis_id == mass_analysis_id)
+                res_parent = await db.execute(stmt_parent)
+                parent = res_parent.scalars().first()
+                if parent:
+                    parent.typology_id = t_obj.typology_id
+                    parent.typology_key = t_obj.typology_key
+                    parent.typology_name = t_obj.typology_name
+
+                updated_rows += len(affected_rows)
+                updated_analyses += 1
+            except Exception as ex:
+                warnings.append(f"Error updating analysis ID {mass_analysis_id}: {str(ex)}")
+                unresolved_analyses += 1
+
+        if updated_analyses > 0:
+            await db.commit()
+
+        return {
+            "updated_rows": updated_rows,
+            "updated_analyses": updated_analyses,
+            "unresolved_analyses": unresolved_analyses,
+            "warnings": warnings
+        }
+
+    # ── Automation Management ──────────────────────────────────────────────────
+
+    @staticmethod
+    async def create_automation(db: AsyncSession, payload: MassAnalysisAutomationCreate) -> MassAnalysisAutomation:
+        """Create a new automation configuration and its corresponding background job."""
+        # 1. First validate if Prompt exists
+        stmt_p = select(Prompt).where(Prompt.prompt_id == payload.prompt_id)
+        res_p = await db.execute(stmt_p)
+        prompt = res_p.scalars().first()
+        if not prompt:
+            raise ValueError(f"El prompt ID {payload.prompt_id} no existe.")
+
+        # 2. Create the underlying background job with execution_source = 'automation'
+        job = MassEvaluationJob(
+            job_name=f"[Auto] {payload.name}",
+            description=payload.description,
+            is_active=payload.is_active,
+            prompt_id=payload.prompt_id,
+            prompt_version_id=payload.prompt_version_id,
+            agent_owner_ids=payload.agent_owner_ids,
+            duration_min_seconds=payload.min_duration_seconds,
+            direction=payload.direction_filter,
+            only_with_recording=True,
+            max_calls=500,
+            execution_source="automation",
+            date_mode="relative",
+            relative_days=1,
+            timezone="Europe/Madrid",
+            schedule_enabled=False
+        )
+        await enrich_job_prompt_info(db, job)
+        db.add(job)
+        await db.flush()
+
+        # 3. Create the Automation Configuration
+        automation = MassAnalysisAutomation(
+            name=payload.name,
+            description=payload.description,
+            is_active=payload.is_active,
+            interval_minutes=payload.interval_minutes,
+            lookback_minutes=payload.lookback_minutes,
+            delay_minutes=payload.delay_minutes,
+            service_id=payload.service_id,
+            prompt_id=payload.prompt_id,
+            prompt_version_id=payload.prompt_version_id,
+            min_duration_seconds=payload.min_duration_seconds,
+            direction_filter=payload.direction_filter,
+            agent_owner_ids=payload.agent_owner_ids,
+            job_id=job.job_id
+        )
+        db.add(automation)
+        await db.commit()
+        await db.refresh(automation)
+        return automation
+
+    @staticmethod
+    async def update_automation(
+        db: AsyncSession, automation_id: int, payload: MassAnalysisAutomationUpdate
+    ) -> MassAnalysisAutomation | None:
+        """Update an automation configuration and synchronize changes to its background job."""
+        stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id == automation_id)
+        res = await db.execute(stmt)
+        automation = res.scalars().first()
+        if not automation:
+            return None
+
+        update_data = payload.model_dump(exclude_unset=True)
+        for k, v in update_data.items():
+            setattr(automation, k, v)
+
+        # Synchronize changes to underlying permanent job
+        if automation.job_id:
+            stmt_j = select(MassEvaluationJob).where(MassEvaluationJob.job_id == automation.job_id)
+            res_j = await db.execute(stmt_j)
+            job = res_j.scalars().first()
+            if job:
+                if "name" in update_data:
+                    job.job_name = f"[Auto] {payload.name}"
+                if "description" in update_data:
+                    job.description = payload.description
+                if "is_active" in update_data:
+                    job.is_active = payload.is_active
+                if "prompt_id" in update_data:
+                    job.prompt_id = payload.prompt_id
+                if "prompt_version_id" in update_data:
+                    job.prompt_version_id = payload.prompt_version_id
+                if "agent_owner_ids" in update_data:
+                    job.agent_owner_ids = payload.agent_owner_ids
+                if "min_duration_seconds" in update_data:
+                    job.duration_min_seconds = payload.min_duration_seconds
+                if "direction_filter" in update_data:
+                    job.direction = payload.direction_filter
+
+                await enrich_job_prompt_info(db, job)
+
+        await db.commit()
+        await db.refresh(automation)
+        return automation
+
+    @staticmethod
+    async def get_automation(db: AsyncSession, automation_id: int) -> MassAnalysisAutomation | None:
+        """Retrieve details of an automation configuration."""
+        stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id == automation_id)
+        res = await db.execute(stmt)
+        return res.scalars().first()
+
+    @staticmethod
+    async def list_automations(db: AsyncSession, limit: int = 100) -> list[MassAnalysisAutomation]:
+        """List all active automation configurations."""
+        stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.is_active == True).order_by(desc(MassAnalysisAutomation.automation_id)).limit(limit)
+        res = await db.execute(stmt)
+        return list(res.scalars().all())
+
+    @staticmethod
+    async def delete_automation(db: AsyncSession, automation_id: int, soft_delete: bool = True) -> bool:
+        """Deactivate or delete an automation and its background job."""
+        stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id == automation_id)
+        res = await db.execute(stmt)
+        automation = res.scalars().first()
+        if not automation:
+            return False
+
+        if soft_delete:
+            automation.is_active = False
+            if automation.job_id:
+                stmt_j = select(MassEvaluationJob).where(MassEvaluationJob.job_id == automation.job_id)
+                res_j = await db.execute(stmt_j)
+                job = res_j.scalars().first()
+                if job:
+                    job.is_active = False
+            await db.commit()
+        else:
+            if automation.job_id:
+                stmt_j = select(MassEvaluationJob).where(MassEvaluationJob.job_id == automation.job_id)
+                res_j = await db.execute(stmt_j)
+                job = res_j.scalars().first()
+                if job:
+                    await db.delete(job)
+            await db.delete(automation)
+            await db.commit()
+        return True
+
+    @staticmethod
+    async def run_automation_run(
+        db: AsyncSession, automation: MassAnalysisAutomation | int, trigger_type: str = "scheduled"
+    ) -> MassAnalysisAutomationRun:
+        """Computes call search window, generates an automation execution run, and spawns the job."""
+        if isinstance(automation, int):
+            stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id == automation)
+            res = await db.execute(stmt)
+            automation = res.scalars().first()
+            if not automation:
+                raise ValueError(f"La automatización ID {automation} no existe.")
+        else:
+            db.add(automation)
+
+        now = datetime.now(timezone.utc)
+        
+        # temporal window window_from to window_to based on delay and lookback
+        window_from = now - timedelta(minutes=(automation.lookback_minutes or 30) + (automation.delay_minutes or 5))
+        window_to = now - timedelta(minutes=(automation.delay_minutes or 5))
+
+        # Check lock: verify if this automation already has a running automation execution
+        stmt_lock = select(MassAnalysisAutomationRun).where(
+            MassAnalysisAutomationRun.automation_id == automation.automation_id,
+            MassAnalysisAutomationRun.status == "running"
+        )
+        res_lock = await db.execute(stmt_lock)
+        active_auto_run = res_lock.scalars().first()
+        if active_auto_run:
+            raise ValueError(f"La automatización {automation.automation_id} ya tiene una ejecución activa (Run ID {active_auto_run.automation_run_id})")
+
+        # Create Run record
+        auto_run = MassAnalysisAutomationRun(
+            automation_id=automation.automation_id,
+            status="running",
+            started_at=now,
+            window_from=window_from,
+            window_to=window_to,
+            calls_found=0,
+            calls_selected=0,
+            calls_skipped=0
+        )
+        db.add(auto_run)
+        await db.flush()
+
+        try:
+            # Trigger underlying mass evaluation run (which launches background execution task)
+            sub_run = await MassEvaluationService.run_job(
+                db,
+                job_id=automation.job_id,
+                trigger_type=trigger_type,
+                override_date_from=window_from,
+                override_date_to=window_to
+            )
+
+            # Link run and job ids
+            auto_run.job_id = automation.job_id
+            auto_run.run_id = sub_run.run_id
+            
+            automation.last_run_at = now
+            await db.commit()
+            
+        except Exception as e:
+            logger.error("Failed to launch mass evaluation run for automation %d: %s", automation.automation_id, e)
+            auto_run.status = "failed"
+            auto_run.finished_at = datetime.now(timezone.utc)
+            auto_run.error_message = str(e)
+            automation.last_run_at = now
+            automation.last_error_at = datetime.now(timezone.utc)
+            automation.last_error_message = str(e)
+            await db.commit()
+
+        await db.refresh(auto_run)
+        return auto_run
+
+    @staticmethod
+    async def run_due_automations(db: AsyncSession) -> dict[str, int]:
+        """Finds all active automations that are due to execute and triggers them."""
+        now = datetime.now(timezone.utc)
+        
+        # Select all active automations
+        stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.is_active == True)
+        res = await db.execute(stmt)
+        automations = res.scalars().all()
+        
+        due_count = 0
+        launched_count = 0
+        
+        for aut in automations:
+            # Extract attributes locally to avoid expired attribute accesses on commit/expiration
+            automation_id = aut.automation_id
+            automation_name = aut.name
+            interval_minutes = aut.interval_minutes or 30
+            last_run_at = aut.last_run_at
+
+            # Check if due based on interval
+            is_due = False
+            if last_run_at is None:
+                is_due = True
+            else:
+                elapsed = now - last_run_at
+                if elapsed >= timedelta(minutes=interval_minutes):
+                    is_due = True
+                    
+            if not is_due:
+                continue
+                
+            due_count += 1
+            
+            # Check if already running using extracted automation_id
+            stmt_lock = select(MassAnalysisAutomationRun).where(
+                MassAnalysisAutomationRun.automation_id == automation_id,
+                MassAnalysisAutomationRun.status == "running"
+            )
+            res_lock = await db.execute(stmt_lock)
+            active_run = res_lock.scalars().first()
+            if active_run:
+                logger.info("Automation scheduler skipped automation ID %d ('%s') because it is already running.", automation_id, automation_name)
+                continue
+                
+            try:
+                # Trigger via automation_id to avoid lazy-loading issues
+                await MassEvaluationService.run_automation_run(db, automation_id, trigger_type="scheduled")
+                launched_count += 1
+                logger.info("Automation scheduler successfully launched automation ID %d ('%s').", automation_id, automation_name)
+            except Exception as e:
+                logger.error("Automation scheduler failed to launch automation ID %d ('%s'): %s", automation_id, automation_name, e)
+                
+        return {"due_automations_count": due_count, "launched_automations_count": launched_count}
+
+    @staticmethod
+    async def list_automation_runs(db: AsyncSession, automation_id: int, limit: int = 100) -> list[MassAnalysisAutomationRun]:
+        """List all execution logs / runs for a given automation configuration."""
+        stmt = select(MassAnalysisAutomationRun).where(MassAnalysisAutomationRun.automation_id == automation_id).order_by(desc(MassAnalysisAutomationRun.automation_run_id)).limit(limit)
+        res = await db.execute(stmt)
+        return list(res.scalars().all())
+

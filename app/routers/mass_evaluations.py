@@ -14,6 +14,11 @@ from app.schemas.mass_evaluations import (
     MassEvaluationResultResponse,
     MassEvaluationRunResponse,
     MassEvaluationRunLaunchResponse,
+    MassCriterionTypologyBackfillRequest,
+    MassAnalysisAutomationCreate,
+    MassAnalysisAutomationUpdate,
+    MassAnalysisAutomationResponse,
+    MassAnalysisAutomationRunResponse,
 )
 from app.services.mass_evaluation_service import MassEvaluationService
 
@@ -54,6 +59,11 @@ async def create_job(
     """Create a new mass evaluation job."""
     try:
         return await MassEvaluationService.create_job(db, payload=payload)
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(ve)
+        )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -68,13 +78,24 @@ async def update_job(
     db: AsyncSession = Depends(get_db)
 ):
     """Update an existing mass evaluation job."""
-    job = await MassEvaluationService.update_job(db, job_id=job_id, payload=payload)
-    if not job:
+    try:
+        job = await MassEvaluationService.update_job(db, job_id=job_id, payload=payload)
+        if not job:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job ID {job_id} not found."
+            )
+        return job
+    except ValueError as ve:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Job ID {job_id} not found."
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(ve)
         )
-    return job
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to update job: {str(e)}"
+        )
 
 
 @router.delete("/mass-evaluation-jobs/{job_id}")
@@ -260,3 +281,141 @@ async def get_result(
     d = MassEvaluationResultResponse.model_validate(result)
     d.items_visual = build_items_visual(result.items_json)
     return d
+
+
+@router.post("/admin/backfill-mass-criterion-typologies", status_code=status.HTTP_200_OK)
+async def backfill_mass_criterion_typologies(
+    payload: MassCriterionTypologyBackfillRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Backfill typology fields in MassEvaluationCriterionResult and parent MassEvaluationResult
+    for historical mass evaluation rows using the value from 'tipo_llamada' criterion.
+    """
+    try:
+        return await MassEvaluationService.backfill_mass_criterion_typologies(db, payload=payload)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Backfill operation failed: {str(e)}"
+        )
+
+
+# ── Automations Endpoints ──────────────────────────────────────────────────
+
+@router.get("/mass-analysis/automations", response_model=list[MassAnalysisAutomationResponse])
+async def list_automations(
+    limit: int = Query(100, ge=1, le=1000),
+    db: AsyncSession = Depends(get_db)
+):
+    """List all active automation configurations."""
+    return await MassEvaluationService.list_automations(db, limit=limit)
+
+
+@router.get("/mass-analysis/automations/{automation_id}", response_model=MassAnalysisAutomationResponse)
+async def get_automation(
+    automation_id: int,
+    db: AsyncSession = Depends(get_db)
+):
+    """Retrieve details of a single automation configuration."""
+    automation = await MassEvaluationService.get_automation(db, automation_id=automation_id)
+    if not automation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Automation configuration ID {automation_id} not found."
+        )
+    return automation
+
+
+@router.post("/mass-analysis/automations", response_model=MassAnalysisAutomationResponse, status_code=status.HTTP_201_CREATED)
+async def create_automation(
+    payload: MassAnalysisAutomationCreate,
+    db: AsyncSession = Depends(get_db)
+):
+    """Create a new automation configuration."""
+    try:
+        return await MassEvaluationService.create_automation(db, payload=payload)
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(ve)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create automation: {str(e)}"
+        )
+
+
+@router.patch("/mass-analysis/automations/{automation_id}", response_model=MassAnalysisAutomationResponse)
+async def update_automation(
+    automation_id: int,
+    payload: MassAnalysisAutomationUpdate,
+    db: AsyncSession = Depends(get_db)
+):
+    """Update an automation configuration."""
+    automation = await MassEvaluationService.update_automation(db, automation_id=automation_id, payload=payload)
+    if not automation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Automation configuration ID {automation_id} not found."
+        )
+    return automation
+
+
+@router.delete("/mass-analysis/automations/{automation_id}", status_code=status.HTTP_200_OK)
+async def delete_automation(
+    automation_id: int,
+    soft: bool = True,
+    db: AsyncSession = Depends(get_db)
+):
+    """Deactivate or delete an automation configuration."""
+    success = await MassEvaluationService.delete_automation(db, automation_id=automation_id, soft_delete=soft)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Automation configuration ID {automation_id} not found."
+        )
+    return {"message": f"Automation configuration ID {automation_id} successfully deleted."}
+
+
+@router.post("/mass-analysis/automations/{automation_id}/run-now", response_model=MassAnalysisAutomationRunResponse)
+async def run_automation_now(
+    automation_id: int,
+    db: AsyncSession = Depends(get_db)
+):
+    """Trigger an automation execution run immediately."""
+    automation = await MassEvaluationService.get_automation(db, automation_id=automation_id)
+    if not automation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Automation configuration ID {automation_id} not found."
+        )
+    try:
+        return await MassEvaluationService.run_automation_run(db, automation=automation, trigger_type="manual")
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(ve)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to launch automation run: {str(e)}"
+        )
+
+
+@router.get("/mass-analysis/automations/{automation_id}/runs", response_model=list[MassAnalysisAutomationRunResponse])
+async def list_automation_runs(
+    automation_id: int,
+    limit: int = Query(100, ge=1, le=1000),
+    db: AsyncSession = Depends(get_db)
+):
+    """List execution logs / runs for a given automation configuration."""
+    automation = await MassEvaluationService.get_automation(db, automation_id=automation_id)
+    if not automation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Automation configuration ID {automation_id} not found."
+        )
+    return await MassEvaluationService.list_automation_runs(db, automation_id=automation_id, limit=limit)
