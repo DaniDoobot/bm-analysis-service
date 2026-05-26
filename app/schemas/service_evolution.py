@@ -41,6 +41,7 @@ class ServiceEvolutionSeriesItem(BaseModel):
 
 
 class ServiceEvolutionTypologyItem(BaseModel):
+    typology_id: int | None = None
     typology_key: str | None = None
     typology_name: str | None = None
     total_calls: int

@@ -366,37 +366,85 @@ class ServiceEvolutionService:
             ))
 
         # 5. Get Typology split
-        typo_query = text("""
+        # Query 1: Active typologies from bm_typologies + LEFT JOIN call statistics
+        active_typo_query = text("""
             SELECT 
-                r.typology_key,
-                COALESCE(r.typology_name, 'Unclassified') AS typology_name,
+                t.typology_id,
+                t.typology_key,
+                t.typology_name,
                 COUNT(DISTINCT r.mass_analysis_id) AS total_calls,
                 AVG((r.result_json->>'evaluacion_global')::numeric) AS avg_evaluacion_global,
                 AVG(CASE WHEN c.criterion_key = 'cierre_cita' AND c.is_applicable = true AND c.boolean_value IS NOT NULL THEN c.boolean_value::int END) AS cierre_cita_rate
-            FROM bm_mass_evaluation_results r
-            LEFT JOIN bm_mass_evaluation_criterion_results c ON r.mass_analysis_id = c.mass_analysis_id
-            WHERE r.status = 'completed'
-              AND r.result_json IS NOT NULL
-              AND (CAST(:service_id AS integer) IS NULL OR r.service_id = CAST(:service_id AS integer))
-              AND (CAST(:service_key AS text) IS NULL OR r.service_key = CAST(:service_key AS text))
-              AND (CAST(:date_from AS timestamptz) IS NULL OR r.call_timestamp >= CAST(:date_from AS timestamptz))
-              AND (CAST(:date_to AS timestamptz) IS NULL OR r.call_timestamp <= CAST(:date_to AS timestamptz))
-              AND (CAST(:typology_key AS text) IS NULL OR r.typology_key = CAST(:typology_key AS text))
-              AND (CAST(:agent_owner_id AS text) IS NULL OR r.hubspot_owner_id = CAST(:agent_owner_id AS text))
-            GROUP BY r.typology_key, r.typology_name
-            ORDER BY total_calls DESC;
+            FROM bm_typologies t
+            LEFT JOIN bm_mass_evaluation_results r 
+                ON t.typology_key = r.typology_key 
+                AND t.service_id = r.service_id
+                AND r.status = 'completed'
+                AND r.result_json IS NOT NULL
+                AND (CAST(:date_from AS timestamptz) IS NULL OR r.call_timestamp >= CAST(:date_from AS timestamptz))
+                AND (CAST(:date_to AS timestamptz) IS NULL OR r.call_timestamp <= CAST(:date_to AS timestamptz))
+                AND (CAST(:agent_owner_id AS text) IS NULL OR r.hubspot_owner_id = CAST(:agent_owner_id AS text))
+            LEFT JOIN bm_mass_evaluation_criterion_results c 
+                ON r.mass_analysis_id = c.mass_analysis_id
+            WHERE t.is_active = true
+              AND (CAST(:service_id AS integer) IS NULL OR t.service_id = CAST(:service_id AS integer))
+              AND (CAST(:typology_key AS text) IS NULL OR t.typology_key = CAST(:typology_key AS text))
+            GROUP BY t.typology_id, t.typology_key, t.typology_name, t.sort_order
+            ORDER BY t.sort_order ASC, t.typology_id ASC;
         """)
-        typo_res = await db.execute(typo_query, params)
-        typo_rows = typo_res.fetchall()
+        active_typo_res = await db.execute(active_typo_query, params)
+        active_typo_rows = active_typo_res.fetchall()
+        
         by_typology = []
-        for row in typo_rows:
+        for row in active_typo_rows:
             by_typology.append(ServiceEvolutionTypologyItem(
-                typology_key=row[0],
-                typology_name=row[1],
-                total_calls=row[2],
-                avg_evaluacion_global=float(row[3]) if row[3] is not None else None,
-                cierre_cita_rate=float(row[4]) if row[4] is not None else None,
+                typology_id=row[0],
+                typology_key=row[1],
+                typology_name=row[2],
+                total_calls=row[3],
+                avg_evaluacion_global=float(row[4]) if row[4] is not None else None,
+                cierre_cita_rate=float(row[5]) if row[5] is not None else None,
             ))
+
+        # Query 2: Unclassified/unlisted calls
+        # Only run if typology_key is either None or "unclassified"
+        if typology_key is None or typology_key.lower() == "unclassified":
+            unclass_query = text("""
+                SELECT 
+                    COUNT(DISTINCT r.mass_analysis_id) AS total_calls,
+                    AVG((r.result_json->>'evaluacion_global')::numeric) AS avg_evaluacion_global,
+                    AVG(CASE WHEN c.criterion_key = 'cierre_cita' AND c.is_applicable = true AND c.boolean_value IS NOT NULL THEN c.boolean_value::int END) AS cierre_cita_rate
+                FROM bm_mass_evaluation_results r
+                LEFT JOIN bm_mass_evaluation_criterion_results c ON r.mass_analysis_id = c.mass_analysis_id
+                WHERE r.status = 'completed'
+                  AND r.result_json IS NOT NULL
+                  AND (CAST(:service_id AS integer) IS NULL OR r.service_id = CAST(:service_id AS integer))
+                  AND (CAST(:service_key AS text) IS NULL OR r.service_key = CAST(:service_key AS text))
+                  AND (CAST(:date_from AS timestamptz) IS NULL OR r.call_timestamp >= CAST(:date_from AS timestamptz))
+                  AND (CAST(:date_to AS timestamptz) IS NULL OR r.call_timestamp <= CAST(:date_to AS timestamptz))
+                  AND (CAST(:agent_owner_id AS text) IS NULL OR r.hubspot_owner_id = CAST(:agent_owner_id AS text))
+                  AND (
+                    r.typology_key IS NULL 
+                    OR r.typology_key NOT IN (
+                        SELECT typology_key 
+                        FROM bm_typologies 
+                        WHERE is_active = true 
+                          AND (CAST(:service_id AS integer) IS NULL OR service_id = CAST(:service_id AS integer))
+                    )
+                  );
+            """)
+            unclass_res = await db.execute(unclass_query, params)
+            unclass_row = unclass_res.fetchone()
+            
+            if unclass_row and unclass_row[0] > 0:
+                by_typology.append(ServiceEvolutionTypologyItem(
+                    typology_id=None,
+                    typology_key="unclassified",
+                    typology_name="Sin clasificar",
+                    total_calls=unclass_row[0],
+                    avg_evaluacion_global=float(unclass_row[1]) if unclass_row[1] is not None else None,
+                    cierre_cita_rate=float(unclass_row[2]) if unclass_row[2] is not None else None,
+                ))
 
         # 6. Get Agent split
         agent_query = text("""
