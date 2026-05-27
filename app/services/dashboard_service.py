@@ -715,7 +715,8 @@ async def get_dashboard_summary(
             "evaluacion_global": to_float(eg) if eg is not None else None,
             "fecha_eval": _effective_ts(r).isoformat() if _effective_ts(r) else None,
             "call_timestamp": r.call_timestamp.isoformat() if r.call_timestamp else None,
-            "status": r.status
+            "status": r.status,
+            "execution_source": r.execution_source
         })
 
     return {
@@ -1049,6 +1050,7 @@ async def get_agent_evolution(
             "tipo_llamada": rj.get("tipo_llamada"),
             "evaluacion_global": eg,
             "objeciones": obj,
+            "execution_source": r.execution_source
         })
 
     return {
@@ -1360,5 +1362,6 @@ async def get_mass_result_detail(db: AsyncSession, identifier: str) -> dict[str,
         "batch_id": row.job_id,
         "mass_evaluation_id": row.job_id,
         "run_id": row.run_id,
-        "recording_url": row.recording_url
+        "recording_url": row.recording_url,
+        "execution_source": row.execution_source
     }

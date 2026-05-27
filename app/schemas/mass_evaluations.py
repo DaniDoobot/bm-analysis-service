@@ -352,6 +352,7 @@ class MassEvaluationResultResponse(BaseModel):
     typology_key: str | None = None
     typology_name: str | None = None
 
+    execution_source: str | None = None
     status: str
     result_json: dict[str, Any] | None
     items_json: Any

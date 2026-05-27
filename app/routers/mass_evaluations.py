@@ -240,6 +240,7 @@ async def list_results(
     call_id: str | None = Query(None),
     date_from: datetime | None = Query(None),
     date_to: datetime | None = Query(None),
+    execution_source: str | None = Query(None, description="on_demand | automation"),
     limit: int = Query(100, ge=1, le=1000),
     db: AsyncSession = Depends(get_db)
 ):
@@ -253,6 +254,7 @@ async def list_results(
         call_id=call_id,
         date_from=date_from,
         date_to=date_to,
+        execution_source=execution_source,
         limit=limit
     )
     

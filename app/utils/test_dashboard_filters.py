@@ -119,6 +119,28 @@ async def test_case_runner():
         logger.info(f"Agent: {evo_range.get('agent')}")
         logger.info(f"Timeline points: {len(evo_range.get('timeline', []))}")
         
+        # 9. Mass evaluation results filtered by execution_source
+        print_section("9. Mass evaluation results filtered by execution_source")
+        from app.services.mass_evaluation_service import MassEvaluationService
+        
+        # Test default (all)
+        results_all = await MassEvaluationService.list_results(db, limit=5)
+        logger.info(f"Total results (all): {len(results_all)}")
+        
+        # Test on_demand
+        results_on_demand = await MassEvaluationService.list_results(db, execution_source="on_demand", limit=5)
+        logger.info(f"Total results (on_demand): {len(results_on_demand)}")
+        for r in results_on_demand:
+            logger.info(f"  - Call: {r.call_id}, Source: {r.execution_source}")
+            assert r.execution_source == "on_demand", f"Expected 'on_demand', got '{r.execution_source}'"
+
+        # Test automation
+        results_auto = await MassEvaluationService.list_results(db, execution_source="automation", limit=5)
+        logger.info(f"Total results (automation): {len(results_auto)}")
+        for r in results_auto:
+            logger.info(f"  - Call: {r.call_id}, Source: {r.execution_source}")
+            assert r.execution_source == "automation", f"Expected 'automation', got '{r.execution_source}'"
+            
         logger.info("\n=== ALL TEST CASES COMPLETED SUCCESSFULLY ===")
 
 if __name__ == "__main__":
