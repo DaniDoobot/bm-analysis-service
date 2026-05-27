@@ -26,13 +26,25 @@ async def dashboard_summary(
     db: Annotated[AsyncSession, Depends(get_db)],
     type: Annotated[str, Query(description="audio | text")] = "audio",
     period: Annotated[str, Query(description="24h | 7d | 30d")] = "24h",
+    service_id: Annotated[int | None, Query(description="Filter by service ID")] = None,
+    service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
+    date_from: Annotated[str | None, Query(description="Custom start date (ISO or YYYY-MM-DD)")] = None,
+    date_to: Annotated[str | None, Query(description="Custom end date (ISO or YYYY-MM-DD)")] = None,
 ):
     """
     Get dashboard summary metrics including KPIs, evolution charts,
     agent rankings, and latest analyses.
     """
     try:
-        data = await get_dashboard_summary(db, analysis_type=type, period=period)
+        data = await get_dashboard_summary(
+            db,
+            analysis_type=type,
+            period=period,
+            service_id=service_id,
+            service_key=service_key,
+            date_from=date_from,
+            date_to=date_to,
+        )
         return data
     except Exception as e:
         logger.exception("Failed to retrieve dashboard summary")
@@ -42,12 +54,18 @@ async def dashboard_summary(
 @router.get("/agents")
 async def list_agents(
     db: Annotated[AsyncSession, Depends(get_db)],
+    service_id: Annotated[int | None, Query(description="Filter by service ID")] = None,
+    service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
 ):
     """
     Get all active call center agents with their accumulated real metrics.
     """
     try:
-        data = await get_agents_list(db)
+        data = await get_agents_list(
+            db,
+            service_id=service_id,
+            service_key=service_key,
+        )
         return data
     except Exception as e:
         logger.exception("Failed to retrieve agents list")
@@ -59,9 +77,13 @@ async def agent_evolution(
     hubspot_owner_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
     type: Annotated[str, Query(description="audio | text")] = "audio",
-    period: Annotated[str, Query(description="7d | 30d | 90d | all")] = "30d",
-    bucket: Annotated[str | None, Query(description="day | week")] = None,
+    period: Annotated[str, Query(description="24h | 7d | 30d | 90d | all")] = "30d",
+    bucket: Annotated[str | None, Query(description="hour | day | week")] = None,
     prompt_version_id: Annotated[int | None, Query(description="Filter by prompt version")] = None,
+    service_id: Annotated[int | None, Query(description="Filter by service ID")] = None,
+    service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
+    date_from: Annotated[str | None, Query(description="Custom start date (ISO or YYYY-MM-DD)")] = None,
+    date_to: Annotated[str | None, Query(description="Custom end date (ISO or YYYY-MM-DD)")] = None,
 ):
     """
     Get chronological performance, trends, strengths, weaknesses,
@@ -75,6 +97,10 @@ async def agent_evolution(
             period=period,
             bucket_param=bucket,
             prompt_version_id=prompt_version_id,
+            service_id=service_id,
+            service_key=service_key,
+            date_from=date_from,
+            date_to=date_to,
         )
         return data
     except Exception as e:
@@ -89,6 +115,10 @@ async def objections_breakdown(
     period: Annotated[str, Query(description="24h | 7d | 30d | 90d | all")] = "7d",
     agent_id: Annotated[str | None, Query(description="hubspot_owner_id")] = None,
     tipo_llamada: Annotated[str | None, Query(description="Type of call")] = None,
+    service_id: Annotated[int | None, Query(description="Filter by service ID")] = None,
+    service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
+    date_from: Annotated[str | None, Query(description="Custom start date (ISO or YYYY-MM-DD)")] = None,
+    date_to: Annotated[str | None, Query(description="Custom end date (ISO or YYYY-MM-DD)")] = None,
 ):
     """
     Get categorized objection lists, agent-specific counts,
@@ -101,6 +131,10 @@ async def objections_breakdown(
             period=period,
             agent_id=agent_id,
             tipo_llamada=tipo_llamada,
+            service_id=service_id,
+            service_key=service_key,
+            date_from=date_from,
+            date_to=date_to,
         )
         return data
     except Exception as e:

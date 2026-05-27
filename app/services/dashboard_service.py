@@ -10,9 +10,83 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.analyses import Analysis
 from app.models.mass_evaluations import MassEvaluationResult
+from app.models.services import Service
+from app.models.typologies import Typology
 from app.utils.hubspot_owners import resolve_agent_display, resolve_owner_name, OWNER_TO_NAME
 
 logger = logging.getLogger(__name__)
+
+
+def parse_date(date_str: str | None) -> datetime | None:
+    """Safely parse timezone-aware datetimes or YYYY-MM-DD strings."""
+    if not date_str:
+        return None
+    try:
+        # Try ISO format (e.g. 2026-05-27T09:36:56Z)
+        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except ValueError:
+        # Try as plain YYYY-MM-DD
+        try:
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            return dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+
+
+def resolve_date_range(
+    date_from: str | None,
+    date_to: str | None,
+    period: str | None,
+    default_period: str = "24h"
+) -> tuple[datetime | None, datetime | None, str]:
+    """
+    Resolve start and end dates based on custom range or period shortcut.
+    Returns (start_date, end_date, recommended_bucket_interval).
+    """
+    now = datetime.now(timezone.utc)
+    
+    dt_from = parse_date(date_from)
+    dt_to = parse_date(date_to)
+    
+    if dt_from and dt_to:
+        if len(date_from) <= 10:
+            dt_from = dt_from.replace(hour=0, minute=0, second=0, microsecond=0)
+        if len(date_to) <= 10:
+            dt_to = dt_to.replace(hour=23, minute=59, second=59, microsecond=999999)
+            
+        span = dt_to - dt_from
+        if span <= timedelta(hours=24):
+            bucket_interval = "hour"
+        else:
+            bucket_interval = "day"
+        return dt_from, dt_to, bucket_interval
+        
+    p = period or default_period
+    if p == "7d":
+        delta = timedelta(days=7)
+        bucket_interval = "day"
+    elif p == "30d":
+        delta = timedelta(days=30)
+        bucket_interval = "day"
+    elif p == "90d":
+        delta = timedelta(days=90)
+        bucket_interval = "day"
+    elif p == "24h":
+        delta = timedelta(hours=24)
+        bucket_interval = "hour"
+    elif p == "all":
+        # No start constraint for 'all' in SQL, but for comparison and bucket we fall back to 365 days
+        return None, now, "week"
+    else:
+        return resolve_date_range(None, None, default_period)
+        
+    start_actual = now - delta
+    end_actual = now
+    return start_actual, end_actual, bucket_interval
+
 
 CRITERIA_NAMES = {
     "sentiment": "Sentimiento",
@@ -315,25 +389,51 @@ def _get_objection_metrics_mass(rows: list[Any]) -> tuple[int, int]:
 async def get_dashboard_summary(
     db: AsyncSession,
     analysis_type: str = "audio",
-    period: str = "24h"
+    period: str = "24h",
+    service_id: int | None = None,
+    service_key: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     
-    if period == "7d":
-        delta = timedelta(days=7)
-        bucket_interval = "day"
-    elif period == "30d":
-        delta = timedelta(days=30)
-        bucket_interval = "day"
+    # Resolve custom range or period
+    dt_from = parse_date(date_from)
+    dt_to = parse_date(date_to)
+    
+    if dt_from and dt_to:
+        if len(date_from) <= 10:
+            start_actual = dt_from.replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            start_actual = dt_from
+        if len(date_to) <= 10:
+            end_actual = dt_to.replace(hour=23, minute=59, second=59, microsecond=999999)
+        else:
+            end_actual = dt_to
+            
+        span = end_actual - start_actual
+        start_anterior = start_actual - span
+        end_anterior = start_actual
+        if span <= timedelta(hours=24):
+            bucket_interval = "hour"
+        else:
+            bucket_interval = "day"
     else:
-        period = "24h"
-        delta = timedelta(hours=24)
-        bucket_interval = "hour"
+        if period == "7d":
+            delta = timedelta(days=7)
+            bucket_interval = "day"
+        elif period == "30d":
+            delta = timedelta(days=30)
+            bucket_interval = "day"
+        else:
+            period = "24h"
+            delta = timedelta(hours=24)
+            bucket_interval = "hour"
 
-    start_actual = now - delta
-    end_actual = now
-    start_anterior = now - (delta * 2)
-    end_anterior = now - delta
+        start_actual = now - delta
+        end_actual = now
+        start_anterior = now - (delta * 2)
+        end_anterior = now - delta
 
     # Query from MassEvaluationResult exclusively
     stmt = select(MassEvaluationResult).where(
@@ -346,6 +446,17 @@ async def get_dashboard_summary(
                 MassEvaluationResult.analysis_timestamp,
             ) >= start_anterior
         )
+    if end_actual:
+        stmt = stmt.where(
+            func.coalesce(
+                MassEvaluationResult.call_timestamp,
+                MassEvaluationResult.analysis_timestamp,
+            ) <= end_actual
+        )
+    if service_id is not None:
+        stmt = stmt.where(MassEvaluationResult.service_id == service_id)
+    elif service_key is not None:
+        stmt = stmt.where(MassEvaluationResult.service_key == service_key)
 
     result = await db.execute(stmt)
     rows = list(result.scalars().all())
@@ -452,11 +563,84 @@ async def get_dashboard_summary(
             "sin_cita": to_float(data["sin_cita"])
         })
 
-    dist = {}
+    # ── Dynamic Type Distribution using bm_typologies master catalog ──
+    typo_stmt = select(Typology, Service).join(
+        Service, Typology.service_id == Service.service_id
+    ).where(
+        Typology.is_active == True,
+        Service.is_active == True
+    )
+    if service_id is not None:
+        typo_stmt = typo_stmt.where(Typology.service_id == service_id)
+    elif service_key is not None:
+        typo_stmt = typo_stmt.where(Service.service_key == service_key)
+
+    typo_stmt = typo_stmt.order_by(Typology.sort_order.asc(), Typology.typology_name.asc())
+    typo_res = await db.execute(typo_stmt)
+    typo_rows = typo_res.all()
+
+    master_typologies = []
+    for t, s in typo_rows:
+        master_typologies.append({
+            "typology_id": t.typology_id,
+            "typology_key": t.typology_key,
+            "typology_name": t.typology_name,
+            "service_id": s.service_id,
+            "service_key": s.service_key,
+            "service_name": s.service_name,
+            "sort_order": t.sort_order,
+            "total_calls": 0.0,
+            "count": 0.0,
+            "percentage": 0.0,
+            "tipo_llamada": t.typology_key
+        })
+
+    typology_counts = {}
+    unclassified_count = 0
+
     for r in actual_rows:
-        t = (r.result_json.get("tipo_llamada") if r.result_json else None) or "desconocido"
-        dist[t] = dist.get(t, 0) + 1
-    type_distribution = [{"tipo_llamada": k, "count": to_float(v)} for k, v in dist.items()]
+        if r.typology_id is not None:
+            typology_counts[r.typology_id] = typology_counts.get(r.typology_id, 0) + 1
+        else:
+            # Fallback to match by typology_key
+            matched = False
+            if r.typology_key:
+                for mt in master_typologies:
+                    if mt["typology_key"] == r.typology_key and (service_id is None or mt["service_id"] == r.service_id):
+                        typology_counts[mt["typology_id"]] = typology_counts.get(mt["typology_id"], 0) + 1
+                        matched = True
+                        break
+            if not matched:
+                unclassified_count += 1
+
+    total_typology_calls = sum(typology_counts.values()) + unclassified_count
+
+    for mt in master_typologies:
+        cnt = typology_counts.get(mt["typology_id"], 0)
+        mt["count"] = to_float(cnt)
+        mt["total_calls"] = to_float(cnt)
+        if total_typology_calls > 0:
+            mt["percentage"] = to_float(round((cnt / total_typology_calls) * 100, 1))
+        else:
+            mt["percentage"] = 0.0
+
+    if unclassified_count > 0:
+        pct = to_float(round((unclassified_count / total_typology_calls) * 100, 1)) if total_typology_calls > 0 else 0.0
+        master_typologies.append({
+            "typology_id": None,
+            "typology_key": "unclassified",
+            "typology_name": "Sin clasificar",
+            "service_id": None,
+            "service_key": None,
+            "service_name": None,
+            "sort_order": 999999,
+            "total_calls": to_float(unclassified_count),
+            "count": to_float(unclassified_count),
+            "percentage": pct,
+            "tipo_llamada": "unclassified"
+        })
+
+    type_distribution = master_typologies
 
     sentiment_grouped = {}
     for r in actual_rows:
@@ -558,8 +742,13 @@ async def get_dashboard_summary(
     }
 
 
+
 # ── A) GET /bm/agents ──────────────────────────────────────────────────────────
-async def get_agents_list(db: AsyncSession) -> list[dict[str, Any]]:
+async def get_agents_list(
+    db: AsyncSession,
+    service_id: int | None = None,
+    service_key: str | None = None
+) -> list[dict[str, Any]]:
     """Return agents list with metrics calculated from bm_mass_evaluation_results only."""
     from app.models.mass_evaluations import MassEvaluationResult
 
@@ -572,7 +761,13 @@ async def get_agents_list(db: AsyncSession) -> list[dict[str, Any]]:
     ).where(
         MassEvaluationResult.status == "completed",
         MassEvaluationResult.hubspot_owner_id.is_not(None),
-    ).group_by(
+    )
+    if service_id is not None:
+        agg_stmt = agg_stmt.where(MassEvaluationResult.service_id == service_id)
+    elif service_key is not None:
+        agg_stmt = agg_stmt.where(MassEvaluationResult.service_key == service_key)
+        
+    agg_stmt = agg_stmt.group_by(
         MassEvaluationResult.hubspot_owner_id,
         MassEvaluationResult.agent_name,
     )
@@ -594,6 +789,11 @@ async def get_agents_list(db: AsyncSession) -> list[dict[str, Any]]:
         MassEvaluationResult.status == "completed",
         MassEvaluationResult.hubspot_owner_id.is_not(None),
     )
+    if service_id is not None:
+        rj_stmt = rj_stmt.where(MassEvaluationResult.service_id == service_id)
+    elif service_key is not None:
+        rj_stmt = rj_stmt.where(MassEvaluationResult.service_key == service_key)
+        
     rj_res = await db.execute(rj_stmt)
     owner_evals: dict[str, list[float]] = {}
     for r in rj_res.fetchall():
@@ -641,6 +841,7 @@ async def get_agents_list(db: AsyncSession) -> list[dict[str, Any]]:
     return results
 
 
+
 # ── B) GET /bm/agents/{hubspot_owner_id}/evolution ─────────────────────────────
 async def get_agent_evolution(
     db: AsyncSession,
@@ -648,7 +849,11 @@ async def get_agent_evolution(
     analysis_type: str = "audio",   # kept for API compat; mass evals are always audio
     period: str = "30d",
     bucket_param: str | None = None,
-    prompt_version_id: int | None = None
+    prompt_version_id: int | None = None,
+    service_id: int | None = None,
+    service_key: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
 ) -> dict[str, Any]:
     """Evolution metrics from bm_mass_evaluation_results only."""
     from app.models.mass_evaluations import MassEvaluationResult
@@ -656,28 +861,31 @@ async def get_agent_evolution(
     now = datetime.now(timezone.utc)
 
     # 1. Resolve timeframe
-    if period == "7d":
-        start_date = now - timedelta(days=7)
-    elif period == "30d":
-        start_date = now - timedelta(days=30)
-    elif period == "90d":
-        start_date = now - timedelta(days=90)
-    else:
-        period = "all"
-        start_date = None
+    dt_from, dt_to, recommended_bucket = resolve_date_range(date_from, date_to, period, default_period="30d")
+    bucket_interval = bucket_param if bucket_param in ["hour", "day", "week"] else recommended_bucket
 
     stmt = select(MassEvaluationResult).where(
         MassEvaluationResult.hubspot_owner_id == hubspot_owner_id,
         MassEvaluationResult.status == "completed",
     )
-    if start_date:
-        # Filter by call_timestamp first; fallback to analysis_timestamp
+    if dt_from:
         stmt = stmt.where(
             func.coalesce(
                 MassEvaluationResult.call_timestamp,
                 MassEvaluationResult.analysis_timestamp,
-            ) >= start_date
+            ) >= dt_from
         )
+    if dt_to:
+        stmt = stmt.where(
+            func.coalesce(
+                MassEvaluationResult.call_timestamp,
+                MassEvaluationResult.analysis_timestamp,
+            ) <= dt_to
+        )
+    if service_id is not None:
+        stmt = stmt.where(MassEvaluationResult.service_id == service_id)
+    elif service_key is not None:
+        stmt = stmt.where(MassEvaluationResult.service_key == service_key)
     if prompt_version_id is not None:
         stmt = stmt.where(MassEvaluationResult.prompt_version_id == prompt_version_id)
 
@@ -748,19 +956,19 @@ async def get_agent_evolution(
         interpretation = "Sin evaluaciones masivas disponibles para el periodo seleccionado."
 
     # ── Timeline ─────────────────────────────────────────────────────────────
-    bucket_interval = bucket_param if bucket_param in ["day", "week"] else (
-        "week" if period in ["90d", "all"] else "day"
-    )
     buckets_map: dict[str, list] = {}
     for r in rows:
         ts = _effective_ts(r)
         if not ts:
             continue
-        if bucket_interval == "day":
+        if bucket_interval == "hour":
+            b_key = ts.strftime("%Y-%m-%d %H:00")
+        elif bucket_interval == "day":
             b_key = ts.strftime("%Y-%m-%d")
         else:
             b_key = (ts - timedelta(days=ts.weekday())).strftime("%Y-%m-%d")
         buckets_map.setdefault(b_key, []).append(r)
+
 
     timeline = []
     for b_key in sorted(buckets_map):
@@ -882,32 +1090,37 @@ async def get_objections_breakdown(
     analysis_type: str = "audio",
     period: str = "7d",
     agent_id: str | None = None,
-    tipo_llamada: str | None = None
+    tipo_llamada: str | None = None,
+    service_id: int | None = None,
+    service_key: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     
-    if period == "24h":
-        delta = timedelta(hours=24)
-    elif period == "7d":
-        delta = timedelta(days=7)
-    elif period == "30d":
-        delta = timedelta(days=30)
-    elif period == "90d":
-        delta = timedelta(days=90)
-    else:
-        period = "all"
-        delta = None
+    dt_from, dt_to, _ = resolve_date_range(date_from, date_to, period, default_period="7d")
         
     stmt = select(MassEvaluationResult).where(
         MassEvaluationResult.status == "completed"
     )
-    if delta:
+    if dt_from:
         stmt = stmt.where(
             func.coalesce(
                 MassEvaluationResult.call_timestamp,
                 MassEvaluationResult.analysis_timestamp,
-            ) >= now - delta
+            ) >= dt_from
         )
+    if dt_to:
+        stmt = stmt.where(
+            func.coalesce(
+                MassEvaluationResult.call_timestamp,
+                MassEvaluationResult.analysis_timestamp,
+            ) <= dt_to
+        )
+    if service_id is not None:
+        stmt = stmt.where(MassEvaluationResult.service_id == service_id)
+    elif service_key is not None:
+        stmt = stmt.where(MassEvaluationResult.service_key == service_key)
     if agent_id:
         stmt = stmt.where(MassEvaluationResult.hubspot_owner_id == agent_id)
         
