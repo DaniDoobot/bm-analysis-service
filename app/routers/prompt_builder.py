@@ -61,9 +61,22 @@ async def build_with_ai_endpoint(
         error_msg = result.get("error_message") if result else "No se pudo generar una estructura válida."
         # If error mentions legacy typologies, return the clean non-normalizable message requested
         if "legacy" in error_msg.lower():
+            legacy_details = result.get("legacy_details") if result else []
+            detail_str = "No se pudo generar una estructura válida porque el borrador contiene tipologías legacy no normalizables."
+            if legacy_details:
+                detail_str += "\n\nDetalle de registros conflictivos detectados:\n"
+                for item in legacy_details:
+                    detail_str += (
+                        f"  • ID: {item.get('typology_id')} | "
+                        f"Clave: '{item.get('typology_key')}' | "
+                        f"Nombre: '{item.get('typology_name')}' | "
+                        f"Servicio ID: {item.get('service_id')} | "
+                        f"Estado: {item.get('estado')} | "
+                        f"Tabla: {item.get('tabla_origen')}\n"
+                    )
             raise HTTPException(
                 status_code=400,
-                detail="No se pudo generar una estructura válida porque el borrador contiene tipologías legacy no normalizables."
+                detail=detail_str
             )
         raise HTTPException(
             status_code=400,

@@ -83,7 +83,8 @@ def sanitize_legacy_typologies_block(prompt_text: str, active_typologies: list[A
             prompt_text = prompt_text[:start_idx] + dynamic_section
     else:
         # If no explicit header is found, but legacy keywords exist, let's do a safe string replacement
-        legacy_typos = ["informacion_sin_cita", "falta_con_reagendo", "falta_sin_reagendo", "no_interesado", "no_apto"]
+        active_keys = {t.typology_key for t in active_typologies} if active_typologies else set()
+        legacy_typos = [lt for lt in ["informacion_sin_cita", "falta_con_reagendo", "falta_sin_reagendo", "no_interesado", "no_apto"] if lt not in active_keys]
         has_legacy = any(lt in prompt_text for lt in legacy_typos)
         if has_legacy:
             # We prepend the dynamic section to the beginning of the prompt,
@@ -97,7 +98,8 @@ def sanitize_legacy_typologies_block(prompt_text: str, active_typologies: list[A
             prompt_text = dynamic_section + "\n" + "\n".join(cleaned_lines)
 
     # Also, double check any remaining direct keyword references and remove/neutralize them
-    legacy_typos = ["informacion_sin_cita", "falta_con_reagendo", "falta_sin_reagendo", "no_interesado", "no_apto"]
+    active_keys = {t.typology_key for t in active_typologies} if active_typologies else set()
+    legacy_typos = [lt for lt in ["informacion_sin_cita", "falta_con_reagendo", "falta_sin_reagendo", "no_interesado", "no_apto"] if lt not in active_keys]
     for lt in legacy_typos:
         prompt_text = prompt_text.replace(f'"{lt}"', '"otros"')
         prompt_text = prompt_text.replace(f"'{lt}'", "'otros'")
@@ -117,13 +119,16 @@ def sanitize_inputs_completely(
     to ensure zero legacy typologies leak or cause 500 errors.
     """
     active_keys = [t.typology_key for t in active_typologies] if active_typologies else ["cita", "confirmacion", "cancelacion", "reagendo", "falta", "otros"]
+    active_keys_set = set(active_keys)
     
     legacy_mapping = {
-        "informacion_sin_cita": "cita",
-        "falta_con_reagendo": "falta",
-        "falta_sin_reagendo": "falta",
-        "no_interesado": "otros",
-        "no_apto": "otros"
+        k: v for k, v in {
+            "informacion_sin_cita": "cita",
+            "falta_con_reagendo": "falta",
+            "falta_sin_reagendo": "falta",
+            "no_interesado": "otros",
+            "no_apto": "otros"
+        }.items() if k not in active_keys_set
     }
 
     # Helper to clean an allowed_values list or string
@@ -276,7 +281,8 @@ async def build_prompt_with_ai(
         criterion_typologies_map[c.criterion_id] = list(c_keys)
 
     # 3.6. Check for legacy typologies before sanitization for logging purposes
-    legacy_typos = ["informacion_sin_cita", "falta_con_reagendo", "falta_sin_reagendo", "no_interesado", "no_apto"]
+    active_keys = {t.typology_key for t in typologies} if typologies else set()
+    legacy_typos = [lt for lt in ["informacion_sin_cita", "falta_con_reagendo", "falta_sin_reagendo", "no_interesado", "no_apto"] if lt not in active_keys]
     
     def detect_legacy_in_obj(obj: Any) -> bool:
         if not obj:
@@ -439,7 +445,8 @@ async def build_prompt_with_ai(
                     break
 
         # 2.2. Prevent legacy typologies leakage
-        legacy_typos = ["informacion_sin_cita", "falta_con_reagendo", "falta_sin_reagendo", "no_interesado", "no_apto"]
+        active_keys = {t.typology_key for t in typologies} if typologies else set()
+        legacy_typos = [lt for lt in ["informacion_sin_cita", "falta_con_reagendo", "falta_sin_reagendo", "no_interesado", "no_apto"] if lt not in active_keys]
         has_legacy_leak = False
         for lt in legacy_typos:
             if lt in generated_prompt:
@@ -456,7 +463,7 @@ async def build_prompt_with_ai(
                 "content": (
                     "¡ERROR CRÍTICO! Has incluido tipologías antiguas prohibidas en el prompt generado. "
                     "Por favor, vuelve a generar el prompt y asegúrate de eliminar por completo y no mencionar ninguna de las siguientes palabras: "
-                    "informacion_sin_cita, falta_con_reagendo, falta_sin_reagendo, no_interesado, no_apto. "
+                    f"{', '.join(legacy_typos)}. "
                     "Usa estrictamente las nuevas tipologías dinámicas permitidas: " + (", ".join([t.typology_key for t in typologies]) if typologies else "cita, confirmacion, cancelacion, reagendo, falta, otros")
                 )
             })
@@ -470,7 +477,56 @@ async def build_prompt_with_ai(
                 validation_errors.append(f"Se detectaron problemas de codificación (carácter '{mb}').")
                 
         if validation_errors:
+            legacy_details = []
             if has_legacy_leak:
+                try:
+                    leaked_keys = [lt for lt in legacy_typos if lt in generated_prompt]
+                    for lt in leaked_keys:
+                        # Find all matching typologies (both active and inactive) in DB
+                        from app.models.typologies import Typology
+                        t_db_res = await db.execute(
+                            select(Typology).where(Typology.typology_key == lt)
+                        )
+                        t_db_objs = t_db_res.scalars().all()
+                        
+                        normalized_mapped = {"informacion_sin_cita": "cita", "falta_con_reagendo": "falta", "falta_sin_reagendo": "falta", "no_interesado": "otros", "no_apto": "otros"}.get(lt, "otros")
+                        
+                        if not t_db_objs:
+                            legacy_details.append({
+                                "typology_id": None,
+                                "typology_key": lt,
+                                "typology_name": None,
+                                "service_id": service_id,
+                                "estado": "not_in_db",
+                                "deleted_at": None,
+                                "tabla_origen": "bm_typologies",
+                                "normalized_key": normalized_mapped
+                            })
+                        else:
+                            for t_obj in t_db_objs:
+                                legacy_details.append({
+                                    "typology_id": t_obj.typology_id,
+                                    "typology_key": t_obj.typology_key,
+                                    "typology_name": t_obj.typology_name,
+                                    "service_id": t_obj.service_id,
+                                    "estado": "active" if t_obj.is_active else "inactive/soft-deleted",
+                                    "deleted_at": None if t_obj.is_active else "is_active=False",
+                                    "tabla_origen": "bm_typologies",
+                                    "normalized_key": normalized_mapped
+                                })
+                    
+                    logger.error(
+                        "LEGACY TYPOLOGY LEAK DETAIL REPORT:\n"
+                        " - Service ID: %s\n"
+                        " - Structure ID: %s\n"
+                        " - Detailed records: %s",
+                        service_id,
+                        resolved_base_structure_id,
+                        legacy_details
+                    )
+                except Exception as log_ex:
+                    logger.error("Error creating legacy leak details report: %s", log_ex)
+
                 error_msg = (
                     "No se pudo generar una estructura válida porque el texto base contiene tipologías legacy. "
                     "Actualiza la estructura base o limpia el bloque de tipologías."
@@ -479,7 +535,12 @@ async def build_prompt_with_ai(
                 error_msg = "El prompt generado falló las validaciones estrictas: " + " ".join(validation_errors)
                 
             logger.error(error_msg)
-            return {"ok": False, "status": "error", "error_message": error_msg}
+            return {
+                "ok": False,
+                "status": "error",
+                "error_message": error_msg,
+                "legacy_details": legacy_details
+            }
 
         # If we successfully parsed and validated, exit loop
         break
