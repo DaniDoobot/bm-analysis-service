@@ -6,6 +6,7 @@ from app.models.prompts import Prompt, PromptVersion, PromptBaseStructure
 from app.models.mass_evaluations import MassEvaluationJob, MassEvaluationRun, MassEvaluationResult, MassEvaluationCriterionResult
 from app.models.services import Service
 from app.models.typologies import Typology
+from app.models.users import User
 
 __all__ = [
     "Prompt",
@@ -24,6 +25,7 @@ __all__ = [
     "MassEvaluationCriterionResult",
     "Service",
     "Typology",
+    "User",
 ]
 
 

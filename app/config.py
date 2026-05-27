@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     # ── Automation Scheduler ──────────────────────────────────────────────────
     enable_automation_scheduler: bool = False
 
+    # ── Password Reveal Flag ──────────────────────────────────────────────────
+    allow_password_reveal: bool = True
+
     # ── CORS ──────────────────────────────────────────────────────────────────
     cors_origins: str = "*"
 

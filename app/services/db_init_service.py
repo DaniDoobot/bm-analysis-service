@@ -110,6 +110,31 @@ async def init_db():
             await conn.run_sync(Base.metadata.create_all)
             logger.info("Database tables initialized successfully.")
 
+        # 1.2. Seed default developer user if bm_users is empty
+        from app.models.users import User
+        from app.utils.security import hash_password
+        
+        async with AsyncSession(engine) as session:
+            try:
+                res = await session.execute(select(User).limit(1))
+                if not res.scalars().first():
+                    logger.info("Seeding default developer user 'admin'...")
+                    default_user = User(
+                        username="admin",
+                        email="admin@doobot.ai",
+                        role="admin",
+                        is_active=True,
+                        password_hash=hash_password("admin123"),
+                        password_plain_dev="admin123"
+                    )
+                    session.add(default_user)
+                    await session.commit()
+                    logger.info("Default developer user 'admin' seeded successfully.")
+                else:
+                    logger.info("Users table is not empty, skipping seeding.")
+            except Exception as e:
+                logger.error("Failed to seed default developer user: %s", e)
+
         # 1.5. Ensure columns exist on bm_prompts table dynamically and non-destructively
         async with engine.begin() as conn:
             for col_name, col_type in [
