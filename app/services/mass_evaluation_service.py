@@ -6,7 +6,7 @@ import zoneinfo
 from datetime import datetime, time, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select, update, delete, desc, func, and_
+from sqlalchemy import select, update, delete, desc, func, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -1168,7 +1168,13 @@ class MassEvaluationService:
         if date_to is not None:
             filters.append(MassEvaluationResult.call_timestamp <= date_to)
         if execution_source is not None:
-            filters.append(MassEvaluationResult.execution_source == execution_source)
+            if execution_source == "on_demand":
+                filters.append(or_(
+                    MassEvaluationResult.execution_source == "on_demand",
+                    MassEvaluationResult.execution_source.is_(None)
+                ))
+            else:
+                filters.append(MassEvaluationResult.execution_source == execution_source)
             
         if filters:
             stmt = stmt.where(and_(*filters))

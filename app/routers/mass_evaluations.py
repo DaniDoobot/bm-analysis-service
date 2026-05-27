@@ -263,6 +263,8 @@ async def list_results(
         # Avoid relying on model_validator, build response model explicitly
         d = MassEvaluationResultResponse.model_validate(r)
         d.items_visual = build_items_visual(r.items_json)
+        if d.execution_source is None:
+            d.execution_source = "on_demand"
         out.append(d)
     return out
 
@@ -282,6 +284,8 @@ async def get_result(
         )
     d = MassEvaluationResultResponse.model_validate(result)
     d.items_visual = build_items_visual(result.items_json)
+    if d.execution_source is None:
+        d.execution_source = "on_demand"
     return d
 
 
