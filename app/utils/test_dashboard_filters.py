@@ -141,6 +141,19 @@ async def test_case_runner():
             logger.info(f"  - Call: {r.call_id}, Source: {r.execution_source}")
             assert r.execution_source == "automation", f"Expected 'automation', got '{r.execution_source}'"
             
+        # 10. Verify OpenAPI parameter specification
+        print_section("10. OpenAPI Specification Verification")
+        from app.main import app
+        openapi_schema = app.openapi()
+        path_item = openapi_schema.get("paths", {}).get("/bm/mass-evaluation-results", {})
+        get_op = path_item.get("get", {})
+        parameters = get_op.get("parameters", [])
+        
+        param_names = [p.get("name") for p in parameters]
+        logger.info(f"OpenAPI /bm/mass-evaluation-results GET parameters: {param_names}")
+        assert "execution_source" in param_names, "execution_source query parameter must be exposed in OpenAPI!"
+        logger.info("SUCCESS: execution_source query parameter is correctly exposed in OpenAPI!")
+        
         logger.info("\n=== ALL TEST CASES COMPLETED SUCCESSFULLY ===")
 
 if __name__ == "__main__":
