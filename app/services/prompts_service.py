@@ -125,6 +125,41 @@ async def get_active_prompt(db: AsyncSession, prompt_type: str) -> dict | None:
     current = await _get_current_version(db, p.prompt_id)
     
     prompt_text = current.prompt if current else None
+    
+    # Saneamiento automático / Sanity check antes de servir
+    if current and prompt_text:
+        try:
+            from app.services.criteria_service import sync_criterion_block, clean_orphaned_blocks, get_active_criteria
+            active_criteria = await get_active_criteria(db, p.prompt_id)
+            
+            changed = False
+            
+            # A. Sincronizar / Reconstruir bloques de criterios activos
+            for c in active_criteria:
+                new_text, block_changed = sync_criterion_block(prompt_text, c)
+                if block_changed and new_text != prompt_text:
+                    prompt_text = new_text
+                    changed = True
+            
+            # B. Limpiar bloques huérfanos
+            new_text_cleaned = clean_orphaned_blocks(prompt_text, active_criteria)
+            if new_text_cleaned != prompt_text:
+                prompt_text = new_text_cleaned
+                changed = True
+                
+            # C. Si hubo cambios, persistir en base de datos
+            if changed and current.prompt != prompt_text:
+                from sqlalchemy import func
+                from datetime import timezone, datetime
+                current.prompt = prompt_text
+                current.updated_at = func.now() if hasattr(func, 'now') else datetime.now(timezone.utc)
+                db.add(current)
+                await db.commit()
+                await db.refresh(current)
+                logger.info(f"Saneamiento automático: Se saneó y persistió la versión activa ID {current.id} para prompt_id {p.prompt_id}.")
+        except Exception as ex:
+            logger.error(f"Error durante el saneamiento automático de versión activa: {ex}", exc_info=True)
+
     if not prompt_text and p.prompt_id:
         prompt_text = await build_fallback_prompt_from_criteria(db, p.prompt_id)
 
