@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 
 def sync_criterion_block(prompt_text: str, criterion, old_output_key: str | None = None, old_criterion_key: str | None = None) -> tuple[str, bool]:
     """
-    Sincroniza el bloque descriptivo de un criterio en el texto del prompt usando claves técnicas.
-    No depende de encontrar la descripción anterior completa.
+    Sincroniza el bloque completo de un criterio en el texto del prompt usando claves técnicas.
+    Reconstruye dinámicamente la cabecera, descripción e incluye tipologías aplicables.
     """
     if not prompt_text:
         return prompt_text, False
@@ -161,6 +161,26 @@ def sync_criterion_block(prompt_text: str, criterion, old_output_key: str | None
         if match_indent_header:
             indent = match_indent_header.group(1) + "  "
 
+    # Reconstruir cabecera dinámicamente
+    header_bullet = "- "
+    match_bullet = re.match(r"^(\s*[-*])", header_line)
+    if match_bullet:
+        header_bullet = match_bullet.group(1) + " "
+        
+    id_prefix = ""
+    match_id = re.search(r"\[ID:\s*\d+\]", header_line)
+    if match_id:
+        id_prefix = match_id.group(0) + " "
+        
+    new_header_line = f"{header_bullet.rstrip()} {id_prefix}[{criterion.criterion_type or 'text'}] {criterion.criterion_name}"
+    keys_meta = []
+    if criterion.output_key:
+        keys_meta.append(f"output_key: {criterion.output_key}")
+    if getattr(criterion, "feed_key", None):
+        keys_meta.append(f"feed_key: {criterion.feed_key}")
+    if keys_meta:
+        new_header_line += " (" + ", ".join(keys_meta) + ")"
+
     # Construir nuevas líneas de descripción con la indentación correcta
     new_desc = getattr(criterion, "criterion_description", "") or ""
     new_desc_lines = []
@@ -170,13 +190,239 @@ def sync_criterion_block(prompt_text: str, criterion, old_output_key: str | None
         else:
             new_desc_lines.append("")
 
+    # Filtrar metadatos técnicos antiguos redundantes que vamos a reconstruir
+    preserved_tech_lines = []
+    for line in technical_lines:
+        normalized_line = line.lower().strip()
+        if normalized_line.startswith("valores permitidos:") or normalized_line.startswith("tipologías aplicables:") or normalized_line.startswith("tipologias aplicables:"):
+            continue
+        preserved_tech_lines.append(line)
+
+    # Reconstruir tipologías aplicables y valores permitidos
+    new_tech_lines = []
+    if getattr(criterion, "allowed_values", None):
+        vals = criterion.allowed_values
+        vals_str = ", ".join(vals) if isinstance(vals, list) else str(vals)
+        new_tech_lines.append(f"{indent}Valores permitidos: {vals_str}")
+        
+    if getattr(criterion, "applies_to_types", None):
+        typos = criterion.applies_to_types
+        typos_str = ", ".join(typos) if isinstance(typos, list) else str(typos)
+        new_tech_lines.append(f"{indent}Tipologías aplicables: {typos_str}")
+    else:
+        # Reconstruir "Todas" si el bloque original contenía la línea de tipologías
+        has_orig_typos = any("tipología" in line.lower() or "tipologia" in line.lower() for line in block_lines[1:])
+        if has_orig_typos:
+            new_tech_lines.append(f"{indent}Tipologías aplicables: Todas")
+
     # Reconstruir bloque y sustituir en el texto original
-    new_block_lines = [header_line]
+    new_block_lines = [new_header_line]
     new_block_lines.extend(new_desc_lines)
-    new_block_lines.extend(technical_lines)
+    new_block_lines.extend(new_tech_lines)
+    new_block_lines.extend(preserved_tech_lines)
     
     lines[header_idx:block_end_idx] = new_block_lines
     return "\n".join(lines), True
+
+
+def remove_criterion_block(prompt_text: str, criterion) -> tuple[str, bool]:
+    """
+    Elimina el bloque de un criterio completo y sus metadatos del texto del prompt,
+    e invalida sus llaves técnicas del formato JSON de salida final.
+    """
+    if not prompt_text:
+        return prompt_text, False
+
+    import re
+    output_key = getattr(criterion, "output_key", None)
+    criterion_key = getattr(criterion, "criterion_key", None)
+    feed_key = getattr(criterion, "feed_key", None)
+    
+    # Lista de claves técnicas para buscar el bloque
+    search_keys = [output_key, criterion_key, feed_key]
+    search_keys = [x for x in search_keys if x]
+    
+    if not search_keys:
+        return prompt_text, False
+
+    lines = prompt_text.splitlines()
+    header_idx = -1
+    
+    for i, line in enumerate(lines):
+        has_key = False
+        normalized_line = line.lower()
+        for sk in search_keys:
+            if re.search(rf"\b{re.escape(sk)}\b", line, re.IGNORECASE):
+                has_key = True
+                break
+        
+        if has_key:
+            stripped = line.strip()
+            if stripped.startswith("-") or stripped.startswith("*") or "output_key" in normalized_line or "feed_key" in normalized_line:
+                header_idx = i
+                break
+
+    if header_idx == -1:
+        return prompt_text, False
+
+    # Encontrar final del bloque
+    block_end_idx = len(lines)
+    for j in range(header_idx + 1, len(lines)):
+        line = lines[j]
+        if line.strip().startswith("#"):
+            block_end_idx = j
+            break
+        if line.strip().startswith("- [") or line.strip().startswith("* ["):
+            block_end_idx = j
+            break
+        if "output_key:" in line:
+            other_key_match = re.search(r"output_key:\s*([a-zA-Z0-9_]+)", line, re.IGNORECASE)
+            if other_key_match:
+                other_key = other_key_match.group(1)
+                if other_key != output_key:
+                    block_end_idx = j
+                    break
+        if re.match(r"^\s*(?:###?\s+)?(?:FORMATO DE SALIDA|REGLAS|DEFINICIÓN|TAREA|CONTEXTO)", line, re.IGNORECASE):
+            block_end_idx = j
+            break
+
+    # Eliminar bloque de líneas
+    # Remover también una línea en blanco anterior si está libre para evitar huecos en el prompt
+    if header_idx > 0 and lines[header_idx - 1].strip() == "":
+        header_idx -= 1
+        
+    del lines[header_idx:block_end_idx]
+    new_prompt_text = "\n".join(lines)
+    
+    # Limpiar las llaves del JSON final para evitar que el LLM las retorne
+    for key in [output_key, feed_key]:
+        if not key:
+            continue
+        pattern_json = re.compile(rf'^\s*[\'"]?{re.escape(key)}[\'"]?\s*:\s*[^,\n]+,?\s*$', re.MULTILINE | re.IGNORECASE)
+        new_prompt_text = pattern_json.sub("", new_prompt_text)
+
+    return new_prompt_text, True
+
+
+def clean_orphaned_blocks(prompt_text: str, active_criteria: list) -> str:
+    """
+    Inspecciona el prompt completo buscando bloques huérfanos (que ya no pertenecen a criterios activos)
+    y los elimina automáticamente.
+    """
+    if not prompt_text:
+        return prompt_text
+
+    import re
+    # Obtener todas las output_keys y criterion_keys activas
+    active_keys = set()
+    for c in active_criteria:
+        if c.output_key:
+            active_keys.add(c.output_key)
+        if c.criterion_key:
+            active_keys.add(c.criterion_key)
+            
+    # Conservar siempre "tipo_llamada"
+    active_keys.add("tipo_llamada")
+
+    lines = prompt_text.splitlines()
+    orphaned_keys = []
+    
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("- [") or stripped.startswith("* ["):
+            match = re.search(r"output_key:\s*([a-zA-Z0-9_]+)", line, re.IGNORECASE)
+            if match:
+                key = match.group(1)
+                if key not in active_keys:
+                    orphaned_keys.append(key)
+
+    # Eliminar todos los bloques huérfanos encontrados
+    for o_key in orphaned_keys:
+        class MockCriterion:
+            def __init__(self, key):
+                self.output_key = key
+                self.criterion_key = key
+                self.feed_key = f"{key}_feed"
+                
+        mock_c = MockCriterion(o_key)
+        prompt_text, removed = remove_criterion_block(prompt_text, mock_c)
+        if removed:
+            logger.info(f"Limpieza automática: Bloque huérfano '{o_key}' eliminado del prompt completo.")
+            
+    return prompt_text
+
+
+async def _sync_prompt_on_removal(db: AsyncSession, prompt_id: int, criterion) -> None:
+    """
+    Sincroniza la eliminación o deactivación de un criterio en la versión actual del prompt
+    y en los borradores activos.
+    """
+    try:
+        from app.services.prompts_service import _get_current_version
+        from app.models.prompts import Prompt
+        from app.models.drafts import PromptDraft
+        from sqlalchemy import func
+        from datetime import timezone, datetime
+        
+        # 1. Sincronizar en PromptVersion
+        current_version = await _get_current_version(db, prompt_id)
+        if current_version and current_version.prompt:
+            prompt_text = current_version.prompt
+            new_text, removed = remove_criterion_block(prompt_text, criterion)
+            if removed and new_text != current_version.prompt:
+                current_version.prompt = new_text
+                current_version.updated_at = func.now() if hasattr(func, 'now') else datetime.now(timezone.utc)
+                db.add(current_version)
+                
+                # Actualizar también parent Prompt
+                prompt_obj = await db.get(Prompt, prompt_id)
+                if prompt_obj:
+                    prompt_obj.updated_at = func.now() if hasattr(func, 'now') else datetime.now(timezone.utc)
+                    db.add(prompt_obj)
+                logger.info(f"Sincronización de eliminación: Se eliminó el bloque del criterio '{criterion.output_key}' en la versión activa del prompt.")
+
+        # 2. Sincronizar en borradores activos (PromptDraft)
+        drafts_stmt = select(PromptDraft).where(
+            PromptDraft.prompt_id == prompt_id,
+            PromptDraft.status == "draft"
+        )
+        drafts_res = await db.execute(drafts_stmt)
+        active_drafts = drafts_res.scalars().all()
+        for draft in active_drafts:
+            draft_data = draft.draft_data or {}
+            draft_changed = False
+            
+            # A. Eliminar bloque del prompt de borrador
+            if "prompt" in draft_data and isinstance(draft_data["prompt"], str):
+                draft_prompt = draft_data["prompt"]
+                new_draft_prompt, removed = remove_criterion_block(draft_prompt, criterion)
+                if removed:
+                    draft_data["prompt"] = new_draft_prompt
+                    draft_changed = True
+                    
+            # B. Eliminar en la lista de criterios estructurados del borrador
+            if "criteria" in draft_data and isinstance(draft_data["criteria"], list):
+                original_len = len(draft_data["criteria"])
+                draft_data["criteria"] = [
+                    crit for crit in draft_data["criteria"] 
+                    if not (
+                        (crit.get("criterion_id") is not None and crit.get("criterion_id") == criterion.criterion_id) or 
+                        (crit.get("criterion_key") is not None and crit.get("criterion_key") == criterion.criterion_key) or
+                        (crit.get("output_key") is not None and crit.get("output_key") == criterion.output_key)
+                    )
+                ]
+                if len(draft_data["criteria"]) != original_len:
+                    draft_changed = True
+                    
+            if draft_changed:
+                draft.draft_data = dict(draft_data)
+                draft.updated_at = func.now() if hasattr(func, 'now') else datetime.now(timezone.utc)
+                db.add(draft)
+                logger.info(f"Sincronización de eliminación en borrador: Se actualizó el borrador ID {draft.draft_id} tras eliminar/deactivar el criterio.")
+                
+    except Exception as ex:
+        logger.error(f"Error al sincronizar eliminación del criterio en prompt/borradores: {ex}", exc_info=True)
+
 
 
 
@@ -270,6 +516,168 @@ async def get_active_criteria(db: AsyncSession, prompt_id: int) -> list[PromptCr
     return result.scalars().all()
 
 
+async def _sync_criterion_on_save(
+    db: AsyncSession,
+    criterion: PromptCriterion,
+    old_name: str | None = None,
+    old_output_key: str | None = None
+) -> None:
+    """
+    Sincroniza un criterio guardado, creado o restaurado en la versión activa del prompt
+    y borradores activos. Maneja también desincronizaciones de bloques huérfanos.
+    """
+    try:
+        from app.services.prompts_service import _get_current_version
+        from app.models.prompts import Prompt
+        from app.models.drafts import PromptDraft
+        from sqlalchemy import func
+        from datetime import timezone, datetime
+        
+        prompt_id = criterion.prompt_id
+        if not prompt_id:
+            return
+
+        if not criterion.is_active:
+            # Si se guarda como inactivo, remover de la versión activa y borradores
+            await _sync_prompt_on_removal(db, prompt_id, criterion)
+            return
+
+        # Cargar criterios activos una sola vez para la limpieza de huérfanos
+        active_criteria_stmt = select(PromptCriterion).where(
+            PromptCriterion.prompt_id == prompt_id,
+            PromptCriterion.is_active == True,
+            PromptCriterion.deleted_at.is_(None)
+        )
+        active_criteria_res = await db.execute(active_criteria_stmt)
+        active_criteria = list(active_criteria_res.scalars().all())
+        
+        # Asegurar que el criterio actual esté en active_criteria para que no se considere huérfano
+        if not any(c.criterion_id == criterion.criterion_id or c.criterion_key == criterion.criterion_key for c in active_criteria):
+            active_criteria.append(criterion)
+
+        # --- 1. Sincronizar de la versión activa (PromptVersion) ---
+        current_version = await _get_current_version(db, prompt_id)
+        if current_version and current_version.prompt:
+            prompt_text = current_version.prompt
+            changed = False
+            
+            # Primero, aplicar reemplazos globales de nombre y claves
+            if old_name and criterion.criterion_name and old_name != criterion.criterion_name:
+                if old_name in prompt_text:
+                    prompt_text = prompt_text.replace(old_name, criterion.criterion_name)
+                    changed = True
+            
+            if old_output_key and criterion.output_key and old_output_key != criterion.output_key:
+                if old_output_key in prompt_text:
+                    prompt_text = prompt_text.replace(old_output_key, criterion.output_key)
+                    changed = True
+            
+            # Luego, sincronizar el bloque descriptivo del criterio por clave técnica
+            prompt_text, block_changed = sync_criterion_block(prompt_text, criterion, old_output_key, criterion.criterion_key)
+            if block_changed:
+                changed = True
+                
+            prompt_text = clean_orphaned_blocks(prompt_text, active_criteria)
+            
+            if changed or prompt_text != current_version.prompt:
+                current_version.prompt = prompt_text
+                current_version.updated_at = func.now() if hasattr(func, 'now') else datetime.now(timezone.utc)
+                prompt_obj = await db.get(Prompt, prompt_id)
+                if prompt_obj:
+                    prompt_obj.updated_at = func.now() if hasattr(func, 'now') else datetime.now(timezone.utc)
+                    db.add(prompt_obj)
+                db.add(current_version)
+                logger.info(f"Sincronización automática: Se actualizó el criterio ID {criterion.criterion_id} dentro del texto completo del prompt activo.")
+        
+        # --- 2. Sincronizar de borradores activos (PromptDraft) ---
+        drafts_stmt = select(PromptDraft).where(
+            PromptDraft.prompt_id == prompt_id,
+            PromptDraft.status == "draft"
+        )
+        drafts_res = await db.execute(drafts_stmt)
+        active_drafts = drafts_res.scalars().all()
+        for draft in active_drafts:
+            draft_data = draft.draft_data or {}
+            draft_changed = False
+            
+            # A. Actualizar texto de prompt en el borrador
+            if "prompt" in draft_data and isinstance(draft_data["prompt"], str):
+                draft_prompt = draft_data["prompt"]
+                
+                if old_name and criterion.criterion_name and old_name != criterion.criterion_name:
+                    if old_name in draft_prompt:
+                        draft_prompt = draft_prompt.replace(old_name, criterion.criterion_name)
+                        draft_changed = True
+                        
+                if old_output_key and criterion.output_key and old_output_key != criterion.output_key:
+                    if old_output_key in draft_prompt:
+                        draft_prompt = draft_prompt.replace(old_output_key, criterion.output_key)
+                        draft_changed = True
+                        
+                # Sincronizar el bloque descriptivo del criterio
+                draft_prompt, desc_changed = sync_criterion_block(draft_prompt, criterion, old_output_key, criterion.criterion_key)
+                if desc_changed:
+                    draft_changed = True
+                
+                draft_prompt = clean_orphaned_blocks(draft_prompt, active_criteria)
+                draft_data["prompt"] = draft_prompt
+                draft_changed = True
+            
+            # B. Actualizar elemento correspondiente en la lista de criterios estructurados del borrador
+            if "criteria" in draft_data and isinstance(draft_data["criteria"], list):
+                exists = False
+                for crit_dict in draft_data["criteria"]:
+                    if not isinstance(crit_dict, dict):
+                        continue
+                    c_id = crit_dict.get("criterion_id")
+                    c_key = crit_dict.get("criterion_key")
+                    
+                    match_by_id = (c_id is not None and c_id == criterion.criterion_id)
+                    match_by_key = (c_key is not None and c_key == criterion.criterion_key)
+                    
+                    if match_by_id or match_by_key:
+                        crit_dict["criterion_description"] = criterion.criterion_description
+                        crit_dict["criterion_name"] = criterion.criterion_name
+                        crit_dict["criterion_key"] = criterion.criterion_key
+                        crit_dict["output_key"] = criterion.output_key
+                        crit_dict["feed_key"] = criterion.feed_key
+                        crit_dict["criterion_type"] = criterion.criterion_type
+                        crit_dict["allowed_values"] = criterion.allowed_values
+                        crit_dict["applies_to_types"] = criterion.applies_to_types
+                        crit_dict["order_index"] = criterion.order_index
+                        crit_dict["is_required"] = criterion.is_required
+                        crit_dict["is_active"] = criterion.is_active
+                        exists = True
+                        draft_changed = True
+                if not exists:
+                    # Agregar nuevo
+                    new_crit_dict = {
+                        "criterion_id": criterion.criterion_id,
+                        "criterion_name": criterion.criterion_name,
+                        "criterion_description": criterion.criterion_description,
+                        "criterion_key": criterion.criterion_key,
+                        "output_key": criterion.output_key,
+                        "feed_key": criterion.feed_key,
+                        "criterion_type": criterion.criterion_type,
+                        "allowed_values": criterion.allowed_values,
+                        "applies_to_types": criterion.applies_to_types,
+                        "order_index": criterion.order_index,
+                        "is_required": criterion.is_required,
+                        "is_active": criterion.is_active
+                    }
+                    draft_data["criteria"].append(new_crit_dict)
+                    draft_changed = True
+            
+            if draft_changed:
+                draft.draft_data = dict(draft_data)
+                draft.updated_at = func.now() if hasattr(func, 'now') else datetime.now(timezone.utc)
+                db.add(draft)
+                logger.info(f"Sincronización automática de borrador: Se actualizó el borrador ID {draft.draft_id} con el criterio modificado/creado.")
+                
+    except Exception as sync_ex:
+        logger.error(f"Error durante la sincronización automática de criterio en prompt/borradores: {sync_ex}", exc_info=True)
+
+
 async def save_criterion(db: AsyncSession, body: SaveCriterionRequest) -> PromptCriterion:
     """Create, restore, or update a criterion."""
     # Gather potential conflicting criteria in the same prompt
@@ -349,114 +757,7 @@ async def save_criterion(db: AsyncSession, body: SaveCriterionRequest) -> Prompt
         criterion.deleted_at = None
         criterion.deleted_by_email = None
 
-        # Sincronización automática de prompt completo:
-        # Reemplazar la descripción, el nombre y el output_key viejos por los nuevos en la versión activa del prompt.
-        try:
-            from app.services.prompts_service import _get_current_version
-            from app.models.prompts import Prompt
-            from app.models.drafts import PromptDraft
-            from sqlalchemy import func
-            from datetime import timezone, datetime
-            
-            # --- 1. Sincronización de la versión activa (PromptVersion) ---
-            current_version = await _get_current_version(db, body.prompt_id)
-            if current_version and current_version.prompt:
-                prompt_text = current_version.prompt
-                changed = False
-                
-                # Primero, aplicar reemplazos globales de nombre y claves
-                if old_name and body.criterion_name and old_name != body.criterion_name:
-                    if old_name in prompt_text:
-                        prompt_text = prompt_text.replace(old_name, body.criterion_name)
-                        changed = True
-                
-                if old_output_key and body.output_key and old_output_key != body.output_key:
-                    if old_output_key in prompt_text:
-                        prompt_text = prompt_text.replace(old_output_key, body.output_key)
-                        changed = True
-                
-                # Luego, sincronizar el bloque descriptivo del criterio por clave técnica
-                prompt_text, block_changed = sync_criterion_block(prompt_text, criterion, old_output_key, criterion.criterion_key)
-                if block_changed:
-                    changed = True
-                
-                if changed and prompt_text != current_version.prompt:
-                    current_version.prompt = prompt_text
-                    current_version.updated_at = func.now() if hasattr(func, 'now') else datetime.now(timezone.utc)
-                    prompt_obj = await db.get(Prompt, body.prompt_id)
-                    if prompt_obj:
-                        prompt_obj.updated_at = func.now() if hasattr(func, 'now') else datetime.now(timezone.utc)
-                    db.add(current_version)
-                    logger.info(f"Sincronización automática: Se actualizó el criterio ID {body.criterion_id} dentro del texto completo del prompt activo.")
-            
-            # --- 2. Sincronización de borradores activos (PromptDraft) ---
-            drafts_stmt = select(PromptDraft).where(
-                PromptDraft.prompt_id == body.prompt_id,
-                PromptDraft.status == "draft"
-            )
-            drafts_res = await db.execute(drafts_stmt)
-            active_drafts = drafts_res.scalars().all()
-            for draft in active_drafts:
-                draft_data = draft.draft_data or {}
-                draft_changed = False
-                
-                # A. Actualizar texto de prompt en el borrador
-                if "prompt" in draft_data and isinstance(draft_data["prompt"], str):
-                    draft_prompt = draft_data["prompt"]
-                    
-                    if old_name and body.criterion_name and old_name != body.criterion_name:
-                        if old_name in draft_prompt:
-                            draft_prompt = draft_prompt.replace(old_name, body.criterion_name)
-                            draft_changed = True
-                            
-                    if old_output_key and body.output_key and old_output_key != body.output_key:
-                        if old_output_key in draft_prompt:
-                            draft_prompt = draft_prompt.replace(old_output_key, body.output_key)
-                            draft_changed = True
-                            
-                    # Sincronizar el bloque descriptivo del criterio
-                    draft_prompt, desc_changed = sync_criterion_block(draft_prompt, criterion, old_output_key, criterion.criterion_key)
-                    if desc_changed:
-                        draft_changed = True
-                            
-                    if draft_changed:
-                        draft_data["prompt"] = draft_prompt
-                
-                # B. Actualizar elemento correspondiente en la lista de criterios estructurados del borrador
-                if "criteria" in draft_data and isinstance(draft_data["criteria"], list):
-                    for crit_dict in draft_data["criteria"]:
-                        if not isinstance(crit_dict, dict):
-                            continue
-                        c_id = crit_dict.get("criterion_id")
-                        c_key = crit_dict.get("criterion_key")
-                        
-                        match_by_id = (c_id is not None and c_id == body.criterion_id)
-                        match_by_key = (c_key is not None and c_key == body.criterion_key)
-                        
-                        if match_by_id or match_by_key:
-                            crit_dict["criterion_description"] = body.criterion_description
-                            crit_dict["criterion_name"] = body.criterion_name
-                            crit_dict["criterion_key"] = body.criterion_key
-                            crit_dict["output_key"] = body.output_key
-                            crit_dict["feed_key"] = body.feed_key
-                            crit_dict["criterion_type"] = body.criterion_type
-                            crit_dict["allowed_values"] = body.allowed_values
-                            crit_dict["applies_to_types"] = body.applies_to_types
-                            crit_dict["order_index"] = body.order_index
-                            crit_dict["is_required"] = body.is_required
-                            crit_dict["is_active"] = body.is_active
-                            draft_changed = True
-                
-                if draft_changed:
-                    draft.draft_data = dict(draft_data)
-                    draft.updated_at = func.now() if hasattr(func, 'now') else datetime.now(timezone.utc)
-                    db.add(draft)
-                    logger.info(f"Sincronización automática de borrador: Se actualizó el borrador ID {draft.draft_id} con el criterio modificado.")
-                    
-        except Exception as sync_ex:
-            logger.error(f"Error durante la sincronización automática de descripción de criterio en prompt/borradores: {sync_ex}", exc_info=True)
-            # No bloqueamos el guardado del item si falla la sincronización de texto completo
-
+        await _sync_criterion_on_save(db, criterion, old_name=old_name, old_output_key=old_output_key)
 
         await db.commit()
         await db.refresh(criterion)
@@ -496,6 +797,9 @@ async def save_criterion(db: AsyncSession, body: SaveCriterionRequest) -> Prompt
                 setattr(criterion, field, value)
                 
             await _ensure_typology_associations(db, criterion)
+            
+            await _sync_criterion_on_save(db, criterion)
+            
             await db.commit()
             await db.refresh(criterion)
             return criterion
@@ -507,17 +811,29 @@ async def save_criterion(db: AsyncSession, body: SaveCriterionRequest) -> Prompt
     await db.flush() # Flush to generate criterion_id
     
     await _ensure_typology_associations(db, criterion)
+    
+    await _sync_criterion_on_save(db, criterion)
+    
     await db.commit()
     await db.refresh(criterion)
     return criterion
 
 
 async def toggle_criterion(db: AsyncSession, criterion_id: int, is_active: bool) -> None:
-    await db.execute(
-        update(PromptCriterion)
-        .where(PromptCriterion.criterion_id == criterion_id)
-        .values(is_active=is_active)
-    )
+    stmt = select(PromptCriterion).where(PromptCriterion.criterion_id == criterion_id)
+    res = await db.execute(stmt)
+    criterion = res.scalars().first()
+    if not criterion:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Criterio con ID {criterion_id} no encontrado."
+        )
+    criterion.is_active = is_active
+    db.add(criterion)
+    
+    # Sincronización
+    await _sync_criterion_on_save(db, criterion)
+    
     await db.commit()
 
 
@@ -633,6 +949,10 @@ async def delete_criterion(db: AsyncSession, criterion_id: int, performed_by_ema
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No se puede borrar el item tipo_llamada porque es necesario para clasificar la llamada."
         )
+
+    # Sincronizar la eliminación en el texto del prompt y borradores antes de borrar en la BD
+    if criterion.prompt_id:
+        await _sync_prompt_on_removal(db, criterion.prompt_id, criterion)
 
     # Check if used in AnalysisResult
     used_in_analysis_stmt = select(AnalysisResult.result_id).where(AnalysisResult.criterion_id == criterion_id).limit(1)
