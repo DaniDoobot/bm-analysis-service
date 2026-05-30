@@ -44,6 +44,41 @@ def _get_azure_client(provider_type: str):
     )
 
 
+import time
+
+
+def _log_completion_metrics(response, deployment: str, operation: str, duration_sec: float):
+    """Utility helper to log token usage and execution time taken for Azure OpenAI calls."""
+    try:
+        if hasattr(response, "usage") and response.usage:
+            prompt_tokens = response.usage.prompt_tokens
+            completion_tokens = response.usage.completion_tokens
+            total_tokens = response.usage.total_tokens
+            logger.info(
+                f"\n==================================================\n"
+                f"AZURE OPENAI PERFORMANCE DIAGNOSTIC ({operation.upper()}):\n"
+                f"==================================================\n"
+                f"- Deployment: {deployment}\n"
+                f"- Duration: {duration_sec:.2f} s\n"
+                f"- Prompt (Input) Tokens: {prompt_tokens}\n"
+                f"- Completion (Output) Tokens: {completion_tokens}\n"
+                f"- Total Tokens: {total_tokens}\n"
+                f"=================================================="
+            )
+        else:
+            logger.info(
+                f"\n==================================================\n"
+                f"AZURE OPENAI PERFORMANCE DIAGNOSTIC ({operation.upper()}):\n"
+                f"==================================================\n"
+                f"- Deployment: {deployment}\n"
+                f"- Duration: {duration_sec:.2f} s\n"
+                f"- Token usage info not available\n"
+                f"=================================================="
+            )
+    except Exception as usage_ex:
+        logger.warning(f"Failed to capture OpenAI token usage details for {operation}: {usage_ex}")
+
+
 async def complete_text(
     messages: list[dict[str, str]],
     model: str | None = None,
@@ -65,7 +100,12 @@ async def complete_text(
     if response_format == "json_object":
         kwargs["response_format"] = {"type": "json_object"}
 
+    t_start = time.perf_counter()
     response = await client.chat.completions.create(**kwargs)
+    t_end = time.perf_counter()
+    
+    _log_completion_metrics(response, deployment, "complete_text", t_end - t_start)
+
     return response.choices[0].message.content or ""
 
 
@@ -83,9 +123,20 @@ async def transcribe_audio(audio_bytes: bytes, filename: str = "audio.wav") -> d
     audio_file = io.BytesIO(audio_bytes)
     audio_file.name = filename
 
+    t_start = time.perf_counter()
     response = await client.audio.transcriptions.create(
         model=deployment,
         file=audio_file,
+    )
+    t_end = time.perf_counter()
+    
+    logger.info(
+        f"\n==================================================\n"
+        f"AZURE OPENAI WHISPER TRANSCRIPTION METRICS:\n"
+        f"==================================================\n"
+        f"- Deployment: {deployment}\n"
+        f"- Duration: {t_end - t_start:.2f} s\n"
+        f"=================================================="
     )
     return {
         "text": response.text,
@@ -115,11 +166,15 @@ async def analyze_audio_url(audio_url: str, prompt_text: str, model: str | None 
         }
     ]
 
+    t_start = time.perf_counter()
     response = await client.chat.completions.create(
         model=deployment,
         messages=messages,
         response_format={"type": "json_object"},
     )
+    t_end = time.perf_counter()
+    
+    _log_completion_metrics(response, deployment, "analyze_audio_url", t_end - t_start)
     return response.choices[0].message.content or ""
 
 
@@ -163,9 +218,14 @@ async def analyze_audio_bytes(audio_bytes: bytes, prompt_text: str, audio_format
         }
     ]
 
+    t_start = time.perf_counter()
     response = await client.chat.completions.create(
         model=deployment,
         messages=messages,
     )
+    t_end = time.perf_counter()
+    
+    _log_completion_metrics(response, deployment, "analyze_audio_bytes", t_end - t_start)
     return response.choices[0].message.content or ""
+
 

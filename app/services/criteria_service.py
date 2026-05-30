@@ -15,6 +15,59 @@ from fastapi import HTTPException, status
 
 logger = logging.getLogger(__name__)
 
+
+def replace_description_fuzzy(text: str, old_desc: str, new_desc: str) -> tuple[str, bool]:
+    """
+    Fuzzy replace of a criterion description inside prompt text.
+    Handles exact, trailing period, whitespace, and case insensitive matches.
+    """
+    if not text or not old_desc or not new_desc or old_desc == new_desc:
+        return text, False
+
+    # 1. Exact match
+    if old_desc in text:
+        return text.replace(old_desc, new_desc), True
+
+    # 2. Try stripping trailing periods/spaces from both
+    old_stripped = old_desc.rstrip(" .")
+    if old_stripped and old_stripped in text:
+        return text.replace(old_stripped, new_desc.rstrip(" .")), True
+
+    # 3. Fuzzy match: normalize whitespaces and try to find
+    import re
+    def normalize_spaces(s):
+        return re.sub(r'\s+', ' ', s).strip()
+
+    norm_text = normalize_spaces(text)
+    norm_old = normalize_spaces(old_desc)
+    if norm_old in norm_text:
+        escaped_words = [re.escape(w) for w in old_desc.split() if w]
+        if escaped_words:
+            pattern = r'\s+'.join(escaped_words)
+            # Try case-sensitive first
+            new_text, count = re.subn(pattern, new_desc, text)
+            if count > 0:
+                return new_text, True
+            # Try case-insensitive
+            new_text, count = re.subn(pattern, new_desc, text, flags=re.IGNORECASE)
+            if count > 0:
+                return new_text, True
+
+    # 4. Try normalized stripped
+    norm_old_stripped = normalize_spaces(old_stripped)
+    escaped_words_stripped = [re.escape(w) for w in old_stripped.split() if w]
+    if escaped_words_stripped:
+        pattern_stripped = r'\s+'.join(escaped_words_stripped)
+        new_text, count = re.subn(pattern_stripped, new_desc.rstrip(" ."), text)
+        if count > 0:
+            return new_text, True
+        new_text, count = re.subn(pattern_stripped, new_desc.rstrip(" ."), text, flags=re.IGNORECASE)
+        if count > 0:
+            return new_text, True
+
+    return text, False
+
+
 # Valid criterion types
 CRITERION_TYPES = ["score_1_10", "percentage", "boolean", "text", "category", "number"]
 
@@ -175,10 +228,126 @@ async def save_criterion(db: AsyncSession, body: SaveCriterionRequest) -> Prompt
                 
         # Update existing
         logger.info(f"Updating existing active criterion (ID: {body.criterion_id}, key: '{body.criterion_key}').")
+        old_desc = criterion.criterion_description
+        old_name = criterion.criterion_name
+        old_output_key = criterion.output_key
+
         for field, value in body.model_dump(exclude={"criterion_id"}).items():
             setattr(criterion, field, value)
         criterion.deleted_at = None
         criterion.deleted_by_email = None
+
+        # Sincronización automática de prompt completo:
+        # Reemplazar la descripción, el nombre y el output_key viejos por los nuevos en la versión activa del prompt.
+        try:
+            from app.services.prompts_service import _get_current_version
+            from app.models.prompts import Prompt
+            from app.models.drafts import PromptDraft
+            from sqlalchemy import func
+            from datetime import timezone, datetime
+            
+            # --- 1. Sincronización de la versión activa (PromptVersion) ---
+            current_version = await _get_current_version(db, body.prompt_id)
+            if current_version and current_version.prompt:
+                prompt_text = current_version.prompt
+                changed = False
+                
+                # Reemplazar descripción usando lógica fuzzy robusta
+                if old_desc and body.criterion_description and old_desc != body.criterion_description:
+                    prompt_text, desc_changed = replace_description_fuzzy(prompt_text, old_desc, body.criterion_description)
+                    if desc_changed:
+                        changed = True
+                
+                # Reemplazar nombre
+                if old_name and body.criterion_name and old_name != body.criterion_name:
+                    if old_name in prompt_text:
+                        prompt_text = prompt_text.replace(old_name, body.criterion_name)
+                        changed = True
+                
+                # Reemplazar output_key
+                if old_output_key and body.output_key and old_output_key != body.output_key:
+                    if old_output_key in prompt_text:
+                        prompt_text = prompt_text.replace(old_output_key, body.output_key)
+                        changed = True
+                
+                if changed and prompt_text != current_version.prompt:
+                    current_version.prompt = prompt_text
+                    current_version.updated_at = func.now() if hasattr(func, 'now') else datetime.now(timezone.utc)
+                    prompt_obj = await db.get(Prompt, body.prompt_id)
+                    if prompt_obj:
+                        prompt_obj.updated_at = func.now() if hasattr(func, 'now') else datetime.now(timezone.utc)
+                    db.add(current_version)
+                    logger.info(f"Sincronización automática: Se actualizó el criterio ID {body.criterion_id} dentro del texto completo del prompt activo.")
+            
+            # --- 2. Sincronización de borradores activos (PromptDraft) ---
+            drafts_stmt = select(PromptDraft).where(
+                PromptDraft.prompt_id == body.prompt_id,
+                PromptDraft.status == "draft"
+            )
+            drafts_res = await db.execute(drafts_stmt)
+            active_drafts = drafts_res.scalars().all()
+            for draft in active_drafts:
+                draft_data = draft.draft_data or {}
+                draft_changed = False
+                
+                # A. Actualizar texto de prompt en el borrador
+                if "prompt" in draft_data and isinstance(draft_data["prompt"], str):
+                    draft_prompt = draft_data["prompt"]
+                    
+                    if old_desc and body.criterion_description and old_desc != body.criterion_description:
+                        draft_prompt, desc_changed = replace_description_fuzzy(draft_prompt, old_desc, body.criterion_description)
+                        if desc_changed:
+                            draft_changed = True
+                            
+                    if old_name and body.criterion_name and old_name != body.criterion_name:
+                        if old_name in draft_prompt:
+                            draft_prompt = draft_prompt.replace(old_name, body.criterion_name)
+                            draft_changed = True
+                            
+                    if old_output_key and body.output_key and old_output_key != body.output_key:
+                        if old_output_key in draft_prompt:
+                            draft_prompt = draft_prompt.replace(old_output_key, body.output_key)
+                            draft_changed = True
+                            
+                    if draft_changed:
+                        draft_data["prompt"] = draft_prompt
+                
+                # B. Actualizar elemento correspondiente en la lista de criterios estructurados del borrador
+                if "criteria" in draft_data and isinstance(draft_data["criteria"], list):
+                    for crit_dict in draft_data["criteria"]:
+                        if not isinstance(crit_dict, dict):
+                            continue
+                        c_id = crit_dict.get("criterion_id")
+                        c_key = crit_dict.get("criterion_key")
+                        
+                        match_by_id = (c_id is not None and c_id == body.criterion_id)
+                        match_by_key = (c_key is not None and c_key == body.criterion_key)
+                        
+                        if match_by_id or match_by_key:
+                            crit_dict["criterion_description"] = body.criterion_description
+                            crit_dict["criterion_name"] = body.criterion_name
+                            crit_dict["criterion_key"] = body.criterion_key
+                            crit_dict["output_key"] = body.output_key
+                            crit_dict["feed_key"] = body.feed_key
+                            crit_dict["criterion_type"] = body.criterion_type
+                            crit_dict["allowed_values"] = body.allowed_values
+                            crit_dict["applies_to_types"] = body.applies_to_types
+                            crit_dict["order_index"] = body.order_index
+                            crit_dict["is_required"] = body.is_required
+                            crit_dict["is_active"] = body.is_active
+                            draft_changed = True
+                
+                if draft_changed:
+                    draft.draft_data = dict(draft_data)
+                    draft.updated_at = func.now() if hasattr(func, 'now') else datetime.now(timezone.utc)
+                    db.add(draft)
+                    logger.info(f"Sincronización automática de borrador: Se actualizó el borrador ID {draft.draft_id} con el criterio modificado.")
+                    
+        except Exception as sync_ex:
+            logger.error(f"Error durante la sincronización automática de descripción de criterio en prompt/borradores: {sync_ex}", exc_info=True)
+            # No bloqueamos el guardado del item si falla la sincronización de texto completo
+
+
         await db.commit()
         await db.refresh(criterion)
         return criterion
