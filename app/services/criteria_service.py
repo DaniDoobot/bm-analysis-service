@@ -16,56 +16,168 @@ from fastapi import HTTPException, status
 logger = logging.getLogger(__name__)
 
 
-def replace_description_fuzzy(text: str, old_desc: str, new_desc: str) -> tuple[str, bool]:
+def sync_criterion_block(prompt_text: str, criterion, old_output_key: str | None = None, old_criterion_key: str | None = None) -> tuple[str, bool]:
     """
-    Fuzzy replace of a criterion description inside prompt text.
-    Handles exact, trailing period, whitespace, and case insensitive matches.
+    Sincroniza el bloque descriptivo de un criterio en el texto del prompt usando claves técnicas.
+    No depende de encontrar la descripción anterior completa.
     """
-    if not text or not old_desc or not new_desc or old_desc == new_desc:
-        return text, False
+    if not prompt_text:
+        return prompt_text, False
 
-    # 1. Exact match
-    if old_desc in text:
-        return text.replace(old_desc, new_desc), True
-
-    # 2. Try stripping trailing periods/spaces from both
-    old_stripped = old_desc.rstrip(" .")
-    if old_stripped and old_stripped in text:
-        return text.replace(old_stripped, new_desc.rstrip(" .")), True
-
-    # 3. Fuzzy match: normalize whitespaces and try to find
     import re
-    def normalize_spaces(s):
-        return re.sub(r'\s+', ' ', s).strip()
+    output_key = getattr(criterion, "output_key", None)
+    criterion_key = getattr(criterion, "criterion_key", None)
+    feed_key = getattr(criterion, "feed_key", None)
+    
+    # Lista de claves técnicas para buscar el bloque
+    search_keys = []
+    if old_output_key:
+        search_keys.append(old_output_key)
+    if output_key:
+        search_keys.append(output_key)
+    if old_criterion_key:
+        search_keys.append(old_criterion_key)
+    if criterion_key:
+        search_keys.append(criterion_key)
+    if feed_key:
+        search_keys.append(feed_key)
+        
+    # Deduplicar claves de búsqueda
+    seen = set()
+    search_keys = [x for x in search_keys if x and not (x in seen or seen.add(x))]
+    
+    if not search_keys:
+        return prompt_text, False
 
-    norm_text = normalize_spaces(text)
-    norm_old = normalize_spaces(old_desc)
-    if norm_old in norm_text:
-        escaped_words = [re.escape(w) for w in old_desc.split() if w]
-        if escaped_words:
-            pattern = r'\s+'.join(escaped_words)
-            # Try case-sensitive first
-            new_text, count = re.subn(pattern, new_desc, text)
-            if count > 0:
-                return new_text, True
-            # Try case-insensitive
-            new_text, count = re.subn(pattern, new_desc, text, flags=re.IGNORECASE)
-            if count > 0:
-                return new_text, True
+    lines = prompt_text.splitlines()
+    header_idx = -1
+    
+    for i, line in enumerate(lines):
+        has_key = False
+        normalized_line = line.lower()
+        for sk in search_keys:
+            if re.search(rf"\b{re.escape(sk)}\b", line, re.IGNORECASE):
+                has_key = True
+                break
+        
+        if has_key:
+            # Para evitar falsos positivos en el texto introductorio, priorizamos líneas que parezcan cabeceras:
+            # que empiecen con viñetas (- o *) o que explícitamente tengan output_key / feed_key
+            stripped = line.strip()
+            if stripped.startswith("-") or stripped.startswith("*") or "output_key" in normalized_line or "feed_key" in normalized_line:
+                header_idx = i
+                break
 
-    # 4. Try normalized stripped
-    norm_old_stripped = normalize_spaces(old_stripped)
-    escaped_words_stripped = [re.escape(w) for w in old_stripped.split() if w]
-    if escaped_words_stripped:
-        pattern_stripped = r'\s+'.join(escaped_words_stripped)
-        new_text, count = re.subn(pattern_stripped, new_desc.rstrip(" ."), text)
-        if count > 0:
-            return new_text, True
-        new_text, count = re.subn(pattern_stripped, new_desc.rstrip(" ."), text, flags=re.IGNORECASE)
-        if count > 0:
-            return new_text, True
+    if header_idx == -1:
+        # Fallback: Si no se encuentra el bloque del criterio, lo insertamos en la sección "CRITERIOS DE ANÁLISIS"
+        section_idx = -1
+        for i, line in enumerate(lines):
+            if "criterios de análisis" in line.lower() or "criterios de analisis" in line.lower():
+                section_idx = i
+                break
+                
+        # Construir bloque nuevo
+        new_block = [
+            f"- [{criterion.criterion_type or 'text'}] {criterion.criterion_name} (output_key: {criterion.output_key}" + (f", feed_key: {criterion.feed_key}" if criterion.feed_key else "") + ")",
+            f"  {criterion.criterion_description or ''}"
+        ]
+        if getattr(criterion, "applies_to_types", None):
+            typos_str = ", ".join(criterion.applies_to_types) if isinstance(criterion.applies_to_types, list) else str(criterion.applies_to_types)
+            new_block.append(f"  Tipologías aplicables: {typos_str}")
+        if getattr(criterion, "allowed_values", None):
+            vals_str = ", ".join(criterion.allowed_values) if isinstance(criterion.allowed_values, list) else str(criterion.allowed_values)
+            new_block.append(f"  Valores permitidos: {vals_str}")
+            
+        if section_idx != -1:
+            lines.insert(section_idx + 1, "")
+            for offset, new_line in enumerate(new_block):
+                lines.insert(section_idx + 2 + offset, new_line)
+            logger.info(f"Sincronización: Insertado nuevo bloque para el criterio {search_keys[0]} bajo la sección de criterios.")
+            return "\n".join(lines), True
+        else:
+            lines.append("")
+            lines.extend(new_block)
+            logger.info(f"Sincronización: Añadido nuevo bloque para el criterio {search_keys[0]} al final del prompt.")
+            return "\n".join(lines), True
 
-    return text, False
+    # Encontramos la cabecera. Ahora buscamos el final del bloque
+    block_end_idx = len(lines)
+    for j in range(header_idx + 1, len(lines)):
+        line = lines[j]
+        # Límites del bloque:
+        # 1. Empieza otro encabezado markdown (#)
+        if line.strip().startswith("#"):
+            block_end_idx = j
+            break
+        # 2. Empieza una nueva viñeta que indica otro criterio
+        if line.strip().startswith("- [") or line.strip().startswith("* ["):
+            block_end_idx = j
+            break
+        # 3. Contiene otra clave técnica distinta a la de este criterio
+        if "output_key:" in line:
+            other_key_match = re.search(r"output_key:\s*([a-zA-Z0-9_]+)", line, re.IGNORECASE)
+            if other_key_match:
+                other_key = other_key_match.group(1)
+                if other_key != output_key:
+                    block_end_idx = j
+                    break
+        # 4. Palabras clave de fin de sección
+        if re.match(r"^\s*(?:###?\s+)?(?:FORMATO DE SALIDA|REGLAS|DEFINICIÓN|TAREA|CONTEXTO)", line, re.IGNORECASE):
+            block_end_idx = j
+            break
+
+    block_lines = lines[header_idx:block_end_idx]
+    header_line = block_lines[0]
+    technical_lines = []
+    original_description_lines = []
+    
+    # Palabras clave para identificar metadatos técnicos del bloque
+    tech_indicators = ["tipología", "tipologia", "aplicable", "valor", "allowed", "applies", "output_key", "feed_key"]
+    
+    for line in block_lines[1:]:
+        is_tech = False
+        normalized_line = line.lower()
+        for pat in tech_indicators:
+            if pat in normalized_line:
+                is_tech = True
+                break
+        if is_tech:
+            technical_lines.append(line)
+        else:
+            if line.strip():
+                original_description_lines.append(line)
+            else:
+                technical_lines.append(line)
+
+    # Indentación original
+    indent = "  "
+    if original_description_lines:
+        first_desc_line = original_description_lines[0]
+        match_indent = re.match(r"^(\s+)", first_desc_line)
+        if match_indent:
+            indent = match_indent.group(1)
+    else:
+        match_indent_header = re.match(r"^(\s*)", header_line)
+        if match_indent_header:
+            indent = match_indent_header.group(1) + "  "
+
+    # Construir nuevas líneas de descripción con la indentación correcta
+    new_desc = getattr(criterion, "criterion_description", "") or ""
+    new_desc_lines = []
+    for line in new_desc.splitlines():
+        if line.strip():
+            new_desc_lines.append(indent + line.strip())
+        else:
+            new_desc_lines.append("")
+
+    # Reconstruir bloque y sustituir en el texto original
+    new_block_lines = [header_line]
+    new_block_lines.extend(new_desc_lines)
+    new_block_lines.extend(technical_lines)
+    
+    lines[header_idx:block_end_idx] = new_block_lines
+    return "\n".join(lines), True
+
 
 
 # Valid criterion types
@@ -252,23 +364,21 @@ async def save_criterion(db: AsyncSession, body: SaveCriterionRequest) -> Prompt
                 prompt_text = current_version.prompt
                 changed = False
                 
-                # Reemplazar descripción usando lógica fuzzy robusta
-                if old_desc and body.criterion_description and old_desc != body.criterion_description:
-                    prompt_text, desc_changed = replace_description_fuzzy(prompt_text, old_desc, body.criterion_description)
-                    if desc_changed:
-                        changed = True
-                
-                # Reemplazar nombre
+                # Primero, aplicar reemplazos globales de nombre y claves
                 if old_name and body.criterion_name and old_name != body.criterion_name:
                     if old_name in prompt_text:
                         prompt_text = prompt_text.replace(old_name, body.criterion_name)
                         changed = True
                 
-                # Reemplazar output_key
                 if old_output_key and body.output_key and old_output_key != body.output_key:
                     if old_output_key in prompt_text:
                         prompt_text = prompt_text.replace(old_output_key, body.output_key)
                         changed = True
+                
+                # Luego, sincronizar el bloque descriptivo del criterio por clave técnica
+                prompt_text, block_changed = sync_criterion_block(prompt_text, criterion, old_output_key, criterion.criterion_key)
+                if block_changed:
+                    changed = True
                 
                 if changed and prompt_text != current_version.prompt:
                     current_version.prompt = prompt_text
@@ -294,11 +404,6 @@ async def save_criterion(db: AsyncSession, body: SaveCriterionRequest) -> Prompt
                 if "prompt" in draft_data and isinstance(draft_data["prompt"], str):
                     draft_prompt = draft_data["prompt"]
                     
-                    if old_desc and body.criterion_description and old_desc != body.criterion_description:
-                        draft_prompt, desc_changed = replace_description_fuzzy(draft_prompt, old_desc, body.criterion_description)
-                        if desc_changed:
-                            draft_changed = True
-                            
                     if old_name and body.criterion_name and old_name != body.criterion_name:
                         if old_name in draft_prompt:
                             draft_prompt = draft_prompt.replace(old_name, body.criterion_name)
@@ -308,6 +413,11 @@ async def save_criterion(db: AsyncSession, body: SaveCriterionRequest) -> Prompt
                         if old_output_key in draft_prompt:
                             draft_prompt = draft_prompt.replace(old_output_key, body.output_key)
                             draft_changed = True
+                            
+                    # Sincronizar el bloque descriptivo del criterio
+                    draft_prompt, desc_changed = sync_criterion_block(draft_prompt, criterion, old_output_key, criterion.criterion_key)
+                    if desc_changed:
+                        draft_changed = True
                             
                     if draft_changed:
                         draft_data["prompt"] = draft_prompt

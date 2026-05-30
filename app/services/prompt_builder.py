@@ -392,8 +392,8 @@ async def build_prompt_with_ai(
 
     t_meta_prompt = time.perf_counter()
 
-    # Try generating up to 2 times if legacy typologies are detected
-    max_attempts = 2
+    # Try generating up to 1 time (no sequential corrective LLM retries)
+    max_attempts = 1
     attempt = 1
     current_messages = list(messages)
     parsed = None
