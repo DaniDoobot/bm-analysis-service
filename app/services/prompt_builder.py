@@ -599,6 +599,56 @@ async def build_prompt_with_ai(
         "=================================================="
     )
 
+    # Extract, validate and map improved descriptions suggestions
+    improved_descriptions = parsed.get("improved_criteria_descriptions", [])
+    active_criterion_ids = {c.criterion_id for c in criteria}
+    active_criterion_keys = {c.criterion_key for c in criteria if c.criterion_key}
+    
+    validated_improved_descriptions = []
+    if isinstance(improved_descriptions, list):
+        for desc_entry in improved_descriptions:
+            if not isinstance(desc_entry, dict):
+                continue
+            c_id = desc_entry.get("criterion_id")
+            c_key = desc_entry.get("criterion_key")
+            
+            is_valid = False
+            if c_id is not None:
+                try:
+                    c_id_int = int(c_id)
+                    if c_id_int in active_criterion_ids:
+                        is_valid = True
+                except (ValueError, TypeError):
+                    pass
+            
+            if not is_valid and c_key in active_criterion_keys:
+                is_valid = True
+                matching_c = next((c for c in criteria if c.criterion_key == c_key), None)
+                if matching_c:
+                    desc_entry["criterion_id"] = matching_c.criterion_id
+            
+            if is_valid:
+                validated_improved_descriptions.append({
+                    "criterion_id": desc_entry.get("criterion_id"),
+                    "criterion_key": desc_entry.get("criterion_key") or c_key,
+                    "original_description": desc_entry.get("original_description") or "",
+                    "improved_description": desc_entry.get("improved_description") or "",
+                    "reason": desc_entry.get("reason") or "Mejora de claridad y redactabilidad."
+                })
+
+    improved_count = len(validated_improved_descriptions)
+    unchanged_count = len(criteria) - improved_count
+    
+    logger.info(
+        "\n==================================================\n"
+        "REFORMULATION DIAGNOSIS REPORT:\n"
+        "==================================================\n"
+        f"- Criterios revisados: {len(criteria)}\n"
+        f"- Descripciones mejoradas: {improved_count}\n"
+        f"- Descripciones sin cambios: {unchanged_count}\n"
+        "=================================================="
+    )
+
     return {
         "ok": True,
         "status": "completed",
@@ -610,6 +660,7 @@ async def build_prompt_with_ai(
         "change_summary": change_note or parsed.get("change_summary", ""),
         "generated_prompt": generated_prompt,
         "criteria_count": len(criteria),
+        "improved_criteria_descriptions": validated_improved_descriptions,
     }
 
 
@@ -669,7 +720,36 @@ def _build_meta_prompt(
                 sanitized_base_prompt or base_structure.base_prompt
             ])
 
-    # 3. If there are no criteria
+    # 3. Description Review and Reformulation Rules
+    reformulation_instructions = [
+        "",
+        "# REVISIÓN Y REFORMULACIÓN INTELIGENTE DE CRITERIOS",
+        "Antes de redactar la estructura final, debes revisar críticamente las descripciones de todos los criterios activos proporcionados.",
+        "Si una descripción es ambigua, incompleta, poco evaluable, demasiado corta o está mal redactada, DEBES REFORMULARLA para que sea clara, observable y útil para evaluar una llamada. Mantén siempre la intención original del criterio.",
+        "",
+        "Criterios de calidad que debe cumplir la descripción reformulada:",
+        "1. Explicar claramente qué conductas, palabras o hechos específicos deben observarse en la llamada.",
+        "2. Ser objetiva y fácilmente evaluable por un modelo de lenguaje sin ambigüedad.",
+        "3. Evitar frases vagas como 'evaluar bien', 'ver si lo hace correcto', 'analizar comportamiento'.",
+        "4. Indicar qué se considera un buen desempeño y qué se considera un incumplimiento.",
+        "5. No mezclar múltiples objetivos en un solo criterio (mantener foco funcional).",
+        "6. Aplicación según tipo de criterio (criterion_type):",
+        "   - score_1_10: Definir de forma gradual qué amerita puntuaciones bajas, medias y altas.",
+        "   - boolean: Dejar muy claro qué constituye un 'true' (cumplido) y un 'false' (incumplido).",
+        "   - category: Respetar únicamente los valores permitidos de allowed_values y definir cuándo aplica cada uno.",
+        "   - text / free_text: Indicar qué dato textual preciso extraer y recalcar que solo debe extraerse si aparece explícitamente (si no, devolver '').",
+        "   - number: Indicar qué número extraer o calcular y en qué unidad.",
+        "   - percentage: Indicar qué porcentaje calcular y sobre qué base.",
+        "",
+        "Reglas irrompibles para la reformulación:",
+        "1. Mantén siempre la intención original y la aplicabilidad por tipología de cada criterio.",
+        "2. NUNCA inventes criterios nuevos ni elimines criterios activos existentes.",
+        "3. Conserva intactos todos los identificadores y claves técnicas: criterion_id, criterion_key, output_key, feed_key y criterion_type.",
+        "4. Usa la descripción reformulada y mejorada en la redacción de la sección 'CRITERIOS DE ANÁLISIS' del prompt generado.",
+        "5. Devuelve la lista estructurada de descripciones originales vs reformuladas en la clave 'improved_criteria_descriptions' de tu JSON de respuesta."
+    ]
+
+    # 4. If there are no criteria
     if not criteria:
         criteria_notice = [
             "# Criterios y Formato de Salida",
@@ -678,7 +758,7 @@ def _build_meta_prompt(
     else:
         criteria_notice = [
             "# Criterios activos (fuente de verdad)",
-            "Los siguientes criterios deben estar TODOS documentados e incluidos en el prompt generado.",
+            "Los siguientes criterios deben estar TODOS documentados e incluidos en el prompt generado utilizando sus descripciones mejoradas/reformuladas.",
             "NO inventes criterios. NO omitas ninguno. NO uses campos genéricos heredados como campo_1, campo_2, etc.",
             "",
             criteria_block,
@@ -696,6 +776,7 @@ def _build_meta_prompt(
         "",
     ]
     sections.extend(rules_and_base_structure)
+    sections.extend(reformulation_instructions)
     sections.extend([
         "",
         "# CRITERIOS DE EVALUACIÓN VS DATOS DEL PACIENTE",
@@ -719,7 +800,7 @@ def _build_meta_prompt(
         "# Reglas críticas para el prompt generado",
         "- Usa estructura Markdown sencilla (e.g., ### REGLAS GENERALES) y NO uses separadores decorativos ASCII ni caracteres especiales (e.g., ─────).",
         "- El prompt generado debe escribirse fluido y no parecer texto pegado de fragmentos aislados.",
-        "- En la sección de 'CRITERIOS DE ANÁLISIS' del prompt generado, si hay criterios activos, DEBEN LISTARSE TODOS Y CADA UNO de ellos con su definición explícita. No resumas ni agrupes. Todo output_key y feed_key que aparezca en el JSON debe tener su definición explícita en el texto.",
+        "- En la sección de 'CRITERIOS DE ANÁLISIS' del prompt generado, si hay criterios activos, DEBEN LISTARSE TODOS Y CADA UNO de ellos con su definición explícita usando la versión reformulada y mejorada. No resumas ni agrupes. Todo output_key y feed_key que aparezca en el JSON debe tener su definición explícita en el texto.",
         "- El prompt generado debe contener contexto, la tarea, reglas generales, definiciones EXACTAS y completas de todos los tipos de llamada, definiciones de los criterios (si los hay) y el formato JSON estricto.",
         "- Para los criterios de tipo 'category', el formato JSON final debe mostrar explícitamente los valores permitidos (ej. \"valor1\"|\"valor2\"|null) y no un simple string|null.",
         "- Prohíbe expresamente en el prompt generado el uso de claves legacy como campo_1, campo_2, campo_3, campo_4, campo_5.",
@@ -727,7 +808,7 @@ def _build_meta_prompt(
         "",
         "# Respuesta esperada de tu parte (como asistente experto)",
         "Responde EXCLUSIVAMENTE con un JSON válido usando estas claves:",
-        '{"generated_name": "Nombre corto de esta versión", "change_summary": "Resumen claro de lo que cambiaste", "generated_prompt": "El texto COMPLETO del prompt listo para ser inyectado en el analizador de llamadas"}',
+        '{"generated_name": "Nombre corto de esta versión", "change_summary": "Resumen claro de lo que cambiaste", "generated_prompt": "El texto COMPLETO del prompt listo para ser inyectado en el analizador de llamadas (usando las descripciones reformuladas)", "improved_criteria_descriptions": [{"criterion_id": 123, "criterion_key": "clave_criterio", "original_description": "descripción original", "improved_description": "descripción reformulada y mejorada", "reason": "explicación clara de por qué se mejoró la descripción"}]}',
     ])
 
     return "\n".join(sections)
@@ -737,7 +818,7 @@ def _format_criteria(criteria: list[PromptCriterion], criterion_typologies_map: 
     lines = []
     for c in criteria:
         line = (
-            f"- [{c.criterion_type}] {c.criterion_name} "
+            f"- [ID: {c.criterion_id}] [{c.criterion_type}] {c.criterion_name} "
             f"(output_key: {c.output_key}"
         )
         if c.feed_key:
