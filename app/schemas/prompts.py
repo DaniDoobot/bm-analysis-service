@@ -167,6 +167,7 @@ class PromptBaseStructureCreate(BaseModel):
 
 class PromptBaseStructureUpdate(BaseModel):
     structure_name: str | None = None
+    name: str | None = None
     description: str | None = None
     prompt_type: str | None = None
     base_prompt: str | None = None

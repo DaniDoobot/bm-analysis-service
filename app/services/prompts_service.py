@@ -1,11 +1,14 @@
 """
 Prompts service — business logic for prompts and versions.
 """
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
 
 from app.models.prompts import Prompt, PromptVersion, PromptBaseStructure
 from app.schemas.prompts import (
@@ -513,32 +516,46 @@ async def update_base_structure(
     db: AsyncSession, structure_id: int, body: PromptBaseStructureUpdate
 ) -> PromptBaseStructure | None:
     """Update an existing prompt base structure."""
-    result = await db.execute(
-        select(PromptBaseStructure).where(PromptBaseStructure.id == structure_id)
-    )
-    struct = result.scalars().first()
-    if not struct:
-        return None
+    try:
+        result = await db.execute(
+            select(PromptBaseStructure).where(PromptBaseStructure.id == structure_id)
+        )
+        struct = result.scalars().first()
+        if not struct:
+            return None
 
-    if body.structure_name is not None:
-        struct.structure_name = body.structure_name
-    if body.description is not None:
-        struct.description = body.description
-    if body.prompt_type is not None:
-        struct.prompt_type = "text"
-    if body.base_prompt is not None:
-        struct.base_prompt = body.base_prompt
-    
-    struct.default_criteria = None # Always force None to clear out legacy items
-    
-    if body.is_active is not None:
-        struct.is_active = body.is_active
-    if body.service_id is not None:
-        struct.service_id = body.service_id
+        # Support both 'name' and 'structure_name' fields from payload
+        name_to_use = body.name if body.name is not None else body.structure_name
+        if name_to_use is not None:
+            struct.structure_name = name_to_use
+        if body.description is not None:
+            struct.description = body.description
+        if body.prompt_type is not None:
+            struct.prompt_type = body.prompt_type
+        if body.base_prompt is not None:
+            struct.base_prompt = body.base_prompt
+        
+        # Correctly persist default criteria list instead of wiping it
+        if body.default_criteria is not None:
+            struct.default_criteria = body.default_criteria
+        
+        if body.is_active is not None:
+            struct.is_active = body.is_active
+        if body.service_id is not None:
+            struct.service_id = body.service_id
 
-    await db.commit()
-    await db.refresh(struct)
-    return struct
+        await db.commit()
+        await db.refresh(struct)
+        logger.info(
+            "Successfully updated base structure ID %d: name=%s, description=%s, type=%s, criteria_count=%d",
+            struct.id, struct.structure_name, struct.description, struct.prompt_type,
+            len(struct.default_criteria) if struct.default_criteria else 0
+        )
+        return struct
+    except Exception as e:
+        await db.rollback()
+        logger.error("Error updating base structure ID %d: %s", structure_id, e, exc_info=True)
+        raise e
 
 
 async def assign_base_structure(db: AsyncSession, prompt_id: int, base_structure_id: int) -> dict[str, Any]:
@@ -625,9 +642,28 @@ async def create_prompt_from_base(db: AsyncSession, body: CreateFromBaseRequest)
     )
     db.add(new_version)
     
-    # 4. Copy default criteria: DEPRECATED & IGNORED.
-    # Base structures no longer contain criteria. Specific structures always start with 0 criteria items.
+    # 4. Copy default criteria if requested and present
     criteria_count = 0
+    if body.copy_default_criteria and struct.default_criteria:
+        from app.models.criteria import PromptCriterion
+        for idx, item in enumerate(struct.default_criteria):
+            new_crit = PromptCriterion(
+                prompt_id=new_prompt.prompt_id,
+                criterion_key=item.get("criterion_key"),
+                criterion_name=item.get("criterion_name"),
+                criterion_description=item.get("criterion_description"),
+                criterion_type=item.get("criterion_type", "score_1_10"),
+                output_key=item.get("output_key"),
+                feed_key=item.get("feed_key"),
+                allowed_values=item.get("allowed_values"),
+                applies_to_types=item.get("applies_to_types"),
+                order_index=item.get("order_index", idx + 1),
+                is_required=item.get("is_required", False),
+                is_active=item.get("is_active", True),
+            )
+            db.add(new_crit)
+            criteria_count += 1
+        await db.flush()
 
     await db.commit()
     await db.refresh(new_version)

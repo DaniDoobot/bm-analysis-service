@@ -219,20 +219,30 @@ async def build_prompt_with_ai(
     """
     Generate a new prompt version using AI.
     """
+    import time
+    t_start = time.perf_counter()
+
     # 1. Fetch prompt object
     result = await db.execute(select(Prompt).where(Prompt.prompt_id == prompt_id))
     prompt_obj = result.scalars().first()
     if not prompt_obj:
         return {"ok": False, "status": "error", "error_message": f"Prompt_id {prompt_id} not found."}
 
+    t_load_prompt = time.perf_counter()
+
     # 2. Get current version
     current_version = await _get_current_version(db, prompt_id)
     current_prompt_text = current_version.prompt if current_version else None
     base_version_id = current_version.id if current_version else None
+
+    t_load_version = time.perf_counter()
+
     # 3. Get active criteria
     criteria = await get_active_criteria(db, prompt_id)
     if criteria is None:
         criteria = []
+
+    t_load_criteria = time.perf_counter()
 
     # 3.2. Fetch base structure based on priority
     resolved_base_structure_id = base_structure_id
@@ -246,6 +256,8 @@ async def build_prompt_with_ai(
             select(PromptBaseStructure).where(PromptBaseStructure.id == resolved_base_structure_id)
         )
         base_structure = res_struct.scalars().first()
+
+    t_load_base = time.perf_counter()
 
     # 3.5. Fetch active typologies of the service
     service_id = prompt_obj.service_id
@@ -269,16 +281,22 @@ async def build_prompt_with_ai(
         )
         typologies = t_res.scalars().all()
 
-    # Fetch criterion-typology mappings
-    criterion_typologies_map = {}
-    for c in criteria:
+    t_load_typos = time.perf_counter()
+
+    # Fetch criterion-typology mappings (Optimized batch query instead of N+1)
+    criterion_typologies_map = {c.criterion_id: [] for c in criteria}
+    if criteria:
+        criteria_ids = [c.criterion_id for c in criteria]
         assoc_res = await db.execute(
-            select(Typology.typology_key)
-            .join(PromptCriterionTypology, PromptCriterionTypology.typology_id == Typology.typology_id)
-            .where(PromptCriterionTypology.criterion_id == c.criterion_id, Typology.is_active == True)
+            select(PromptCriterionTypology.criterion_id, Typology.typology_key)
+            .join(Typology, PromptCriterionTypology.typology_id == Typology.typology_id)
+            .where(PromptCriterionTypology.criterion_id.in_(criteria_ids), Typology.is_active == True)
         )
-        c_keys = assoc_res.scalars().all()
-        criterion_typologies_map[c.criterion_id] = list(c_keys)
+        for c_id, t_key in assoc_res.all():
+            if c_id in criterion_typologies_map:
+                criterion_typologies_map[c_id].append(t_key)
+
+    t_load_mappings = time.perf_counter()
 
     # 3.6. Check for legacy typologies before sanitization for logging purposes
     active_keys = {t.typology_key for t in typologies} if typologies else set()
@@ -372,12 +390,16 @@ async def build_prompt_with_ai(
         {"role": "user", "content": meta_prompt},
     ]
 
+    t_meta_prompt = time.perf_counter()
+
     # Try generating up to 2 times if legacy typologies are detected
     max_attempts = 2
     attempt = 1
     current_messages = list(messages)
     parsed = None
     generated_prompt = ""
+
+    t_llm_start = time.perf_counter()
 
     while attempt <= max_attempts:
         try:
@@ -544,6 +566,38 @@ async def build_prompt_with_ai(
 
         # If we successfully parsed and validated, exit loop
         break
+
+    t_llm_end = time.perf_counter()
+    t_validation_end = time.perf_counter()
+
+    t_total = time.perf_counter() - t_start
+    duration_db_prompt = (t_load_prompt - t_start) * 1000
+    duration_db_version = (t_load_version - t_load_prompt) * 1000
+    duration_db_criteria = (t_load_criteria - t_load_version) * 1000
+    duration_db_base = (t_load_base - t_load_criteria) * 1000
+    duration_db_typos = (t_load_typos - t_load_base) * 1000
+    duration_db_mappings = (t_load_mappings - t_load_typos) * 1000
+    duration_meta_prompt = (t_meta_prompt - t_load_mappings) * 1000
+    duration_llm = (t_llm_end - t_llm_start) * 1000
+    duration_validation = (t_validation_end - t_llm_end) * 1000
+    
+    logger.info(
+        "\n==================================================\n"
+        "PERFORMANCE DIAGNOSIS REPORT - PROMPT BUILD WITH AI\n"
+        "==================================================\n"
+        f"- Carga de prompt (DB): {duration_db_prompt:.2f} ms\n"
+        f"- Carga de versión (DB): {duration_db_version:.2f} ms\n"
+        f"- Carga de criterios (DB): {duration_db_criteria:.2f} ms\n"
+        f"- Carga de estructura base (DB): {duration_db_base:.2f} ms\n"
+        f"- Carga de tipologías (DB): {duration_db_typos:.2f} ms\n"
+        f"- Carga de mapeos de tipologías (DB - Optimizado): {duration_db_mappings:.2f} ms\n"
+        f"- Construcción de prompt / sanitización: {duration_meta_prompt:.2f} ms\n"
+        f"- Llamada OpenAI/LLM: {duration_llm:.2f} ms ({duration_llm/1000:.2f} s)\n"
+        f"- Validación post-generación: {duration_validation:.2f} ms\n"
+        "--------------------------------------------------\n"
+        f"DURACIÓN TOTAL RESPUESTA: {t_total:.4f} s\n"
+        "=================================================="
+    )
 
     return {
         "ok": True,

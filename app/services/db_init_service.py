@@ -1064,17 +1064,8 @@ async def init_db():
 
 
 
-        # This runs in its own isolated transaction so it always commits, regardless of
-        # any failures in subsequent seeding steps.
-        async with engine.begin() as conn:
-            logger.info("Executing isolated backfill: SET default_criteria = NULL and prompt_type = 'text' for all bm_prompt_base_structures...")
-            result_criteria = await conn.execute(
-                text("UPDATE bm_prompt_base_structures SET default_criteria = NULL WHERE default_criteria IS NOT NULL;")
-            )
-            result_type = await conn.execute(
-                text("UPDATE bm_prompt_base_structures SET prompt_type = 'text' WHERE prompt_type IS DISTINCT FROM 'text';")
-            )
-            logger.info("Backfill complete. Criteria rows updated: %d, Type rows updated: %d", result_criteria.rowcount, result_type.rowcount)
+        # Isolated backfill block was removed to prevent destructive wiping of base structure criteria and prompt types on startup.
+        logger.info("Skipping legacy isolated backfill to preserve custom base structures and criteria.")
 
         # 3. Seed structures in a safe, non-destructive session
         from app.dependencies import get_db
