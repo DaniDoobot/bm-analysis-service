@@ -93,6 +93,7 @@ class UserUpdatePayload(BaseModel):
     is_active: Optional[bool] = None
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None
+    must_reset_password: Optional[bool] = None
 
     @field_validator("role")
     @classmethod

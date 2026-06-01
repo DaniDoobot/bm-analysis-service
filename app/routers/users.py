@@ -36,6 +36,9 @@ def _user_to_full(u: User) -> dict:
         "hubspot_owner_id": u.hubspot_owner_id,
         "agent_initials": u.agent_initials,
         "password_masked": "********",
+        "must_reset_password": u.must_reset_password,
+        "password_set_at": u.password_set_at.isoformat() if u.password_set_at else None,
+        "reset_token_expires_at": u.reset_token_expires_at.isoformat() if u.reset_token_expires_at else None,
         "created_at": u.created_at.isoformat() if u.created_at else None,
         "updated_at": u.updated_at.isoformat() if u.updated_at else None,
     }
@@ -209,6 +212,11 @@ async def update_user(
         user.hubspot_owner_id = body.hubspot_owner_id
     if body.agent_initials is not None:
         user.agent_initials = body.agent_initials
+    if body.must_reset_password is not None:
+        if body.must_reset_password and not user.must_reset_password:
+            user.reset_token = secrets.token_urlsafe(32)
+            user.reset_token_expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+        user.must_reset_password = body.must_reset_password
 
     await db.commit()
     await db.refresh(user)
