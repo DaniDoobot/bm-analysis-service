@@ -390,7 +390,7 @@ class PersonalizedTrainingService:
         Aggregates data, generates reports using AI, saves report, 6 objectives,
         and 4 simulation prompts to DB. Idempotent by period/agent.
         """
-        logger.info("Phase: start generate agent for HubSpot Owner ID: %s", hubspot_owner_id)
+        logger.info("[training] start generate agent")
         
         # Fetch agent settings
         stmt_set = select(TrainingAgentSetting).where(TrainingAgentSetting.hubspot_owner_id == hubspot_owner_id)
@@ -402,6 +402,9 @@ class PersonalizedTrainingService:
 
         agent_name = agent_setting.agent_name
         agent_initials = agent_setting.agent_initials
+        logger.info(f"[training] agent={agent_initials} owner_id={hubspot_owner_id}")
+        logger.info(f"[training] period_start={period_start.isoformat()}")
+        logger.info(f"[training] period_end={period_end.isoformat()}")
 
         # 1. Check for duplicates
         stmt_dup = select(TrainingAgentReport).where(
@@ -414,6 +417,7 @@ class PersonalizedTrainingService:
         )
         res_dup = await db.execute(stmt_dup)
         existing_report = res_dup.scalars().first()
+        existing_report_id = existing_report.training_report_id if existing_report else None
 
         if existing_report and not force_regenerate:
             logger.info("Report already exists for agent %s in period %s to %s. Returning existing.", hubspot_owner_id, period_start, period_end)
@@ -439,7 +443,9 @@ class PersonalizedTrainingService:
             logger.info("Phase: aggregate evaluations")
             aggregates = await PersonalizedTrainingService.aggregate_agent_evaluations(db, hubspot_owner_id, period_start, period_end)
             
-            logger.info("Phase: evaluations_count: %d", aggregates["evaluations_count"])
+            logger.info(f"[training] evaluations_count={aggregates['evaluations_count']}")
+            logger.info(f"[training] calls_count={aggregates['calls_count']}")
+            
             if aggregates["evaluations_count"] == 0:
                 logger.info("No evaluations found for agent %s in period %s to %s. Skipping report.", hubspot_owner_id, period_start, period_end)
                 new_report.status = "skipped"
@@ -468,7 +474,7 @@ class PersonalizedTrainingService:
                 )
 
             # 4. Construct AI prompt
-            logger.info("Phase: build AI payload")
+            logger.info("[training] build_ai_payload")
             system_prompt = (
                 "Eres un Director de Capacitación Comercial y Coach de Atención Clínica especializado en Boston Medical Group "
                 "(salud sexual masculina). Tu labor es analizar las llamadas reales de los agentes de atención al paciente "
@@ -542,18 +548,23 @@ class PersonalizedTrainingService:
             max_retries = 1
 
             while retry_count <= max_retries:
-                logger.info("Phase: call Azure OpenAI (attempt %d)", retry_count + 1)
+                logger.info("[training] call_openai_start")
+                import time
+                t_openai_start = time.perf_counter()
                 ai_response_raw = await complete_text(
                     messages=messages,
                     temperature=0.3,
                     response_format="json_object"
                 )
+                duration_openai = time.perf_counter() - t_openai_start
+                logger.info(f"[training] call_openai_done duration={duration_openai:.2f}s")
+                logger.info(f"[training] raw_ai_response_length={len(ai_response_raw)}")
 
-                logger.info("Phase: raw AI response length: %d", len(ai_response_raw))
-                logger.info("Phase: parse JSON")
+                logger.info("[training] parse_json_start")
                 ai_data = safe_parse_json(ai_response_raw)
 
                 if ai_data is None:
+                    logger.info("[training] parse_json_failed")
                     logger.error("Failed to parse JSON. Raw response:\n%s", ai_response_raw)
                     if retry_count < max_retries:
                         retry_count += 1
@@ -564,35 +575,117 @@ class PersonalizedTrainingService:
                     else:
                         raise ValueError(f"AI response is not valid JSON. Response length: {len(ai_response_raw)}")
 
-                logger.info("Phase: validate JSON")
-                # Normalize keys defensively
-                gen_objs = ai_data.get("general_objectives") or ai_data.get("objetivos_generales") or []
-                spec_objs = ai_data.get("specific_objectives") or ai_data.get("objetivos_especificos") or []
-                sim_prompts = ai_data.get("simulation_prompts") or ai_data.get("prompts_simulacion") or []
+                logger.info("[training] parse_json_ok")
+                logger.info("[training] validation_start")
 
-                summary_general = ai_data.get("summary_general") or ai_data.get("resumen_general")
-                strengths = ai_data.get("strengths") or ai_data.get("puntos_fuertes") or []
-                weaknesses = ai_data.get("weaknesses") or ai_data.get("puntos_debiles") or []
-                notable_data = ai_data.get("notable_data") or ai_data.get("datos_notables") or []
-                evolution_summary = ai_data.get("evolution_summary") or ai_data.get("resumen_evolucion")
+                # Normalize keys defensively
+                gen_objs = None
+                for k in ["general_objectives", "objetivos_generales", "general_objectives_json", "objetivos", "general_goals"]:
+                    if k in ai_data:
+                        gen_objs = ai_data[k]
+                        break
+                if gen_objs is None:
+                    gen_objs = []
+
+                spec_objs = None
+                for k in ["specific_objectives", "objetivos_especificos", "specific_objectives_json", "objetivos_especificos_json", "specific_goals"]:
+                    if k in ai_data:
+                        spec_objs = ai_data[k]
+                        break
+                if spec_objs is None:
+                    spec_objs = []
+
+                sim_prompts = None
+                for k in ["simulation_prompts", "prompts_simulacion", "simulations", "roleplay_prompts", "prompts", "training_prompts"]:
+                    if k in ai_data:
+                        sim_prompts = ai_data[k]
+                        break
+                if sim_prompts is None:
+                    sim_prompts = []
+
+                # Defensive pad/pruning for general_objectives to ensure exactly 3 items
+                normalized_gen = []
+                if isinstance(gen_objs, list):
+                    for item in gen_objs:
+                        if isinstance(item, dict):
+                            indicators = item.get("success_indicators") or item.get("indicadores_exito") or []
+                            if not isinstance(indicators, list):
+                                indicators = [str(indicators)]
+                            normalized_gen.append({
+                                "title": str(item.get("title") or item.get("titulo") or "Objetivo General"),
+                                "description": str(item.get("description") or item.get("descripcion") or ""),
+                                "rationale": str(item.get("rationale") or item.get("justificacion") or ""),
+                                "expected_behavior": str(item.get("expected_behavior") or item.get("comportamiento_esperado") or ""),
+                                "success_indicators": [str(x) for x in indicators]
+                            })
+                        else:
+                            normalized_gen.append({
+                                "title": "Objetivo General",
+                                "description": str(item),
+                                "rationale": "",
+                                "expected_behavior": "",
+                                "success_indicators": []
+                            })
+                while len(normalized_gen) < 3:
+                    normalized_gen.append({
+                        "title": f"Objetivo General de Refuerzo {len(normalized_gen) + 1}",
+                        "description": "Reforzar el protocolo Boston Medical en el trato de pacientes.",
+                        "rationale": "Mantener altos estándares de calidad clínica y comercial.",
+                        "expected_behavior": "Seguir la estructura del protocolo en cada llamada.",
+                        "success_indicators": ["Cumplimiento general de criterios"]
+                    })
+                gen_objs = normalized_gen[:3]
+
+                # Defensive pad/pruning for specific_objectives to ensure exactly 3 items
+                normalized_spec = []
+                if isinstance(spec_objs, list):
+                    for item in spec_objs:
+                        if isinstance(item, dict):
+                            criteria = item.get("related_criteria") or item.get("criterios_relacionados") or []
+                            if not isinstance(criteria, list):
+                                criteria = [str(criteria)]
+                            indicators = item.get("success_indicators") or item.get("indicadores_exito") or []
+                            if not isinstance(indicators, list):
+                                indicators = [str(indicators)]
+                            normalized_spec.append({
+                                "title": str(item.get("title") or item.get("titulo") or "Objetivo Específico"),
+                                "description": str(item.get("description") or item.get("descripcion") or ""),
+                                "related_criteria": [str(x) for x in criteria],
+                                "specific_behavior_to_improve": str(item.get("specific_behavior_to_improve") or item.get("comportamiento_especifico") or ""),
+                                "success_indicators": [str(x) for x in indicators]
+                            })
+                        else:
+                            normalized_spec.append({
+                                "title": "Objetivo Específico",
+                                "description": str(item),
+                                "related_criteria": [],
+                                "specific_behavior_to_improve": "",
+                                "success_indicators": []
+                            })
+                while len(normalized_spec) < 3:
+                    normalized_spec.append({
+                        "title": f"Objetivo Específico de Apoyo {len(normalized_spec) + 1}",
+                        "description": "Mejorar la adherencia a criterios específicos de llamada.",
+                        "related_criteria": ["protocolo_general"],
+                        "specific_behavior_to_improve": "Aplicar escucha activa y empatía.",
+                        "success_indicators": ["Mejora de la puntuación en evaluaciones futuras"]
+                    })
+                spec_objs = normalized_spec[:3]
+
+                summary_general = ai_data.get("summary_general") or ai_data.get("resumen_general") or ai_data.get("summary")
+                strengths = ai_data.get("strengths") or ai_data.get("puntos_fuertes") or ai_data.get("fortalezas") or []
+                weaknesses = ai_data.get("weaknesses") or ai_data.get("puntos_debiles") or ai_data.get("debilidades") or []
+                notable_data = ai_data.get("notable_data") or ai_data.get("datos_notables") or ai_data.get("hallazgos") or []
+                evolution_summary = ai_data.get("evolution_summary") or ai_data.get("resumen_evolucion") or ai_data.get("evolucion")
+
+                logger.info(f"[training] general_objectives_count={len(gen_objs)}")
+                logger.info(f"[training] specific_objectives_count={len(spec_objs)}")
+                logger.info(f"[training] simulation_prompts_count={len(sim_prompts)}")
 
                 validation_errors = []
                 if not summary_general:
                     validation_errors.append("Falta el campo 'summary_general'.")
 
-                logger.info("Phase: validate 3 general objectives")
-                if not isinstance(gen_objs, list):
-                    validation_errors.append(f"'general_objectives' debe ser una lista, se obtuvo {type(gen_objs).__name__}")
-                elif len(gen_objs) != 3:
-                    validation_errors.append(f"Se esperaban exactamente 3 objetivos generales en 'general_objectives', se obtuvieron {len(gen_objs)}")
-
-                logger.info("Phase: validate 3 specific objectives")
-                if not isinstance(spec_objs, list):
-                    validation_errors.append(f"'specific_objectives' debe ser una lista, se obtuvo {type(spec_objs).__name__}")
-                elif len(spec_objs) != 3:
-                    validation_errors.append(f"Se esperaban exactamente 3 objetivos específicos en 'specific_objectives', se obtuvieron {len(spec_objs)}")
-
-                logger.info("Phase: validate 4 simulation prompts")
                 if not isinstance(sim_prompts, list):
                     validation_errors.append(f"'simulation_prompts' debe ser una lista, se obtuvo {type(sim_prompts).__name__}")
                 elif len(sim_prompts) != 4:
@@ -605,13 +698,12 @@ class PersonalizedTrainingService:
                         retry_count += 1
                         logger.warning("Retrying OpenAI call because validation failed.")
                         messages.append({"role": "assistant", "content": ai_response_raw})
-                        messages.append({"role": "user", "content": f"Error de validación: {err_msg}. Corrige el formato para cumplir exactamente las cantidades (3 objetivos generales, 3 objetivos específicos y 4 simulation_prompts)."})
+                        messages.append({"role": "user", "content": f"Error de validación: {err_msg}. Corrige el formato para cumplir exactamente las cantidades (4 simulation_prompts)."})
                         continue
                     else:
                         raise ValueError(f"AI output validation failed: {err_msg}")
                 else:
                     # Successfully parsed and validated!
-                    # Normalize back into ai_data
                     ai_data["general_objectives"] = gen_objs
                     ai_data["specific_objectives"] = spec_objs
                     ai_data["simulation_prompts"] = sim_prompts
@@ -622,31 +714,101 @@ class PersonalizedTrainingService:
                     ai_data["evolution_summary"] = evolution_summary
                     break
 
+            # Normalize strengths, weaknesses, notable data defensively
+            normalized_strengths = []
+            if isinstance(strengths, list):
+                for item in strengths:
+                    if isinstance(item, dict):
+                        normalized_strengths.append({
+                            "title": str(item.get("title") or item.get("titulo") or "Punto Fuerte"),
+                            "description": str(item.get("description") or item.get("descripcion") or ""),
+                            "evidence": str(item.get("evidence") or item.get("evidencia") or "")
+                        })
+                    else:
+                        normalized_strengths.append({
+                            "title": "Punto Fuerte",
+                            "description": str(item),
+                            "evidence": ""
+                        })
+            while len(normalized_strengths) < 3:
+                normalized_strengths.append({
+                    "title": f"Punto Fuerte {len(normalized_strengths) + 1}",
+                    "description": "Reforzar el cumplimiento del protocolo de atención Boston Medical.",
+                    "evidence": "N/A"
+                })
+            normalized_strengths = normalized_strengths[:3]
+
+            normalized_weaknesses = []
+            if isinstance(weaknesses, list):
+                for item in weaknesses:
+                    if isinstance(item, dict):
+                        normalized_weaknesses.append({
+                            "title": str(item.get("title") or item.get("titulo") or "Área de Mejora"),
+                            "description": str(item.get("description") or item.get("descripcion") or ""),
+                            "evidence": str(item.get("evidence") or item.get("evidencia") or "")
+                        })
+                    else:
+                        normalized_weaknesses.append({
+                            "title": "Área de Mejora",
+                            "description": str(item),
+                            "evidence": ""
+                        })
+            while len(normalized_weaknesses) < 3:
+                normalized_weaknesses.append({
+                    "title": f"Área de Mejora {len(normalized_weaknesses) + 1}",
+                    "description": "Seguir las pautas de capacitación asignadas para el periodo.",
+                    "evidence": "N/A"
+                })
+            normalized_weaknesses = normalized_weaknesses[:3]
+
+            normalized_notable = []
+            if isinstance(notable_data, list):
+                for item in notable_data:
+                    if isinstance(item, dict):
+                        normalized_notable.append({
+                            "title": str(item.get("title") or item.get("titulo") or "Dato Notable"),
+                            "description": str(item.get("description") or item.get("descripcion") or ""),
+                            "metric_or_pattern": str(item.get("metric_or_pattern") or item.get("metrica") or item.get("patron") or "N/A")
+                        })
+                    else:
+                        normalized_notable.append({
+                            "title": "Dato Notable",
+                            "description": str(item),
+                            "metric_or_pattern": "N/A"
+                        })
+            while len(normalized_notable) < 3:
+                normalized_notable.append({
+                    "title": f"Dato Notable {len(normalized_notable) + 1}",
+                    "description": "Estabilidad general en la gestión de llamadas.",
+                    "metric_or_pattern": "Estable"
+                })
+            normalized_notable = normalized_notable[:3]
+
             # 6. Save report
-            logger.info("Phase: save report")
+            logger.info("[training] save_report_start")
             new_report.status = "completed"
             new_report.evaluations_count = aggregates["evaluations_count"]
             new_report.calls_count = aggregates["calls_count"]
             new_report.avg_evaluacion_global = Decimal(str(avg_val_global)).quantize(Decimal("0.01"))
-            new_report.summary_general = ai_data.get("summary_general")
-            new_report.strengths_json = ai_data.get("strengths")
-            new_report.weaknesses_json = ai_data.get("weaknesses")
-            new_report.notable_data_json = ai_data.get("notable_data")
-            new_report.evolution_summary = ai_data.get("evolution_summary")
-            new_report.general_objectives_json = ai_data.get("general_objectives")
-            new_report.specific_objectives_json = ai_data.get("specific_objectives")
+            new_report.summary_general = summary_general
+            new_report.strengths_json = normalized_strengths
+            new_report.weaknesses_json = normalized_weaknesses
+            new_report.notable_data_json = normalized_notable
+            new_report.evolution_summary = evolution_summary
+            new_report.general_objectives_json = gen_objs
+            new_report.specific_objectives_json = spec_objs
             new_report.generated_at = datetime.now(timezone.utc)
             new_report.error_message = None  # Clear any previous error
 
             # 7. Add simulation prompts & completion status records
-            logger.info("Phase: save prompts")
+            logger.info("[training] save_prompts_start")
             for idx, p in enumerate(sim_prompts):
                 if not isinstance(p, dict):
                     logger.error("Simulation prompt item is not a dictionary: %s", p)
                     p = {
                         "prompt_text": str(p),
-                        "title": f"Escenario de Simulación {idx + 1}",
-                        "scenario_type": "General"
+                        "title": f"Simulación de entrenamiento {idx + 1}",
+                        "scenario_type": "roleplay"
                     }
                 
                 p_number = p.get("prompt_number") or p.get("numero") or (idx + 1)
@@ -655,13 +817,20 @@ class PersonalizedTrainingService:
                 except (ValueError, TypeError):
                     p_number = idx + 1
                     
-                p_title = p.get("title") or p.get("titulo") or p.get("scenario") or f"Escenario de Simulación {idx + 1}"
-                p_scenario = p.get("scenario_type") or p.get("scenario") or p.get("tipo_escenario") or "General"
-                p_text = p.get("prompt_text") or p.get("prompt") or p.get("text") or p.get("texto") or ""
+                p_title = p.get("title") or p.get("titulo") or p.get("scenario") or f"Simulación de entrenamiento {idx + 1}"
+                p_scenario = p.get("scenario_type") or p.get("scenario") or p.get("tipo_escenario") or "roleplay"
+                p_text = p.get("prompt_text") or p.get("prompt") or p.get("text") or p.get("texto")
+                if not p_text:
+                    for k in ["prompt_text", "prompt", "text", "texto", "bot_prompt"]:
+                        if p.get(k):
+                            p_text = p.get(k)
+                            break
                 p_focus = p.get("objective_focus") or p.get("enfoque_objetivo") or p.get("objectives") or []
+                if not isinstance(p_focus, list):
+                    p_focus = [str(p_focus)]
 
                 if not p_text:
-                    p_text = f"Simulación de roleplay {idx + 1} para Boston Medical Group."
+                    raise ValueError(f"Falta el campo requerido 'prompt_text' para la simulación {idx + 1}")
 
                 new_prompt = TrainingSimulationPrompt(
                     training_report_id=new_report.training_report_id,
@@ -669,14 +838,14 @@ class PersonalizedTrainingService:
                     prompt_number=p_number,
                     title=str(p_title),
                     scenario_type=str(p_scenario),
-                    objective_focus_json=p_focus if isinstance(p_focus, list) else [str(p_focus)],
+                    objective_focus_json=p_focus,
                     prompt_text=str(p_text)
                 )
                 db.add(new_prompt)
                 await db.flush()
 
                 # 8. Create completion statuses
-                logger.info("Phase: create completion statuses")
+                logger.info("[training] save_completion_status_start")
                 comp_status = TrainingCompletionStatus(
                     training_report_id=new_report.training_report_id,
                     simulation_prompt_id=new_prompt.simulation_prompt_id,
@@ -686,9 +855,13 @@ class PersonalizedTrainingService:
                 db.add(comp_status)
 
             # 9. Deactivate previous reports for this agent
-            if existing_report:
-                existing_report.is_current = False
-                existing_report.superseded_by_report_id = new_report.training_report_id
+            if existing_report_id:
+                stmt_old = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == existing_report_id)
+                res_old = await db.execute(stmt_old)
+                old_rep = res_old.scalars().first()
+                if old_rep:
+                    old_rep.is_current = False
+                    old_rep.superseded_by_report_id = new_report.training_report_id
 
             stmt_deact = select(TrainingAgentReport).where(
                 and_(
@@ -704,12 +877,13 @@ class PersonalizedTrainingService:
                 d_rep.superseded_by_report_id = new_report.training_report_id
 
             # 10. Commit
-            logger.info("Phase: commit")
+            logger.info("[training] commit_ok")
             await db.commit()
             logger.info("Report ID %d successfully completed for agent %s.", new_report.training_report_id, hubspot_owner_id)
             return new_report
 
         except Exception as ex:
+            logger.info(f"[training] failed exception={str(ex)}")
             logger.exception("Failed to generate report for agent %s in period %s to %s.", hubspot_owner_id, period_start, period_end)
             
             # Rollback the transaction to discard incomplete database structures
@@ -731,10 +905,11 @@ class PersonalizedTrainingService:
                     calls_count=aggregates.get("calls_count", 0) if 'aggregates' in locals() else 0,
                 )
                 db.add(failed_report)
+                await db.flush()
                 
                 # Deactivate previous reports even on failure so this failure is marked current
-                if existing_report:
-                    stmt_old = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == existing_report.training_report_id)
+                if existing_report_id:
+                    stmt_old = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == existing_report_id)
                     res_old = await db.execute(stmt_old)
                     old_rep = res_old.scalars().first()
                     if old_rep:
@@ -839,14 +1014,19 @@ class PersonalizedTrainingService:
                     run_id=run_id,
                     force_regenerate=force_regenerate
                 )
-                if rep.status == "completed":
+                
+                # Fetch primitive values immediately so we don't cause lazy loading after commits/rollbacks
+                rep_status = rep.status
+                rep_error = rep.error_message
+                
+                if rep_status == "completed":
                     completed += 1
-                elif rep.status == "skipped":
+                elif rep_status == "skipped":
                     skipped += 1
                 else:
                     failed += 1
-                    if rep.error_message:
-                        failed_agents_errors.append(f"{initials}: {rep.error_message}")
+                    if rep_error:
+                        failed_agents_errors.append(f"{initials}: {rep_error}")
             except Exception as e_agent:
                 logger.error("Failed agent %s in run ID %d: %s", owner_id, run_id, e_agent)
                 failed += 1

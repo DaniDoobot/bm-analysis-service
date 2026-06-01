@@ -121,6 +121,9 @@ class TrainingAgentReportBase(BaseModel):
     generated_at: Optional[datetime] = None
     error_message: Optional[str] = None
 
+    class Config:
+        from_attributes = True
+
 
 class TrainingAgentReportOut(TrainingAgentReportBase):
     prompts: List[SimulationPromptOut] = []
@@ -184,6 +187,10 @@ class AgentDetailResponse(BaseModel):
     progress_percentage: Decimal = Decimal("0.0")
     history: List[TrainingAgentReportBase] = []
     evolution_summary: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
 
 
 # ── Manual Generation Request Schema ──────────────────────────────────────────
