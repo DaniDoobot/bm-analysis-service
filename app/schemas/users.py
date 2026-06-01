@@ -73,7 +73,7 @@ class UserCreatePayload(BaseModel):
     @field_validator("role")
     @classmethod
     def validate_role(cls, v):
-        allowed = {"administrador", "agente", "agent"}
+        allowed = {"administrador", "admin", "agente", "agent", "usuario"}
         if v not in allowed:
             raise ValueError(f"Rol invalido '{v}'. Permitidos: {allowed}")
         return v
@@ -99,7 +99,7 @@ class UserUpdatePayload(BaseModel):
     def validate_role(cls, v):
         if v is None:
             return v
-        allowed = {"administrador", "agente", "agent"}
+        allowed = {"administrador", "admin", "agente", "agent", "usuario"}
         if v not in allowed:
             raise ValueError(f"Rol invalido '{v}'. Permitidos: {allowed}")
         return v

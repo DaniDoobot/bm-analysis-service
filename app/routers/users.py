@@ -57,7 +57,7 @@ async def list_users(
     res = await db.execute(stmt)
     users = res.scalars().all()
 
-    if current_user.role == "administrador":
+    if current_user.role in {"administrador", "admin"}:
         return {"ok": True, "total": len(users), "users": [_user_to_full(u) for u in users]}
 
     # Non-admin: return basic public info only
@@ -88,7 +88,7 @@ async def get_user(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Get a single user by ID. Admins see full detail; others can only see their own."""
-    if current_user.role != "administrador" and current_user.user_id != user_id:
+    if current_user.role not in {"administrador", "admin"} and current_user.user_id != user_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Solo puedes ver tu propio perfil.",
