@@ -119,6 +119,7 @@ class TrainingAgentReportBase(BaseModel):
     is_current: bool
     created_at: datetime
     generated_at: Optional[datetime] = None
+    error_message: Optional[str] = None
 
 
 class TrainingAgentReportOut(TrainingAgentReportBase):
@@ -172,6 +173,7 @@ class AgentOverviewItem(BaseModel):
     progress_percentage: Decimal = Decimal("0.0")
     last_generated_at: Optional[datetime] = None
     previous_reports_count: int = 0
+    error_message: Optional[str] = None
 
 
 class AgentDetailResponse(BaseModel):

@@ -17,6 +17,7 @@ from app.models.personalized_training import (
 from app.models.mass_evaluations import MassEvaluationResult, MassEvaluationCriterionResult
 from app.models.users import User
 from app.services.openai_service import complete_text
+from app.utils.json_utils import safe_parse_json
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +104,8 @@ class PersonalizedTrainingService:
                 "progress_total": 4,
                 "progress_percentage": Decimal("0.0"),
                 "last_generated_at": None,
-                "previous_reports_count": prev_count
+                "previous_reports_count": prev_count,
+                "error_message": None
             }
 
             if report:
@@ -114,6 +116,7 @@ class PersonalizedTrainingService:
                 item["evaluations_count"] = report.evaluations_count
                 item["summary_general"] = report.summary_general[:100] + "..." if report.summary_general and len(report.summary_general) > 100 else report.summary_general
                 item["last_generated_at"] = report.generated_at or report.created_at
+                item["error_message"] = report.error_message
 
                 if report.status == "completed":
                     item["objectives_count"] = 6  # 3 general + 3 specific
@@ -387,6 +390,8 @@ class PersonalizedTrainingService:
         Aggregates data, generates reports using AI, saves report, 6 objectives,
         and 4 simulation prompts to DB. Idempotent by period/agent.
         """
+        logger.info("Phase: start generate agent for HubSpot Owner ID: %s", hubspot_owner_id)
+        
         # Fetch agent settings
         stmt_set = select(TrainingAgentSetting).where(TrainingAgentSetting.hubspot_owner_id == hubspot_owner_id)
         res_set = await db.execute(stmt_set)
@@ -431,8 +436,10 @@ class PersonalizedTrainingService:
         # If there's an existing current report, we mark it superseded later if we succeed.
         try:
             # 2. Aggregate evaluations
+            logger.info("Phase: aggregate evaluations")
             aggregates = await PersonalizedTrainingService.aggregate_agent_evaluations(db, hubspot_owner_id, period_start, period_end)
-
+            
+            logger.info("Phase: evaluations_count: %d", aggregates["evaluations_count"])
             if aggregates["evaluations_count"] == 0:
                 logger.info("No evaluations found for agent %s in period %s to %s. Skipping report.", hubspot_owner_id, period_start, period_end)
                 new_report.status = "skipped"
@@ -461,6 +468,7 @@ class PersonalizedTrainingService:
                 )
 
             # 4. Construct AI prompt
+            logger.info("Phase: build AI payload")
             system_prompt = (
                 "Eres un Director de Capacitación Comercial y Coach de Atención Clínica especializado en Boston Medical Group "
                 "(salud sexual masculina). Tu labor es analizar las llamadas reales de los agentes de atención al paciente "
@@ -478,11 +486,12 @@ class PersonalizedTrainingService:
                 "NO devuelvas texto introductorio, formateo Markdown complementario, explicaciones ni etiquetas, solo el JSON puro."
             )
 
-            # Convert aggregates to clean text block
-            c_averages_str = "\n".join(
-                f"- {data['name']} ({key}): {data['value']:.2f} ({'Puntuación 1-10' if data['type'] == 'numeric' else 'Porcentaje de Cumplimiento %'})"
-                for key, data in aggregates["criteria_averages"].items()
-            )
+            # Convert aggregates to clean text block safely
+            c_averages_lines = []
+            for key, data in aggregates["criteria_averages"].items():
+                val = data.get("value") or 0.0
+                c_averages_lines.append(f"- {data['name']} ({key}): {val:.2f} ({'Puntuación 1-10' if data['type'] == 'numeric' else 'Porcentaje de Cumplimiento %'})")
+            c_averages_str = "\n".join(c_averages_lines)
 
             feedbacks_str = "\n".join(
                 f"- Criterio '{f['criterion']}' {f['score']}: \"{f['feedback']}\""
@@ -491,14 +500,17 @@ class PersonalizedTrainingService:
 
             tipologia_str = ", ".join(f"{k} ({v} llamadas)" for k, v in aggregates["tipologia_distribution"].items())
 
+            avg_val_global = aggregates.get("avg_evaluacion_global") or 0.0
+            cierre_cita_rate = aggregates.get("cierre_cita_rate") or 0.0
+
             user_prompt = (
                 f"### DATOS DE EVALUACIONES MASIVAS DEL AGENTE\n"
                 f"Agente: {agent_name} ({agent_initials})\n"
                 f"Periodo Analizado: {period_start.strftime('%Y-%m-%d')} al {period_end.strftime('%Y-%m-%d')}\n"
                 f"Total de llamadas evaluadas: {aggregates['evaluations_count']}\n"
                 f"Llamadas únicas: {aggregates['calls_count']}\n"
-                f"Evaluación Global Media del agente: {aggregates['avg_evaluacion_global']:.2f}/10\n"
-                f"Tasa de Cierre de Cita: {aggregates['cierre_cita_rate'] or 0.0:.2f}%\n"
+                f"Evaluación Global Media del agente: {avg_val_global:.2f}/10\n"
+                f"Tasa de Cierre de Cita: {cierre_cita_rate:.2f}%\n"
                 f"Tipologías de Llamadas:\n{tipologia_str or 'No disponible'}\n\n"
                 f"### PROMEDIOS POR CRITERIO DE EVALUACIÓN:\n{c_averages_str}\n\n"
                 f"### FEEDBACKS NEGATIVOS/ÁREAS DE MEJORA DETECTADAS EN LLAMADAS:\n{feedbacks_str or 'No hay feedbacks negativos registrados'}\n\n"
@@ -518,56 +530,153 @@ class PersonalizedTrainingService:
                 f"Genera los 4 prompts específicos para entrenar las debilidades reales del agente ({agent_name}) mostradas en sus promedios de criterios y feedbacks."
             )
 
-            # 5. Call OpenAI
+            # 5. Call OpenAI and validate
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ]
 
-            logger.info("Calling Azure OpenAI complete_text to generate personalized training report for %s", hubspot_owner_id)
-            ai_response_raw = await complete_text(
-                messages=messages,
-                temperature=0.3,
-                response_format="json_object"
-            )
+            ai_data = None
+            ai_response_raw = ""
+            retry_count = 0
+            max_retries = 1
 
-            # 6. Parse response
-            ai_data = json.loads(ai_response_raw)
+            while retry_count <= max_retries:
+                logger.info("Phase: call Azure OpenAI (attempt %d)", retry_count + 1)
+                ai_response_raw = await complete_text(
+                    messages=messages,
+                    temperature=0.3,
+                    response_format="json_object"
+                )
 
-            # Enforce exactly 3 general, 3 specific, 4 simulation prompts
-            general_objectives = ai_data.get("general_objectives", [])[:3]
-            specific_objectives = ai_data.get("specific_objectives", [])[:3]
-            simulation_prompts = ai_data.get("simulation_prompts", [])[:4]
+                logger.info("Phase: raw AI response length: %d", len(ai_response_raw))
+                logger.info("Phase: parse JSON")
+                ai_data = safe_parse_json(ai_response_raw)
 
-            # Write values to our SQLAlchemy model
+                if ai_data is None:
+                    logger.error("Failed to parse JSON. Raw response:\n%s", ai_response_raw)
+                    if retry_count < max_retries:
+                        retry_count += 1
+                        logger.warning("Retrying OpenAI call because JSON parsing failed.")
+                        messages.append({"role": "assistant", "content": ai_response_raw})
+                        messages.append({"role": "user", "content": "Error: La respuesta no es un JSON válido. Devuelve estrictamente el objeto JSON sin envoltorios markdown."})
+                        continue
+                    else:
+                        raise ValueError(f"AI response is not valid JSON. Response length: {len(ai_response_raw)}")
+
+                logger.info("Phase: validate JSON")
+                # Normalize keys defensively
+                gen_objs = ai_data.get("general_objectives") or ai_data.get("objetivos_generales") or []
+                spec_objs = ai_data.get("specific_objectives") or ai_data.get("objetivos_especificos") or []
+                sim_prompts = ai_data.get("simulation_prompts") or ai_data.get("prompts_simulacion") or []
+
+                summary_general = ai_data.get("summary_general") or ai_data.get("resumen_general")
+                strengths = ai_data.get("strengths") or ai_data.get("puntos_fuertes") or []
+                weaknesses = ai_data.get("weaknesses") or ai_data.get("puntos_debiles") or []
+                notable_data = ai_data.get("notable_data") or ai_data.get("datos_notables") or []
+                evolution_summary = ai_data.get("evolution_summary") or ai_data.get("resumen_evolucion")
+
+                validation_errors = []
+                if not summary_general:
+                    validation_errors.append("Falta el campo 'summary_general'.")
+
+                logger.info("Phase: validate 3 general objectives")
+                if not isinstance(gen_objs, list):
+                    validation_errors.append(f"'general_objectives' debe ser una lista, se obtuvo {type(gen_objs).__name__}")
+                elif len(gen_objs) != 3:
+                    validation_errors.append(f"Se esperaban exactamente 3 objetivos generales en 'general_objectives', se obtuvieron {len(gen_objs)}")
+
+                logger.info("Phase: validate 3 specific objectives")
+                if not isinstance(spec_objs, list):
+                    validation_errors.append(f"'specific_objectives' debe ser una lista, se obtuvo {type(spec_objs).__name__}")
+                elif len(spec_objs) != 3:
+                    validation_errors.append(f"Se esperaban exactamente 3 objetivos específicos en 'specific_objectives', se obtuvieron {len(spec_objs)}")
+
+                logger.info("Phase: validate 4 simulation prompts")
+                if not isinstance(sim_prompts, list):
+                    validation_errors.append(f"'simulation_prompts' debe ser una lista, se obtuvo {type(sim_prompts).__name__}")
+                elif len(sim_prompts) != 4:
+                    validation_errors.append(f"Se esperaban exactamente 4 prompts de simulación en 'simulation_prompts', se obtuvieron {len(sim_prompts)}")
+
+                if validation_errors:
+                    err_msg = " | ".join(validation_errors)
+                    logger.warning("AI output validation failed: %s. Raw Response:\n%s", err_msg, ai_response_raw)
+                    if retry_count < max_retries:
+                        retry_count += 1
+                        logger.warning("Retrying OpenAI call because validation failed.")
+                        messages.append({"role": "assistant", "content": ai_response_raw})
+                        messages.append({"role": "user", "content": f"Error de validación: {err_msg}. Corrige el formato para cumplir exactamente las cantidades (3 objetivos generales, 3 objetivos específicos y 4 simulation_prompts)."})
+                        continue
+                    else:
+                        raise ValueError(f"AI output validation failed: {err_msg}")
+                else:
+                    # Successfully parsed and validated!
+                    # Normalize back into ai_data
+                    ai_data["general_objectives"] = gen_objs
+                    ai_data["specific_objectives"] = spec_objs
+                    ai_data["simulation_prompts"] = sim_prompts
+                    ai_data["summary_general"] = summary_general
+                    ai_data["strengths"] = strengths
+                    ai_data["weaknesses"] = weaknesses
+                    ai_data["notable_data"] = notable_data
+                    ai_data["evolution_summary"] = evolution_summary
+                    break
+
+            # 6. Save report
+            logger.info("Phase: save report")
             new_report.status = "completed"
             new_report.evaluations_count = aggregates["evaluations_count"]
             new_report.calls_count = aggregates["calls_count"]
-            new_report.avg_evaluacion_global = Decimal(str(aggregates["avg_evaluacion_global"] or 0.0)).quantize(Decimal("0.01"))
+            new_report.avg_evaluacion_global = Decimal(str(avg_val_global)).quantize(Decimal("0.01"))
             new_report.summary_general = ai_data.get("summary_general")
             new_report.strengths_json = ai_data.get("strengths")
             new_report.weaknesses_json = ai_data.get("weaknesses")
             new_report.notable_data_json = ai_data.get("notable_data")
             new_report.evolution_summary = ai_data.get("evolution_summary")
-            new_report.general_objectives_json = general_objectives
-            new_report.specific_objectives_json = specific_objectives
+            new_report.general_objectives_json = ai_data.get("general_objectives")
+            new_report.specific_objectives_json = ai_data.get("specific_objectives")
             new_report.generated_at = datetime.now(timezone.utc)
+            new_report.error_message = None  # Clear any previous error
 
             # 7. Add simulation prompts & completion status records
-            for idx, p in enumerate(simulation_prompts):
+            logger.info("Phase: save prompts")
+            for idx, p in enumerate(sim_prompts):
+                if not isinstance(p, dict):
+                    logger.error("Simulation prompt item is not a dictionary: %s", p)
+                    p = {
+                        "prompt_text": str(p),
+                        "title": f"Escenario de Simulación {idx + 1}",
+                        "scenario_type": "General"
+                    }
+                
+                p_number = p.get("prompt_number") or p.get("numero") or (idx + 1)
+                try:
+                    p_number = int(p_number)
+                except (ValueError, TypeError):
+                    p_number = idx + 1
+                    
+                p_title = p.get("title") or p.get("titulo") or p.get("scenario") or f"Escenario de Simulación {idx + 1}"
+                p_scenario = p.get("scenario_type") or p.get("scenario") or p.get("tipo_escenario") or "General"
+                p_text = p.get("prompt_text") or p.get("prompt") or p.get("text") or p.get("texto") or ""
+                p_focus = p.get("objective_focus") or p.get("enfoque_objetivo") or p.get("objectives") or []
+
+                if not p_text:
+                    p_text = f"Simulación de roleplay {idx + 1} para Boston Medical Group."
+
                 new_prompt = TrainingSimulationPrompt(
                     training_report_id=new_report.training_report_id,
                     hubspot_owner_id=hubspot_owner_id,
-                    prompt_number=p.get("prompt_number", idx + 1),
-                    title=p.get("title", f"Escenario de Simulación {idx + 1}"),
-                    scenario_type=p.get("scenario_type", "General"),
-                    objective_focus_json=p.get("objective_focus", []),
-                    prompt_text=p.get("prompt_text", "")
+                    prompt_number=p_number,
+                    title=str(p_title),
+                    scenario_type=str(p_scenario),
+                    objective_focus_json=p_focus if isinstance(p_focus, list) else [str(p_focus)],
+                    prompt_text=str(p_text)
                 )
                 db.add(new_prompt)
                 await db.flush()
 
-                # Create pending completion status
+                # 8. Create completion statuses
+                logger.info("Phase: create completion statuses")
                 comp_status = TrainingCompletionStatus(
                     training_report_id=new_report.training_report_id,
                     simulation_prompt_id=new_prompt.simulation_prompt_id,
@@ -576,7 +685,7 @@ class PersonalizedTrainingService:
                 )
                 db.add(comp_status)
 
-            # 8. Deactivate previous reports for this agent
+            # 9. Deactivate previous reports for this agent
             if existing_report:
                 existing_report.is_current = False
                 existing_report.superseded_by_report_id = new_report.training_report_id
@@ -594,15 +703,63 @@ class PersonalizedTrainingService:
                 d_rep.is_current = False
                 d_rep.superseded_by_report_id = new_report.training_report_id
 
+            # 10. Commit
+            logger.info("Phase: commit")
             await db.commit()
             logger.info("Report ID %d successfully completed for agent %s.", new_report.training_report_id, hubspot_owner_id)
             return new_report
 
         except Exception as ex:
             logger.exception("Failed to generate report for agent %s in period %s to %s.", hubspot_owner_id, period_start, period_end)
-            new_report.status = "failed"
-            new_report.error_message = str(ex)
-            await db.commit()
+            
+            # Rollback the transaction to discard incomplete database structures
+            await db.rollback()
+            
+            # Start a clean transaction to insert a failed report with the traceback details
+            try:
+                failed_report = TrainingAgentReport(
+                    training_run_id=run_id,
+                    hubspot_owner_id=hubspot_owner_id,
+                    agent_name=agent_name,
+                    agent_initials=agent_initials,
+                    period_start=period_start,
+                    period_end=period_end,
+                    status="failed",
+                    is_current=True,
+                    error_message=str(ex),
+                    evaluations_count=aggregates.get("evaluations_count", 0) if 'aggregates' in locals() else 0,
+                    calls_count=aggregates.get("calls_count", 0) if 'aggregates' in locals() else 0,
+                )
+                db.add(failed_report)
+                
+                # Deactivate previous reports even on failure so this failure is marked current
+                if existing_report:
+                    stmt_old = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == existing_report.training_report_id)
+                    res_old = await db.execute(stmt_old)
+                    old_rep = res_old.scalars().first()
+                    if old_rep:
+                        old_rep.is_current = False
+                        old_rep.superseded_by_report_id = failed_report.training_report_id
+                
+                stmt_deact = select(TrainingAgentReport).where(
+                    and_(
+                        TrainingAgentReport.hubspot_owner_id == hubspot_owner_id,
+                        TrainingAgentReport.training_report_id != failed_report.training_report_id,
+                        TrainingAgentReport.is_current == True
+                    )
+                )
+                res_deact = await db.execute(stmt_deact)
+                deacts = res_deact.scalars().all()
+                for d_rep in deacts:
+                    d_rep.is_current = False
+                    d_rep.superseded_by_report_id = failed_report.training_report_id
+                
+                await db.commit()
+                return failed_report
+            except Exception as e_fail_save:
+                logger.exception("Critically failed to save failed report status for %s", hubspot_owner_id)
+                await db.rollback()
+            
             raise ex
 
     @staticmethod
@@ -621,11 +778,9 @@ class PersonalizedTrainingService:
         """
         # Calculate dates if missing
         if not period_end:
-            # End of yesterday
             now = datetime.now(timezone.utc)
             period_end = datetime(now.year, now.month, now.day, 23, 59, 59, tzinfo=timezone.utc) - timedelta(days=1)
         if not period_start:
-            # 14 days before period_end
             period_start = period_end - timedelta(days=14) + timedelta(seconds=1)
 
         # Select target agents
@@ -642,6 +797,16 @@ class PersonalizedTrainingService:
         res_set = await db.execute(stmt_set)
         active_settings = res_set.scalars().all()
 
+        # Decouple settings from ORM to avoid expired attributes exceptions after transaction commits/rollbacks
+        target_agents = [
+            {
+                "hubspot_owner_id": s.hubspot_owner_id,
+                "agent_name": s.agent_name,
+                "agent_initials": s.agent_initials
+            }
+            for s in active_settings
+        ]
+
         # Create global Run record
         new_run = TrainingRun(
             period_start=period_start,
@@ -650,24 +815,28 @@ class PersonalizedTrainingService:
             triggered_by=triggered_by,
             created_by_email=created_by_email,
             started_at=datetime.now(timezone.utc),
-            agents_total=len(active_settings)
+            agents_total=len(target_agents)
         )
         db.add(new_run)
         await db.commit()
         await db.refresh(new_run)
 
+        run_id = new_run.training_run_id
         completed = 0
         skipped = 0
         failed = 0
+        failed_agents_errors = []
 
-        for s in active_settings:
+        for agent_info in target_agents:
+            owner_id = agent_info["hubspot_owner_id"]
+            initials = agent_info["agent_initials"]
             try:
                 rep = await PersonalizedTrainingService.generate_report_for_agent(
                     db=db,
-                    hubspot_owner_id=s.hubspot_owner_id,
+                    hubspot_owner_id=owner_id,
                     period_start=period_start,
                     period_end=period_end,
-                    run_id=new_run.training_run_id,
+                    run_id=run_id,
                     force_regenerate=force_regenerate
                 )
                 if rep.status == "completed":
@@ -676,9 +845,17 @@ class PersonalizedTrainingService:
                     skipped += 1
                 else:
                     failed += 1
+                    if rep.error_message:
+                        failed_agents_errors.append(f"{initials}: {rep.error_message}")
             except Exception as e_agent:
-                logger.error("Failed agent %s in run ID %d: %s", s.hubspot_owner_id, new_run.training_run_id, e_agent)
+                logger.error("Failed agent %s in run ID %d: %s", owner_id, run_id, e_agent)
                 failed += 1
+                failed_agents_errors.append(f"{initials}: {str(e_agent)}")
+
+        # Re-fetch new_run to avoid any greenlet/expired attribute issues after rollbacks
+        stmt_run = select(TrainingRun).where(TrainingRun.training_run_id == run_id)
+        res_run = await db.execute(stmt_run)
+        new_run = res_run.scalar_one()
 
         # Finalize run
         new_run.status = "completed" if failed == 0 else ("partially_completed" if completed > 0 else "failed")
@@ -686,6 +863,8 @@ class PersonalizedTrainingService:
         new_run.agents_skipped = skipped
         new_run.agents_failed = failed
         new_run.finished_at = datetime.now(timezone.utc)
+        if failed_agents_errors:
+            new_run.error_message = "; ".join(failed_agents_errors)
 
         await db.commit()
         await db.refresh(new_run)
