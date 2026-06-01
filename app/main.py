@@ -25,6 +25,7 @@ from app.routers import (
     typologies,
     service_evolution,
     me,
+    personalized_training,
 )
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -90,6 +91,7 @@ app.include_router(services.router)
 app.include_router(typologies.router)
 app.include_router(service_evolution.router)
 app.include_router(me.router)
+app.include_router(personalized_training.router)
 
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
@@ -144,6 +146,32 @@ async def start_automation_scheduler():
             await asyncio.sleep(30)
 
 
+# ── Personalized Training Scheduler ──────────────────────────────────────────
+async def start_training_scheduler():
+    """Background scheduler task checking for due personalized training runs every hour."""
+    logger.info("Personalized training background scheduler task started.")
+    import asyncio
+    await asyncio.sleep(20)  # Give app some startup headroom
+    
+    from app.db import get_engine
+    from app.services.personalized_training_service import PersonalizedTrainingService
+    from sqlalchemy.ext.asyncio import AsyncSession
+    
+    engine = get_engine()
+    
+    while True:
+        try:
+            async with AsyncSession(engine) as db:
+                await PersonalizedTrainingService.run_due_training_jobs(db)
+            await asyncio.sleep(3600)  # Check every hour
+        except asyncio.CancelledError:
+            logger.info("Personalized training background scheduler task cancelled.")
+            break
+        except Exception as e:
+            logger.error("Error in personalized training scheduler loop: %s", e, exc_info=True)
+            await asyncio.sleep(60)
+
+
 # ── Startup ───────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup_event():
@@ -172,4 +200,11 @@ async def startup_event():
         asyncio.create_task(start_automation_scheduler())
     else:
         logger.info("Automations background scheduler is DISABLED (ENABLE_AUTOMATION_SCHEDULER=false).")
+
+    # Start personalized training background scheduler if enabled
+    if settings.enable_training_scheduler:
+        asyncio.create_task(start_training_scheduler())
+    else:
+        logger.info("Personalized training background scheduler is DISABLED (ENABLE_TRAINING_SCHEDULER=false).")
+
 

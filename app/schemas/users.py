@@ -7,6 +7,8 @@ class UserBase(BaseModel):
     email: str
     role: str = "agent"
     is_active: bool = True
+    hubspot_owner_id: str | None = None
+    agent_initials: str | None = None
 
 
 class UserOut(UserBase):
@@ -21,6 +23,8 @@ class MeUpdatePayload(BaseModel):
     current_password: str
     username: str | None = None
     email: str | None = None
+    hubspot_owner_id: str | None = None
+    agent_initials: str | None = None
 
 
 class MePasswordUpdatePayload(BaseModel):

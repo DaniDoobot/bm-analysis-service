@@ -7,6 +7,13 @@ from app.models.mass_evaluations import MassEvaluationJob, MassEvaluationRun, Ma
 from app.models.services import Service
 from app.models.typologies import Typology
 from app.models.users import User
+from app.models.personalized_training import (
+    TrainingAgentSetting,
+    TrainingRun,
+    TrainingAgentReport,
+    TrainingSimulationPrompt,
+    TrainingCompletionStatus,
+)
 
 __all__ = [
     "Prompt",
@@ -26,6 +33,12 @@ __all__ = [
     "Service",
     "Typology",
     "User",
+    "TrainingAgentSetting",
+    "TrainingRun",
+    "TrainingAgentReport",
+    "TrainingSimulationPrompt",
+    "TrainingCompletionStatus",
 ]
+
 
 

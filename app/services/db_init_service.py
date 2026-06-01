@@ -135,6 +135,68 @@ async def init_db():
             except Exception as e:
                 logger.error("Failed to seed default developer user: %s", e)
 
+        # 1.3. Seed default training agents if bm_training_agent_settings is empty
+        from app.models.personalized_training import TrainingAgentSetting
+        async with AsyncSession(engine) as session:
+            try:
+                res = await session.execute(select(TrainingAgentSetting).limit(1))
+                if not res.scalars().first():
+                    logger.info("Seeding default training agents...")
+                    default_agents = [
+                        {"initials": "ST", "owner_id": "1459417733", "name": "Santiago Taboada"},
+                        {"initials": "LD", "owner_id": "1375831790", "name": "Luci Dos Santos Furtado"},
+                        {"initials": "FR", "owner_id": "1539993532", "name": "Fernanda Rodrigues"},
+                        {"initials": "RG", "owner_id": "1375831787", "name": "Roberto Galán"},
+                        {"initials": "EC", "owner_id": "1375831791", "name": "Eugenia Carreno"},
+                        {"initials": "BH", "owner_id": "33013277", "name": "Bryan Herrera"},
+                        {"initials": "CM", "owner_id": "33013276", "name": "Cristina Montenegro"},
+                    ]
+                    for agent in default_agents:
+                        new_agent = TrainingAgentSetting(
+                            hubspot_owner_id=agent["owner_id"],
+                            agent_name=agent["name"],
+                            agent_initials=agent["initials"],
+                            is_enabled=True
+                        )
+                        session.add(new_agent)
+                    await session.commit()
+                    logger.info("Default training agents seeded successfully.")
+                else:
+                    logger.info("Training agents table is not empty, skipping seeding.")
+            except Exception as e:
+                logger.error("Failed to seed default training agents: %s", e)
+
+        # 1.4. Ensure columns exist on bm_users table dynamically and non-destructively
+        async with engine.begin() as conn:
+            for col_name, col_type in [
+                ("hubspot_owner_id", "TEXT"),
+                ("agent_initials", "TEXT"),
+            ]:
+                res = await conn.execute(
+                    text(f"""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.columns 
+                            WHERE table_schema = 'public' 
+                              AND table_name = 'bm_users' 
+                              AND column_name = '{col_name}'
+                        );
+                    """)
+                )
+                col_exists = res.scalar()
+                if not col_exists:
+                    logger.info("Adding column '%s' to 'bm_users' table...", col_name)
+                    await conn.execute(
+                        text(f"ALTER TABLE bm_users ADD COLUMN {col_name} {col_type} NULL;")
+                    )
+                    if col_name == "hubspot_owner_id":
+                        try:
+                            await conn.execute(text("ALTER TABLE bm_users ADD CONSTRAINT uq_bm_users_hubspot_owner_id UNIQUE (hubspot_owner_id);"))
+                        except Exception as e_uq:
+                            logger.warning("Could not add unique constraint to hubspot_owner_id: %s", e_uq)
+                    logger.info("Column '%s' added successfully to 'bm_users'.", col_name)
+                else:
+                    logger.info("Column '%s' already exists on 'bm_users' table.", col_name)
+
         # 1.5. Ensure columns exist on bm_prompts table dynamically and non-destructively
         async with engine.begin() as conn:
             for col_name, col_type in [

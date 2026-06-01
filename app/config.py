@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     # ── Automation Scheduler ──────────────────────────────────────────────────
     enable_automation_scheduler: bool = False
 
+    # ── Personalized Training Scheduler ───────────────────────────────────────
+    enable_training_scheduler: bool = True
+    training_interval_days: int = 14
+    training_lookback_days: int = 14
+
     # ── Password Reveal Flag ──────────────────────────────────────────────────
     allow_password_reveal: bool = True
 
