@@ -153,8 +153,140 @@ async def cleanup_mass_evaluations(
         )
         return {"ok": True, **result}
     except Exception as e:
-        logger.exception("Error during cleanup-mass-evaluations: %s", e)
+        logger.exception("Error durante la limpieza de evaluaciones masivas: %s", e)
         raise HTTPException(
             status_code=400,
             detail=f"Error durante la limpieza de evaluaciones masivas: {str(e)}",
         )
+
+
+class CleanupSpecificRequest(BaseModel):
+    mode: Literal["dry_run", "execute"] = Field(default="dry_run", description="dry_run to preview, execute to delete")
+
+
+@router.post("/cleanup-specific-evaluations")
+async def cleanup_specific_evaluations(
+    body: CleanupSpecificRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Temporary endpoint to safely and programmatically delete a specific set of mass evaluations
+    strictly by call_timestamp in production.
+    """
+    from sqlalchemy import select, delete, func
+    from app.models.mass_evaluations import MassEvaluationResult, MassEvaluationCriterionResult, MassEvaluationJob, MassEvaluationRun
+    from datetime import datetime, timezone
+    
+    start_ts = datetime(2026, 5, 25, 0, 0, 0, tzinfo=timezone.utc)
+    end_ts = datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc)
+    
+    try:
+        # 1. Total jobs and runs count before (to confirm no deletion)
+        stmt_jobs_before = select(func.count(MassEvaluationJob.job_id))
+        stmt_runs_before = select(func.count(MassEvaluationRun.run_id))
+        jobs_count_before = (await db.execute(stmt_jobs_before)).scalar() or 0
+        runs_count_before = (await db.execute(stmt_runs_before)).scalar() or 0
+        
+        # 2. Total results to delete before
+        stmt_res_before = select(func.count(MassEvaluationResult.mass_analysis_id)).where(
+            MassEvaluationResult.call_timestamp >= start_ts,
+            MassEvaluationResult.call_timestamp < end_ts,
+            MassEvaluationResult.status == "completed"
+        )
+        total_resultados_a_borrar = (await db.execute(stmt_res_before)).scalar() or 0
+        
+        # 3. Total criteria to delete before
+        subq_ids = select(MassEvaluationResult.mass_analysis_id).where(
+            MassEvaluationResult.call_timestamp >= start_ts,
+            MassEvaluationResult.call_timestamp < end_ts,
+            MassEvaluationResult.status == "completed"
+        )
+        stmt_crit_before = select(func.count(MassEvaluationCriterionResult.id)).where(
+            MassEvaluationCriterionResult.mass_analysis_id.in_(subq_ids)
+        )
+        total_criterios_asociados_a_borrar = (await db.execute(stmt_crit_before)).scalar() or 0
+        
+        deleted_criteria = 0
+        deleted_results = 0
+        
+        # 4. If execute mode and count matches exactly 14
+        if body.mode == "execute":
+            if total_resultados_a_borrar != 14:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Safety check failed: expected exactly 14 results to delete, found {total_resultados_a_borrar}."
+                )
+                
+            # Perform deletes
+            stmt_del_crit = delete(MassEvaluationCriterionResult).where(
+                MassEvaluationCriterionResult.mass_analysis_id.in_(subq_ids)
+            )
+            res_del_crit = await db.execute(stmt_del_crit)
+            deleted_criteria = res_del_crit.rowcount
+            
+            stmt_del_res = delete(MassEvaluationResult).where(
+                MassEvaluationResult.call_timestamp >= start_ts,
+                MassEvaluationResult.call_timestamp < end_ts,
+                MassEvaluationResult.status == "completed"
+            )
+            res_del_res = await db.execute(stmt_del_res)
+            deleted_results = res_del_res.rowcount
+            
+            await db.commit()
+            
+        # 5. Validation after
+        stmt_res_after = select(func.count(MassEvaluationResult.mass_analysis_id)).where(
+            MassEvaluationResult.call_timestamp >= start_ts,
+            MassEvaluationResult.call_timestamp < end_ts,
+            MassEvaluationResult.status == "completed"
+        )
+        resultados_restantes = (await db.execute(stmt_res_after)).scalar() or 0
+        
+        # Validation orphans after (criteria whose mass_analysis_id is not in results)
+        subq_all_res = select(MassEvaluationResult.mass_analysis_id)
+        stmt_orphans = select(func.count(MassEvaluationCriterionResult.id)).where(
+            ~MassEvaluationCriterionResult.mass_analysis_id.in_(subq_all_res)
+        )
+        criterios_huerfanos = (await db.execute(stmt_orphans)).scalar() or 0
+        
+        # Jobs and runs after
+        jobs_count_after = (await db.execute(stmt_jobs_before)).scalar() or 0
+        runs_count_after = (await db.execute(stmt_runs_before)).scalar() or 0
+        
+        jobs_runs_unchanged = (jobs_count_before == jobs_count_after) and (runs_count_before == runs_count_after)
+        
+        return {
+            "ok": True,
+            "mode": body.mode,
+            "total_resultados_a_borrar_previo": total_resultados_a_borrar,
+            "total_criterios_asociados_a_borrar_previo": total_criterios_asociados_a_borrar,
+            "filas_borradas_criterios": deleted_criteria,
+            "filas_borradas_resultados": deleted_results,
+            "resultados_restantes_despues": resultados_restantes,
+            "criterios_huerfanos_despues": criterios_huerfanos,
+            "jobs_count_before": jobs_count_before,
+            "jobs_count_after": jobs_count_after,
+            "runs_count_before": runs_count_before,
+            "runs_count_after": runs_count_after,
+            "confirmacion_jobs_y_runs_no_afectados": jobs_runs_unchanged,
+            "sql_ejecutado": (
+                "BEGIN;\n"
+                "DELETE FROM bm_mass_evaluation_criterion_results "
+                "WHERE mass_analysis_id IN ("
+                "  SELECT mass_analysis_id FROM bm_mass_evaluation_results "
+                "  WHERE call_timestamp >= '2026-05-25 00:00:00+00' AND call_timestamp < '2026-06-01 00:00:00+00'"
+                ");\n"
+                "DELETE FROM bm_mass_evaluation_results "
+                "WHERE call_timestamp >= '2026-05-25 00:00:00+00' AND call_timestamp < '2026-06-01 00:00:00+00';\n"
+                "COMMIT;"
+            )
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error during cleanup-specific-evaluations: %s", e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal error during cleanup: {str(e)}"
+        )
+
