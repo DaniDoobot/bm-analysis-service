@@ -1,6 +1,6 @@
 """Pydantic schemas for User profile and auth payloads."""
 from typing import Optional
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 
 class UserBase(BaseModel):
@@ -63,11 +63,12 @@ class UserCreatePayload(BaseModel):
     """Payload for admin creating a new user."""
     email: str
     username: Optional[str] = None       # default: email.split("@")[0]
-    password: str
+    password: Optional[str] = None
     role: str = "agente"
     is_active: bool = True
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None
+    must_reset_password: bool = False
 
     @field_validator("role")
     @classmethod
@@ -76,6 +77,12 @@ class UserCreatePayload(BaseModel):
         if v not in allowed:
             raise ValueError(f"Rol invalido '{v}'. Permitidos: {allowed}")
         return v
+
+    @model_validator(mode="after")
+    def validate_password_requirement(self) -> "UserCreatePayload":
+        if not self.must_reset_password and not self.password:
+            raise ValueError("Se requiere 'password' cuando 'must_reset_password' es False.")
+        return self
 
 
 class UserUpdatePayload(BaseModel):
@@ -121,5 +128,15 @@ class MePasswordUpdatePayload(BaseModel):
 
 class RevealPasswordPayload(BaseModel):
     current_password: str
+
+
+class RequestPasswordResetPayload(BaseModel):
+    email: str
+
+
+class ResetPasswordPayload(BaseModel):
+    token: str
+    new_password: str
+
 
 

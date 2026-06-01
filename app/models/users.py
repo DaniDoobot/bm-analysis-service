@@ -19,6 +19,11 @@ class User(Base):
     agent_initials: Mapped[str | None] = mapped_column(Text, nullable=True)
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
     password_plain_dev: Mapped[str | None] = mapped_column(Text, nullable=True)
+    must_reset_password: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    password_set_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reset_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reset_token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

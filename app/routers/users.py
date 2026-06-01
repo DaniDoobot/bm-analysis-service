@@ -3,6 +3,8 @@ FastAPI router for user management — CRUD protected by Bearer admin token.
 All write endpoints require role='administrador'.
 """
 import logging
+import secrets
+from datetime import datetime, timezone, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -130,6 +132,17 @@ async def create_user(
             detail=f"Ya existe un usuario con username '{username}'.",
         )
 
+    token = None
+    if body.must_reset_password:
+        token = secrets.token_urlsafe(32)
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+        # Generate a secure placeholder hash since password_hash cannot be NULL
+        temp_pass = secrets.token_urlsafe(32)
+        pass_hash = hash_password(temp_pass)
+    else:
+        pass_hash = hash_password(body.password)
+        expires_at = None
+
     new_user = User(
         username=username,
         email=body.email,
@@ -137,15 +150,23 @@ async def create_user(
         is_active=body.is_active,
         hubspot_owner_id=body.hubspot_owner_id,
         agent_initials=body.agent_initials,
-        password_hash=hash_password(body.password),
+        password_hash=pass_hash,
         password_plain_dev=None,
+        must_reset_password=body.must_reset_password,
+        reset_token=token,
+        reset_token_expires_at=expires_at,
     )
     db.add(new_user)
     await db.commit()
     await db.refresh(new_user)
 
     logger.info("Admin %s CREATED user %s (id=%s)", admin.email, new_user.email, new_user.user_id)
-    return {"ok": True, "action": "created", "user": _user_to_full(new_user)}
+    
+    resp = {"ok": True, "action": "created", "user": _user_to_full(new_user)}
+    if body.must_reset_password:
+        resp["reset_token"] = token
+        resp["reset_url"] = f"https://speechbm.doobot.ai/reset-password?token={token}"
+    return resp
 
 
 # ── PATCH /bm/users/{user_id} ──────────────────────────────────────────────────
@@ -256,3 +277,34 @@ async def deactivate_user(
 
     logger.info("Admin %s DEACTIVATED user %s (id=%s)", admin.email, user.email, user.user_id)
     return {"ok": True, "action": "deactivated", "user_id": user_id, "email": user.email}
+
+
+@router.post("/{user_id}/force-password-reset")
+async def force_password_reset(
+    user_id: int,
+    admin: Annotated[User, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Force password reset for a user.
+    Generates a secure reset token expiring in 24 hours and sets must_reset_password = True.
+    """
+    stmt = select(User).where(User.user_id == user_id)
+    res = await db.execute(stmt)
+    user = res.scalars().first()
+    if not user:
+        raise HTTPException(status_code=404, detail=f"Usuario {user_id} no encontrado.")
+
+    token = secrets.token_urlsafe(32)
+    user.must_reset_password = True
+    user.reset_token = token
+    user.reset_token_expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+    
+    await db.commit()
+    
+    logger.info("Admin %s FORCED password reset for user %s (id=%s)", admin.email, user.email, user.user_id)
+    return {
+        "ok": True,
+        "reset_token": token,
+        "reset_url": f"https://speechbm.doobot.ai/reset-password?token={token}"
+    }

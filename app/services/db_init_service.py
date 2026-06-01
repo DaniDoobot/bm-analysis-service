@@ -179,8 +179,13 @@ async def init_db():
         # 1.4. Ensure columns exist on bm_users table dynamically and non-destructively
         async with engine.begin() as conn:
             for col_name, col_type in [
-                ("hubspot_owner_id", "TEXT"),
-                ("agent_initials", "TEXT"),
+                ("hubspot_owner_id", "TEXT NULL"),
+                ("agent_initials", "TEXT NULL"),
+                ("must_reset_password", "BOOLEAN DEFAULT FALSE NOT NULL"),
+                ("password_set_at", "TIMESTAMPTZ NULL"),
+                ("reset_token", "TEXT NULL"),
+                ("reset_token_expires_at", "TIMESTAMPTZ NULL"),
+                ("last_login_at", "TIMESTAMPTZ NULL"),
             ]:
                 res = await conn.execute(
                     text(f"""
@@ -196,7 +201,7 @@ async def init_db():
                 if not col_exists:
                     logger.info("Adding column '%s' to 'bm_users' table...", col_name)
                     await conn.execute(
-                        text(f"ALTER TABLE bm_users ADD COLUMN {col_name} {col_type} NULL;")
+                        text(f"ALTER TABLE bm_users ADD COLUMN {col_name} {col_type};")
                     )
                     if col_name == "hubspot_owner_id":
                         try:

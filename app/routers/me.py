@@ -1,5 +1,6 @@
-"""FastAPI router for User profile, auth, and development password reveal."""
 import logging
+import secrets
+from datetime import datetime, timezone, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -15,6 +16,8 @@ from app.schemas.users import (
     RevealPasswordPayload,
     MeUpdatePayload,
     MePasswordUpdatePayload,
+    RequestPasswordResetPayload,
+    ResetPasswordPayload,
 )
 from app.utils.security import (
     verify_password,
@@ -47,20 +50,40 @@ async def login(
     res = await db.execute(stmt)
     user = res.scalars().first()
     
-    if not user or not verify_password(payload.password, user.password_hash):
+    if not user:
         logger.warning("Invalid credentials for identifier: '%s'", identifier)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Nombre de usuario o contrase\u00f1a incorrectos."
+            detail="Nombre de usuario o contraseña incorrectos."
         )
         
     if not user.is_active:
         logger.warning("Inactive user login attempt: '%s'", identifier)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="La cuenta de usuario est\u00e1 desactivada."
+            detail="La cuenta de usuario está desactivada."
+        )
+
+    if user.must_reset_password:
+        logger.info("Login blocked: user %s must reset password.", user.email)
+        return {
+            "ok": False,
+            "requires_password_reset": True,
+            "email": user.email,
+            "message": "Debes establecer una nueva contraseña para continuar."
+        }
+        
+    if not verify_password(payload.password, user.password_hash):
+        logger.warning("Invalid credentials for identifier: '%s'", identifier)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Nombre de usuario o contraseña incorrectos."
         )
         
+    # Update last_login_at
+    user.last_login_at = datetime.now(timezone.utc)
+    await db.commit()
+
     # Generate Bearer Token
     token_data = {"user_id": user.user_id, "username": user.username}
     token = create_access_token(token_data)
@@ -126,6 +149,89 @@ async def bootstrap_first_admin(
             "email": admin.email,
             "role": admin.role,
         }
+    }
+
+
+@router.post("/auth/request-password-reset")
+async def request_password_reset(
+    payload: RequestPasswordResetPayload,
+    db: Annotated[AsyncSession, Depends(get_db)]
+):
+    """
+    Request a password reset token.
+    Safe neutral response, but returns the token/url in the JSON in development/testing mode
+    if the email exists and is active.
+    """
+    email_clean = payload.email.strip().lower()
+    
+    stmt = select(User).where(User.email == email_clean)
+    res = await db.execute(stmt)
+    user = res.scalars().first()
+    
+    msg = "Si el email existe y está activo, se ha generado un enlace de restablecimiento."
+    
+    if not user or not user.is_active:
+        logger.info("Request reset for non-existent or inactive email: %s", email_clean)
+        return {
+            "ok": True,
+            "message": msg
+        }
+        
+    token = secrets.token_urlsafe(32)
+    user.reset_token = token
+    user.reset_token_expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+    
+    await db.commit()
+    
+    logger.info("Generated reset token for user: %s", user.email)
+    
+    # We return the token and url in the JSON so that Lovable/developers can access it manually.
+    return {
+        "ok": True,
+        "message": msg,
+        "reset_token": token,
+        "reset_url": f"https://speechbm.doobot.ai/reset-password?token={token}"
+    }
+
+
+@router.post("/auth/reset-password")
+async def reset_password(
+    payload: ResetPasswordPayload,
+    db: Annotated[AsyncSession, Depends(get_db)]
+):
+    """
+    Submit a password reset token to set a new password.
+    Clears must_reset_password flag and updates password_set_at.
+    """
+    stmt = select(User).where(User.reset_token == payload.token)
+    res = await db.execute(stmt)
+    user = res.scalars().first()
+    
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Token de restablecimiento inválido o expirado."
+        )
+        
+    if not user.reset_token_expires_at or user.reset_token_expires_at < datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El token de restablecimiento ha expirado."
+        )
+        
+    user.password_hash = hash_password(payload.new_password)
+    user.password_plain_dev = None
+    user.must_reset_password = False
+    user.password_set_at = datetime.now(timezone.utc)
+    user.reset_token = None
+    user.reset_token_expires_at = None
+    
+    await db.commit()
+    
+    logger.info("Successfully reset password for user %s via token.", user.email)
+    return {
+        "ok": True,
+        "message": "Contraseña restablecida correctamente."
     }
 
 
