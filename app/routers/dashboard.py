@@ -14,7 +14,9 @@ from app.services.dashboard_service import (
     get_agent_evolution,
     get_objections_breakdown,
     get_mass_result_detail,
+    get_agents_comparison,
 )
+from app.schemas.dashboard import AgentComparisonResponse
 from app.utils.hubspot_owners import resolve_owner_id_by_email, resolve_owner_name
 
 logger = logging.getLogger(__name__)
@@ -48,6 +50,45 @@ async def dashboard_summary(
         return data
     except Exception as e:
         logger.exception("Failed to retrieve dashboard summary")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/dashboard/agents-comparison", response_model=AgentComparisonResponse)
+async def agents_comparison(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    hubspot_owner_ids: Annotated[str | None, Query(description="Comma-separated HubSpot owner IDs")] = None,
+    service_id: Annotated[int | None, Query(description="Filter by service ID")] = None,
+    service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
+    typology_id: Annotated[int | None, Query(description="Filter by typology ID")] = None,
+    typology_key: Annotated[str | None, Query(description="Filter by typology key")] = None,
+    period: Annotated[str | None, Query(description="24h | 7d | 30d | 90d | all")] = None,
+    date_from: Annotated[str | None, Query(description="Custom start date (ISO or YYYY-MM-DD)")] = None,
+    date_to: Annotated[str | None, Query(description="Custom end date (ISO or YYYY-MM-DD)")] = None,
+    bucket: Annotated[str | None, Query(description="hour | day | week")] = None,
+):
+    """
+    Get multi-agent comparison analytics for dashboard reporting.
+    """
+    owner_ids = None
+    if hubspot_owner_ids and hubspot_owner_ids.strip():
+        owner_ids = [oid.strip() for oid in hubspot_owner_ids.split(",") if oid.strip()]
+        
+    try:
+        data = await get_agents_comparison(
+            db,
+            hubspot_owner_ids=owner_ids,
+            service_id=service_id,
+            service_key=service_key,
+            typology_id=typology_id,
+            typology_key=typology_key,
+            period=period,
+            date_from=date_from,
+            date_to=date_to,
+            bucket=bucket,
+        )
+        return data
+    except Exception as e:
+        logger.exception("Failed to retrieve agent comparison metrics")
         raise HTTPException(status_code=500, detail=str(e))
 
 

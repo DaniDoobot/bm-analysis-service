@@ -1365,3 +1365,481 @@ async def get_mass_result_detail(db: AsyncSession, identifier: str) -> dict[str,
         "recording_url": row.recording_url,
         "execution_source": row.execution_source
     }
+
+
+async def get_agents_comparison(
+    db: AsyncSession,
+    hubspot_owner_ids: list[str] | None = None,
+    service_id: int | None = None,
+    service_key: str | None = None,
+    typology_id: int | None = None,
+    typology_key: str | None = None,
+    period: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    bucket: str | None = None,
+) -> dict[str, Any]:
+    """Retrieve multi-agent comparison analytics using MassEvaluationResult."""
+    now = datetime.now(timezone.utc)
+    
+    # 1. Resolve date range
+    dt_from = parse_date(date_from)
+    dt_to = parse_date(date_to)
+    
+    if dt_from and dt_to:
+        if date_from and len(date_from) <= 10:
+            start_actual = dt_from.replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            start_actual = dt_from
+            
+        if date_to and len(date_to) <= 10:
+            end_actual = dt_to.replace(hour=23, minute=59, second=59, microsecond=999999)
+        else:
+            end_actual = dt_to
+            
+        span = end_actual - start_actual
+        start_anterior = start_actual - span
+        end_anterior = start_actual
+        
+        if not bucket:
+            if span <= timedelta(hours=24):
+                bucket_interval = "hour"
+            elif span <= timedelta(days=7):
+                bucket_interval = "day"
+            elif span <= timedelta(days=30):
+                bucket_interval = "day"
+            else:
+                bucket_interval = "week"
+        else:
+            bucket_interval = bucket
+    else:
+        p = period or "30d"
+        if p == "24h":
+            delta = timedelta(hours=24)
+            default_bucket = "hour"
+        elif p == "7d":
+            delta = timedelta(days=7)
+            default_bucket = "day"
+        elif p == "30d":
+            delta = timedelta(days=30)
+            default_bucket = "day"
+        elif p == "90d":
+            delta = timedelta(days=90)
+            default_bucket = "day"
+        elif p == "all":
+            delta = timedelta(days=365)
+            default_bucket = "week"
+        else:
+            delta = timedelta(days=30)
+            default_bucket = "day"
+            
+        start_actual = now - delta
+        end_actual = now
+        start_anterior = now - (delta * 2)
+        end_anterior = now - delta
+        bucket_interval = bucket or default_bucket
+
+    # 2. Query completed mass evaluation results
+    stmt = select(MassEvaluationResult).where(
+        MassEvaluationResult.status == "completed"
+    )
+    if start_anterior:
+        stmt = stmt.where(MassEvaluationResult.call_timestamp >= start_anterior)
+    if end_actual:
+        stmt = stmt.where(MassEvaluationResult.call_timestamp <= end_actual)
+        
+    if service_id is not None:
+        stmt = stmt.where(MassEvaluationResult.service_id == service_id)
+    elif service_key is not None:
+        stmt = stmt.where(MassEvaluationResult.service_key == service_key)
+        
+    if typology_id is not None:
+        stmt = stmt.where(MassEvaluationResult.typology_id == typology_id)
+    elif typology_key is not None:
+        stmt = stmt.where(MassEvaluationResult.typology_key == typology_key)
+        
+    if hubspot_owner_ids:
+        stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(hubspot_owner_ids))
+        
+    # Order by call_timestamp ascending for chronological aggregations
+    stmt = stmt.order_by(MassEvaluationResult.call_timestamp.asc())
+    
+    result = await db.execute(stmt)
+    rows = list(result.scalars().all())
+    
+    # 3. Categorize rows
+    actual_rows = []
+    anterior_rows = []
+    
+    for r in rows:
+        ts = r.call_timestamp
+        if not ts:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+            
+        if start_actual <= ts <= end_actual:
+            actual_rows.append(r)
+        elif start_anterior <= ts < start_actual:
+            anterior_rows.append(r)
+
+    # 4. Determine agents to return
+    # Find all agents with activity in current period
+    active_owner_ids = set()
+    for r in actual_rows:
+        if r.hubspot_owner_id:
+            active_owner_ids.add(r.hubspot_owner_id)
+            
+    # Include all selected owner IDs if provided
+    target_owner_ids = set()
+    if hubspot_owner_ids:
+        target_owner_ids.update(hubspot_owner_ids)
+    else:
+        target_owner_ids.update(active_owner_ids)
+        # Also include all known HubSpot owners to ensure Lovable stability
+        target_owner_ids.update(OWNER_TO_NAME.keys())
+        
+    # Map owner IDs to display names & initials
+    agents_map = {}
+    for oid in target_owner_ids:
+        # Resolve display name
+        disp_name = resolve_owner_name(oid)
+        if not disp_name:
+            # Try to resolve from rows
+            for r in rows:
+                if r.hubspot_owner_id == oid and r.agent_name and not r.agent_name.isdigit():
+                    disp_name = r.agent_name
+                    break
+        if not disp_name:
+            disp_name = f"Agente ({oid})"
+            
+        # Initials helper
+        parts = disp_name.strip().split()
+        if len(parts) >= 2:
+            initials = (parts[0][0] + parts[1][0]).upper()
+        elif len(parts) == 1:
+            initials = parts[0][:2].upper()
+        else:
+            initials = "??"
+            
+        agents_map[oid] = {
+            "name": disp_name,
+            "initials": initials
+        }
+        
+    # 5. Master typologies for 0-call population if filtering by service
+    typo_stmt = select(Typology, Service).join(
+        Service, Typology.service_id == Service.service_id
+    ).where(
+        Typology.is_active == True,
+        Service.is_active == True
+    )
+    if service_id is not None:
+        typo_stmt = typo_stmt.where(Typology.service_id == service_id)
+    elif service_key is not None:
+        typo_stmt = typo_stmt.where(Service.service_key == service_key)
+        
+    typo_stmt = typo_stmt.order_by(Typology.sort_order.asc(), Typology.typology_name.asc())
+    typo_res = await db.execute(typo_stmt)
+    typo_rows = typo_res.all()
+    
+    master_typos = []
+    for t, s in typo_rows:
+        master_typos.append({
+            "typology_key": t.typology_key,
+            "typology_name": t.typology_name
+        })
+
+    # 6. Generate time buckets
+    buckets = []
+    if bucket_interval == "hour":
+        curr = start_actual.replace(minute=0, second=0, microsecond=0)
+        while curr <= end_actual:
+            buckets.append(curr)
+            curr += timedelta(hours=1)
+    elif bucket_interval == "week":
+        # Monday of the week
+        curr = start_actual.replace(hour=0, minute=0, second=0, microsecond=0)
+        curr = curr - timedelta(days=curr.weekday())
+        while curr <= end_actual:
+            buckets.append(curr)
+            curr += timedelta(days=7)
+    else: # day
+        curr = start_actual.replace(hour=0, minute=0, second=0, microsecond=0)
+        while curr <= end_actual:
+            buckets.append(curr)
+            curr += timedelta(days=1)
+
+    # 7. Aggregate per-agent metrics, series, typologies, and criteria summaries
+    agents_list = []
+    series_list = []
+    typologies_list = []
+    criteria_list = []
+    
+    for oid, info in agents_map.items():
+        # Filter agent's rows
+        agent_actual_rows = [r for r in actual_rows if r.hubspot_owner_id == oid]
+        agent_anterior_rows = [r for r in anterior_rows if r.hubspot_owner_id == oid]
+        
+        # Calculate current metrics
+        total_calls = len(agent_actual_rows)
+        completed_calls = total_calls # all rows are completed
+        
+        avg_eval = get_avg_score_mass(agent_actual_rows, "evaluacion_global")
+        avg_cla = get_avg_score_mass(agent_actual_rows, "claridad")
+        avg_emp = get_avg_score_mass(agent_actual_rows, "empatia")
+        avg_pro = get_avg_score_mass(agent_actual_rows, "procedimiento")
+        
+        citas_count = sum(1 for r in agent_actual_rows if r.result_json and isinstance(r.result_json, dict) and r.result_json.get("tipo_llamada") == "cita")
+        cierre_cita_rate = round(citas_count / total_calls, 2) if total_calls > 0 else 0.0
+        
+        # Main typology & distribution
+        agent_typo_counts = {}
+        agent_typo_names = {}
+        
+        if service_id is not None or service_key is not None:
+            for mt in master_typos:
+                agent_typo_counts[mt["typology_key"]] = 0
+                agent_typo_names[mt["typology_key"]] = mt["typology_name"]
+                
+        unclassified_count = 0
+        for r in agent_actual_rows:
+            tk = r.typology_key or (r.result_json.get("tipo_llamada") if r.result_json else None)
+            tn = r.typology_name or (r.result_json.get("tipo_llamada").capitalize() if (r.result_json and r.result_json.get("tipo_llamada")) else None)
+            
+            if not tk:
+                unclassified_count += 1
+                continue
+                
+            agent_typo_counts[tk] = agent_typo_counts.get(tk, 0) + 1
+            if tn:
+                agent_typo_names[tk] = tn
+            elif tk not in agent_typo_names:
+                agent_typo_names[tk] = tk.capitalize()
+                
+        # Main Typology determination
+        main_typology = None
+        if agent_typo_counts:
+            # Filter typologies with counts > 0
+            active_typos = {k: v for k, v in agent_typo_counts.items() if v > 0}
+            if active_typos:
+                best_tk = max(active_typos, key=active_typos.get)
+                main_typology = agent_typo_names.get(best_tk, best_tk.capitalize())
+                
+        agent_total_typos = sum(agent_typo_counts.values()) + unclassified_count
+        
+        typos_dist = []
+        for tk, count in agent_typo_counts.items():
+            pct = round((count / agent_total_typos) * 100, 1) if agent_total_typos > 0 else 0.0
+            typos_dist.append({
+                "typology_key": tk,
+                "typology_name": agent_typo_names.get(tk, tk.capitalize()),
+                "total_calls": count,
+                "percentage": pct
+            })
+            
+        if unclassified_count > 0:
+            pct = round((unclassified_count / agent_total_typos) * 100, 1) if agent_total_typos > 0 else 0.0
+            typos_dist.append({
+                "typology_key": "unclassified",
+                "typology_name": "Sin clasificar",
+                "total_calls": unclassified_count,
+                "percentage": pct
+            })
+            
+        typos_dist.sort(key=lambda x: x["total_calls"], reverse=True)
+        typologies_list.append({
+            "hubspot_owner_id": oid,
+            "agent_initials": info["initials"],
+            "typologies": typos_dist
+        })
+        
+        # Averages in previous period for Delta calculation
+        total_calls_ant = len(agent_anterior_rows)
+        avg_eval_ant = get_avg_score_mass(agent_anterior_rows, "evaluacion_global")
+        citas_count_ant = sum(1 for r in agent_anterior_rows if r.result_json and isinstance(r.result_json, dict) and r.result_json.get("tipo_llamada") == "cita")
+        cierre_cita_rate_ant = round(citas_count_ant / total_calls_ant, 2) if total_calls_ant > 0 else 0.0
+        
+        # Delta calculations
+        delta_eval = round(avg_eval - avg_eval_ant, 2) if (avg_eval is not None and avg_eval_ant is not None) else (round(avg_eval, 2) if avg_eval is not None else 0.0)
+        delta_calls = total_calls - total_calls_ant
+        delta_cierre = round(cierre_cita_rate - cierre_cita_rate_ant, 2)
+        
+        delta_vs_previous_period = {
+            "avg_evaluacion_global": delta_eval,
+            "total_calls": delta_calls,
+            "cierre_cita_rate": delta_cierre
+        }
+        
+        # Append Agent Metrics
+        agents_list.append({
+            "hubspot_owner_id": oid,
+            "agent_initials": info["initials"],
+            "agent_name": info["name"],
+            "total_calls": total_calls,
+            "completed_calls": completed_calls,
+            "avg_evaluacion_global": avg_eval,
+            "avg_claridad": avg_cla,
+            "avg_empatia": avg_emp,
+            "avg_procedimiento": avg_pro,
+            "cierre_cita_rate": cierre_cita_rate,
+            "main_typology": main_typology,
+            "delta_vs_previous_period": delta_vs_previous_period
+        })
+        
+        # Time Series Points
+        points = []
+        for b_dt in buckets:
+            if bucket_interval == "hour":
+                b_key = b_dt.strftime("%Y-%m-%d %H:00")
+            elif bucket_interval == "day":
+                b_key = b_dt.strftime("%Y-%m-%d")
+            else:
+                b_key = b_dt.strftime("%Y-%m-%d")
+                
+            # Filter rows in this bucket
+            b_rows = []
+            for r in agent_actual_rows:
+                ts = r.call_timestamp
+                if not ts:
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                    
+                if bucket_interval == "hour":
+                    row_key = ts.strftime("%Y-%m-%d %H:00")
+                elif bucket_interval == "day":
+                    row_key = ts.strftime("%Y-%m-%d")
+                else:
+                    row_key = (ts - timedelta(days=ts.weekday())).strftime("%Y-%m-%d")
+                    
+                if row_key == b_key:
+                    b_rows.append(r)
+                    
+            if b_rows:
+                b_total = len(b_rows)
+                b_citas = sum(1 for r in b_rows if r.result_json and isinstance(r.result_json, dict) and r.result_json.get("tipo_llamada") == "cita")
+                b_avg_eval = get_avg_score_mass(b_rows, "evaluacion_global")
+                b_avg_emp = get_avg_score_mass(b_rows, "empatia")
+                b_avg_cla = get_avg_score_mass(b_rows, "claridad")
+                b_avg_pro = get_avg_score_mass(b_rows, "procedimiento")
+                b_rate = round(b_citas / b_total, 2)
+            else:
+                b_total = 0
+                b_avg_eval = None
+                b_avg_emp = None
+                b_avg_cla = None
+                b_avg_pro = None
+                b_rate = 0.0
+                
+            points.append({
+                "bucket": b_key,
+                "total_calls": b_total,
+                "avg_evaluacion_global": b_avg_eval,
+                "avg_empatia": b_avg_emp,
+                "avg_claridad": b_avg_cla,
+                "avg_procedimiento": b_avg_pro,
+                "cierre_cita_rate": b_rate
+            })
+            
+        series_list.append({
+            "hubspot_owner_id": oid,
+            "agent_initials": info["initials"],
+            "points": points
+        })
+        
+        # Criteria Summary
+        agent_criteria = []
+        for c_key, c_name in CRITERIA_NAMES.items():
+            scores = []
+            for r in agent_actual_rows:
+                s = extract_score_from_mass(r.result_json, r.items_json, c_key)
+                if s is not None:
+                    scores.append(to_float(s))
+            if scores:
+                avg_score = round(sum(scores) / len(scores), 1)
+                count = len(scores)
+            else:
+                avg_score = None
+                count = 0
+            agent_criteria.append({
+                "criterion_key": c_key,
+                "criterion_name": c_name,
+                "avg_score": avg_score,
+                "count": count
+            })
+            
+        criteria_list.append({
+            "hubspot_owner_id": oid,
+            "agent_initials": info["initials"],
+            "criteria": agent_criteria
+        })
+        
+    # 8. Compile Global KPI Summary
+    active_agents = [a for a in agents_list if a["total_calls"] > 0]
+    total_calls_global = sum(a["total_calls"] for a in agents_list)
+    
+    best_avg_agent = {}
+    best_imp_agent = {}
+    highest_vol_agent = {}
+    
+    if active_agents:
+        # Best Agent by average
+        with_avg = [a for a in active_agents if a["avg_evaluacion_global"] is not None]
+        if with_avg:
+            best_avg = max(with_avg, key=lambda x: x["avg_evaluacion_global"])
+            best_avg_agent = {
+                "hubspot_owner_id": best_avg["hubspot_owner_id"],
+                "agent_initials": best_avg["agent_initials"],
+                "avg_evaluacion_global": best_avg["avg_evaluacion_global"]
+            }
+            
+        # Best Agent by improvement
+        with_imp = [a for a in active_agents if a["delta_vs_previous_period"].get("avg_evaluacion_global") is not None]
+        if with_imp:
+            best_imp = max(with_imp, key=lambda x: x["delta_vs_previous_period"]["avg_evaluacion_global"])
+            best_imp_agent = {
+                "hubspot_owner_id": best_imp["hubspot_owner_id"],
+                "agent_initials": best_imp["agent_initials"],
+                "delta_avg_evaluacion_global": best_imp["delta_vs_previous_period"]["avg_evaluacion_global"]
+            }
+            
+        # Highest Volume Agent
+        highest_vol = max(active_agents, key=lambda x: x["total_calls"])
+        highest_vol_agent = {
+            "hubspot_owner_id": highest_vol["hubspot_owner_id"],
+            "agent_initials": highest_vol["agent_initials"],
+            "total_calls": highest_vol["total_calls"]
+        }
+        
+    summary = {
+        "agents_count": len(active_agents),
+        "total_calls": total_calls_global,
+        "best_agent_by_avg": best_avg_agent,
+        "best_agent_by_improvement": best_imp_agent,
+        "highest_volume_agent": highest_vol_agent
+    }
+    
+    # Sort agents list by total_calls desc, then avg_evaluacion_global desc
+    agents_list.sort(key=lambda x: (x["total_calls"], x["avg_evaluacion_global"] or 0.0), reverse=True)
+    
+    filters = {
+        "hubspot_owner_ids": hubspot_owner_ids,
+        "service_id": service_id,
+        "service_key": service_key,
+        "typology_key": typology_key,
+        "period": period,
+        "date_from": start_actual.isoformat() if start_actual else None,
+        "date_to": end_actual.isoformat() if end_actual else None,
+        "bucket": bucket_interval
+    }
+    
+    return {
+        "filters": filters,
+        "summary": summary,
+        "agents": agents_list,
+        "series": series_list,
+        "typology_distribution_by_agent": typologies_list,
+        "criteria_summary_by_agent": criteria_list
+    }
+
