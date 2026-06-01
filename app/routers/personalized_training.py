@@ -118,13 +118,28 @@ async def get_agent_detail_admin(
 ):
     """Full detail of an agent's training, objectives, prompts, history and progress (Admin only)."""
     enforce_admin_role(current_user)
-    detail = await PersonalizedTrainingService.get_agent_detail(db, hubspot_owner_id=hubspot_owner_id)
-    if not detail:
+    try:
+        detail = await PersonalizedTrainingService.get_agent_detail(db, hubspot_owner_id=hubspot_owner_id)
+        if not detail:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Agente {hubspot_owner_id} no encontrado en configuraciones."
+            )
+        # Manually validate with Pydantic to catch serialization errors before returning
+        AgentDetailResponse.model_validate(detail)
+        return detail
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed GET detail for agent %s: %s", hubspot_owner_id, e)
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Agente {hubspot_owner_id} no encontrado en configuraciones."
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error_message": "Fallo de serialización en el endpoint de detalle.",
+                "exception_type": type(e).__name__,
+                "exception_message": str(e)
+            }
         )
-    return detail
 
 
 @router.post("/admin/generate", response_model=TrainingRunResponse)

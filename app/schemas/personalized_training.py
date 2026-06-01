@@ -68,7 +68,7 @@ class SimulationPromptOut(BaseModel):
     prompt_number: int
     title: str
     scenario_type: str
-    objective_focus_json: List[str] = Field(default_factory=list)
+    objective_focus_json: Optional[List[str]] = Field(default_factory=list)
     prompt_text: str
     created_at: datetime
 

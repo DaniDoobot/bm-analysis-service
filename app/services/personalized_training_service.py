@@ -140,6 +140,196 @@ class PersonalizedTrainingService:
         return overview
 
     @staticmethod
+    def _map_setting_to_dict(s: TrainingAgentSetting) -> Optional[dict]:
+        if not s:
+            return None
+        return {
+            "setting_id": s.setting_id,
+            "hubspot_owner_id": s.hubspot_owner_id,
+            "agent_name": s.agent_name,
+            "agent_initials": s.agent_initials,
+            "is_enabled": s.is_enabled,
+            "created_at": s.created_at,
+            "updated_at": s.updated_at,
+        }
+
+    @staticmethod
+    def _map_prompt_to_dict(p: TrainingSimulationPrompt) -> Optional[dict]:
+        if not p:
+            return None
+        focus = p.objective_focus_json
+        if focus is None:
+            focus = []
+        elif not isinstance(focus, list):
+            focus = [str(focus)]
+            
+        return {
+            "simulation_prompt_id": p.simulation_prompt_id,
+            "training_report_id": p.training_report_id,
+            "hubspot_owner_id": p.hubspot_owner_id,
+            "prompt_number": p.prompt_number,
+            "title": p.title or f"Simulación de entrenamiento {p.prompt_number}",
+            "scenario_type": p.scenario_type or "roleplay",
+            "objective_focus_json": [str(x) for x in focus],
+            "prompt_text": p.prompt_text or "",
+            "created_at": p.created_at,
+        }
+
+    @staticmethod
+    def _map_completion_to_dict(c: TrainingCompletionStatus) -> Optional[dict]:
+        if not c:
+            return None
+        return {
+            "completion_id": c.completion_id,
+            "training_report_id": c.training_report_id,
+            "simulation_prompt_id": c.simulation_prompt_id,
+            "hubspot_owner_id": c.hubspot_owner_id,
+            "status": c.status or "pending",
+            "completed_at": c.completed_at,
+            "training_call_id": c.training_call_id,
+            "training_phone_number": c.training_phone_number,
+            "notes": c.notes,
+            "created_at": c.created_at,
+        }
+
+    @staticmethod
+    def _map_report_to_dict(r: TrainingAgentReport, prompts: list = None, completions: list = None) -> Optional[dict]:
+        if not r:
+            return None
+            
+        avg_score = None
+        if r.avg_evaluacion_global is not None:
+            try:
+                avg_score = Decimal(str(r.avg_evaluacion_global))
+            except Exception:
+                pass
+                
+        # Defensive JSONB lists normalizations
+        strengths = r.strengths_json
+        normalized_strengths = []
+        if isinstance(strengths, list):
+            for item in strengths:
+                if isinstance(item, dict):
+                    normalized_strengths.append({
+                        "title": str(item.get("title") or item.get("titulo") or "Punto Fuerte"),
+                        "description": str(item.get("description") or item.get("descripcion") or ""),
+                        "evidence": str(item.get("evidence") or item.get("evidencia") or "")
+                    })
+                else:
+                    normalized_strengths.append({
+                        "title": "Punto Fuerte",
+                        "description": str(item),
+                        "evidence": ""
+                    })
+        
+        weaknesses = r.weaknesses_json
+        normalized_weaknesses = []
+        if isinstance(weaknesses, list):
+            for item in weaknesses:
+                if isinstance(item, dict):
+                    normalized_weaknesses.append({
+                        "title": str(item.get("title") or item.get("titulo") or "Área de Mejora"),
+                        "description": str(item.get("description") or item.get("descripcion") or ""),
+                        "evidence": str(item.get("evidence") or item.get("evidencia") or "")
+                    })
+                else:
+                    normalized_weaknesses.append({
+                        "title": "Área de Mejora",
+                        "description": str(item),
+                        "evidence": ""
+                    })
+
+        notable = r.notable_data_json
+        normalized_notable = []
+        if isinstance(notable, list):
+            for item in notable:
+                if isinstance(item, dict):
+                    normalized_notable.append({
+                        "title": str(item.get("title") or item.get("titulo") or "Dato Notable"),
+                        "description": str(item.get("description") or item.get("descripcion") or ""),
+                        "metric_or_pattern": str(item.get("metric_or_pattern") or item.get("metrica") or item.get("patron") or "")
+                    })
+                else:
+                    normalized_notable.append({
+                        "title": "Dato Notable",
+                        "description": str(item),
+                        "metric_or_pattern": ""
+                    })
+
+        gen_objectives = r.general_objectives_json
+        normalized_gen = []
+        if isinstance(gen_objectives, list):
+            for item in gen_objectives:
+                if isinstance(item, dict):
+                    indicators = item.get("success_indicators") or item.get("indicadores_exito") or []
+                    if not isinstance(indicators, list):
+                        indicators = [str(indicators)]
+                    normalized_gen.append({
+                        "title": str(item.get("title") or item.get("titulo") or "Objetivo General"),
+                        "description": str(item.get("description") or item.get("descripcion") or ""),
+                        "rationale": str(item.get("rationale") or item.get("justificacion") or ""),
+                        "expected_behavior": str(item.get("expected_behavior") or item.get("comportamiento_esperado") or ""),
+                        "success_indicators": [str(x) for x in indicators]
+                    })
+
+        spec_objectives = r.specific_objectives_json
+        normalized_spec = []
+        if isinstance(spec_objectives, list):
+            for item in spec_objectives:
+                if isinstance(item, dict):
+                    criteria = item.get("related_criteria") or item.get("criterios_relacionados") or []
+                    if not isinstance(criteria, list):
+                        criteria = [str(criteria)]
+                    indicators = item.get("success_indicators") or item.get("indicadores_exito") or []
+                    if not isinstance(indicators, list):
+                        indicators = [str(indicators)]
+                    normalized_spec.append({
+                        "title": str(item.get("title") or item.get("titulo") or "Objetivo Específico"),
+                        "description": str(item.get("description") or item.get("descripcion") or ""),
+                        "related_criteria": [str(x) for x in criteria],
+                        "specific_behavior_to_improve": str(item.get("specific_behavior_to_improve") or item.get("comportamiento_especifico") or ""),
+                        "success_indicators": [str(x) for x in indicators]
+                    })
+            
+        mapped = {
+            "training_report_id": r.training_report_id,
+            "training_run_id": r.training_run_id,
+            "hubspot_owner_id": r.hubspot_owner_id,
+            "agent_name": r.agent_name,
+            "agent_initials": r.agent_initials,
+            "period_start": r.period_start,
+            "period_end": r.period_end,
+            "status": r.status or "pending",
+            "skipped_reason": r.skipped_reason,
+            "evaluations_count": r.evaluations_count or 0,
+            "calls_count": r.calls_count or 0,
+            "avg_evaluacion_global": avg_score,
+            "summary_general": r.summary_general,
+            "strengths_json": normalized_strengths,
+            "weaknesses_json": normalized_weaknesses,
+            "notable_data_json": normalized_notable,
+            "evolution_summary": r.evolution_summary,
+            "general_objectives_json": normalized_gen,
+            "specific_objectives_json": normalized_spec,
+            "is_current": r.is_current,
+            "created_at": r.created_at,
+            "generated_at": r.generated_at,
+            "error_message": r.error_message,
+        }
+        
+        if prompts is not None:
+            mapped["prompts"] = [PersonalizedTrainingService._map_prompt_to_dict(p) for p in prompts]
+        else:
+            mapped["prompts"] = []
+            
+        if completions is not None:
+            mapped["completion_statuses"] = [PersonalizedTrainingService._map_completion_to_dict(c) for c in completions]
+        else:
+            mapped["completion_statuses"] = []
+            
+        return mapped
+
+    @staticmethod
     async def get_agent_detail(db: AsyncSession, hubspot_owner_id: str) -> Optional[dict]:
         """Returns detailed personalized training information for a specific agent."""
         stmt_set = select(TrainingAgentSetting).where(TrainingAgentSetting.hubspot_owner_id == hubspot_owner_id)
@@ -182,11 +372,7 @@ class PersonalizedTrainingService:
             progress_completed = completed_count
             progress_percentage = Decimal(str(completed_count / 4.0 * 100.0)).quantize(Decimal("0.01"))
 
-            current_report_data = {
-                **report.__dict__,
-                "prompts": prompts,
-                "completion_statuses": completions
-            }
+            current_report_data = PersonalizedTrainingService._map_report_to_dict(report, prompts, completions)
 
         # Fetch historical reports (excluding current report or just listing all)
         stmt_hist = select(TrainingAgentReport).where(
@@ -195,13 +381,15 @@ class PersonalizedTrainingService:
         res_hist = await db.execute(stmt_hist)
         history = list(res_hist.scalars().all())
 
+        mapped_history = [PersonalizedTrainingService._map_report_to_dict(h) for h in history]
+
         return {
-            "agent_setting": setting,
+            "agent_setting": PersonalizedTrainingService._map_setting_to_dict(setting),
             "current_report": current_report_data,
             "progress_completed": progress_completed,
             "progress_total": 4,
             "progress_percentage": progress_percentage,
-            "history": history,
+            "history": mapped_history,
             "evolution_summary": report.evolution_summary if report else None
         }
 
@@ -229,11 +417,7 @@ class PersonalizedTrainingService:
         res_comp = await db.execute(stmt_comp)
         completions = list(res_comp.scalars().all())
 
-        return {
-            **report.__dict__,
-            "prompts": prompts,
-            "completion_statuses": completions
-        }
+        return PersonalizedTrainingService._map_report_to_dict(report, prompts, completions)
 
     @staticmethod
     async def aggregate_agent_evaluations(db: AsyncSession, hubspot_owner_id: str, period_start: datetime, period_end: datetime) -> dict:
