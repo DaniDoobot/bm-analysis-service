@@ -65,6 +65,7 @@ async def agents_comparison(
     date_from: Annotated[str | None, Query(description="Custom start date (ISO or YYYY-MM-DD)")] = None,
     date_to: Annotated[str | None, Query(description="Custom end date (ISO or YYYY-MM-DD)")] = None,
     bucket: Annotated[str | None, Query(description="hour | day | week")] = None,
+    metric_key: Annotated[str | None, Query(description="Selected metric key to compare")] = None,
 ):
     """
     Get multi-agent comparison analytics for dashboard reporting.
@@ -85,6 +86,7 @@ async def agents_comparison(
             date_from=date_from,
             date_to=date_to,
             bucket=bucket,
+            metric_key=metric_key,
         )
         return data
     except Exception as e:

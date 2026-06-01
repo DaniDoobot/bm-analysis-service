@@ -9,7 +9,7 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.analyses import Analysis
-from app.models.mass_evaluations import MassEvaluationResult
+from app.models.mass_evaluations import MassEvaluationResult, MassEvaluationCriterionResult
 from app.models.services import Service
 from app.models.typologies import Typology
 from app.utils.hubspot_owners import resolve_agent_display, resolve_owner_name, OWNER_TO_NAME
@@ -126,6 +126,19 @@ def to_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (ValueError, TypeError):
         return default
+
+
+def extract_criterion_float_value(cr: Any) -> float | None:
+    """Safely extract float score or percentage or boolean from a MassEvaluationCriterionResult."""
+    if not cr or not getattr(cr, "is_applicable", True):
+        return None
+    if getattr(cr, "numeric_value", None) is not None:
+        return to_float(cr.numeric_value)
+    if getattr(cr, "percentage_value", None) is not None:
+        return to_float(cr.percentage_value)
+    if getattr(cr, "boolean_value", None) is not None:
+        return 10.0 if cr.boolean_value else 0.0
+    return None
 
 
 def _get_duration_sec(payload: Any) -> float | None:
@@ -1378,10 +1391,14 @@ async def get_agents_comparison(
     date_from: str | None = None,
     date_to: str | None = None,
     bucket: str | None = None,
+    metric_key: str | None = None,
 ) -> dict[str, Any]:
     """Retrieve multi-agent comparison analytics using MassEvaluationResult."""
     now = datetime.now(timezone.utc)
     
+    if not metric_key:
+        metric_key = "evaluacion_global"
+        
     # 1. Resolve date range
     dt_from = parse_date(date_from)
     dt_to = parse_date(date_to)
@@ -1483,7 +1500,146 @@ async def get_agents_comparison(
         elif start_anterior <= ts < start_actual:
             anterior_rows.append(r)
 
-    # 4. Determine agents to return
+    # 4. Fetch available metrics catalog
+    stmt_metrics = select(
+        MassEvaluationCriterionResult.criterion_key,
+        MassEvaluationCriterionResult.criterion_name,
+        MassEvaluationCriterionResult.criterion_type
+    ).where(
+        MassEvaluationCriterionResult.criterion_type.in_(["score_1_10", "number", "percentage", "boolean", "score"])
+    )
+    metrics_res = await db.execute(stmt_metrics)
+    raw_metrics = metrics_res.all()
+    
+    seen_keys = set()
+    dynamic_metrics = []
+    for r_met in raw_metrics:
+        c_key, c_name, c_type = r_met
+        if not c_key or c_key in seen_keys:
+            continue
+        seen_keys.add(c_key)
+        if c_key in ["evaluacion_global", "total_calls", "cierre_cita_rate"]:
+            continue
+            
+        val_type = "score"
+        if c_type == "percentage":
+            val_type = "percentage"
+        elif c_type == "boolean":
+            val_type = "boolean"
+            
+        dynamic_metrics.append({
+            "metric_key": c_key,
+            "label": c_name or c_key.replace("_", " ").capitalize(),
+            "type": "criterion",
+            "criterion_key": c_key,
+            "output_key": c_key,
+            "value_type": val_type
+        })
+        
+    # Standard fallback criteria list to ensure UI population even with clean DB
+    default_criteria = {
+        "empatia": {"label": "Empatía", "type": "score"},
+        "claridad": {"label": "Claridad", "type": "score"},
+        "procedimiento": {"label": "Procedimiento", "type": "score"},
+        "saludo_inicio": {"label": "Saludo de Inicio", "type": "score"},
+        "n3_preguntas": {"label": "N3 Preguntas", "type": "score"},
+        "despedida_con_refuerzo": {"label": "Despedida con Refuerzo", "type": "score"},
+        "gestion_objeciones": {"label": "Gestión de Obeciones", "type": "score"},
+        "uso_nombre_paciente": {"label": "Uso del Nombre del Paciente", "type": "score"},
+        "uso_preguntas": {"label": "Uso de Preguntas", "type": "score"},
+        "explicaciones_medicas": {"label": "Explicaciones Médicas", "type": "score"},
+        "claridad_explicacion_economica": {"label": "Claridad Explicación Económica", "type": "score"}
+    }
+    for c_key, c_info in default_criteria.items():
+        if c_key not in seen_keys:
+            seen_keys.add(c_key)
+            dynamic_metrics.append({
+                "metric_key": c_key,
+                "label": c_info["label"],
+                "type": "criterion",
+                "criterion_key": c_key,
+                "output_key": c_key,
+                "value_type": c_info["type"]
+            })
+            
+    fixed_metrics = [
+        {
+            "metric_key": "evaluacion_global",
+            "label": "Evaluación global",
+            "type": "fixed",
+            "value_type": "score"
+        },
+        {
+            "metric_key": "total_calls",
+            "label": "Volumen llamadas",
+            "type": "fixed",
+            "value_type": "count"
+        },
+        {
+            "metric_key": "cierre_cita_rate",
+            "label": "Cierre de cita",
+            "type": "fixed",
+            "value_type": "percentage"
+        }
+    ]
+    available_metrics = fixed_metrics + dynamic_metrics
+    
+    # Resolve metric label
+    metric_label = metric_key.replace("_", " ").capitalize()
+    if metric_key == "evaluacion_global":
+        metric_label = "Evaluación global"
+    elif metric_key == "total_calls":
+        metric_label = "Volumen llamadas"
+    elif metric_key == "cierre_cita_rate":
+        metric_label = "Cierre de cita"
+    else:
+        if metric_key in CRITERIA_NAMES:
+            metric_label = CRITERIA_NAMES[metric_key]
+        else:
+            for dm in dynamic_metrics:
+                if dm["metric_key"] == metric_key:
+                    metric_label = dm["label"]
+                    break
+                    
+    # 5. Query matching dynamic criterion results if necessary
+    is_fixed = metric_key in ["evaluacion_global", "total_calls", "cierre_cita_rate"]
+    criterion_rows = []
+    
+    if not is_fixed:
+        stmt_crit = select(
+            MassEvaluationCriterionResult,
+            MassEvaluationResult.call_timestamp,
+            MassEvaluationResult.hubspot_owner_id
+        ).join(
+            MassEvaluationResult,
+            MassEvaluationCriterionResult.mass_analysis_id == MassEvaluationResult.mass_analysis_id
+        ).where(
+            MassEvaluationResult.status == "completed",
+            MassEvaluationCriterionResult.criterion_key == metric_key,
+            MassEvaluationCriterionResult.is_applicable == True
+        )
+        if start_anterior:
+            stmt_crit = stmt_crit.where(MassEvaluationResult.call_timestamp >= start_anterior)
+        if end_actual:
+            stmt_crit = stmt_crit.where(MassEvaluationResult.call_timestamp <= end_actual)
+            
+        if service_id is not None:
+            stmt_crit = stmt_crit.where(MassEvaluationResult.service_id == service_id)
+        elif service_key is not None:
+            stmt_crit = stmt_crit.where(MassEvaluationResult.service_key == service_key)
+            
+        if typology_id is not None:
+            stmt_crit = stmt_crit.where(MassEvaluationResult.typology_id == typology_id)
+        elif typology_key is not None:
+            stmt_crit = stmt_crit.where(MassEvaluationResult.typology_key == typology_key)
+            
+        if hubspot_owner_ids:
+            stmt_crit = stmt_crit.where(MassEvaluationResult.hubspot_owner_id.in_(hubspot_owner_ids))
+            
+        res_crit = await db.execute(stmt_crit)
+        criterion_rows = list(res_crit.all())
+
+    # 6. Determine agents to return
     # Find all agents with activity in current period
     active_owner_ids = set()
     for r in actual_rows:
@@ -1496,16 +1652,13 @@ async def get_agents_comparison(
         target_owner_ids.update(hubspot_owner_ids)
     else:
         target_owner_ids.update(active_owner_ids)
-        # Also include all known HubSpot owners to ensure Lovable stability
         target_owner_ids.update(OWNER_TO_NAME.keys())
         
     # Map owner IDs to display names & initials
     agents_map = {}
     for oid in target_owner_ids:
-        # Resolve display name
         disp_name = resolve_owner_name(oid)
         if not disp_name:
-            # Try to resolve from rows
             for r in rows:
                 if r.hubspot_owner_id == oid and r.agent_name and not r.agent_name.isdigit():
                     disp_name = r.agent_name
@@ -1513,7 +1666,6 @@ async def get_agents_comparison(
         if not disp_name:
             disp_name = f"Agente ({oid})"
             
-        # Initials helper
         parts = disp_name.strip().split()
         if len(parts) >= 2:
             initials = (parts[0][0] + parts[1][0]).upper()
@@ -1527,7 +1679,7 @@ async def get_agents_comparison(
             "initials": initials
         }
         
-    # 5. Master typologies for 0-call population if filtering by service
+    # 7. Master typologies for 0-call population if filtering by service
     typo_stmt = select(Typology, Service).join(
         Service, Typology.service_id == Service.service_id
     ).where(
@@ -1550,7 +1702,7 @@ async def get_agents_comparison(
             "typology_name": t.typology_name
         })
 
-    # 6. Generate time buckets
+    # 8. Generate time buckets
     buckets = []
     if bucket_interval == "hour":
         curr = start_actual.replace(minute=0, second=0, microsecond=0)
@@ -1558,7 +1710,6 @@ async def get_agents_comparison(
             buckets.append(curr)
             curr += timedelta(hours=1)
     elif bucket_interval == "week":
-        # Monday of the week
         curr = start_actual.replace(hour=0, minute=0, second=0, microsecond=0)
         curr = curr - timedelta(days=curr.weekday())
         while curr <= end_actual:
@@ -1570,20 +1721,18 @@ async def get_agents_comparison(
             buckets.append(curr)
             curr += timedelta(days=1)
 
-    # 7. Aggregate per-agent metrics, series, typologies, and criteria summaries
+    # 9. Aggregate per-agent metrics, series, typologies, and criteria summaries
     agents_list = []
     series_list = []
     typologies_list = []
     criteria_list = []
     
     for oid, info in agents_map.items():
-        # Filter agent's rows
         agent_actual_rows = [r for r in actual_rows if r.hubspot_owner_id == oid]
         agent_anterior_rows = [r for r in anterior_rows if r.hubspot_owner_id == oid]
         
-        # Calculate current metrics
         total_calls = len(agent_actual_rows)
-        completed_calls = total_calls # all rows are completed
+        completed_calls = total_calls
         
         avg_eval = get_avg_score_mass(agent_actual_rows, "evaluacion_global")
         avg_cla = get_avg_score_mass(agent_actual_rows, "claridad")
@@ -1617,10 +1766,8 @@ async def get_agents_comparison(
             elif tk not in agent_typo_names:
                 agent_typo_names[tk] = tk.capitalize()
                 
-        # Main Typology determination
         main_typology = None
         if agent_typo_counts:
-            # Filter typologies with counts > 0
             active_typos = {k: v for k, v in agent_typo_counts.items() if v > 0}
             if active_typos:
                 best_tk = max(active_typos, key=active_typos.get)
@@ -1671,6 +1818,53 @@ async def get_agents_comparison(
             "cierre_cita_rate": delta_cierre
         }
         
+        # Dynamic comparison metric values
+        if is_fixed:
+            if metric_key == "evaluacion_global":
+                selected_metric_avg = avg_eval
+                selected_metric_count = total_calls
+                selected_metric_delta = delta_eval
+            elif metric_key == "total_calls":
+                selected_metric_avg = float(total_calls)
+                selected_metric_count = total_calls
+                selected_metric_delta = float(delta_calls)
+            elif metric_key == "cierre_cita_rate":
+                selected_metric_avg = cierre_cita_rate
+                selected_metric_count = total_calls
+                selected_metric_delta = delta_cierre
+            else:
+                selected_metric_avg = None
+                selected_metric_count = 0
+                selected_metric_delta = 0.0
+        else:
+            agent_actual_crits = []
+            agent_anterior_crits = []
+            for cr, ts, r_oid in criterion_rows:
+                if r_oid != oid:
+                    continue
+                if not ts:
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if start_actual <= ts <= end_actual:
+                    agent_actual_crits.append(cr)
+                elif start_anterior <= ts < start_actual:
+                    agent_anterior_crits.append(cr)
+                    
+            actual_scores = [v for cr in agent_actual_crits if (v := extract_criterion_float_value(cr)) is not None]
+            anterior_scores = [v for cr in agent_anterior_crits if (v := extract_criterion_float_value(cr)) is not None]
+            
+            selected_metric_avg = round(sum(actual_scores) / len(actual_scores), 2) if actual_scores else None
+            selected_metric_count = len(actual_scores)
+            selected_metric_avg_ant = round(sum(anterior_scores) / len(anterior_scores), 2) if anterior_scores else None
+            
+            if selected_metric_avg is not None and selected_metric_avg_ant is not None:
+                selected_metric_delta = round(selected_metric_avg - selected_metric_avg_ant, 2)
+            elif selected_metric_avg is not None:
+                selected_metric_delta = round(selected_metric_avg, 2)
+            else:
+                selected_metric_delta = 0.0
+
         # Append Agent Metrics
         agents_list.append({
             "hubspot_owner_id": oid,
@@ -1684,7 +1878,14 @@ async def get_agents_comparison(
             "avg_procedimiento": avg_pro,
             "cierre_cita_rate": cierre_cita_rate,
             "main_typology": main_typology,
-            "delta_vs_previous_period": delta_vs_previous_period
+            "delta_vs_previous_period": delta_vs_previous_period,
+            
+            # Selected Metric Summary
+            "selected_metric_key": metric_key,
+            "selected_metric_label": metric_label,
+            "selected_metric_avg": selected_metric_avg,
+            "selected_metric_count": selected_metric_count,
+            "selected_metric_delta_vs_previous_period": selected_metric_delta
         })
         
         # Time Series Points
@@ -1697,7 +1898,6 @@ async def get_agents_comparison(
             else:
                 b_key = b_dt.strftime("%Y-%m-%d")
                 
-            # Filter rows in this bucket
             b_rows = []
             for r in agent_actual_rows:
                 ts = r.call_timestamp
@@ -1732,6 +1932,39 @@ async def get_agents_comparison(
                 b_avg_pro = None
                 b_rate = 0.0
                 
+            # Compute bucket dynamic/fixed metric value
+            if is_fixed:
+                if metric_key == "evaluacion_global":
+                    b_selected_value = b_avg_eval
+                elif metric_key == "total_calls":
+                    b_selected_value = float(b_total)
+                elif metric_key == "cierre_cita_rate":
+                    b_selected_value = b_rate
+                else:
+                    b_selected_value = None
+            else:
+                b_crits = []
+                for cr, ts, r_oid in criterion_rows:
+                    if r_oid != oid:
+                        continue
+                    if not ts:
+                        continue
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                        
+                    if bucket_interval == "hour":
+                        row_key = ts.strftime("%Y-%m-%d %H:00")
+                    elif bucket_interval == "day":
+                        row_key = ts.strftime("%Y-%m-%d")
+                    else:
+                        row_key = (ts - timedelta(days=ts.weekday())).strftime("%Y-%m-%d")
+                        
+                    if row_key == b_key:
+                        b_crits.append(cr)
+                        
+                b_scores = [v for cr in b_crits if (v := extract_criterion_float_value(cr)) is not None]
+                b_selected_value = round(sum(b_scores) / len(b_scores), 2) if b_scores else None
+                
             points.append({
                 "bucket": b_key,
                 "total_calls": b_total,
@@ -1739,7 +1972,12 @@ async def get_agents_comparison(
                 "avg_empatia": b_avg_emp,
                 "avg_claridad": b_avg_cla,
                 "avg_procedimiento": b_avg_pro,
-                "cierre_cita_rate": b_rate
+                "cierre_cita_rate": b_rate,
+                
+                # Dynamic Series Point Fields
+                "selected_metric_key": metric_key,
+                "selected_metric_label": metric_label,
+                "selected_metric_value": b_selected_value
             })
             
         series_list.append({
@@ -1775,7 +2013,7 @@ async def get_agents_comparison(
             "criteria": agent_criteria
         })
         
-    # 8. Compile Global KPI Summary
+    # 10. Compile Global KPI Summary
     active_agents = [a for a in agents_list if a["total_calls"] > 0]
     total_calls_global = sum(a["total_calls"] for a in agents_list)
     
@@ -1784,7 +2022,6 @@ async def get_agents_comparison(
     highest_vol_agent = {}
     
     if active_agents:
-        # Best Agent by average
         with_avg = [a for a in active_agents if a["avg_evaluacion_global"] is not None]
         if with_avg:
             best_avg = max(with_avg, key=lambda x: x["avg_evaluacion_global"])
@@ -1794,7 +2031,6 @@ async def get_agents_comparison(
                 "avg_evaluacion_global": best_avg["avg_evaluacion_global"]
             }
             
-        # Best Agent by improvement
         with_imp = [a for a in active_agents if a["delta_vs_previous_period"].get("avg_evaluacion_global") is not None]
         if with_imp:
             best_imp = max(with_imp, key=lambda x: x["delta_vs_previous_period"]["avg_evaluacion_global"])
@@ -1804,7 +2040,6 @@ async def get_agents_comparison(
                 "delta_avg_evaluacion_global": best_imp["delta_vs_previous_period"]["avg_evaluacion_global"]
             }
             
-        # Highest Volume Agent
         highest_vol = max(active_agents, key=lambda x: x["total_calls"])
         highest_vol_agent = {
             "hubspot_owner_id": highest_vol["hubspot_owner_id"],
@@ -1840,6 +2075,7 @@ async def get_agents_comparison(
         "agents": agents_list,
         "series": series_list,
         "typology_distribution_by_agent": typologies_list,
-        "criteria_summary_by_agent": criteria_list
+        "criteria_summary_by_agent": criteria_list,
+        "available_metrics": available_metrics
     }
 
