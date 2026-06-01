@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     # ── Password Reveal Flag ──────────────────────────────────────────────────
     allow_password_reveal: bool = True
 
+    # ── Recovery Secreto (Temporal) ───────────────────────────────────────────
+    recovery_secret: str = ""
+
     # ── CORS ──────────────────────────────────────────────────────────────────
     cors_origins: str = "*"
 

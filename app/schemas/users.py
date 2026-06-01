@@ -121,3 +121,12 @@ class MePasswordUpdatePayload(BaseModel):
 
 class RevealPasswordPayload(BaseModel):
     current_password: str
+
+
+class RecoveryPayload(BaseModel):
+    secret: str
+    email: str
+    username: Optional[str] = None
+    password: str
+    agent_initials: Optional[str] = None
+
