@@ -13,6 +13,7 @@ from app.models.personalized_training import (
     TrainingAgentReport,
     TrainingSimulationPrompt,
     TrainingCompletionStatus,
+    TrainingSchedulerSetting,
 )
 
 __all__ = [
@@ -38,6 +39,7 @@ __all__ = [
     "TrainingAgentReport",
     "TrainingSimulationPrompt",
     "TrainingCompletionStatus",
+    "TrainingSchedulerSetting",
 ]
 
 

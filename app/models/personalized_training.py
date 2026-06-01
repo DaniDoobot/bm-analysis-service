@@ -168,3 +168,21 @@ class TrainingCompletionStatus(Base):
 
     report = relationship("TrainingAgentReport", back_populates="completion_statuses")
     prompt = relationship("TrainingSimulationPrompt", back_populates="completion_status")
+
+
+class TrainingSchedulerSetting(Base):
+    __tablename__ = "bm_training_scheduler_settings"
+
+    setting_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    interval_days: Mapped[int] = mapped_column(Integer, default=14, server_default="14", nullable=False)
+    lookback_days: Mapped[int] = mapped_column(Integer, default=14, server_default="14", nullable=False)
+    
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), onupdate=func.now(), server_default=func.now()
+    )
+    updated_by_email: Mapped[str | None] = mapped_column(Text, nullable=True)

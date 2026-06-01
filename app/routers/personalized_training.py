@@ -18,6 +18,8 @@ from app.schemas.personalized_training import (
     TrainingAgentReportOut,
     TrainingAgentReportBase,
     ManualGeneratePayload,
+    TrainingSchedulerSettingOut,
+    TrainingSchedulerSettingPatch,
 )
 from app.services.personalized_training_service import PersonalizedTrainingService
 
@@ -108,6 +110,70 @@ async def list_agents_overview(
     """Overview list of all active agents and their current training statuses (Admin only)."""
     enforce_admin_role(current_user)
     return await PersonalizedTrainingService.get_agent_overview(db)
+
+
+@router.get("/admin/scheduler-settings", response_model=TrainingSchedulerSettingOut)
+async def get_scheduler_settings(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: AsyncSession = Depends(get_db)
+):
+    """Retrieve the persistent personalized training scheduler configuration (Admin only)."""
+    enforce_admin_role(current_user)
+    
+    from app.config import get_settings
+    settings = get_settings()
+    
+    db_settings = await PersonalizedTrainingService.get_or_create_scheduler_settings(db)
+    
+    # Inject runtime override status dynamically
+    runtime_enabled = settings.enable_training_scheduler
+    
+    return TrainingSchedulerSettingOut(
+        is_enabled=db_settings.is_enabled if runtime_enabled else False,
+        interval_days=db_settings.interval_days,
+        lookback_days=db_settings.lookback_days,
+        last_run_at=db_settings.last_run_at,
+        next_run_at=db_settings.next_run_at if runtime_enabled else None,
+        last_status=db_settings.last_status,
+        updated_at=db_settings.updated_at,
+        runtime_enabled=runtime_enabled,
+        reason=None if runtime_enabled else "Scheduler deshabilitado por variable de entorno"
+    )
+
+
+@router.patch("/admin/scheduler-settings", response_model=TrainingSchedulerSettingOut)
+async def update_scheduler_settings(
+    payload: TrainingSchedulerSettingPatch,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: AsyncSession = Depends(get_db)
+):
+    """Modify the persistent personalized training scheduler configuration (Admin only)."""
+    enforce_admin_role(current_user)
+    
+    from app.config import get_settings
+    settings = get_settings()
+    
+    db_settings = await PersonalizedTrainingService.update_scheduler_settings(
+        db=db,
+        is_enabled=payload.is_enabled,
+        interval_days=payload.interval_days,
+        lookback_days=payload.lookback_days,
+        updated_by_email=current_user.email
+    )
+    
+    runtime_enabled = settings.enable_training_scheduler
+    
+    return TrainingSchedulerSettingOut(
+        is_enabled=db_settings.is_enabled if runtime_enabled else False,
+        interval_days=db_settings.interval_days,
+        lookback_days=db_settings.lookback_days,
+        last_run_at=db_settings.last_run_at,
+        next_run_at=db_settings.next_run_at if runtime_enabled else None,
+        last_status=db_settings.last_status,
+        updated_at=db_settings.updated_at,
+        runtime_enabled=runtime_enabled,
+        reason=None if runtime_enabled else "Scheduler deshabilitado por variable de entorno"
+    )
 
 
 @router.get("/admin/agents/{hubspot_owner_id}", response_model=AgentDetailResponse)

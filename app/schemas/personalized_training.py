@@ -200,3 +200,26 @@ class ManualGeneratePayload(BaseModel):
     period_start: Optional[datetime] = None
     period_end: Optional[datetime] = None
     force_regenerate: bool = False
+
+
+# ── Scheduler Settings Schemas ────────────────────────────────────────────────
+
+class TrainingSchedulerSettingOut(BaseModel):
+    is_enabled: bool
+    interval_days: int
+    lookback_days: int
+    last_run_at: Optional[datetime] = None
+    next_run_at: Optional[datetime] = None
+    last_status: Optional[str] = None
+    updated_at: datetime
+    runtime_enabled: bool = True
+    reason: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class TrainingSchedulerSettingPatch(BaseModel):
+    is_enabled: Optional[bool] = None
+    interval_days: Optional[int] = None
+    lookback_days: Optional[int] = None

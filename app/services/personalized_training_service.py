@@ -13,6 +13,7 @@ from app.models.personalized_training import (
     TrainingAgentReport,
     TrainingSimulationPrompt,
     TrainingCompletionStatus,
+    TrainingSchedulerSetting,
 )
 from app.models.mass_evaluations import MassEvaluationResult, MassEvaluationCriterionResult
 from app.models.users import User
@@ -62,6 +63,54 @@ class PersonalizedTrainingService:
         await db.commit()
         await db.refresh(setting)
         return setting
+
+    @staticmethod
+    async def get_or_create_scheduler_settings(db: AsyncSession) -> TrainingSchedulerSetting:
+        """Fetch the single row of scheduler settings, or create it if not present."""
+        stmt = select(TrainingSchedulerSetting).limit(1)
+        res = await db.execute(stmt)
+        settings = res.scalars().first()
+        
+        if not settings:
+            settings = TrainingSchedulerSetting(
+                is_enabled=True,
+                interval_days=14,
+                lookback_days=14
+            )
+            db.add(settings)
+            await db.commit()
+            await db.refresh(settings)
+            
+        return settings
+
+    @staticmethod
+    async def update_scheduler_settings(
+        db: AsyncSession,
+        is_enabled: Optional[bool] = None,
+        interval_days: Optional[int] = None,
+        lookback_days: Optional[int] = None,
+        updated_by_email: Optional[str] = None
+    ) -> TrainingSchedulerSetting:
+        """Update persistent scheduler settings and recompute next_run_at."""
+        settings = await PersonalizedTrainingService.get_or_create_scheduler_settings(db)
+        
+        if is_enabled is not None:
+            settings.is_enabled = is_enabled
+        if interval_days is not None:
+            settings.interval_days = interval_days
+        if lookback_days is not None:
+            settings.lookback_days = lookback_days
+        if updated_by_email is not None:
+            settings.updated_by_email = updated_by_email
+            
+        # Recompute next_run_at
+        now = datetime.now(timezone.utc)
+        ref = settings.last_run_at or now
+        settings.next_run_at = ref + timedelta(days=settings.interval_days)
+        
+        await db.commit()
+        await db.refresh(settings)
+        return settings
 
     @staticmethod
     async def get_agent_overview(db: AsyncSession) -> List[dict]:
@@ -1243,7 +1292,18 @@ class PersonalizedTrainingService:
         from app.config import get_settings
         settings = get_settings()
         
-        # 1. Fetch latest completed run
+        # 1. Global environment override check
+        if not settings.enable_training_scheduler:
+            logger.info("Training scheduler: Automatically disabled globally by environment variable ENABLE_TRAINING_SCHEDULER=false.")
+            return {"triggered": False, "reason": "Scheduler deshabilitado por variable de entorno"}
+
+        # 2. Database persistent settings check
+        db_settings = await PersonalizedTrainingService.get_or_create_scheduler_settings(db)
+        if not db_settings.is_enabled:
+            logger.info("Training scheduler: Persistently disabled in database settings.")
+            return {"triggered": False, "reason": "Scheduler deshabilitado en base de datos"}
+
+        # 3. Fetch latest completed run
         stmt = select(TrainingRun).where(
             TrainingRun.status.in_(["completed", "partially_completed"])
         ).order_by(desc(TrainingRun.training_run_id)).limit(1)
@@ -1255,31 +1315,66 @@ class PersonalizedTrainingService:
         due = False
         reason = ""
         
-        if not last_run:
-            due = True
-            reason = "No previous training runs exist."
-        else:
-            ref_time = last_run.finished_at or last_run.created_at
-            if ref_time.tzinfo is None:
-                ref_time = ref_time.replace(tzinfo=timezone.utc)
+        # 4. Resolve due by next_run_at or interval days
+        if db_settings.next_run_at:
+            next_run = db_settings.next_run_at
+            if next_run.tzinfo is None:
+                next_run = next_run.replace(tzinfo=timezone.utc)
                 
-            elapsed = now - ref_time
-            limit = timedelta(days=settings.training_interval_days)
-            
-            if elapsed >= limit:
+            if now >= next_run:
                 due = True
-                reason = f"Last run finished {elapsed.days} days ago (limit is {settings.training_interval_days} days)."
+                reason = f"Current time {now.isoformat()} is at or past next scheduled run {next_run.isoformat()}."
             else:
-                reason = f"Last run was {elapsed.days} days ago (limit is {settings.training_interval_days} days). Next run due in {settings.training_interval_days - elapsed.days} days."
+                reason = f"Next scheduled run is at {next_run.isoformat()} (due in {(next_run - now).days} days)."
+        else:
+            # Fallback to last run + interval_days
+            if not last_run:
+                due = True
+                reason = "No previous training runs exist and no schedule next_run_at is defined."
+            else:
+                ref_time = last_run.finished_at or last_run.created_at
+                if ref_time.tzinfo is None:
+                    ref_time = ref_time.replace(tzinfo=timezone.utc)
+                    
+                elapsed = now - ref_time
+                limit = timedelta(days=db_settings.interval_days)
+                
+                if elapsed >= limit:
+                    due = True
+                    reason = f"Last run finished {elapsed.days} days ago (limit is {db_settings.interval_days} days)."
+                else:
+                    reason = f"Last run was {elapsed.days} days ago (limit is {db_settings.interval_days} days). Next run due in {db_settings.interval_days - elapsed.days} days."
 
         if due:
             logger.info("Training scheduler: A new personalized training run is DUE. Reason: %s", reason)
-            # Run the pass automatically
-            run = await PersonalizedTrainingService.run_personalized_training_pass(
-                db=db,
-                triggered_by="scheduler"
-            )
-            return {"triggered": True, "run_id": run.training_run_id, "reason": reason}
+            
+            # Set setting status to running before launching to prevent parallel triggers
+            db_settings.last_status = "running"
+            await db.commit()
+            
+            run = None
+            try:
+                run = await PersonalizedTrainingService.run_personalized_training_pass(
+                    db=db,
+                    triggered_by="scheduler"
+                )
+                
+                # Fetch settings again to refresh session state safely
+                db_settings = await PersonalizedTrainingService.get_or_create_scheduler_settings(db)
+                db_settings.last_run_at = now
+                db_settings.next_run_at = now + timedelta(days=db_settings.interval_days)
+                db_settings.last_status = run.status
+                await db.commit()
+                return {"triggered": True, "run_id": run.training_run_id, "reason": reason}
+            except Exception as e_run:
+                logger.exception("Training scheduler: Run failed.")
+                # Fetch settings again to refresh session state safely
+                db_settings = await PersonalizedTrainingService.get_or_create_scheduler_settings(db)
+                db_settings.last_run_at = now
+                db_settings.next_run_at = now + timedelta(days=db_settings.interval_days)
+                db_settings.last_status = "failed"
+                await db.commit()
+                raise e_run
         
         logger.info("Training scheduler: No training run due. Status: %s", reason)
         return {"triggered": False, "reason": reason}
