@@ -162,6 +162,7 @@ async def cleanup_mass_evaluations(
 
 class CleanupSpecificRequest(BaseModel):
     mode: Literal["dry_run", "execute"] = Field(default="dry_run", description="dry_run to preview, execute to delete")
+    expected_count: int = Field(default=14, description="Expected number of results to delete for safety check")
 
 
 @router.post("/cleanup-specific-evaluations")
@@ -187,19 +188,17 @@ async def cleanup_specific_evaluations(
         jobs_count_before = (await db.execute(stmt_jobs_before)).scalar() or 0
         runs_count_before = (await db.execute(stmt_runs_before)).scalar() or 0
         
-        # 2. Total results to delete before
+        # 2. Total results to delete before (WITHOUT status completed constraint to count all rows)
         stmt_res_before = select(func.count(MassEvaluationResult.mass_analysis_id)).where(
             MassEvaluationResult.call_timestamp >= start_ts,
-            MassEvaluationResult.call_timestamp < end_ts,
-            MassEvaluationResult.status == "completed"
+            MassEvaluationResult.call_timestamp < end_ts
         )
         total_resultados_a_borrar = (await db.execute(stmt_res_before)).scalar() or 0
         
         # 3. Total criteria to delete before
         subq_ids = select(MassEvaluationResult.mass_analysis_id).where(
             MassEvaluationResult.call_timestamp >= start_ts,
-            MassEvaluationResult.call_timestamp < end_ts,
-            MassEvaluationResult.status == "completed"
+            MassEvaluationResult.call_timestamp < end_ts
         )
         stmt_crit_before = select(func.count(MassEvaluationCriterionResult.id)).where(
             MassEvaluationCriterionResult.mass_analysis_id.in_(subq_ids)
@@ -209,12 +208,12 @@ async def cleanup_specific_evaluations(
         deleted_criteria = 0
         deleted_results = 0
         
-        # 4. If execute mode and count matches exactly 14
+        # 4. If execute mode and count matches dynamically provided expected_count
         if body.mode == "execute":
-            if total_resultados_a_borrar != 14:
+            if total_resultados_a_borrar != body.expected_count:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Safety check failed: expected exactly 14 results to delete, found {total_resultados_a_borrar}."
+                    detail=f"Safety check failed: expected exactly {body.expected_count} results to delete, found {total_resultados_a_borrar}."
                 )
                 
             # Perform deletes
@@ -226,8 +225,7 @@ async def cleanup_specific_evaluations(
             
             stmt_del_res = delete(MassEvaluationResult).where(
                 MassEvaluationResult.call_timestamp >= start_ts,
-                MassEvaluationResult.call_timestamp < end_ts,
-                MassEvaluationResult.status == "completed"
+                MassEvaluationResult.call_timestamp < end_ts
             )
             res_del_res = await db.execute(stmt_del_res)
             deleted_results = res_del_res.rowcount
@@ -237,8 +235,7 @@ async def cleanup_specific_evaluations(
         # 5. Validation after
         stmt_res_after = select(func.count(MassEvaluationResult.mass_analysis_id)).where(
             MassEvaluationResult.call_timestamp >= start_ts,
-            MassEvaluationResult.call_timestamp < end_ts,
-            MassEvaluationResult.status == "completed"
+            MassEvaluationResult.call_timestamp < end_ts
         )
         resultados_restantes = (await db.execute(stmt_res_after)).scalar() or 0
         
