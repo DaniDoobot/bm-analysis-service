@@ -125,7 +125,7 @@ async def init_db():
                         role="admin",
                         is_active=True,
                         password_hash=hash_password("admin123"),
-                        password_plain_dev="admin123"
+                        password_plain_dev=None
                     )
                     session.add(default_user)
                     await session.commit()
@@ -134,6 +134,16 @@ async def init_db():
                     logger.info("Users table is not empty, skipping seeding.")
             except Exception as e:
                 logger.error("Failed to seed default developer user: %s", e)
+
+        # 1.2.b Clear all plain-text passwords from the database for security
+        async with AsyncSession(engine) as session:
+            try:
+                await session.execute(text("UPDATE bm_users SET password_plain_dev = NULL WHERE password_plain_dev IS NOT NULL;"))
+                await session.commit()
+                logger.info("Cleared all plain-text dev passwords from bm_users successfully.")
+            except Exception as e:
+                logger.error("Failed to clear plain-text dev passwords: %s", e)
+
 
         # 1.3. Seed default training agents if bm_training_agent_settings is empty
         from app.models.personalized_training import TrainingAgentSetting

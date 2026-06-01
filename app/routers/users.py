@@ -138,7 +138,7 @@ async def create_user(
         hubspot_owner_id=body.hubspot_owner_id,
         agent_initials=body.agent_initials,
         password_hash=hash_password(body.password),
-        password_plain_dev=body.password,
+        password_plain_dev=None,
     )
     db.add(new_user)
     await db.commit()
@@ -217,7 +217,7 @@ async def admin_reset_password(
         raise HTTPException(status_code=404, detail=f"Usuario {user_id} no encontrado.")
 
     user.password_hash = hash_password(body.new_password)
-    user.password_plain_dev = body.new_password
+    user.password_plain_dev = None
     await db.commit()
 
     logger.info(
