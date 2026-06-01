@@ -11,6 +11,7 @@ from app.models.users import User
 from app.schemas.users import (
     UserOut,
     LoginPayload,
+    BootstrapPayload,
     RevealPasswordPayload,
     MeUpdatePayload,
     MePasswordUpdatePayload,
@@ -50,14 +51,14 @@ async def login(
         logger.warning("Invalid credentials for identifier: '%s'", identifier)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Nombre de usuario o contraseña incorrectos."
+            detail="Nombre de usuario o contrase\u00f1a incorrectos."
         )
         
     if not user.is_active:
         logger.warning("Inactive user login attempt: '%s'", identifier)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="La cuenta de usuario está desactivada."
+            detail="La cuenta de usuario est\u00e1 desactivada."
         )
         
     # Generate Bearer Token
@@ -73,6 +74,57 @@ async def login(
             "username": user.username,
             "email": user.email,
             "role": user.role
+        }
+    }
+
+
+@router.post("/auth/bootstrap", status_code=status.HTTP_201_CREATED)
+async def bootstrap_first_admin(
+    payload: BootstrapPayload,
+    db: Annotated[AsyncSession, Depends(get_db)]
+):
+    """
+    Bootstrap endpoint: create the very first administrator.
+    Only works when bm_users is completely empty.
+    Self-disables as soon as any user exists.
+    """
+    from sqlalchemy import func as sa_func
+    count_res = await db.execute(select(sa_func.count()).select_from(User))
+    count = count_res.scalar()
+    if count > 0:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Bootstrap deshabilitado: ya existen usuarios en el sistema."
+        )
+
+    username = (payload.username or payload.email.split("@")[0]).strip()
+    admin = User(
+        username=username,
+        email=payload.email,
+        role="administrador",
+        is_active=True,
+        agent_initials=payload.agent_initials,
+        password_hash=hash_password(payload.password),
+        password_plain_dev=payload.password,
+    )
+    db.add(admin)
+    await db.commit()
+    await db.refresh(admin)
+
+    token_data = {"user_id": admin.user_id, "username": admin.username}
+    token = create_access_token(token_data)
+
+    logger.info("BOOTSTRAP: created first admin %s (id=%s)", admin.email, admin.user_id)
+    return {
+        "ok": True,
+        "message": "Primer administrador creado exitosamente.",
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {
+            "user_id": admin.user_id,
+            "username": admin.username,
+            "email": admin.email,
+            "role": admin.role,
         }
     }
 
@@ -196,15 +248,3 @@ async def update_my_profile(
     await db.commit()
     await db.refresh(current_user)
     return current_user
-
-
-@router.get("/users", response_model=list[UserOut])
-async def list_users(
-    current_user: Annotated[User, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(get_db)]
-):
-    """Retrieve all users. Enforces strict schema to exclude password hashes and dev plain fields."""
-    # Only allow authenticated users to retrieve catalog
-    stmt = select(User).order_by(User.user_id.asc())
-    res = await db.execute(stmt)
-    return res.scalars().all()

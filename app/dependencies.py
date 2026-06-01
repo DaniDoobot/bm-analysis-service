@@ -59,3 +59,14 @@ async def get_current_user(
         )
     return user
 
+
+async def require_admin(
+    current_user: User = Depends(get_current_user)
+) -> User:
+    """Require authenticated user with role 'administrador'."""
+    if current_user.role != "administrador":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Se requiere rol administrador para esta operación."
+        )
+    return current_user

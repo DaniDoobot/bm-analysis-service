@@ -25,6 +25,7 @@ from app.routers import (
     typologies,
     service_evolution,
     me,
+    users,
     personalized_training,
 )
 
@@ -91,6 +92,7 @@ app.include_router(services.router)
 app.include_router(typologies.router)
 app.include_router(service_evolution.router)
 app.include_router(me.router)
+app.include_router(users.router)
 app.include_router(personalized_training.router)
 
 
