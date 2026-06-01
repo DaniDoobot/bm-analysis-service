@@ -31,25 +31,30 @@ async def login(
     payload: LoginPayload,
     db: Annotated[AsyncSession, Depends(get_db)]
 ):
-    """Authenticate user and return a Bearer access token."""
-    logger.info("Login attempt for username: '%s'", payload.username)
+    """Authenticate user and return a Bearer access token.
     
-    # Search by username or email
+    Accepts payload with 'username' OR 'email' field (both supported).
+    Searches bm_users by username OR email column.
+    """
+    identifier = payload.login_identifier
+    logger.info("Login attempt for identifier: '%s'", identifier)
+    
+    # Search by username or email (whichever the client sent)
     stmt = select(User).where(
-        (User.username == payload.username) | (User.email == payload.username)
+        (User.username == identifier) | (User.email == identifier)
     )
     res = await db.execute(stmt)
     user = res.scalars().first()
     
     if not user or not verify_password(payload.password, user.password_hash):
-        logger.warning("Invalid credentials for username: '%s'", payload.username)
+        logger.warning("Invalid credentials for identifier: '%s'", identifier)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Nombre de usuario o contraseña incorrectos."
         )
         
     if not user.is_active:
-        logger.warning("Inactive user login attempt: '%s'", payload.username)
+        logger.warning("Inactive user login attempt: '%s'", identifier)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="La cuenta de usuario está desactivada."

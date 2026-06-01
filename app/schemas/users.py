@@ -38,5 +38,16 @@ class RevealPasswordPayload(BaseModel):
 
 
 class LoginPayload(BaseModel):
-    username: str
+    """Accepts username OR email + password. Both field names are supported for compatibility."""
+    username: str | None = None
+    email: str | None = None
     password: str
+
+    @property
+    def login_identifier(self) -> str:
+        """Return whichever of username/email was provided."""
+        return (self.username or self.email or "").strip()
+
+    def model_post_init(self, __context):
+        if not self.username and not self.email:
+            raise ValueError("Se requiere 'username' o 'email'.")

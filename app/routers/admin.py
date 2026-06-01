@@ -1,17 +1,29 @@
 """
-Admin router — administrative operations including environment cleanup.
+Admin router — administrative operations including environment cleanup and user management.
 """
 import logging
+import os
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_db
+from app.models.users import User
+from app.utils.security import hash_password, verify_password
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/bm/admin", tags=["Admin"])
+
+# ── Admin Secret Guard ─────────────────────────────────────────────────────────
+_ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "bm-admin-secret-2026")
+
+def require_admin_secret(x_admin_secret: str = Header(..., alias="X-Admin-Secret")):
+    """Validate the X-Admin-Secret header for sensitive admin-only operations."""
+    if x_admin_secret != _ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Acceso denegado: secreto admin inválido.")
 
 
 class CleanupRequest(BaseModel):
@@ -159,3 +171,151 @@ async def cleanup_mass_evaluations(
             detail=f"Error durante la limpieza de evaluaciones masivas: {str(e)}",
         )
 
+
+# ── User Management Endpoints ─────────────────────────────────────────────────
+
+class UserUpsertPayload(BaseModel):
+    email: str = Field(description="Email del usuario")
+    username: str | None = Field(default=None, description="Username (si no se da, se usa la parte antes del @)")
+    password: str = Field(description="Contraseña en claro")
+    role: str = Field(default="agente", description="Rol: administrador, agente, etc.")
+    is_active: bool = Field(default=True)
+    hubspot_owner_id: str | None = Field(default=None)
+    agent_initials: str | None = Field(default=None)
+
+
+class UserResetPasswordPayload(BaseModel):
+    email: str = Field(description="Email o username del usuario a actualizar")
+    new_password: str = Field(description="Nueva contraseña en claro")
+
+
+@router.get("/users", dependencies=[Depends(require_admin_secret)])
+async def admin_list_users(
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    List all users in bm_users with their status.
+    Protected by X-Admin-Secret header.
+    """
+    stmt = select(User).order_by(User.user_id.asc())
+    res = await db.execute(stmt)
+    users = res.scalars().all()
+    return {
+        "ok": True,
+        "total": len(users),
+        "users": [
+            {
+                "user_id": u.user_id,
+                "username": u.username,
+                "email": u.email,
+                "role": u.role,
+                "is_active": u.is_active,
+                "hubspot_owner_id": u.hubspot_owner_id,
+                "agent_initials": u.agent_initials,
+                "has_password_hash": bool(u.password_hash),
+                "password_plain_dev": u.password_plain_dev,
+                "created_at": u.created_at.isoformat() if u.created_at else None,
+            }
+            for u in users
+        ],
+    }
+
+
+@router.post("/users/upsert", dependencies=[Depends(require_admin_secret)])
+async def admin_upsert_user(
+    body: UserUpsertPayload,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Create or update a user in bm_users.
+    - If a user with that email already exists, updates their password, role, and status.
+    - If no user exists with that email, creates one.
+    Protected by X-Admin-Secret header.
+    """
+    username = body.username or body.email.split("@")[0]
+
+    stmt = select(User).where(User.email == body.email)
+    res = await db.execute(stmt)
+    existing = res.scalars().first()
+
+    if existing:
+        existing.password_hash = hash_password(body.password)
+        existing.password_plain_dev = body.password
+        existing.role = body.role
+        existing.is_active = body.is_active
+        if body.hubspot_owner_id is not None:
+            existing.hubspot_owner_id = body.hubspot_owner_id
+        if body.agent_initials is not None:
+            existing.agent_initials = body.agent_initials
+        await db.commit()
+        await db.refresh(existing)
+        logger.info("Admin upsert: UPDATED user %s (id=%s)", body.email, existing.user_id)
+        return {
+            "ok": True,
+            "action": "updated",
+            "user_id": existing.user_id,
+            "email": existing.email,
+            "username": existing.username,
+            "role": existing.role,
+            "is_active": existing.is_active,
+        }
+    else:
+        new_user = User(
+            username=username,
+            email=body.email,
+            role=body.role,
+            is_active=body.is_active,
+            hubspot_owner_id=body.hubspot_owner_id,
+            agent_initials=body.agent_initials,
+            password_hash=hash_password(body.password),
+            password_plain_dev=body.password,
+        )
+        db.add(new_user)
+        await db.commit()
+        await db.refresh(new_user)
+        logger.info("Admin upsert: CREATED user %s (id=%s)", body.email, new_user.user_id)
+        return {
+            "ok": True,
+            "action": "created",
+            "user_id": new_user.user_id,
+            "email": new_user.email,
+            "username": new_user.username,
+            "role": new_user.role,
+            "is_active": new_user.is_active,
+        }
+
+
+@router.post("/users/reset-password", dependencies=[Depends(require_admin_secret)])
+async def admin_reset_password(
+    body: UserResetPasswordPayload,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Reset password for an existing user (search by email or username).
+    Protected by X-Admin-Secret header.
+    """
+    stmt = select(User).where(
+        (User.email == body.email) | (User.username == body.email)
+    )
+    res = await db.execute(stmt)
+    user = res.scalars().first()
+
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No existe usuario con email/username '{body.email}'."
+        )
+
+    user.password_hash = hash_password(body.new_password)
+    user.password_plain_dev = body.new_password
+    user.is_active = True
+    await db.commit()
+    logger.info("Admin reset-password: updated password for user %s (id=%s)", user.email, user.user_id)
+    return {
+        "ok": True,
+        "user_id": user.user_id,
+        "email": user.email,
+        "username": user.username,
+        "is_active": user.is_active,
+        "message": "Contraseña actualizada correctamente.",
+    }
