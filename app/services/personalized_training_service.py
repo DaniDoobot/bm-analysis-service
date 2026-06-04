@@ -574,12 +574,19 @@ class PersonalizedTrainingService:
     async def get_cycles_team_summary(db: AsyncSession) -> dict:
         """
         Computes team-wide training metrics for administrators.
+
+        NOTE: is_enabled only controls automatic generation of new cycles.
+        Dashboard visibility is determined by having valid (non-archived) reports,
+        regardless of is_enabled. All agents with cycles are monitored.
         """
-        # 1. Fetch all active/enabled agents
-        settings_stmt = select(TrainingAgentSetting).where(TrainingAgentSetting.is_enabled == True)
+        # 1. Fetch ALL agent settings regardless of is_enabled
+        # is_enabled only controls generation of new cycles, NOT dashboard visibility
+        settings_stmt = select(TrainingAgentSetting).order_by(TrainingAgentSetting.agent_name.asc())
         res_settings = await db.execute(settings_stmt)
-        active_settings = list(res_settings.scalars().all())
-        active_agents_count = len(active_settings)
+        all_settings = list(res_settings.scalars().all())
+
+        # Count how many agents have generation enabled (for informational purposes)
+        generation_enabled_agents = sum(1 for s in all_settings if s.is_enabled)
 
         team_scores = []
         team_prev_scores = []
@@ -594,22 +601,32 @@ class PersonalizedTrainingService:
         agents_declining = 0
         
         priority_agents = []
+        monitored_agents_count = 0  # Agents with valid cycles (regardless of is_enabled)
 
-        for s in active_settings:
-            # Get all reports for this agent ordered by period start desc
+        for s in all_settings:
+            # Get all reports for this agent (excluding archived) ordered by period start desc
             stmt_reps = select(TrainingAgentReport).where(
-                TrainingAgentReport.hubspot_owner_id == s.hubspot_owner_id
+                and_(
+                    TrainingAgentReport.hubspot_owner_id == s.hubspot_owner_id,
+                    TrainingAgentReport.status != "archived"
+                )
             ).order_by(desc(TrainingAgentReport.period_start))
             res_reps = await db.execute(stmt_reps)
             reps = list(res_reps.scalars().all())
+
+            # Skip agents with no valid reports at all (they have no data to show)
+            if not reps:
+                continue
+
+            # Count this agent as monitored since they have at least one valid report
+            monitored_agents_count += 1
             
-            # Find the latest and second latest completed reports
+            # Find the latest and second latest completed (non-archived/non-superseded) reports
             completed_reps = [r for r in reps if r.status == "completed"]
             latest_r = completed_reps[0] if completed_reps else None
             prev_r = completed_reps[1] if len(completed_reps) > 1 else None
             
-            # Get simulation progress for this agent
-            # We count pending simulations across all reports for this agent
+            # Count pending simulations across all COMPLETED reports for this agent
             agent_pending_cycles = 0
             agent_pending_simulations = 0
             
@@ -772,7 +789,7 @@ class PersonalizedTrainingService:
             recurring_patterns.append({
                 "label": label,
                 "count": count,
-                "total_agents": active_agents_count,
+                "total_agents": monitored_agents_count,
                 "severity": severity
             })
 
@@ -781,7 +798,7 @@ class PersonalizedTrainingService:
                 {
                     "label": "Tres preguntas clave ausente o tardía",
                     "count": 0,
-                    "total_agents": active_agents_count,
+                    "total_agents": monitored_agents_count,
                     "severity": "medium"
                 }
             ]
@@ -794,18 +811,16 @@ class PersonalizedTrainingService:
         runs = list(res_runs.scalars().all())
         runs.reverse()  # Chronological order
 
-        # Collect active owner IDs for filtering evolution
-        active_owner_ids = [s.hubspot_owner_id for s in active_settings]
-
+        # Cycle evolution includes ALL agents with valid completed reports,
+        # regardless of is_enabled. Only archived reports are excluded.
         cycle_evolution = []
         cycle_counter = 1
         for run in runs:
             stmt_run_reps = select(TrainingAgentReport).where(
                 and_(
                     TrainingAgentReport.training_run_id == run.training_run_id,
-                    TrainingAgentReport.status == "completed",
-                    TrainingAgentReport.hubspot_owner_id.in_(active_owner_ids),
-                    TrainingAgentReport.status != "archived"
+                    TrainingAgentReport.status == "completed"
+                    # Note: archived reports have status='archived', so status=="completed" already excludes them
                 )
             )
             res_run_reps = await db.execute(stmt_run_reps)
@@ -883,13 +898,17 @@ class PersonalizedTrainingService:
                     "cycle_label": "Ciclo 1",
                     "team_avg_score": team_avg_score,
                     "close_rate": avg_close_rate,
-                    "completed_cycles": len([s for s in active_settings if total_pending_cycles == 0]),
+                    "completed_cycles": 0,
                     "pending_simulations": total_pending_simulations
                 }
             ]
 
         return {
-            "active_agents": active_agents_count,
+            # monitored_agents: agents with valid cycles in DB (shown in dashboard regardless of is_enabled)
+            "active_agents": monitored_agents_count,  # Kept for backwards compatibility
+            "monitored_agents": monitored_agents_count,
+            # generation_enabled_agents: agents configured to receive new cycles from the scheduler
+            "generation_enabled_agents": generation_enabled_agents,
             "team_avg_score": team_avg_score,
             "team_avg_score_delta": team_avg_score_delta,
             "avg_close_rate": avg_close_rate,

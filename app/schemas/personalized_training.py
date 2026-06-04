@@ -276,7 +276,12 @@ class CycleEvolutionItem(BaseModel):
 
 
 class CyclesTeamSummaryResponse(BaseModel):
+    # active_agents kept for backwards compatibility; same as monitored_agents
     active_agents: int
+    # monitored_agents: all agents that have valid (non-archived) cycles, regardless of is_enabled
+    monitored_agents: int
+    # generation_enabled_agents: agents with is_enabled=True (scheduled to receive new cycles)
+    generation_enabled_agents: int
     team_avg_score: float
     team_avg_score_delta: float
     avg_close_rate: float
