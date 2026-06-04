@@ -121,7 +121,10 @@ class PersonalizedTrainingService:
         for s in settings:
             # Fetch all reports for this agent
             stmt_reps = select(TrainingAgentReport).where(
-                TrainingAgentReport.hubspot_owner_id == s.hubspot_owner_id
+                and_(
+                    TrainingAgentReport.hubspot_owner_id == s.hubspot_owner_id,
+                    TrainingAgentReport.status != "archived"
+                )
             ).order_by(desc(TrainingAgentReport.training_report_id))
             res_reps = await db.execute(stmt_reps)
             all_agent_reps = list(res_reps.scalars().all())
@@ -130,7 +133,8 @@ class PersonalizedTrainingService:
             stmt_rep = select(TrainingAgentReport).where(
                 and_(
                     TrainingAgentReport.hubspot_owner_id == s.hubspot_owner_id,
-                    TrainingAgentReport.is_current == True
+                    TrainingAgentReport.is_current == True,
+                    TrainingAgentReport.status != "archived"
                 )
             ).order_by(desc(TrainingAgentReport.training_report_id))
             res_rep = await db.execute(stmt_rep)
@@ -489,7 +493,7 @@ class PersonalizedTrainingService:
         return mapped
 
     @staticmethod
-    async def get_agent_detail(db: AsyncSession, hubspot_owner_id: str) -> Optional[dict]:
+    async def get_agent_detail(db: AsyncSession, hubspot_owner_id: str, include_archived: bool = False) -> Optional[dict]:
         """Returns detailed personalized training information for a specific agent."""
         stmt_set = select(TrainingAgentSetting).where(TrainingAgentSetting.hubspot_owner_id == hubspot_owner_id)
         res_set = await db.execute(stmt_set)
@@ -502,7 +506,8 @@ class PersonalizedTrainingService:
         stmt_rep = select(TrainingAgentReport).where(
             and_(
                 TrainingAgentReport.hubspot_owner_id == hubspot_owner_id,
-                TrainingAgentReport.is_current == True
+                TrainingAgentReport.is_current == True,
+                TrainingAgentReport.status != "archived"
             )
         ).order_by(desc(TrainingAgentReport.training_report_id))
         res_rep = await db.execute(stmt_rep)
@@ -536,7 +541,11 @@ class PersonalizedTrainingService:
         # Fetch historical reports (excluding current report or just listing all)
         stmt_hist = select(TrainingAgentReport).where(
             TrainingAgentReport.hubspot_owner_id == hubspot_owner_id
-        ).order_by(desc(TrainingAgentReport.period_start))
+        )
+        if not include_archived:
+            stmt_hist = stmt_hist.where(TrainingAgentReport.status != "archived")
+            
+        stmt_hist = stmt_hist.order_by(desc(TrainingAgentReport.period_start))
         res_hist = await db.execute(stmt_hist)
         history = list(res_hist.scalars().all())
 
@@ -785,13 +794,18 @@ class PersonalizedTrainingService:
         runs = list(res_runs.scalars().all())
         runs.reverse()  # Chronological order
 
+        # Collect active owner IDs for filtering evolution
+        active_owner_ids = [s.hubspot_owner_id for s in active_settings]
+
         cycle_evolution = []
         cycle_counter = 1
         for run in runs:
             stmt_run_reps = select(TrainingAgentReport).where(
                 and_(
                     TrainingAgentReport.training_run_id == run.training_run_id,
-                    TrainingAgentReport.status == "completed"
+                    TrainingAgentReport.status == "completed",
+                    TrainingAgentReport.hubspot_owner_id.in_(active_owner_ids),
+                    TrainingAgentReport.status != "archived"
                 )
             )
             res_run_reps = await db.execute(stmt_run_reps)
@@ -800,8 +814,10 @@ class PersonalizedTrainingService:
             if not run_reps:
                 continue
             
-            run_scores = [float(r.avg_evaluacion_global) for r in run_reps if r.avg_evaluacion_global is not None]
-            run_avg_score = round(sum(run_scores) / len(run_scores), 2) if run_scores else 0.0
+            run_scores = [float(r.avg_evaluacion_global) for r in run_reps if r.avg_evaluacion_global is not None and float(r.avg_evaluacion_global) > 0]
+            if not run_scores:
+                continue  # Skip runs with no valid scores (e.g., all 0.0 avg scores)
+            run_avg_score = round(sum(run_scores) / len(run_scores), 2)
             
             stmt_run_close = select(
                 func.count(MassEvaluationCriterionResult.id)
@@ -913,6 +929,41 @@ class PersonalizedTrainingService:
         completions = list(res_comp.scalars().all())
 
         return PersonalizedTrainingService._map_report_to_dict(report, prompts, completions)
+
+    @staticmethod
+    async def archive_report(db: AsyncSession, report_id: int) -> Optional[dict]:
+        """
+        Soft-deletes/archives a training report by setting its status to 'archived'
+        and is_current to False.
+        """
+        stmt = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == report_id)
+        res = await db.execute(stmt)
+        report = res.scalars().first()
+        
+        if not report:
+            return None
+            
+        report.status = "archived"
+        report.is_current = False
+        await db.commit()
+        
+        return await PersonalizedTrainingService.get_report_by_id(db, report_id)
+
+    @staticmethod
+    async def hard_delete_report(db: AsyncSession, report_id: int) -> bool:
+        """
+        Physically deletes a training report and all its cascading relations (prompts, completion statuses).
+        """
+        stmt = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == report_id)
+        res = await db.execute(stmt)
+        report = res.scalars().first()
+        
+        if not report:
+            return False
+            
+        await db.delete(report)
+        await db.commit()
+        return True
 
     @staticmethod
     async def aggregate_agent_evaluations(db: AsyncSession, hubspot_owner_id: str, period_start: datetime, period_end: datetime) -> dict:

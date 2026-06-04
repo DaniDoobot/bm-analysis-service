@@ -203,12 +203,13 @@ async def update_scheduler_settings(
 async def get_agent_detail_admin(
     hubspot_owner_id: str,
     current_user: Annotated[User, Depends(get_current_user)],
+    include_archived: bool = Query(False),
     db: AsyncSession = Depends(get_db)
 ):
     """Full detail of an agent's training, objectives, prompts, history and progress (Admin only)."""
     enforce_admin_role(current_user)
     try:
-        detail = await PersonalizedTrainingService.get_agent_detail(db, hubspot_owner_id=hubspot_owner_id)
+        detail = await PersonalizedTrainingService.get_agent_detail(db, hubspot_owner_id=hubspot_owner_id, include_archived=include_archived)
         if not detail:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -284,6 +285,7 @@ async def get_my_current_training(
 @router.get("/me/history", response_model=List[TrainingAgentReportBase])
 async def get_my_training_history(
     current_user: Annotated[User, Depends(get_current_user)],
+    include_archived: bool = Query(False),
     db: AsyncSession = Depends(get_db)
 ):
     """Retrieve the list of historical training reports for the authenticated agent."""
@@ -293,7 +295,7 @@ async def get_my_training_history(
             detail="Tu cuenta de usuario no está asociada a ningún HubSpot Owner ID de agente."
         )
     
-    detail = await PersonalizedTrainingService.get_agent_detail(db, hubspot_owner_id=current_user.hubspot_owner_id)
+    detail = await PersonalizedTrainingService.get_agent_detail(db, hubspot_owner_id=current_user.hubspot_owner_id, include_archived=include_archived)
     if not detail:
         return []
     return detail["history"]
@@ -355,11 +357,12 @@ async def get_agent_current_training(
 async def get_agent_training_history(
     hubspot_owner_id: str,
     current_user: Annotated[User, Depends(get_current_user)],
+    include_archived: bool = Query(False),
     db: AsyncSession = Depends(get_db)
 ):
     """Retrieve all historical training reports for a specific agent (Ownership enforced)."""
     enforce_agent_or_admin_ownership(current_user, hubspot_owner_id)
-    detail = await PersonalizedTrainingService.get_agent_detail(db, hubspot_owner_id=hubspot_owner_id)
+    detail = await PersonalizedTrainingService.get_agent_detail(db, hubspot_owner_id=hubspot_owner_id, include_archived=include_archived)
     if not detail:
         return []
     return detail["history"]
@@ -382,3 +385,38 @@ async def get_report_by_id(
     if current_user.role not in ["admin", "administrador"]:
         report_details = sanitize_report_for_agent(report_details)
     return report_details
+
+
+@router.post("/admin/reports/{training_report_id}/archive", response_model=TrainingAgentReportOut)
+async def archive_training_report(
+    training_report_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: AsyncSession = Depends(get_db)
+):
+    """Soft-delete / archive a training report so it no longer counts in active/pending stats (Admin only)."""
+    enforce_admin_role(current_user)
+    report = await PersonalizedTrainingService.archive_report(db, report_id=training_report_id)
+    if not report:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Informe de entrenamiento ID {training_report_id} no encontrado."
+        )
+    return report
+
+
+@router.delete("/admin/reports/{training_report_id}/hard-delete")
+async def hard_delete_training_report(
+    training_report_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: AsyncSession = Depends(get_db)
+):
+    """Hard-delete a training report and all its prompts and completions from the database (Admin only)."""
+    enforce_admin_role(current_user)
+    success = await PersonalizedTrainingService.hard_delete_report(db, report_id=training_report_id)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Informe de entrenamiento ID {training_report_id} no encontrado."
+        )
+    return {"message": f"Informe de entrenamiento ID {training_report_id} eliminado físicamente con éxito."}
+
