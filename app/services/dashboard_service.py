@@ -272,7 +272,7 @@ def _effective_ts(row: Any) -> "datetime | None":
     return ts
 
 
-def extract_score_from_mass(result_json: Any, items_json: Any, key: str) -> "float | None":
+def extract_score_from_mass(result_json: Any, items_json: Any, key: str, is_fallback_call: bool = False) -> "float | None":
     """Extract numeric score from mass result_json, falling back to items_json."""
     EVALUATIVE_SCORES = {
         "evaluacion_global", "sentiment", "sentimiento", "evaluacion_sentimiento",
@@ -286,22 +286,27 @@ def extract_score_from_mass(result_json: Any, items_json: Any, key: str) -> "flo
     if key not in EVALUATIVE_SCORES:
         return None
 
+    # 1. Check result_json
+    val = None
     if result_json and isinstance(result_json, dict):
         val = result_json.get(key)
         if val is None and key == "sentiment":
             val = result_json.get("sentimiento") or result_json.get("evaluacion_sentimiento")
         if val is None and key == "procedimiento":
             val = result_json.get("adherencia_procedimiento")
+        if val is None and key == "evaluacion_global":
+            val = result_json.get("evaluacion_global") or result_json.get("global_score") or result_json.get("puntuacion_global")
             
         if val is not None:
             if isinstance(val, bool):
-                return None
-                
+                val = 10.0 if val else 0.0
             try:
                 if isinstance(val, dict):
                     for sk in ["score", "valor", "value", "puntuacion"]:
                         v_sub = val.get(sk)
-                        if v_sub is not None and not isinstance(v_sub, bool):
+                        if v_sub is not None:
+                            if isinstance(v_sub, bool):
+                                v_sub = 10.0 if v_sub else 0.0
                             if isinstance(v_sub, (int, float, decimal.Decimal)):
                                 return to_float(v_sub)
                             elif isinstance(v_sub, str):
@@ -312,9 +317,16 @@ def extract_score_from_mass(result_json: Any, items_json: Any, key: str) -> "flo
                     elif isinstance(val, str):
                         return float(val)
             except (ValueError, TypeError):
-                return None
+                if isinstance(val, str):
+                    cleaned = val.strip().lower()
+                    if cleaned in ["si", "sí"]:
+                        return 10.0
+                    if cleaned == "no":
+                        return 0.0
+                pass
                         
-    if items_json:
+    # 2. Check items_json
+    if items_json and val is None:
         items = items_json if isinstance(items_json, list) else []
         for item in items:
             if not isinstance(item, dict):
@@ -322,14 +334,39 @@ def extract_score_from_mass(result_json: Any, items_json: Any, key: str) -> "flo
             item_key = item.get("key") or item.get("criterion_key") or item.get("output_key")
             if item_key == key:
                 v = item.get("value") or item.get("score") or item.get("valor")
-                if v is not None and not isinstance(v, bool):
+                if v is not None:
+                    if isinstance(v, bool):
+                        return 10.0 if v else 0.0
                     try:
                         if isinstance(v, (int, float, decimal.Decimal)):
                             return to_float(v)
                         elif isinstance(v, str):
                             return float(v)
                     except (ValueError, TypeError):
+                        if isinstance(v, str):
+                            cleaned = v.strip().lower()
+                            if cleaned in ["si", "sí"]:
+                                return 10.0
+                            if cleaned == "no":
+                                return 0.0
                         pass
+
+    # 3. Fallback calculation for evaluacion_global if not explicitly found
+    if key == "evaluacion_global" and not is_fallback_call:
+        other_keys = [
+            "empatia", "simpatia", "claridad", "procedimiento", "saludo_inicio",
+            "n3_preguntas", "despedida_con_refuerzo", "gestion_objeciones",
+            "uso_nombre_paciente", "uso_preguntas", "explicaciones_medicas",
+            "claridad_explicacion_economica", "siguiente_paso"
+        ]
+        other_scores = []
+        for ok in other_keys:
+            ov = extract_score_from_mass(result_json, items_json, ok, is_fallback_call=True)
+            if ov is not None:
+                other_scores.append(ov)
+        if other_scores:
+            return to_float(round(sum(other_scores) / len(other_scores), 1))
+
     return None
 
 

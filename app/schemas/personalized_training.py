@@ -69,6 +69,10 @@ class SimulationPromptOut(BaseModel):
     title: str
     scenario_type: str
     objective_focus_json: Optional[List[str]] = Field(default_factory=list)
+    linked_general_objectives: Optional[List[str]] = Field(default_factory=list)
+    linked_specific_objectives: Optional[List[str]] = Field(default_factory=list)
+    objective_summary: Optional[str] = None
+    expected_behavior: Optional[str] = None
     prompt_text: str
     created_at: datetime
 
@@ -120,6 +124,11 @@ class TrainingAgentReportBase(BaseModel):
     created_at: datetime
     generated_at: Optional[datetime] = None
     error_message: Optional[str] = None
+
+    # Cycle progress fields
+    progress_completed: int = 0
+    progress_total: int = 4
+    progress_percentage: Decimal = Decimal("0.0")
 
     class Config:
         from_attributes = True
@@ -178,6 +187,18 @@ class AgentOverviewItem(BaseModel):
     previous_reports_count: int = 0
     error_message: Optional[str] = None
 
+    # Advanced cycle metrics
+    pending_cycles_count: int = 0
+    pending_simulations_count: int = 0
+    active_cycles_count: int = 0
+    completed_cycles_count: int = 0
+    latest_cycle_status: Optional[str] = None
+    latest_cycle_progress_completed: int = 0
+    latest_cycle_progress_total: int = 4
+    latest_cycle_period_start: Optional[datetime] = None
+    latest_cycle_period_end: Optional[datetime] = None
+    latest_cycle_avg_score: Optional[Decimal] = None
+
 
 class AgentDetailResponse(BaseModel):
     agent_setting: TrainingAgentSettingOut
@@ -185,7 +206,7 @@ class AgentDetailResponse(BaseModel):
     progress_completed: int = 0
     progress_total: int = 4
     progress_percentage: Decimal = Decimal("0.0")
-    history: List[TrainingAgentReportBase] = []
+    history: List[TrainingAgentReportOut] = []
     evolution_summary: Optional[str] = None
 
     class Config:
@@ -223,3 +244,48 @@ class TrainingSchedulerSettingPatch(BaseModel):
     is_enabled: Optional[bool] = None
     interval_days: Optional[int] = None
     lookback_days: Optional[int] = None
+
+
+# ── Team Summary Schemas ──────────────────────────────────────────────────────
+
+class PriorityAgentItem(BaseModel):
+    hubspot_owner_id: str
+    agent_initials: str
+    agent_name: str
+    score: Optional[float] = None
+    score_delta: Optional[float] = None
+    pending_cycles: int
+    pending_simulations: int
+    status: str
+    reason: str
+
+
+class RecurringPatternItem(BaseModel):
+    label: str
+    count: int
+    total_agents: int
+    severity: str
+
+
+class CycleEvolutionItem(BaseModel):
+    cycle_label: str
+    team_avg_score: float
+    close_rate: float
+    completed_cycles: int
+    pending_simulations: int
+
+
+class CyclesTeamSummaryResponse(BaseModel):
+    active_agents: int
+    team_avg_score: float
+    team_avg_score_delta: float
+    avg_close_rate: float
+    agents_requiring_attention: int
+    agents_improving: int
+    agents_stagnant: int
+    agents_declining: int
+    pending_cycles: int
+    pending_simulations: int
+    priority_agents: List[PriorityAgentItem]
+    recurring_patterns: List[RecurringPatternItem]
+    cycle_evolution: List[CycleEvolutionItem]

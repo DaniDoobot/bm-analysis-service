@@ -119,6 +119,13 @@ class PersonalizedTrainingService:
         overview = []
 
         for s in settings:
+            # Fetch all reports for this agent
+            stmt_reps = select(TrainingAgentReport).where(
+                TrainingAgentReport.hubspot_owner_id == s.hubspot_owner_id
+            ).order_by(desc(TrainingAgentReport.training_report_id))
+            res_reps = await db.execute(stmt_reps)
+            all_agent_reps = list(res_reps.scalars().all())
+
             # Fetch current (latest, is_current=True) report for the agent
             stmt_rep = select(TrainingAgentReport).where(
                 and_(
@@ -130,11 +137,69 @@ class PersonalizedTrainingService:
             report = res_rep.scalars().first()
 
             # Count previous reports
-            stmt_prev_count = select(func.count(TrainingAgentReport.training_report_id)).where(
-                TrainingAgentReport.hubspot_owner_id == s.hubspot_owner_id
-            )
-            res_prev_count = await db.execute(stmt_prev_count)
-            prev_count = res_prev_count.scalar() or 0
+            prev_count = len(all_agent_reps)
+
+            # Compute cycle aggregates
+            pending_cycles = 0
+            pending_simulations = 0
+            active_cycles = 0
+            completed_cycles = 0
+            
+            for r in all_agent_reps:
+                if r.status == "completed":
+                    # Check how many simulations are completed for this report
+                    stmt_sim_c = select(func.count(TrainingCompletionStatus.completion_id)).where(
+                        and_(
+                            TrainingCompletionStatus.training_report_id == r.training_report_id,
+                            TrainingCompletionStatus.status == "completed"
+                        )
+                    )
+                    res_sim_c = await db.execute(stmt_sim_c)
+                    sim_comp_count = res_sim_c.scalar() or 0
+                    
+                    if sim_comp_count == 4:
+                        completed_cycles += 1
+                    else:
+                        pending_cycles += 1
+                        pending_simulations += (4 - sim_comp_count)
+                        if sim_comp_count > 0:
+                            active_cycles += 1
+
+            # Latest cycle info
+            latest_r = all_agent_reps[0] if all_agent_reps else None
+            latest_cycle_status = "no_data"
+            latest_cycle_progress_completed = 0
+            latest_cycle_progress_total = 4
+            latest_cycle_period_start = None
+            latest_cycle_period_end = None
+            latest_cycle_avg_score = None
+            
+            if latest_r:
+                latest_cycle_period_start = latest_r.period_start
+                latest_cycle_period_end = latest_r.period_end
+                latest_cycle_avg_score = latest_r.avg_evaluacion_global
+                
+                if latest_r.status == "failed":
+                    latest_cycle_status = "failed"
+                elif latest_r.status == "skipped":
+                    latest_cycle_status = "skipped"
+                elif latest_r.status == "completed":
+                    stmt_latest_comp = select(func.count(TrainingCompletionStatus.completion_id)).where(
+                        and_(
+                            TrainingCompletionStatus.training_report_id == latest_r.training_report_id,
+                            TrainingCompletionStatus.status == "completed"
+                        )
+                    )
+                    res_latest_comp = await db.execute(stmt_latest_comp)
+                    latest_comp_count = res_latest_comp.scalar() or 0
+                    
+                    latest_cycle_progress_completed = latest_comp_count
+                    if latest_comp_count == 0:
+                        latest_cycle_status = "pending"
+                    elif latest_comp_count == 4:
+                        latest_cycle_status = "completed"
+                    else:
+                        latest_cycle_status = "running"
 
             item = {
                 "hubspot_owner_id": s.hubspot_owner_id,
@@ -154,7 +219,18 @@ class PersonalizedTrainingService:
                 "progress_percentage": Decimal("0.0"),
                 "last_generated_at": None,
                 "previous_reports_count": prev_count,
-                "error_message": None
+                "error_message": None,
+                # New fields
+                "pending_cycles_count": pending_cycles,
+                "pending_simulations_count": pending_simulations,
+                "active_cycles_count": active_cycles,
+                "completed_cycles_count": completed_cycles,
+                "latest_cycle_status": latest_cycle_status,
+                "latest_cycle_progress_completed": latest_cycle_progress_completed,
+                "latest_cycle_progress_total": latest_cycle_progress_total,
+                "latest_cycle_period_start": latest_cycle_period_start,
+                "latest_cycle_period_end": latest_cycle_period_end,
+                "latest_cycle_avg_score": latest_cycle_avg_score
             }
 
             if report:
@@ -206,11 +282,29 @@ class PersonalizedTrainingService:
     def _map_prompt_to_dict(p: TrainingSimulationPrompt) -> Optional[dict]:
         if not p:
             return None
-        focus = p.objective_focus_json
-        if focus is None:
-            focus = []
-        elif not isinstance(focus, list):
-            focus = [str(focus)]
+        
+        focus_data = p.objective_focus_json
+        focus_list = []
+        linked_gen = []
+        linked_spec = []
+        obj_summary = None
+        exp_behavior = None
+        
+        if isinstance(focus_data, dict):
+            focus_list = focus_data.get("focus") or []
+            linked_gen = focus_data.get("linked_general_objectives") or []
+            linked_spec = focus_data.get("linked_specific_objectives") or []
+            obj_summary = focus_data.get("objective_summary")
+            exp_behavior = focus_data.get("expected_behavior")
+        elif isinstance(focus_data, list):
+            focus_list = focus_data
+        elif focus_data is not None:
+            focus_list = [str(focus_data)]
+            
+        if not obj_summary:
+            obj_summary = f"Reforzar habilidades críticas asociadas a la simulación {p.prompt_number}."
+        if not exp_behavior:
+            exp_behavior = "Aplicar correctamente los criterios evaluativos del protocolo Boston Medical."
             
         return {
             "simulation_prompt_id": p.simulation_prompt_id,
@@ -219,7 +313,11 @@ class PersonalizedTrainingService:
             "prompt_number": p.prompt_number,
             "title": p.title or f"Simulación de entrenamiento {p.prompt_number}",
             "scenario_type": p.scenario_type or "roleplay",
-            "objective_focus_json": [str(x) for x in focus],
+            "objective_focus_json": [str(x) for x in focus_list],
+            "linked_general_objectives": [str(x) for x in linked_gen],
+            "linked_specific_objectives": [str(x) for x in linked_spec],
+            "objective_summary": obj_summary,
+            "expected_behavior": exp_behavior,
             "prompt_text": p.prompt_text or "",
             "created_at": p.created_at,
         }
@@ -340,6 +438,14 @@ class PersonalizedTrainingService:
                         "success_indicators": [str(x) for x in indicators]
                     })
             
+        # Calculate progress completion metrics
+        progress_completed = 0
+        progress_percentage = Decimal("0.0")
+        if completions:
+            completed_count = sum(1 for c in completions if (c.status == "completed" if hasattr(c, "status") else c.get("status") == "completed"))
+            progress_completed = completed_count
+            progress_percentage = Decimal(str(completed_count / 4.0 * 100.0)).quantize(Decimal("0.01"))
+
         mapped = {
             "training_report_id": r.training_report_id,
             "training_run_id": r.training_run_id,
@@ -364,6 +470,9 @@ class PersonalizedTrainingService:
             "created_at": r.created_at,
             "generated_at": r.generated_at,
             "error_message": r.error_message,
+            "progress_completed": progress_completed,
+            "progress_total": 4,
+            "progress_percentage": progress_percentage
         }
         
         if prompts is not None:
@@ -430,7 +539,16 @@ class PersonalizedTrainingService:
         res_hist = await db.execute(stmt_hist)
         history = list(res_hist.scalars().all())
 
-        mapped_history = [PersonalizedTrainingService._map_report_to_dict(h) for h in history]
+        mapped_history = []
+        for h in history:
+            stmt_comp_h = select(TrainingCompletionStatus).where(
+                TrainingCompletionStatus.training_report_id == h.training_report_id
+            ).order_by(TrainingCompletionStatus.completion_id.asc())
+            res_comp_h = await db.execute(stmt_comp_h)
+            completions_h = list(res_comp_h.scalars().all())
+            
+            mapped_h = PersonalizedTrainingService._map_report_to_dict(h, completions=completions_h)
+            mapped_history.append(mapped_h)
 
         return {
             "agent_setting": PersonalizedTrainingService._map_setting_to_dict(setting),
@@ -440,6 +558,325 @@ class PersonalizedTrainingService:
             "progress_percentage": progress_percentage,
             "history": mapped_history,
             "evolution_summary": report.evolution_summary if report else None
+        }
+
+    @staticmethod
+    async def get_cycles_team_summary(db: AsyncSession) -> dict:
+        """
+        Computes team-wide training metrics for administrators.
+        """
+        # 1. Fetch all active/enabled agents
+        settings_stmt = select(TrainingAgentSetting).where(TrainingAgentSetting.is_enabled == True)
+        res_settings = await db.execute(settings_stmt)
+        active_settings = list(res_settings.scalars().all())
+        active_agents_count = len(active_settings)
+
+        team_scores = []
+        team_prev_scores = []
+        team_close_rates = []
+        
+        total_pending_cycles = 0
+        total_pending_simulations = 0
+        
+        agents_requiring_attention = 0
+        agents_improving = 0
+        agents_stagnant = 0
+        agents_declining = 0
+        
+        priority_agents = []
+
+        for s in active_settings:
+            # Get all reports for this agent ordered by period start desc
+            stmt_reps = select(TrainingAgentReport).where(
+                TrainingAgentReport.hubspot_owner_id == s.hubspot_owner_id
+            ).order_by(desc(TrainingAgentReport.period_start))
+            res_reps = await db.execute(stmt_reps)
+            reps = list(res_reps.scalars().all())
+            
+            # Find the latest and second latest completed reports
+            completed_reps = [r for r in reps if r.status == "completed"]
+            latest_r = completed_reps[0] if completed_reps else None
+            prev_r = completed_reps[1] if len(completed_reps) > 1 else None
+            
+            # Get simulation progress for this agent
+            # We count pending simulations across all reports for this agent
+            agent_pending_cycles = 0
+            agent_pending_simulations = 0
+            
+            for r in reps:
+                if r.status == "completed":
+                    stmt_sim_c = select(func.count(TrainingCompletionStatus.completion_id)).where(
+                        and_(
+                            TrainingCompletionStatus.training_report_id == r.training_report_id,
+                            TrainingCompletionStatus.status == "completed"
+                        )
+                    )
+                    res_sim_c = await db.execute(stmt_sim_c)
+                    sim_comp_count = res_sim_c.scalar() or 0
+                    if sim_comp_count < 4:
+                        agent_pending_cycles += 1
+                        agent_pending_simulations += (4 - sim_comp_count)
+
+            total_pending_cycles += agent_pending_cycles
+            total_pending_simulations += agent_pending_simulations
+            
+            score = None
+            score_delta = None
+            
+            if latest_r:
+                if latest_r.avg_evaluacion_global is not None:
+                    score = float(latest_r.avg_evaluacion_global)
+                    team_scores.append(score)
+                    
+                    if prev_r and prev_r.avg_evaluacion_global is not None:
+                        prev_score = float(prev_r.avg_evaluacion_global)
+                        team_prev_scores.append(prev_score)
+                        score_delta = round(score - prev_score, 2)
+                        
+                # Compute close rate for latest report period
+                stmt_close = select(
+                    func.count(MassEvaluationCriterionResult.id)
+                ).join(
+                    MassEvaluationResult, MassEvaluationResult.mass_analysis_id == MassEvaluationCriterionResult.mass_analysis_id
+                ).where(
+                    MassEvaluationResult.hubspot_owner_id == s.hubspot_owner_id,
+                    MassEvaluationResult.call_timestamp >= latest_r.period_start,
+                    MassEvaluationResult.call_timestamp <= latest_r.period_end,
+                    MassEvaluationResult.status == "completed",
+                    MassEvaluationCriterionResult.criterion_key == "cierre_cita",
+                    MassEvaluationCriterionResult.is_applicable == True,
+                    MassEvaluationCriterionResult.boolean_value == True
+                )
+                res_close = await db.execute(stmt_close)
+                close_count = res_close.scalar() or 0
+                
+                stmt_total = select(
+                    func.count(MassEvaluationCriterionResult.id)
+                ).join(
+                    MassEvaluationResult, MassEvaluationResult.mass_analysis_id == MassEvaluationCriterionResult.mass_analysis_id
+                ).where(
+                    MassEvaluationResult.hubspot_owner_id == s.hubspot_owner_id,
+                    MassEvaluationResult.call_timestamp >= latest_r.period_start,
+                    MassEvaluationResult.call_timestamp <= latest_r.period_end,
+                    MassEvaluationResult.status == "completed",
+                    MassEvaluationCriterionResult.criterion_key == "cierre_cita",
+                    MassEvaluationCriterionResult.is_applicable == True,
+                    MassEvaluationCriterionResult.boolean_value.is_not(None)
+                )
+                res_total = await db.execute(stmt_total)
+                total_count = res_total.scalar() or 0
+                
+                if total_count > 0:
+                    agent_close_rate = close_count / total_count
+                    team_close_rates.append(agent_close_rate)
+                else:
+                    agent_close_rate = None
+            else:
+                agent_close_rate = None
+
+            # Categorize agent
+            agent_status = "stagnant"
+            reason = "Rendimiento estable"
+            
+            if score is not None:
+                if score < 6.5 or agent_pending_cycles > 0:
+                    agent_status = "requires_attention"
+                    agents_requiring_attention += 1
+                    if score < 6.5 and agent_pending_cycles > 0:
+                        reason = "Score bajo y ciclos pendientes"
+                    elif score < 6.5:
+                        reason = "Score bajo en el último ciclo"
+                    else:
+                        reason = "Ciclos pendientes acumulados"
+                elif score_delta is not None:
+                    if score_delta > 0.1:
+                        agent_status = "improving"
+                        agents_improving += 1
+                        reason = "Progreso positivo en puntuaciones"
+                    elif score_delta < -0.1:
+                        agent_status = "declining"
+                        agents_declining += 1
+                        reason = "Rendimiento en declive"
+                    else:
+                        agents_stagnant += 1
+                else:
+                    agents_stagnant += 1
+            else:
+                agents_stagnant += 1
+
+            if agent_status == "requires_attention" or (score_delta is not None and score_delta < 0):
+                priority_agents.append({
+                    "hubspot_owner_id": s.hubspot_owner_id,
+                    "agent_initials": s.agent_initials,
+                    "agent_name": s.agent_name,
+                    "score": round(score, 2) if score is not None else None,
+                    "score_delta": score_delta,
+                    "pending_cycles": agent_pending_cycles,
+                    "pending_simulations": agent_pending_simulations,
+                    "status": agent_status,
+                    "reason": reason
+                })
+
+        # Calculate averages
+        team_avg_score = round(sum(team_scores) / len(team_scores), 2) if team_scores else 0.0
+        
+        # Calculate delta of team average
+        if team_scores and team_prev_scores:
+            latest_avg = sum(team_scores) / len(team_scores)
+            prev_avg = sum(team_prev_scores) / len(team_prev_scores)
+            team_avg_score_delta = round(latest_avg - prev_avg, 2)
+        else:
+            team_avg_score_delta = 0.0
+            
+        avg_close_rate = round(sum(team_close_rates) / len(team_close_rates), 2) if team_close_rates else 0.0
+
+        # Sort priority agents
+        priority_agents.sort(key=lambda x: (0 if x["status"] == "requires_attention" else 1, x["score"] or 10.0))
+
+        # 2. Get recurring patterns/weaknesses from the latest cycle period
+        stmt_patterns = select(
+            MassEvaluationCriterionResult.criterion_name,
+            func.count(MassEvaluationCriterionResult.criterion_key)
+        ).join(
+            MassEvaluationResult, MassEvaluationResult.mass_analysis_id == MassEvaluationCriterionResult.mass_analysis_id
+        ).where(
+            MassEvaluationResult.status == "completed",
+            MassEvaluationCriterionResult.is_applicable == True,
+            or_(
+                and_(MassEvaluationCriterionResult.numeric_value.is_not(None), MassEvaluationCriterionResult.numeric_value < 8.0),
+                and_(MassEvaluationCriterionResult.boolean_value.is_not(None), MassEvaluationCriterionResult.boolean_value == False)
+            )
+        ).group_by(
+            MassEvaluationCriterionResult.criterion_name
+        ).order_by(
+            desc(func.count(MassEvaluationCriterionResult.criterion_key))
+        ).limit(3)
+
+        res_patterns = await db.execute(stmt_patterns)
+        pattern_rows = res_patterns.all()
+        
+        recurring_patterns = []
+        for row in pattern_rows:
+            label, count = row
+            severity = "high" if count >= 10 else "medium"
+            recurring_patterns.append({
+                "label": label,
+                "count": count,
+                "total_agents": active_agents_count,
+                "severity": severity
+            })
+
+        if not recurring_patterns:
+            recurring_patterns = [
+                {
+                    "label": "Tres preguntas clave ausente o tardía",
+                    "count": 0,
+                    "total_agents": active_agents_count,
+                    "severity": "medium"
+                }
+            ]
+
+        # 3. Cycle evolution (grouped by training runs)
+        stmt_runs = select(TrainingRun).where(
+            TrainingRun.status == "completed"
+        ).order_by(desc(TrainingRun.created_at)).limit(5)
+        res_runs = await db.execute(stmt_runs)
+        runs = list(res_runs.scalars().all())
+        runs.reverse()  # Chronological order
+
+        cycle_evolution = []
+        for idx, run in enumerate(runs):
+            stmt_run_reps = select(TrainingAgentReport).where(
+                TrainingAgentReport.training_run_id == run.training_run_id
+            )
+            res_run_reps = await db.execute(stmt_run_reps)
+            run_reps = list(res_run_reps.scalars().all())
+            
+            run_scores = [float(r.avg_evaluacion_global) for r in run_reps if r.avg_evaluacion_global is not None]
+            run_avg_score = round(sum(run_scores) / len(run_scores), 2) if run_scores else 0.0
+            
+            stmt_run_close = select(
+                func.count(MassEvaluationCriterionResult.id)
+            ).join(
+                MassEvaluationResult, MassEvaluationResult.mass_analysis_id == MassEvaluationCriterionResult.mass_analysis_id
+            ).where(
+                MassEvaluationResult.call_timestamp >= run.period_start,
+                MassEvaluationResult.call_timestamp <= run.period_end,
+                MassEvaluationResult.status == "completed",
+                MassEvaluationCriterionResult.criterion_key == "cierre_cita",
+                MassEvaluationCriterionResult.is_applicable == True,
+                MassEvaluationCriterionResult.boolean_value == True
+            )
+            res_run_close = await db.execute(stmt_run_close)
+            run_close_count = res_run_close.scalar() or 0
+            
+            stmt_run_total = select(
+                func.count(MassEvaluationCriterionResult.id)
+            ).join(
+                MassEvaluationResult, MassEvaluationResult.mass_analysis_id == MassEvaluationCriterionResult.mass_analysis_id
+            ).where(
+                MassEvaluationResult.call_timestamp >= run.period_start,
+                MassEvaluationResult.call_timestamp <= run.period_end,
+                MassEvaluationResult.status == "completed",
+                MassEvaluationCriterionResult.criterion_key == "cierre_cita",
+                MassEvaluationCriterionResult.is_applicable == True,
+                MassEvaluationCriterionResult.boolean_value.is_not(None)
+            )
+            res_run_total = await db.execute(stmt_run_total)
+            run_total_count = res_run_total.scalar() or 0
+            
+            run_close_rate = round(run_close_count / run_total_count, 2) if run_total_count > 0 else 0.0
+
+            completed_cycles = 0
+            pending_simulations = 0
+            
+            for r in run_reps:
+                stmt_sim_c = select(func.count(TrainingCompletionStatus.completion_id)).where(
+                    and_(
+                        TrainingCompletionStatus.training_report_id == r.training_report_id,
+                        TrainingCompletionStatus.status == "completed"
+                    )
+                )
+                res_sim_c = await db.execute(stmt_sim_c)
+                sim_comp_count = res_sim_c.scalar() or 0
+                if sim_comp_count == 4:
+                    completed_cycles += 1
+                else:
+                    pending_simulations += (4 - sim_comp_count)
+
+            cycle_evolution.append({
+                "cycle_label": f"Ciclo {idx + 1}",
+                "team_avg_score": run_avg_score,
+                "close_rate": run_close_rate,
+                "completed_cycles": completed_cycles,
+                "pending_simulations": pending_simulations
+            })
+
+        if not cycle_evolution:
+            cycle_evolution = [
+                {
+                    "cycle_label": "Ciclo 1",
+                    "team_avg_score": team_avg_score,
+                    "close_rate": avg_close_rate,
+                    "completed_cycles": len([s for s in active_settings if total_pending_cycles == 0]),
+                    "pending_simulations": total_pending_simulations
+                }
+            ]
+
+        return {
+            "active_agents": active_agents_count,
+            "team_avg_score": team_avg_score,
+            "team_avg_score_delta": team_avg_score_delta,
+            "avg_close_rate": avg_close_rate,
+            "agents_requiring_attention": agents_requiring_attention,
+            "agents_improving": agents_improving,
+            "agents_stagnant": agents_stagnant,
+            "agents_declining": agents_declining,
+            "pending_cycles": total_pending_cycles,
+            "pending_simulations": total_pending_simulations,
+            "priority_agents": priority_agents,
+            "recurring_patterns": recurring_patterns,
+            "cycle_evolution": cycle_evolution
         }
 
     @staticmethod
@@ -502,14 +939,12 @@ class PersonalizedTrainingService:
         calls_count = len(set(r.call_id for r in results))
 
         # Calculate average global evaluation
+        from app.services.dashboard_service import extract_score_from_mass
         global_scores = []
         for r in results:
-            if r.result_json and "evaluacion_global" in r.result_json:
-                try:
-                    score = float(r.result_json["evaluacion_global"])
-                    global_scores.append(score)
-                except (ValueError, TypeError):
-                    pass
+            score = extract_score_from_mass(r.result_json, r.items_json, "evaluacion_global")
+            if score is not None:
+                global_scores.append(score)
 
         avg_global = sum(global_scores) / len(global_scores) if global_scores else None
 
@@ -721,7 +1156,16 @@ class PersonalizedTrainingService:
                 "- evolution_summary: Análisis de la evolución vs el informe anterior si existe.\n"
                 "- general_objectives: Una lista de EXACTAMENTE 3 objetivos generales de capacitación.\n"
                 "- specific_objectives: Una lista de EXACTAMENTE 3 objetivos específicos asociados a criterios.\n"
-                "- simulation_prompts: Una lista de EXACTAMENTE 4 prompts de voz interactivos para bots de roleplay de llamadas.\n\n"
+                "- simulation_prompts: Una lista de EXACTAMENTE 4 prompts de voz interactivos para bots de roleplay de llamadas. Cada prompt de simulación debe ser un objeto conteniendo:\n"
+                "    * prompt_number: número entero (1, 2, 3, 4)\n"
+                "    * title: título de la simulación\n"
+                "    * scenario_type: tipo de escenario (generalmente 'roleplay')\n"
+                "    * prompt_text: el prompt de voz detallado del bot\n"
+                "    * objective_focus: lista de enfoques específicos (e.g. ['explicacion_precio'])\n"
+                "    * linked_general_objectives: lista de títulos de objetivos generales vinculados a esta simulación\n"
+                "    * linked_specific_objectives: lista de títulos de objetivos específicos vinculados a esta simulación\n"
+                "    * objective_summary: explicación breve del objetivo de la simulación\n"
+                "    * expected_behavior: conducta esperada del agente en la simulación\n\n"
                 "NO devuelvas texto introductorio, formateo Markdown complementario, explicaciones ni etiquetas, solo el JSON puro."
             )
 
@@ -739,8 +1183,11 @@ class PersonalizedTrainingService:
 
             tipologia_str = ", ".join(f"{k} ({v} llamadas)" for k, v in aggregates["tipologia_distribution"].items())
 
-            avg_val_global = aggregates.get("avg_evaluacion_global") or 0.0
-            cierre_cita_rate = aggregates.get("cierre_cita_rate") or 0.0
+            avg_val_global = aggregates.get("avg_evaluacion_global")
+            cierre_cita_rate = aggregates.get("cierre_cita_rate")
+
+            avg_val_global_str = f"{avg_val_global:.2f}/10" if avg_val_global is not None else "No disponible"
+            cierre_cita_rate_str = f"{cierre_cita_rate:.2f}%" if cierre_cita_rate is not None else "No disponible"
 
             user_prompt = (
                 f"### DATOS DE EVALUACIONES MASIVAS DEL AGENTE\n"
@@ -748,8 +1195,8 @@ class PersonalizedTrainingService:
                 f"Periodo Analizado: {period_start.strftime('%Y-%m-%d')} al {period_end.strftime('%Y-%m-%d')}\n"
                 f"Total de llamadas evaluadas: {aggregates['evaluations_count']}\n"
                 f"Llamadas únicas: {aggregates['calls_count']}\n"
-                f"Evaluación Global Media del agente: {avg_val_global:.2f}/10\n"
-                f"Tasa de Cierre de Cita: {cierre_cita_rate:.2f}%\n"
+                f"Evaluación Global Media del agente: {avg_val_global_str}\n"
+                f"Tasa de Cierre de Cita: {cierre_cita_rate_str}\n"
                 f"Tipologías de Llamadas:\n{tipologia_str or 'No disponible'}\n\n"
                 f"### PROMEDIOS POR CRITERIO DE EVALUACIÓN:\n{c_averages_str}\n\n"
                 f"### FEEDBACKS NEGATIVOS/ÁREAS DE MEJORA DETECTADAS EN LLAMADAS:\n{feedbacks_str or 'No hay feedbacks negativos registrados'}\n\n"
@@ -1022,7 +1469,7 @@ class PersonalizedTrainingService:
             new_report.status = "completed"
             new_report.evaluations_count = aggregates["evaluations_count"]
             new_report.calls_count = aggregates["calls_count"]
-            new_report.avg_evaluacion_global = Decimal(str(avg_val_global)).quantize(Decimal("0.01"))
+            new_report.avg_evaluacion_global = Decimal(str(avg_val_global)).quantize(Decimal("0.01")) if avg_val_global is not None else None
             new_report.summary_general = summary_general
             new_report.strengths_json = normalized_strengths
             new_report.weaknesses_json = normalized_weaknesses
@@ -1061,6 +1508,25 @@ class PersonalizedTrainingService:
                 p_focus = p.get("objective_focus") or p.get("enfoque_objetivo") or p.get("objectives") or []
                 if not isinstance(p_focus, list):
                     p_focus = [str(p_focus)]
+                
+                linked_gen = p.get("linked_general_objectives") or []
+                if not isinstance(linked_gen, list):
+                    linked_gen = [str(linked_gen)]
+                    
+                linked_spec = p.get("linked_specific_objectives") or []
+                if not isinstance(linked_spec, list):
+                    linked_spec = [str(linked_spec)]
+                    
+                obj_summary = p.get("objective_summary") or p.get("resumen_objetivo")
+                exp_behavior = p.get("expected_behavior") or p.get("conducta_esperada")
+                
+                combined_focus = {
+                    "focus": p_focus,
+                    "linked_general_objectives": linked_gen,
+                    "linked_specific_objectives": linked_spec,
+                    "objective_summary": obj_summary,
+                    "expected_behavior": exp_behavior
+                }
 
                 if not p_text:
                     raise ValueError(f"Falta el campo requerido 'prompt_text' para la simulación {idx + 1}")
@@ -1071,7 +1537,7 @@ class PersonalizedTrainingService:
                     prompt_number=p_number,
                     title=str(p_title),
                     scenario_type=str(p_scenario),
-                    objective_focus_json=p_focus,
+                    objective_focus_json=combined_focus,
                     prompt_text=str(p_text)
                 )
                 db.add(new_prompt)

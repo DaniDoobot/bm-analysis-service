@@ -20,6 +20,7 @@ from app.schemas.personalized_training import (
     ManualGeneratePayload,
     TrainingSchedulerSettingOut,
     TrainingSchedulerSettingPatch,
+    CyclesTeamSummaryResponse,
 )
 from app.services.personalized_training_service import PersonalizedTrainingService
 
@@ -61,6 +62,18 @@ def enforce_agent_or_admin_ownership(user: User, hubspot_owner_id: str):
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No tienes permisos para ver el entrenamiento de otros agentes."
         )
+
+
+def sanitize_report_for_agent(report: dict) -> dict:
+    """Removes sensitive prompt_text instructions from simulation prompts for agents."""
+    if not report:
+        return report
+    
+    if "prompts" in report and isinstance(report["prompts"], list):
+        for p in report["prompts"]:
+            if isinstance(p, dict):
+                p["prompt_text"] = ""
+    return report
 
 
 # ── Admin Endpoints ──────────────────────────────────────────────────────────
@@ -110,6 +123,16 @@ async def list_agents_overview(
     """Overview list of all active agents and their current training statuses (Admin only)."""
     enforce_admin_role(current_user)
     return await PersonalizedTrainingService.get_agent_overview(db)
+
+
+@router.get("/admin/cycles-summary", response_model=CyclesTeamSummaryResponse)
+async def get_team_cycles_summary(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: AsyncSession = Depends(get_db)
+):
+    """Get team-wide training metrics, aggregates and priority targets (Admin only)."""
+    enforce_admin_role(current_user)
+    return await PersonalizedTrainingService.get_cycles_team_summary(db)
 
 
 @router.get("/admin/scheduler-settings", response_model=TrainingSchedulerSettingOut)
@@ -255,7 +278,7 @@ async def get_my_current_training(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No se encontró ningún informe de entrenamiento actual disponible para tu usuario."
         )
-    return detail["current_report"]
+    return sanitize_report_for_agent(detail["current_report"])
 
 
 @router.get("/me/history", response_model=List[TrainingAgentReportBase])
@@ -303,7 +326,7 @@ async def get_my_historical_report(
             detail="No tienes permisos para ver el informe de entrenamiento de otro agente."
         )
 
-    return report_details
+    return sanitize_report_for_agent(report_details)
 
 
 # ── Generic/Agent Parameterized Endpoints ─────────────────────────────────────
@@ -322,7 +345,10 @@ async def get_agent_current_training(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"No se encontró ningún informe de entrenamiento actual para el agente {hubspot_owner_id}."
         )
-    return detail["current_report"]
+    report_data = detail["current_report"]
+    if current_user.role not in ["admin", "administrador"]:
+        report_data = sanitize_report_for_agent(report_data)
+    return report_data
 
 
 @router.get("/agents/{hubspot_owner_id}/history", response_model=List[TrainingAgentReportBase])
@@ -353,4 +379,6 @@ async def get_report_by_id(
             detail=f"Informe de entrenamiento ID {training_report_id} no encontrado."
         )
     enforce_agent_or_admin_ownership(current_user, report_details["hubspot_owner_id"])
+    if current_user.role not in ["admin", "administrador"]:
+        report_details = sanitize_report_for_agent(report_details)
     return report_details
