@@ -466,3 +466,213 @@ async def cleanup_mass_evaluations(
         "warnings": warnings,
         "plan_preview": plan,
     }
+
+
+async def cleanup_typology_results(
+    db: AsyncSession,
+    typology_key: str = "informacion",
+    mode: str = "dry_run",
+    performed_by_email: str | None = None,
+) -> dict[str, Any]:
+    """
+    Delete all manual and mass evaluation analysis results belonging to a specific typology (e.g. 'informacion').
+    """
+    from sqlalchemy import or_, select, delete as sa_delete, func
+    from app.models.typologies import Typology
+    from app.models.analyses import Analysis, AnalysisResult, AnalysisCriterionResult, CallAnalysisCurrent
+    from app.models.mass_evaluations import MassEvaluationResult, MassEvaluationCriterionResult
+    
+    logger.info(
+        "Typology cleanup started — key=%s mode=%s performed_by=%s",
+        typology_key, mode, performed_by_email,
+    )
+    
+    # 1. Resolve matching typologies
+    stmt_typ = select(Typology).where(
+        or_(
+            Typology.typology_key == typology_key,
+            Typology.typology_key.ilike(f"%{typology_key}%"),
+            Typology.typology_name.ilike(f"%{typology_key}%"),
+            # Also support accents if we have 'informacion' vs 'información'
+            Typology.typology_key.ilike(f"%información%"),
+            Typology.typology_name.ilike(f"%información%")
+        )
+    )
+    typ_res = await db.execute(stmt_typ)
+    typs = typ_res.scalars().all()
+    
+    typ_ids = [t.typology_id for t in typs]
+    typ_keys = [t.typology_key for t in typs]
+    typ_names = [t.typology_name for t in typs]
+    
+    # Add target strings in case there are orphaned records not joined with database entities
+    target_keys = list(set([typology_key, "informacion", "información"] + typ_keys))
+    target_names_patterns = ["%informacion%", "%información%"] + [f"%{name}%" for name in typ_names]
+    
+    # Construct conditions for mass evaluation results
+    mass_eval_filter = or_(
+        MassEvaluationResult.typology_id.in_(typ_ids) if typ_ids else False,
+        MassEvaluationResult.typology_key.in_(target_keys),
+        *[MassEvaluationResult.typology_name.ilike(p) for p in target_names_patterns]
+    )
+    
+    # Construct conditions for manual analysis criterion results
+    manual_criterion_filter = or_(
+        AnalysisCriterionResult.typology_id.in_(typ_ids) if typ_ids else False,
+        AnalysisCriterionResult.typology_key.in_(target_keys),
+        *[AnalysisCriterionResult.typology_name.ilike(p) for p in target_names_patterns]
+    )
+    
+    # 2. Query Mass Evaluation Results to Delete
+    res_mass_ids = await db.execute(select(MassEvaluationResult.mass_analysis_id).where(mass_eval_filter))
+    mass_eval_ids = list(res_mass_ids.scalars().all())
+    
+    # Count associated criteria records
+    mass_criteria_count = 0
+    if mass_eval_ids:
+        cnt_mass_crit = await db.execute(
+            select(func.count(MassEvaluationCriterionResult.id)).where(
+                MassEvaluationCriterionResult.mass_analysis_id.in_(mass_eval_ids)
+            )
+        )
+        mass_criteria_count = cnt_mass_crit.scalar() or 0
+        
+    # 3. Query Manual Analysis IDs to Delete
+    # First, matching criteria
+    res_manual_ids_crit = await db.execute(select(AnalysisCriterionResult.analysis_id).where(manual_criterion_filter))
+    manual_ids_from_criteria = {r for r in res_manual_ids_crit.scalars().all()}
+    
+    # Second, matching by tipo_llamada directly in Analysis
+    manual_analysis_filter = or_(
+        *[Analysis.tipo_llamada.ilike(p) for p in target_names_patterns]
+    )
+    res_manual_ids_analysis = await db.execute(select(Analysis.analysis_id).where(manual_analysis_filter))
+    manual_ids_from_analyses = {r for r in res_manual_ids_analysis.scalars().all()}
+    
+    # Union to get complete list of targeted manual analysis IDs
+    all_manual_ids = list(manual_ids_from_criteria.union(manual_ids_from_analyses))
+    
+    # Count associated criteria records
+    manual_criteria_count = 0
+    if all_manual_ids:
+        cnt_man_crit = await db.execute(
+            select(func.count(AnalysisCriterionResult.id)).where(
+                AnalysisCriterionResult.analysis_id.in_(all_manual_ids)
+            )
+        )
+        manual_criteria_count = cnt_man_crit.scalar() or 0
+        
+    # Count associated legacy criteria results
+    manual_results_count = 0
+    if all_manual_ids:
+        cnt_man_res = await db.execute(
+            select(func.count(AnalysisResult.result_id)).where(
+                AnalysisResult.analysis_id.in_(all_manual_ids)
+            )
+        )
+        manual_results_count = cnt_man_res.scalar() or 0
+        
+    # Count associated current analysis records to delete
+    current_analyses_count = 0
+    current_filter = or_(
+        CallAnalysisCurrent.latest_analysis_id.in_(all_manual_ids) if all_manual_ids else False,
+        *[CallAnalysisCurrent.tipo_llamada.ilike(p) for p in target_names_patterns]
+    )
+    cnt_curr = await db.execute(select(func.count(CallAnalysisCurrent.call_id)).where(current_filter))
+    current_analyses_count = cnt_curr.scalar() or 0
+    
+    # Summary of affected records
+    plan = {
+        "matched_typologies": [{"id": t.typology_id, "key": t.typology_key, "name": t.typology_name} for t in typs],
+        "mass_evaluation_results_count": len(mass_eval_ids),
+        "mass_evaluation_criterion_results_count": mass_criteria_count,
+        "manual_analyses_count": len(all_manual_ids),
+        "manual_analysis_criterion_results_count": manual_criteria_count,
+        "manual_analysis_results_count": manual_results_count,
+        "call_analysis_current_count": current_analyses_count,
+    }
+    
+    if mode == "dry_run":
+        logger.info("Typology cleanup dry_run completed — no data modified.")
+        return {"mode": "dry_run", "plan": plan}
+        
+    # ── EXECUTE MODE ──────────────────────────────────────────────────────────
+    deleted_mass_crit = 0
+    deleted_mass_res = 0
+    deleted_man_crit = 0
+    deleted_man_res = 0
+    deleted_man_main = 0
+    deleted_curr = 0
+    
+    # 1. Delete Mass Evaluation Criterion Results
+    if mass_eval_ids:
+        res_del_mass_crit = await db.execute(
+            sa_delete(MassEvaluationCriterionResult).where(
+                MassEvaluationCriterionResult.mass_analysis_id.in_(mass_eval_ids)
+            )
+        )
+        deleted_mass_crit = res_del_mass_crit.rowcount
+        
+    # 2. Delete Mass Evaluation Results
+    if mass_eval_ids:
+        res_del_mass_res = await db.execute(
+            sa_delete(MassEvaluationResult).where(
+                MassEvaluationResult.mass_analysis_id.in_(mass_eval_ids)
+            )
+        )
+        deleted_mass_res = res_del_mass_res.rowcount
+        
+    # 3. Delete Manual Analysis Criterion Results
+    if all_manual_ids:
+        res_del_man_crit = await db.execute(
+            sa_delete(AnalysisCriterionResult).where(
+                AnalysisCriterionResult.analysis_id.in_(all_manual_ids)
+            )
+        )
+        deleted_man_crit = res_del_man_crit.rowcount
+        
+    # 4. Delete Manual Analysis Results (Legacy pivot)
+    if all_manual_ids:
+        res_del_man_res = await db.execute(
+            sa_delete(AnalysisResult).where(
+                AnalysisResult.analysis_id.in_(all_manual_ids)
+            )
+        )
+        deleted_man_res = res_del_man_res.rowcount
+        
+    # 5. Delete Call Analysis Current references or rows
+    res_del_curr = await db.execute(
+        sa_delete(CallAnalysisCurrent).where(current_filter)
+    )
+    deleted_curr = res_del_curr.rowcount
+    
+    # 6. Delete Main Analyses
+    if all_manual_ids:
+        res_del_man_main = await db.execute(
+            sa_delete(Analysis).where(
+                Analysis.analysis_id.in_(all_manual_ids)
+            )
+        )
+        deleted_man_main = res_del_man_main.rowcount
+        
+    await db.commit()
+    
+    logger.info(
+        "Typology cleanup executed — deleted mass: res=%d crit=%d, manual: main=%d crit=%d legacy_res=%d, current=%d",
+        deleted_mass_res, deleted_mass_crit, deleted_man_main, deleted_man_crit, deleted_man_res, deleted_curr
+    )
+    
+    return {
+        "mode": "execute",
+        "ok": True,
+        "deleted_counts": {
+            "mass_evaluation_results": deleted_mass_res,
+            "mass_evaluation_criterion_results": deleted_mass_crit,
+            "manual_analyses": deleted_man_main,
+            "manual_analysis_criterion_results": deleted_man_crit,
+            "manual_analysis_results": deleted_man_res,
+            "call_analysis_current": deleted_curr,
+        },
+        "plan_preview": plan,
+    }
+
