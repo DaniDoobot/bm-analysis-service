@@ -166,7 +166,8 @@ class PersonalizedTrainingService:
                             active_cycles += 1
 
             # Latest cycle info
-            latest_r = all_agent_reps[0] if all_agent_reps else None
+            active_reps = [r for r in all_agent_reps if r.status != "superseded"]
+            latest_r = active_reps[0] if active_reps else None
             latest_cycle_status = "no_data"
             latest_cycle_progress_completed = 0
             latest_cycle_progress_total = 4
@@ -785,12 +786,19 @@ class PersonalizedTrainingService:
         runs.reverse()  # Chronological order
 
         cycle_evolution = []
-        for idx, run in enumerate(runs):
+        cycle_counter = 1
+        for run in runs:
             stmt_run_reps = select(TrainingAgentReport).where(
-                TrainingAgentReport.training_run_id == run.training_run_id
+                and_(
+                    TrainingAgentReport.training_run_id == run.training_run_id,
+                    TrainingAgentReport.status == "completed"
+                )
             )
             res_run_reps = await db.execute(stmt_run_reps)
             run_reps = list(res_run_reps.scalars().all())
+            
+            if not run_reps:
+                continue
             
             run_scores = [float(r.avg_evaluacion_global) for r in run_reps if r.avg_evaluacion_global is not None]
             run_avg_score = round(sum(run_scores) / len(run_scores), 2) if run_scores else 0.0
@@ -845,12 +853,13 @@ class PersonalizedTrainingService:
                     pending_simulations += (4 - sim_comp_count)
 
             cycle_evolution.append({
-                "cycle_label": f"Ciclo {idx + 1}",
+                "cycle_label": f"Ciclo {cycle_counter}",
                 "team_avg_score": run_avg_score,
                 "close_rate": run_close_rate,
                 "completed_cycles": completed_cycles,
                 "pending_simulations": pending_simulations
             })
+            cycle_counter += 1
 
         if not cycle_evolution:
             cycle_evolution = [
@@ -1560,6 +1569,7 @@ class PersonalizedTrainingService:
                 old_rep = res_old.scalars().first()
                 if old_rep:
                     old_rep.is_current = False
+                    old_rep.status = "superseded"
                     old_rep.superseded_by_report_id = new_report.training_report_id
 
             stmt_deact = select(TrainingAgentReport).where(
@@ -1613,6 +1623,7 @@ class PersonalizedTrainingService:
                     old_rep = res_old.scalars().first()
                     if old_rep:
                         old_rep.is_current = False
+                        old_rep.status = "superseded"
                         old_rep.superseded_by_report_id = failed_report.training_report_id
                 
                 stmt_deact = select(TrainingAgentReport).where(
