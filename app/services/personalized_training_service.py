@@ -760,46 +760,162 @@ class PersonalizedTrainingService:
         # Sort priority agents
         priority_agents.sort(key=lambda x: (0 if x["status"] == "requires_attention" else 1, x["score"] or 10.0))
 
-        # 2. Get recurring patterns/weaknesses from the latest cycle period
-        stmt_patterns = select(
-            MassEvaluationCriterionResult.criterion_name,
-            func.count(MassEvaluationCriterionResult.criterion_key)
-        ).join(
-            MassEvaluationResult, MassEvaluationResult.mass_analysis_id == MassEvaluationCriterionResult.mass_analysis_id
-        ).where(
-            MassEvaluationResult.status == "completed",
-            MassEvaluationCriterionResult.is_applicable == True,
-            or_(
-                and_(MassEvaluationCriterionResult.numeric_value.is_not(None), MassEvaluationCriterionResult.numeric_value < 8.0),
-                and_(MassEvaluationCriterionResult.boolean_value.is_not(None), MassEvaluationCriterionResult.boolean_value == False)
+        # 2. Get recurring patterns/weaknesses from the current cycle period of monitored agents
+        # We fetch all current completed/pending/running reports of monitored agents
+        stmt_curr_reps = select(TrainingAgentReport).where(
+            and_(
+                TrainingAgentReport.is_current == True,
+                TrainingAgentReport.status.in_(["completed", "pending", "running"])
             )
-        ).group_by(
-            MassEvaluationCriterionResult.criterion_name
-        ).order_by(
-            desc(func.count(MassEvaluationCriterionResult.criterion_key))
-        ).limit(3)
+        )
+        res_curr_reps = await db.execute(stmt_curr_reps)
+        current_reports = list(res_curr_reps.scalars().all())
 
-        res_patterns = await db.execute(stmt_patterns)
-        pattern_rows = res_patterns.all()
-        
+        patterns_data = {}
         recurring_patterns = []
-        for row in pattern_rows:
-            label, count = row
-            severity = "high" if count >= 10 else "medium"
-            recurring_patterns.append({
-                "label": label,
-                "count": count,
-                "total_agents": monitored_agents_count,
-                "severity": severity
-            })
+
+        if current_reports:
+            # Query low-scoring mass evaluation criterion results for the agent and period of each current report
+            conditions = []
+            for r in current_reports:
+                conditions.append(
+                    and_(
+                        MassEvaluationResult.hubspot_owner_id == r.hubspot_owner_id,
+                        MassEvaluationResult.call_timestamp >= r.period_start,
+                        MassEvaluationResult.call_timestamp <= r.period_end
+                    )
+                )
+            
+            stmt_crit = select(
+                MassEvaluationResult.hubspot_owner_id,
+                MassEvaluationResult.call_timestamp,
+                MassEvaluationCriterionResult.criterion_name,
+                MassEvaluationCriterionResult.criterion_key,
+                MassEvaluationCriterionResult.numeric_value,
+                MassEvaluationCriterionResult.boolean_value
+            ).join(
+                MassEvaluationCriterionResult,
+                MassEvaluationResult.mass_analysis_id == MassEvaluationCriterionResult.mass_analysis_id
+            ).where(
+                and_(
+                    MassEvaluationResult.status == "completed",
+                    MassEvaluationCriterionResult.is_applicable == True,
+                    or_(*conditions),
+                    or_(
+                        and_(MassEvaluationCriterionResult.numeric_value.is_not(None), MassEvaluationCriterionResult.numeric_value < 8.0),
+                        and_(MassEvaluationCriterionResult.boolean_value.is_not(None), MassEvaluationCriterionResult.boolean_value == False)
+                    )
+                )
+            )
+            res_crit = await db.execute(stmt_crit)
+            crit_rows = res_crit.all()
+
+            for row in crit_rows:
+                owner_id, call_ts, crit_name, crit_key, num_val, bool_val = row
+                
+                # Find matching report
+                matching_report = None
+                for r in current_reports:
+                    if r.hubspot_owner_id == owner_id and r.period_start <= call_ts <= r.period_end:
+                        matching_report = r
+                        break
+                if not matching_report:
+                    continue
+                    
+                if crit_name not in patterns_data:
+                    patterns_data[crit_name] = {
+                        "affected_agents": set(),
+                        "affected_cycles": set(),
+                        "occurrences": 0,
+                        "scores": []
+                    }
+                patterns_data[crit_name]["affected_agents"].add(owner_id)
+                patterns_data[crit_name]["affected_cycles"].add(matching_report.training_report_id)
+                patterns_data[crit_name]["occurrences"] += 1
+                if num_val is not None:
+                    patterns_data[crit_name]["scores"].append(float(num_val))
+                elif bool_val is not None:
+                    patterns_data[crit_name]["scores"].append(0.0)
+
+            # Process patterns and calculate severity + reason
+            processed_patterns = []
+            for crit_name, data in patterns_data.items():
+                affected_agents_count = len(data["affected_agents"])
+                affected_cycles_count = len(data["affected_cycles"])
+                occurrences = data["occurrences"]
+                avg_score = round(sum(data["scores"]) / len(data["scores"]), 1) if data["scores"] else 0.0
+
+                # Check if mentioned in weaknesses or specific objectives of current reports
+                is_prioritized = False
+                for r in current_reports:
+                    if r.weaknesses_json:
+                        for w in r.weaknesses_json:
+                            w_title = w.get("title", "").lower()
+                            w_desc = w.get("description", "").lower()
+                            if crit_name.lower() in w_title or crit_name.lower() in w_desc:
+                                is_prioritized = True
+                                break
+                    if r.specific_objectives_json:
+                        for obj in r.specific_objectives_json:
+                            o_title = obj.get("title", "").lower()
+                            o_desc = obj.get("description", "").lower()
+                            if crit_name.lower() in o_title or crit_name.lower() in o_desc:
+                                is_prioritized = True
+                                break
+                    if is_prioritized:
+                        break
+
+                # Severity rules
+                if affected_agents_count > 1 or affected_cycles_count >= 2 or avg_score < 5.0 or is_prioritized:
+                    severity = "high"
+                    if is_prioritized:
+                        reason = "Área de mejora u objetivo prioritario en ciclos pendientes"
+                    elif affected_agents_count > 1:
+                        reason = "Afecta a múltiples agentes del equipo"
+                    elif affected_cycles_count >= 2:
+                        reason = "Aparece repetidamente en múltiples ciclos pendientes"
+                    else:
+                        reason = f"Criterio con puntuación media crítica ({avg_score}/10)"
+                elif avg_score >= 5.0 and avg_score <= 7.0:
+                    severity = "medium"
+                    reason = f"Criterio con margen de mejora (puntuación media {avg_score}/10)"
+                else:
+                    severity = "low"
+                    reason = "Desviación puntual con puntuación aceptable"
+
+                processed_patterns.append({
+                    "label": crit_name,
+                    "affected_agents": affected_agents_count,
+                    "affected_cycles": affected_cycles_count,
+                    "occurrences": occurrences,
+                    "avg_score": avg_score,
+                    "severity": severity,
+                    "reason": reason,
+                    # Backwards compatibility fields
+                    "count": occurrences,
+                    "total_agents": affected_agents_count
+                })
+
+            # Sort by priority: severity (high first, then medium, then low), and then occurrences desc
+            severity_order = {"high": 0, "medium": 1, "low": 2}
+            processed_patterns.sort(key=lambda x: (severity_order.get(x["severity"], 3), -x["occurrences"]))
+            
+            # Limit to 3 most relevant patterns
+            recurring_patterns = processed_patterns[:3]
 
         if not recurring_patterns:
             recurring_patterns = [
                 {
                     "label": "Tres preguntas clave ausente o tardía",
+                    "affected_agents": 0,
+                    "affected_cycles": 0,
+                    "occurrences": 0,
+                    "avg_score": 0.0,
+                    "severity": "medium",
+                    "reason": "Sin desviaciones recurrentes identificadas en el ciclo actual",
+                    # Backwards compatibility fields
                     "count": 0,
-                    "total_agents": monitored_agents_count,
-                    "severity": "medium"
+                    "total_agents": 0
                 }
             ]
 
