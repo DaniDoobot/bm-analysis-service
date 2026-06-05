@@ -158,3 +158,39 @@ async def cleanup_mass_evaluations(
             status_code=400,
             detail=f"Error durante la limpieza de evaluaciones masivas: {str(e)}",
         )
+
+
+class CleanupTypologyRequest(BaseModel):
+    typology_key: str = Field(default="informacion", description="Typology key to target for cleanup")
+    mode: Literal["dry_run", "execute"] = Field(default="dry_run", description="dry_run to preview, execute to apply deletion")
+    performed_by_email: str | None = Field(default=None, description="Email of user performing the cleanup")
+
+
+@router.post("/cleanup-typology-results")
+async def cleanup_typology_results(
+    body: CleanupTypologyRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Delete all manual and mass evaluation analysis results belonging to a specific typology (e.g. 'informacion').
+    """
+    logger.info(
+        "Admin cleanup-typology-results called: key=%s mode=%s performed_by=%s",
+        body.typology_key, body.mode, body.performed_by_email,
+    )
+    try:
+        from app.services.cleanup_service import cleanup_typology_results as _cleanup_typology
+        result = await _cleanup_typology(
+            db=db,
+            typology_key=body.typology_key,
+            mode=body.mode,
+            performed_by_email=body.performed_by_email,
+        )
+        return {"ok": True, **result}
+    except Exception as e:
+        logger.exception("Error durante la limpieza de tipologia %s: %s", body.typology_key, e)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error durante la limpieza de tipología: {str(e)}",
+        )
+
