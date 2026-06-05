@@ -602,6 +602,9 @@ class PersonalizedTrainingService:
         
         priority_agents = []
         monitored_agents_count = 0  # Agents with valid cycles (regardless of is_enabled)
+        total_cycles = 0
+        completed_cycles_total = 0
+        running_cycles_total = 0
 
         for s in all_settings:
             # Get all reports for this agent (excluding archived) ordered by period start desc
@@ -622,6 +625,11 @@ class PersonalizedTrainingService:
 
             # Count this agent as monitored since they have at least one valid report
             monitored_agents_count += 1
+            
+            # Count cycles
+            total_cycles += len(valid_reps)
+            completed_cycles_total += sum(1 for r in valid_reps if r.status == "completed")
+            running_cycles_total += sum(1 for r in valid_reps if r.status == "running")
             
             # Find the latest and second latest completed (non-archived/non-superseded) reports
             completed_reps = [r for r in reps if r.status == "completed"]
@@ -1210,6 +1218,9 @@ class PersonalizedTrainingService:
             "monitored_agents": monitored_agents_count,
             # generation_enabled_agents: agents configured to receive new cycles from the scheduler
             "generation_enabled_agents": generation_enabled_agents,
+            "total_cycles": total_cycles,
+            "completed_cycles_total": completed_cycles_total,
+            "running_cycles_total": running_cycles_total,
             "team_avg_score": team_avg_score,
             "team_avg_score_delta": team_avg_score_delta,
             "avg_close_rate": avg_close_rate,

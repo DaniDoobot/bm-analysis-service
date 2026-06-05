@@ -292,6 +292,9 @@ class CyclesTeamSummaryResponse(BaseModel):
     monitored_agents: int
     # generation_enabled_agents: agents with is_enabled=True (scheduled to receive new cycles)
     generation_enabled_agents: int
+    total_cycles: int
+    completed_cycles_total: int
+    running_cycles_total: int
     team_avg_score: float
     team_avg_score_delta: float
     avg_close_rate: float
