@@ -262,12 +262,15 @@ class PriorityAgentItem(BaseModel):
 
 class RecurringPatternItem(BaseModel):
     label: str
+    category: str
     affected_agents: int
     affected_cycles: int
     occurrences: int
     avg_score: float
     severity: str
     reason: str
+    source: str
+    examples: List[str]
     
     # Backwards compatibility fields
     count: int

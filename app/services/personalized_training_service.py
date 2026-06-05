@@ -761,23 +761,193 @@ class PersonalizedTrainingService:
         priority_agents.sort(key=lambda x: (0 if x["status"] == "requires_attention" else 1, x["score"] or 10.0))
 
         # 2. Get recurring patterns/weaknesses from the current cycle period of monitored agents
-        # We fetch all current completed/pending/running reports of monitored agents
+        # Standard patterns for semantic grouping and mapping
+        STANDARD_PATTERNS = [
+            {
+                "id": "indagacion_pareja",
+                "label": "No pregunta si el paciente acudirá acompañado",
+                "category": "Cualificación de la cita",
+                "keywords": ["pareja", "acompañante", "acompañado", "acudirá con", "asistirá con", "acudir con", "venga con", "venir con"],
+                "criteria": ["Pareja asistirá o no", "Pregunta por pareja", "pareja_asistira", "pregunta_pareja"],
+                "fallback_reason": "Falta de indagación sobre el acompañamiento del paciente durante la llamada"
+            },
+            {
+                "id": "recomienda_pareja",
+                "label": "No recomienda acudir acompañado cuando procede",
+                "category": "Cualificación de la cita",
+                "keywords": ["recomienda acudir con", "recomienda acudir acompañado", "recomienda acompañante", "recomienda pareja", "recomendar pareja", "recomendar acudir"],
+                "criteria": ["Recomienda acudir con pareja", "recomienda_acudir_pareja", "recomendar_pareja"],
+                "fallback_reason": "No se promueve activamente que el paciente asista acompañado a la consulta"
+            },
+            {
+                "id": "adelantar_cita",
+                "label": "No explora disponibilidad para adelantar la cita",
+                "category": "Cualificación de la cita",
+                "keywords": ["adelantar cita", "disponibilidad para adelantar", "hueco anterior", "adelantar la cita", "huecos anteriores"],
+                "criteria": ["Puede adelantar cita", "puede_adelantar_cita", "adelantar_cita"],
+                "fallback_reason": "Omisión de ofrecer huecos anteriores disponibles para optimizar la agenda de la clínica"
+            },
+            {
+                "id": "saludo_protocolo",
+                "label": "Incumplimiento del protocolo de saludo e identificación",
+                "category": "Protocolo de llamada",
+                "keywords": ["saludo", "identificaci", "protocolo de saludo", "identifica", "saludo e identificacion", "presentaci"],
+                "criteria": ["Saludo e identificación", "Saludo y presentación", "saludo_identificacion"],
+                "fallback_reason": "Falta de adherencia al protocolo de saludo estándar de la clínica"
+            },
+            {
+                "id": "explicacion_economica",
+                "label": "Explicación económica insuficiente o confusa",
+                "category": "Explicación comercial",
+                "keywords": ["precio", "económic", "condiciones econ", "explicación de precio", "presupuesto", "financiar", "financiación", "coste"],
+                "criteria": [
+                    "Explicación precio consulta", 
+                    "Claridad económica", 
+                    "Claridad en explicación económica", 
+                    "Claridad de explicación de precio en consulta",
+                    "explicacion_precio",
+                    "claridad_economica"
+                ],
+                "fallback_reason": "Falta de claridad u omisión de detalles clave en las tarifas y opciones de financiación"
+            },
+            {
+                "id": "preguntas_clave",
+                "label": "No realiza las preguntas clave de cualificación",
+                "category": "Cualificación de la cita",
+                "keywords": ["preguntas clave", "cualificaci", "tres preguntas", "preguntas de cualificación"],
+                "criteria": ["Tres preguntas clave", "Preguntas clave", "tres_preguntas_clave"],
+                "fallback_reason": "No se formulan las preguntas requeridas para entender el motivo del paciente"
+            },
+            {
+                "id": "cierre_efectivo",
+                "label": "Cierre de cita poco efectivo",
+                "category": "Cierre comercial",
+                "keywords": ["cierre de cita", "cierre poco efectivo", "cerrar cita", "cierre comercial", "cierre de la cita"],
+                "criteria": ["Cierre de cita", "Cierre", "cierre_cita"],
+                "fallback_reason": "Debilidad en el llamado a la acción para concretar la cita médica"
+            },
+            {
+                "id": "personalizacion_empatia",
+                "label": "Falta de personalización en la interacción",
+                "category": "Empatía y conexión",
+                "keywords": ["personalización", "nombre del paciente", "personalizar", "empatía", "conexión", "cercanía", "personalizar la llam"],
+                "criteria": ["Personalización", "Empatía", "Uso del nombre", "empatia", "personalizacion"],
+                "fallback_reason": "Poco uso del nombre del paciente o falta de conexión empática durante la llamada"
+            },
+            {
+                "id": "identificar_objecion",
+                "label": "No identifica correctamente la objeción principal",
+                "category": "Manejo de objeciones",
+                "keywords": ["objeción", "manejo de objeciones", "principal objeción", "rebate", "rebatir", "objeciones"],
+                "criteria": ["Manejo de objeciones", "Objeciones", "manejo_objeciones"],
+                "fallback_reason": "Dificultad para indagar o resolver la barrera real para agendar del paciente"
+            },
+            {
+                "id": "claridad_tratamiento",
+                "label": "Baja claridad en la explicación del tratamiento",
+                "category": "Explicación técnica",
+                "keywords": ["tratamiento", "explicación del tratamiento", "claridad en el tratamiento", "explicar tratamiento"],
+                "criteria": ["Explicación del tratamiento", "Tratamiento", "explicacion_tratamiento"],
+                "fallback_reason": "Explicaciones médicas confusas, fuera de rol o excesivamente complejas"
+            }
+        ]
+
+        # Initialize patterns database
+        patterns_db = {}
+        for p in STANDARD_PATTERNS:
+            patterns_db[p["id"]] = {
+                "label": p["label"],
+                "category": p["category"],
+                "affected_agents": set(),
+                "affected_cycles": set(),
+                "occurrences": 0,
+                "scores": [],
+                "examples": [],
+                "sources": set(),
+                "fallback_reason": p["fallback_reason"]
+            }
+
+        # We fetch all current valid reports (status = completed, is_current = True, not archived/superseded)
         stmt_curr_reps = select(TrainingAgentReport).where(
             and_(
                 TrainingAgentReport.is_current == True,
-                TrainingAgentReport.status.in_(["completed", "pending", "running"])
+                TrainingAgentReport.status == "completed"
             )
         )
         res_curr_reps = await db.execute(stmt_curr_reps)
         current_reports = list(res_curr_reps.scalars().all())
 
-        patterns_data = {}
-        recurring_patterns = []
+        # Process textual weaknesses and objectives
+        for r in current_reports:
+            owner_id = r.hubspot_owner_id
+            report_id = r.training_report_id
+            
+            text_blocks = []
+            if r.weaknesses_json:
+                for w in r.weaknesses_json:
+                    title = w.get("title", "")
+                    description = w.get("description", "")
+                    text_blocks.append((f"{title}: {description}" if title else description, description or title))
+            if r.specific_objectives_json:
+                for obj in r.specific_objectives_json:
+                    title = obj.get("title", "")
+                    description = obj.get("description", "")
+                    text_blocks.append((f"{title}: {description}" if title else description, description or title))
+            if r.general_objectives_json:
+                for obj in r.general_objectives_json:
+                    title = obj.get("title", "")
+                    description = obj.get("description", "")
+                    text_blocks.append((f"{title}: {description}" if title else description, description or title))
 
-        if current_reports:
-            # Query low-scoring mass evaluation criterion results for the agent and period of each current report
+            for full_text, short_text in text_blocks:
+                if not full_text:
+                    continue
+                full_text_lower = full_text.lower()
+                
+                matched = False
+                for p in STANDARD_PATTERNS:
+                    if any(k in full_text_lower for k in p["keywords"]):
+                        pid = p["id"]
+                        patterns_db[pid]["affected_agents"].add(owner_id)
+                        patterns_db[pid]["affected_cycles"].add(report_id)
+                        patterns_db[pid]["sources"].add("weaknesses_and_objectives")
+                        if short_text not in patterns_db[pid]["examples"]:
+                            patterns_db[pid]["examples"].append(short_text)
+                        matched = True
+                        break
+                if not matched:
+                    pid = "otros_aspectos"
+                    if pid not in patterns_db:
+                        patterns_db[pid] = {
+                            "label": "Otras desviaciones o áreas de mejora identificadas",
+                            "category": "General",
+                            "affected_agents": set(),
+                            "affected_cycles": set(),
+                            "occurrences": 0,
+                            "scores": [],
+                            "examples": [],
+                            "sources": set(),
+                            "fallback_reason": "Área de mejora detectada en la evaluación del ciclo"
+                        }
+                    patterns_db[pid]["affected_agents"].add(owner_id)
+                    patterns_db[pid]["affected_cycles"].add(report_id)
+                    patterns_db[pid]["sources"].add("weaknesses_and_objectives")
+                    if short_text not in patterns_db[pid]["examples"]:
+                        patterns_db[pid]["examples"].append(short_text)
+
+        # We also query mass evaluation criterion results for the periods of all current reports (pending, running or completed)
+        stmt_all_curr = select(TrainingAgentReport).where(
+            and_(
+                TrainingAgentReport.is_current == True,
+                TrainingAgentReport.status.in_(["completed", "pending", "running"])
+            )
+        )
+        res_all_curr = await db.execute(stmt_all_curr)
+        all_current_reports = list(res_all_curr.scalars().all())
+
+        if all_current_reports:
             conditions = []
-            for r in current_reports:
+            for r in all_current_reports:
                 conditions.append(
                     and_(
                         MassEvaluationResult.hubspot_owner_id == r.hubspot_owner_id,
@@ -815,104 +985,117 @@ class PersonalizedTrainingService:
                 
                 # Find matching report
                 matching_report = None
-                for r in current_reports:
+                for r in all_current_reports:
                     if r.hubspot_owner_id == owner_id and r.period_start <= call_ts <= r.period_end:
                         matching_report = r
                         break
                 if not matching_report:
                     continue
-                    
-                if crit_name not in patterns_data:
-                    patterns_data[crit_name] = {
-                        "affected_agents": set(),
-                        "affected_cycles": set(),
-                        "occurrences": 0,
-                        "scores": []
-                    }
-                patterns_data[crit_name]["affected_agents"].add(owner_id)
-                patterns_data[crit_name]["affected_cycles"].add(matching_report.training_report_id)
-                patterns_data[crit_name]["occurrences"] += 1
-                if num_val is not None:
-                    patterns_data[crit_name]["scores"].append(float(num_val))
-                elif bool_val is not None:
-                    patterns_data[crit_name]["scores"].append(0.0)
 
-            # Process patterns and calculate severity + reason
-            processed_patterns = []
-            for crit_name, data in patterns_data.items():
-                affected_agents_count = len(data["affected_agents"])
-                affected_cycles_count = len(data["affected_cycles"])
-                occurrences = data["occurrences"]
-                avg_score = round(sum(data["scores"]) / len(data["scores"]), 1) if data["scores"] else 0.0
-
-                # Check if mentioned in weaknesses or specific objectives of current reports
-                is_prioritized = False
-                for r in current_reports:
-                    if r.weaknesses_json:
-                        for w in r.weaknesses_json:
-                            w_title = w.get("title", "").lower()
-                            w_desc = w.get("description", "").lower()
-                            if crit_name.lower() in w_title or crit_name.lower() in w_desc:
-                                is_prioritized = True
-                                break
-                    if r.specific_objectives_json:
-                        for obj in r.specific_objectives_json:
-                            o_title = obj.get("title", "").lower()
-                            o_desc = obj.get("description", "").lower()
-                            if crit_name.lower() in o_title or crit_name.lower() in o_desc:
-                                is_prioritized = True
-                                break
-                    if is_prioritized:
+                # Find which pattern this criterion maps to
+                matched_pattern_id = None
+                for p in STANDARD_PATTERNS:
+                    if crit_name in p["criteria"] or crit_key in p["criteria"]:
+                        matched_pattern_id = p["id"]
                         break
+                
+                if matched_pattern_id:
+                    pid = matched_pattern_id
+                    patterns_db[pid]["affected_agents"].add(owner_id)
+                    patterns_db[pid]["affected_cycles"].add(matching_report.training_report_id)
+                    patterns_db[pid]["occurrences"] += 1
+                    patterns_db[pid]["sources"].add("mass_evaluations")
+                    if num_val is not None:
+                        patterns_db[pid]["scores"].append(float(num_val))
+                    elif bool_val is not None:
+                        patterns_db[pid]["scores"].append(0.0)
 
-                # Severity rules
-                if affected_agents_count > 1 or affected_cycles_count >= 2 or avg_score < 5.0 or is_prioritized:
-                    severity = "high"
-                    if is_prioritized:
-                        reason = "Área de mejora u objetivo prioritario en ciclos pendientes"
-                    elif affected_agents_count > 1:
-                        reason = "Afecta a múltiples agentes del equipo"
-                    elif affected_cycles_count >= 2:
-                        reason = "Aparece repetidamente en múltiples ciclos pendientes"
-                    else:
-                        reason = f"Criterio con puntuación media crítica ({avg_score}/10)"
-                elif avg_score >= 5.0 and avg_score <= 7.0:
-                    severity = "medium"
-                    reason = f"Criterio con margen de mejora (puntuación media {avg_score}/10)"
-                else:
-                    severity = "low"
-                    reason = "Desviación puntual con puntuación aceptable"
+        # Assemble processed patterns list
+        processed_patterns = []
+        for pid, data in patterns_db.items():
+            affected_agents_count = len(data["affected_agents"])
+            if affected_agents_count == 0:
+                continue
 
-                processed_patterns.append({
-                    "label": crit_name,
-                    "affected_agents": affected_agents_count,
-                    "affected_cycles": affected_cycles_count,
-                    "occurrences": occurrences,
-                    "avg_score": avg_score,
-                    "severity": severity,
-                    "reason": reason,
-                    # Backwards compatibility fields
-                    "count": occurrences,
-                    "total_agents": affected_agents_count
-                })
-
-            # Sort by priority: severity (high first, then medium, then low), and then occurrences desc
-            severity_order = {"high": 0, "medium": 1, "low": 2}
-            processed_patterns.sort(key=lambda x: (severity_order.get(x["severity"], 3), -x["occurrences"]))
+            affected_cycles_count = len(data["affected_cycles"])
+            occurrences = data["occurrences"]
+            avg_score = round(sum(data["scores"]) / len(data["scores"]), 1) if data["scores"] else 0.0
             
-            # Limit to 3 most relevant patterns
-            recurring_patterns = processed_patterns[:3]
+            # Determine source
+            sources_set = data["sources"]
+            if "weaknesses_and_objectives" in sources_set:
+                source = "weaknesses_and_objectives"
+            else:
+                source = "mass_evaluations"
+
+            # Determine severity
+            is_in_weaknesses_or_objectives = "weaknesses_and_objectives" in sources_set
+            if (affected_agents_count > 1 or 
+                affected_cycles_count >= 2 or 
+                (avg_score > 0.0 and avg_score < 5.0) or 
+                is_in_weaknesses_or_objectives):
+                severity = "high"
+                if is_in_weaknesses_or_objectives:
+                    reason = "Área de mejora u objetivo prioritario en ciclos pendientes"
+                elif affected_agents_count > 1:
+                    reason = "Afecta a múltiples agentes del equipo"
+                elif affected_cycles_count >= 2:
+                    reason = "Aparece repetidamente en múltiples ciclos pendientes"
+                else:
+                    reason = f"Criterio con puntuación media crítica ({avg_score}/10)"
+            elif (avg_score >= 5.0 and avg_score <= 7.0) or affected_cycles_count >= 1:
+                severity = "medium"
+                reason = f"Criterio con margen de mejora (puntuación media {avg_score}/10)"
+            else:
+                severity = "low"
+                reason = "Desviación puntual con puntuación aceptable"
+
+            examples = data["examples"][:3]
+            if not examples:
+                examples = [data["fallback_reason"]]
+
+            processed_patterns.append({
+                "label": data["label"],
+                "category": data["category"],
+                "affected_agents": affected_agents_count,
+                "affected_cycles": affected_cycles_count,
+                "occurrences": occurrences,
+                "avg_score": avg_score,
+                "severity": severity,
+                "reason": reason,
+                "source": source,
+                "examples": examples,
+                # Backwards compatibility fields
+                "count": occurrences,
+                "total_agents": affected_agents_count
+            })
+
+        # Sort patterns
+        severity_map = {"high": 0, "medium": 1, "low": 2}
+        processed_patterns.sort(key=lambda x: (
+            -x["affected_agents"],
+            -x["affected_cycles"],
+            severity_map.get(x["severity"], 3),
+            x["avg_score"] if x["avg_score"] > 0 else 10.0,
+            -x["occurrences"]
+        ))
+
+        # Limit to maximum 5 patterns
+        recurring_patterns = processed_patterns[:5]
 
         if not recurring_patterns:
             recurring_patterns = [
                 {
-                    "label": "Tres preguntas clave ausente o tardía",
+                    "label": "Sin desviaciones recurrentes",
+                    "category": "General",
                     "affected_agents": 0,
                     "affected_cycles": 0,
                     "occurrences": 0,
                     "avg_score": 0.0,
-                    "severity": "medium",
-                    "reason": "Sin desviaciones recurrentes identificadas en el ciclo actual",
+                    "severity": "low",
+                    "reason": "No se han detectado desviaciones repetidas en los ciclos actuales",
+                    "source": "weaknesses_and_objectives",
+                    "examples": ["El equipo mantiene un desempeño alineado con los protocolos"],
                     # Backwards compatibility fields
                     "count": 0,
                     "total_agents": 0
