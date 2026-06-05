@@ -615,7 +615,9 @@ class PersonalizedTrainingService:
             reps = list(res_reps.scalars().all())
 
             # Skip agents with no valid reports at all (they have no data to show)
-            if not reps:
+            # Skipped and failed reports do not count as valid/active training cycles
+            valid_reps = [r for r in reps if r.status in ["completed", "pending", "running"]]
+            if not valid_reps:
                 continue
 
             # Count this agent as monitored since they have at least one valid report
