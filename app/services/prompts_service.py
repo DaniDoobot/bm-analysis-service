@@ -129,10 +129,16 @@ async def get_active_prompt(db: AsyncSession, prompt_type: str) -> dict | None:
     # Saneamiento automático / Sanity check antes de servir
     if current and prompt_text:
         try:
-            from app.services.criteria_service import sync_criterion_block, clean_orphaned_blocks, get_active_criteria
+            from app.services.criteria_service import sync_criterion_block, clean_orphaned_blocks, get_active_criteria, deduplicate_criteria_blocks
             active_criteria = await get_active_criteria(db, p.prompt_id)
             
             changed = False
+            
+            # 0. Deduplicar bloques duplicados antes de sincronizar
+            new_text_dedup = deduplicate_criteria_blocks(prompt_text)
+            if new_text_dedup != prompt_text:
+                prompt_text = new_text_dedup
+                changed = True
             
             # A. Sincronizar / Reconstruir bloques de criterios activos
             for c in active_criteria:
@@ -700,18 +706,25 @@ async def create_prompt_from_base(db: AsyncSession, body: CreateFromBaseRequest)
             criteria_count += 1
         await db.flush()
 
+    # Capture attribute values before commit to avoid lazy load issues on expired attributes
+    prompt_id = new_prompt.prompt_id
+    version_id = new_version.id
+    prompt_name = new_prompt.prompt_name
+    prompt_type = new_prompt.prompt_type
+    prompt_text = new_version.prompt
+    service_id = new_prompt.service_id
+
     await db.commit()
-    await db.refresh(new_version)
 
     return {
         "ok": True,
-        "prompt_id": new_prompt.prompt_id,
-        "prompt_version_id": new_version.id,
-        "prompt_name": new_prompt.prompt_name,
-        "prompt_type": new_prompt.prompt_type,
-        "prompt": new_version.prompt,
+        "prompt_id": prompt_id,
+        "prompt_version_id": version_id,
+        "prompt_name": prompt_name,
+        "prompt_type": prompt_type,
+        "prompt": prompt_text,
         "criteria_count": criteria_count,
-        "service_id": new_prompt.service_id,
+        "service_id": service_id,
     }
 
 

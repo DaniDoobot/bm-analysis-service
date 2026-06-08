@@ -61,10 +61,22 @@ def sync_criterion_block(prompt_text: str, criterion, old_output_key: str | None
                 break
         
         if has_key:
-            # Para evitar falsos positivos en el texto introductorio, priorizamos líneas que parezcan cabeceras:
-            # que empiecen con viñetas (- o *) o que explícitamente tengan output_key / feed_key
             stripped = line.strip()
-            if stripped.startswith("-") or stripped.startswith("*") or "output_key" in normalized_line or "feed_key" in normalized_line:
+            # A valid header must either start with a list marker and brackets (e.g., "- [score_1_10]"),
+            # or contain the explicit output_key/feed_key metadata format (e.g. "(output_key: tono_simpatia)")
+            is_header = False
+            if stripped.startswith("- [") or stripped.startswith("* [") or stripped.startswith("-  [") or stripped.startswith("*  ["):
+                is_header = True
+            else:
+                for sk in search_keys:
+                    if re.search(rf"output_key:\s*{re.escape(sk)}\b", line, re.IGNORECASE):
+                        is_header = True
+                        break
+                    if re.search(rf"feed_key:\s*{re.escape(sk)}\b", line, re.IGNORECASE):
+                        is_header = True
+                        break
+            
+            if is_header:
                 header_idx = i
                 break
 
@@ -258,7 +270,19 @@ def remove_criterion_block(prompt_text: str, criterion) -> tuple[str, bool]:
         
         if has_key:
             stripped = line.strip()
-            if stripped.startswith("-") or stripped.startswith("*") or "output_key" in normalized_line or "feed_key" in normalized_line:
+            is_header = False
+            if stripped.startswith("- [") or stripped.startswith("* [") or stripped.startswith("-  [") or stripped.startswith("*  ["):
+                is_header = True
+            else:
+                for sk in search_keys:
+                    if re.search(rf"output_key:\s*{re.escape(sk)}\b", line, re.IGNORECASE):
+                        is_header = True
+                        break
+                    if re.search(rf"feed_key:\s*{re.escape(sk)}\b", line, re.IGNORECASE):
+                        is_header = True
+                        break
+            
+            if is_header:
                 header_idx = i
                 break
 
@@ -992,3 +1016,60 @@ async def delete_criterion(db: AsyncSession, criterion_id: int, performed_by_ema
         "action": action,
         "message": "Item eliminado correctamente"
     }
+
+
+def deduplicate_criteria_blocks(prompt_text: str) -> str:
+    """
+    Scans the prompt text and removes any duplicate criterion blocks.
+    A block is recognized by standard headers: '- [type]' or '* [type]' containing output_key.
+    Keeps only the first occurrence of each output_key block.
+    """
+    if not prompt_text:
+        return prompt_text
+    
+    import re
+    lines = prompt_text.splitlines()
+    new_lines = []
+    seen_keys = set()
+    
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        
+        is_header = False
+        output_key = None
+        
+        if stripped.startswith("- [") or stripped.startswith("* [") or stripped.startswith("-  [") or stripped.startswith("*  ["):
+            match = re.search(r"output_key:\s*([a-zA-Z0-9_]+)", line, re.IGNORECASE)
+            if match:
+                is_header = True
+                output_key = match.group(1)
+                
+        if is_header and output_key:
+            if output_key in seen_keys:
+                logger.info(f"Deduplication: Removing duplicate block for '{output_key}' starting at line {i}")
+                # Scan forward until the next block boundary
+                i += 1
+                while i < len(lines):
+                    next_line = lines[i]
+                    next_stripped = next_line.strip()
+                    if next_stripped.startswith("#"):
+                        break
+                    if next_stripped.startswith("- [") or next_stripped.startswith("* ["):
+                        break
+                    if "output_key:" in next_line:
+                        other_key_match = re.search(r"output_key:\s*([a-zA-Z0-9_]+)", next_line, re.IGNORECASE)
+                        if other_key_match and other_key_match.group(1) != output_key:
+                            break
+                    if re.match(r"^\s*(?:###?\s+)?(?:FORMATO DE SALIDA|REGLAS|DEFINICIÓN|TAREA|CONTEXTO)", next_line, re.IGNORECASE):
+                        break
+                    i += 1
+                continue
+            else:
+                seen_keys.add(output_key)
+                
+        new_lines.append(line)
+        i += 1
+        
+    return "\n".join(new_lines)

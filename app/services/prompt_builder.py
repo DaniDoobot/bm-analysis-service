@@ -25,7 +25,7 @@ from app.utils.json_utils import safe_parse_json
 
 logger = logging.getLogger(__name__)
 
-def sanitize_legacy_typologies_block(prompt_text: str, active_typologies: list[Any]) -> str:
+def sanitize_legacy_typologies_block(prompt_text: str, active_typologies: list[Any], legacy_typos_list: list[str] | None = None) -> str:
     """
     Sanitizes or neutralizes legacy typology references in prompt templates.
     Replaces old typologies sections with the current service typologies list
@@ -84,7 +84,10 @@ def sanitize_legacy_typologies_block(prompt_text: str, active_typologies: list[A
     else:
         # If no explicit header is found, but legacy keywords exist, let's do a safe string replacement
         active_keys = {t.typology_key for t in active_typologies} if active_typologies else set()
-        legacy_typos = [lt for lt in ["informacion_sin_cita", "falta_con_reagendo", "falta_sin_reagendo", "no_interesado", "no_apto"] if lt not in active_keys]
+        if legacy_typos_list is not None:
+            legacy_typos = [lt for lt in legacy_typos_list if lt not in active_keys]
+        else:
+            legacy_typos = [lt for lt in ["informacion", "informacion_sin_cita", "falta_con_reagendo", "falta_sin_reagendo", "no_interesado", "no_apto"] if lt not in active_keys]
         has_legacy = any(lt in prompt_text for lt in legacy_typos)
         if has_legacy:
             # We prepend the dynamic section to the beginning of the prompt,
@@ -99,7 +102,10 @@ def sanitize_legacy_typologies_block(prompt_text: str, active_typologies: list[A
 
     # Also, double check any remaining direct keyword references and remove/neutralize them
     active_keys = {t.typology_key for t in active_typologies} if active_typologies else set()
-    legacy_typos = [lt for lt in ["informacion_sin_cita", "falta_con_reagendo", "falta_sin_reagendo", "no_interesado", "no_apto"] if lt not in active_keys]
+    if legacy_typos_list is not None:
+        legacy_typos = [lt for lt in legacy_typos_list if lt not in active_keys]
+    else:
+        legacy_typos = [lt for lt in ["informacion", "informacion_sin_cita", "falta_con_reagendo", "falta_sin_reagendo", "no_interesado", "no_apto"] if lt not in active_keys]
     for lt in legacy_typos:
         prompt_text = prompt_text.replace(f'"{lt}"', '"otros"')
         prompt_text = prompt_text.replace(f"'{lt}'", "'otros'")
@@ -112,7 +118,8 @@ def sanitize_inputs_completely(
     draft_data: Any | None,
     criteria: list[PromptCriterion],
     active_typologies: list[Any],
-    criterion_typologies_map: dict[int, list[str]]
+    criterion_typologies_map: dict[int, list[str]],
+    legacy_typos_list: list[str] | None = None
 ) -> tuple[Any | None, list[PromptCriterion], dict[int, list[str]]]:
     """
     Sanitizes draft_data, database criteria, and relationship maps completely
@@ -121,14 +128,22 @@ def sanitize_inputs_completely(
     active_keys = [t.typology_key for t in active_typologies] if active_typologies else ["cita", "confirmacion", "cancelacion", "reagendo", "falta", "otros"]
     active_keys_set = set(active_keys)
     
+    base_mapping = {
+        "informacion": "otros",
+        "informacion_sin_cita": "cita",
+        "falta_con_reagendo": "falta",
+        "falta_sin_reagendo": "falta",
+        "no_interesado": "otros",
+        "no_apto": "otros"
+    }
+    
+    if legacy_typos_list:
+        for lt in legacy_typos_list:
+            if lt not in base_mapping:
+                base_mapping[lt] = "otros"
+                
     legacy_mapping = {
-        k: v for k, v in {
-            "informacion_sin_cita": "cita",
-            "falta_con_reagendo": "falta",
-            "falta_sin_reagendo": "falta",
-            "no_interesado": "otros",
-            "no_apto": "otros"
-        }.items() if k not in active_keys_set
+        k: v for k, v in base_mapping.items() if k not in active_keys_set
     }
 
     # Helper to clean an allowed_values list or string
@@ -175,7 +190,7 @@ def sanitize_inputs_completely(
     if draft_data and isinstance(draft_data, dict):
         # 1.1 Sanitize draft prompt text
         if "prompt" in draft_data and isinstance(draft_data["prompt"], str):
-            draft_data["prompt"] = sanitize_legacy_typologies_block(draft_data["prompt"], active_typologies)
+            draft_data["prompt"] = sanitize_legacy_typologies_block(draft_data["prompt"], active_typologies, legacy_typos_list)
             
         # 1.2 Sanitize draft criteria
         draft_criteria = draft_data.get("criteria")
@@ -300,7 +315,19 @@ async def build_prompt_with_ai(
 
     # 3.6. Check for legacy typologies before sanitization for logging purposes
     active_keys = {t.typology_key for t in typologies} if typologies else set()
-    legacy_typos = [lt for lt in ["informacion_sin_cita", "falta_con_reagendo", "falta_sin_reagendo", "no_interesado", "no_apto"] if lt not in active_keys]
+    
+    # Fetch all typology keys from the DB to dynamically find any inactive/legacy ones
+    try:
+        all_typos_res = await db.execute(select(Typology.typology_key))
+        all_typos_keys = set(all_typos_res.scalars().all())
+    except Exception as e:
+        logger.warning("Failed to fetch all typologies from DB: %s", e)
+        all_typos_keys = set()
+        
+    legacy_keys_from_db = all_typos_keys - active_keys
+    legacy_keys_set = {"informacion", "informacion_sin_cita", "falta_con_reagendo", "falta_sin_reagendo", "no_interesado", "no_apto"}
+    legacy_keys_set.update(legacy_keys_from_db)
+    legacy_typos = [lt for lt in legacy_keys_set if lt not in active_keys]
     
     def detect_legacy_in_obj(obj: Any) -> bool:
         if not obj:
@@ -331,15 +358,16 @@ async def build_prompt_with_ai(
         draft_data=draft_data,
         criteria=criteria,
         active_typologies=typologies,
-        criterion_typologies_map=criterion_typologies_map
+        criterion_typologies_map=criterion_typologies_map,
+        legacy_typos_list=legacy_typos
     )
 
     # 3.8. Sanitize templates of legacy typologies before sending them to OpenAI
-    sanitized_current_prompt = sanitize_legacy_typologies_block(current_prompt_text, typologies) if current_prompt_text else None
+    sanitized_current_prompt = sanitize_legacy_typologies_block(current_prompt_text, typologies, legacy_typos) if current_prompt_text else None
     
     sanitized_base_prompt = None
     if base_structure and base_structure.base_prompt:
-        sanitized_base_prompt = sanitize_legacy_typologies_block(base_structure.base_prompt, typologies)
+        sanitized_base_prompt = sanitize_legacy_typologies_block(base_structure.base_prompt, typologies, legacy_typos)
 
     # 3.9. Check legacy presence after sanitization and write execution logs
     legacy_detected_after = (
@@ -416,6 +444,8 @@ async def build_prompt_with_ai(
             return {"ok": False, "status": "error", "error_message": "AI did not return valid JSON"}
 
         generated_prompt = parsed.get("generated_prompt", "")
+        from app.services.criteria_service import deduplicate_criteria_blocks
+        generated_prompt = deduplicate_criteria_blocks(generated_prompt)
         
         # --- POST-GENERATION VALIDATION ---
         validation_errors = []

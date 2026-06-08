@@ -269,33 +269,42 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
 
     tipo_llamada = parsed.get("tipo_llamada")
     
-    # Dynamically fetch typologies from DB to avoid validation issues with newly added keys
+    # Dynamically fetch active typologies for the prompt's service to avoid validation issues
     try:
         from sqlalchemy import select
+        from app.models.prompts import Prompt
         from app.models.typologies import Typology
-        t_stmt = select(Typology.typology_key).where(Typology.is_active == True)
-        t_res = await db.execute(t_stmt)
-        active_db_keys = set(t_res.scalars().all())
+        
+        prompt_obj = await db.get(Prompt, resolved_prompt_id)
+        if prompt_obj and prompt_obj.service_id:
+            t_stmt = select(Typology.typology_key).where(
+                Typology.service_id == prompt_obj.service_id,
+                Typology.is_active == True
+            )
+            t_res = await db.execute(t_stmt)
+            active_keys = set(t_res.scalars().all())
+        else:
+            t_stmt = select(Typology.typology_key).where(Typology.is_active == True)
+            t_res = await db.execute(t_stmt)
+            active_keys = set(t_res.scalars().all())
     except Exception as e:
         logger.warning("Failed to fetch active typologies from DB for dynamic validation: %s", e)
-        active_db_keys = set()
+        active_keys = set(["cita", "confirmacion", "cancelacion", "reagendo", "falta", "otros"])
+
+    if not active_keys:
+        active_keys = set(["cita", "confirmacion", "cancelacion", "reagendo", "falta", "otros"])
         
-    combined_allowed = _ALLOWED_TIPOS.union(active_db_keys)
-    
-    if tipo_llamada not in combined_allowed:
+    # Map legacy or inactive typology to "otros" to prevent pipeline crash
+    if tipo_llamada not in active_keys:
         logger.warning(
-            "tipo_llamada no permitido: %r (call_id=%s)", tipo_llamada, call_id
+            "tipo_llamada %r is not active or legacy (allowed: %s). Mapping to 'otros' for call_id=%s, prompt_id=%s",
+            tipo_llamada,
+            sorted(active_keys),
+            call_id,
+            resolved_prompt_id
         )
-        return {
-            "ok": False,
-            "status": "error",
-            "stage": "validation",
-            "error_message": f"tipo_llamada no permitido: {tipo_llamada!r}",
-            "details": {
-                "received": tipo_llamada,
-                "allowed": sorted(combined_allowed),
-            },
-        }
+        tipo_llamada = "otros"
+        parsed["tipo_llamada"] = "otros"
 
     # ── 7. Persist ──────────────────────────────────────────────────────────
     call_metadata: dict[str, Any] = {
