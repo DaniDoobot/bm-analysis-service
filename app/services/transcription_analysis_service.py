@@ -136,6 +136,25 @@ async def analyze_transcription_pipeline(
             "error_message": "Resolved prompt has no content.",
         }
 
+    # Self-heal/Sync the prompt content with active criteria before validating or analyzing
+    try:
+        from app.services.prompts_service import sync_prompt_text_with_active_criteria
+        from app.models.prompts import PromptVersion
+        
+        prompt_content_healed, changed = await sync_prompt_text_with_active_criteria(db, resolved_prompt_id, prompt_content)
+        if changed:
+            prompt_content = prompt_content_healed
+            v_obj = await db.get(PromptVersion, resolved_version_id)
+            if v_obj:
+                from sqlalchemy import func
+                v_obj.prompt = prompt_content
+                v_obj.updated_at = func.now() if hasattr(func, 'now') else datetime.now(timezone.utc)
+                db.add(v_obj)
+                await db.commit()
+                logger.info("Self-healed prompt version ID %s in transcription analysis pipeline.", resolved_version_id)
+    except Exception as ex:
+        logger.error("Error during prompt self-healing in transcription analysis pipeline: %s", ex, exc_info=True)
+
     # ── 1.2. Validate Active Criteria are in prompt_content ────────────
     from app.services.criteria_service import get_active_criteria
     active_criteria = await get_active_criteria(db, resolved_prompt_id)
@@ -242,23 +261,90 @@ async def analyze_transcription_pipeline(
     try:
         if parsed and isinstance(parsed, dict):
             from app.services.criteria_service import get_active_criteria
+            from app.models.criteria import PromptCriterionTypology
+            from app.models.typologies import Typology
+            from sqlalchemy import select
+            
             active_criteria_objs = await get_active_criteria(db, resolved_prompt_id)
             if active_criteria_objs:
-                expected_keys = []
-                for c in active_criteria_objs:
-                    if c.output_key:
-                        expected_keys.append(c.output_key)
-                    if c.feed_key:
-                        expected_keys.append(c.feed_key)
+                # Fetch criterion-typology mappings in batch
+                criteria_ids = [c.criterion_id for c in active_criteria_objs]
+                criterion_typologies_map = {c_id: [] for c_id in criteria_ids}
+                
+                assoc_res = await db.execute(
+                    select(PromptCriterionTypology.criterion_id, Typology.typology_key)
+                    .join(Typology, PromptCriterionTypology.typology_id == Typology.typology_id)
+                    .where(PromptCriterionTypology.criterion_id.in_(criteria_ids), Typology.is_active == True)
+                )
+                for c_id, t_key in assoc_res.all():
+                    if c_id in criterion_typologies_map:
+                        criterion_typologies_map[c_id].append(t_key)
+
+                # Determine the format section text to check if the key is in output format
+                import re
+                header_pattern = re.compile(
+                    r"^(?:###?\s+)?(?:FORMATO\s+DE\s+(?:RESPUESTA|SALIDA(?:\s+JSON)?))\b",
+                    re.IGNORECASE | re.MULTILINE
+                )
+                matches = list(header_pattern.finditer(prompt_content or ""))
+                format_section = (prompt_content or "")[matches[-1].start():] if matches else ""
                 
                 missing_result_keys = []
-                for key in expected_keys:
-                    if key not in parsed:
-                        parsed[key] = None
-                        missing_result_keys.append(key)
-                
+                for c in active_criteria_objs:
+                    # Check output_key
+                    if c.output_key:
+                        if c.output_key not in parsed:
+                            parsed[c.output_key] = None
+                            missing_result_keys.append(c.output_key)
+                            
+                            # Log structured warning
+                            in_text = "true" if c.output_key in (prompt_content or "") else "false"
+                            in_format = "true" if c.output_key in format_section else "false"
+                            associated_typos = criterion_typologies_map.get(c.criterion_id) or []
+                            
+                            logger.warning(
+                                "Missing expected key %s. Present in active criteria: true. "
+                                "Present in prompt text: %s. Present in output format: %s. "
+                                "prompt_version_id=%s. criterion_id=%s. criterion_name='%s'. "
+                                "typologies=%s. call_id=%s",
+                                c.output_key,
+                                in_text,
+                                in_format,
+                                resolved_version_id,
+                                c.criterion_id,
+                                c.criterion_name,
+                                associated_typos,
+                                call_id
+                            )
+                            
+                    # Check feed_key
+                    if c.feed_key:
+                        if c.feed_key not in parsed:
+                            parsed[c.feed_key] = None
+                            missing_result_keys.append(c.feed_key)
+                            
+                            # Log structured warning
+                            in_text = "true" if c.feed_key in (prompt_content or "") else "false"
+                            in_format = "true" if c.feed_key in format_section else "false"
+                            associated_typos = criterion_typologies_map.get(c.criterion_id) or []
+                            
+                            logger.warning(
+                                "Missing expected key %s. Present in active criteria: true. "
+                                "Present in prompt text: %s. Present in output format: %s. "
+                                "prompt_version_id=%s. criterion_id=%s. criterion_name='%s'. "
+                                "typologies=%s. call_id=%s",
+                                c.feed_key,
+                                in_text,
+                                in_format,
+                                resolved_version_id,
+                                c.criterion_id,
+                                c.criterion_name,
+                                associated_typos,
+                                call_id
+                            )
+
                 if missing_result_keys:
-                    logger.warning(
+                    logger.info(
                         "Defensive Keys Guard: Injected missing keys in analysis result JSON: %s for call_id=%s, prompt_id=%s",
                         missing_result_keys,
                         call_id,

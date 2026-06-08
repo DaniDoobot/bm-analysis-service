@@ -38,6 +38,138 @@ def clean_whitespaces(text: str) -> str:
     text = re.sub(r'\n\n\n+', '\n\n', text)
     return text
 
+
+def sync_output_format_in_prompt(
+    prompt_text: str,
+    active_criteria: list,
+    typologies: list,
+) -> tuple[str, bool]:
+    """
+    Localiza la sección del formato de salida JSON y la actualiza con los criterios activos
+    y tipologías actuales. Retorna (new_prompt_text, changed).
+    """
+    if not prompt_text:
+        return prompt_text, False
+
+    from app.services.prompt_builder import _build_output_format
+    import re
+
+    # Match lines that are headers for response/output format
+    header_pattern = re.compile(
+        r"^(?:###?\s+)?(?:FORMATO\s+DE\s+(?:RESPUESTA|SALIDA(?:\s+JSON)?))\b",
+        re.IGNORECASE | re.MULTILINE
+    )
+
+    matches = list(header_pattern.finditer(prompt_text))
+    
+    schema_block = _build_output_format(active_criteria, typologies)
+    header_title = "### FORMATO DE SALIDA JSON"
+    new_section = (
+        f"{header_title}\n\n"
+        f"Responde EXCLUSIVAMENTE con un JSON siguiendo exactamente la siguiente estructura y valores permitidos. "
+        f"No incluyas información adicional ni comentarios fuera del JSON. "
+        f"No utilices claves legacy como campo_1, campo_2, etc.\n\n"
+        f"{schema_block}"
+    )
+
+    if matches:
+        last_match = matches[-1]
+        prefix = prompt_text[:last_match.start()].rstrip()
+        new_prompt_text = f"{prefix}\n\n{new_section}"
+    else:
+        new_prompt_text = f"{prompt_text.rstrip()}\n\n{new_section}"
+
+    normalized_old = clean_whitespaces(prompt_text)
+    normalized_new = clean_whitespaces(new_prompt_text)
+    
+    changed = (normalized_old != normalized_new)
+    return new_prompt_text, changed
+
+
+async def sync_prompt_text_with_active_criteria(
+    db: AsyncSession,
+    prompt_id: int,
+    prompt_text: str,
+) -> tuple[str, bool]:
+    """
+    Sincroniza el texto del prompt con los criterios activos de la base de datos.
+    Deduplica bloques, sincroniza la descripción de criterios activos, limpia huérfanos,
+    actualiza el formato JSON de salida y sanea espacios en blanco.
+    Retorna (new_prompt_text, changed).
+    """
+    if not prompt_text:
+        return prompt_text, False
+
+    from app.services.criteria_service import (
+        sync_criterion_block,
+        clean_orphaned_blocks,
+        get_active_criteria,
+        deduplicate_criteria_blocks,
+    )
+    from app.models.typologies import Typology
+    from app.models.services import Service
+    from sqlalchemy import select
+
+    # 1. Fetch prompt and resolve service_id
+    prompt_res = await db.execute(select(Prompt).where(Prompt.prompt_id == prompt_id))
+    p = prompt_res.scalars().first()
+    service_id = p.service_id if p else None
+
+    if not service_id:
+        s_res = await db.execute(select(Service.service_id).where(Service.service_key == "front"))
+        service_id = s_res.scalar()
+
+    # 2. Fetch active typologies
+    typologies = []
+    if service_id:
+        t_res = await db.execute(
+            select(Typology)
+            .where(Typology.service_id == service_id, Typology.is_active == True)
+            .order_by(Typology.sort_order.asc())
+        )
+        typologies = t_res.scalars().all()
+
+    # 3. Fetch active criteria
+    active_criteria = await get_active_criteria(db, prompt_id)
+
+    changed = False
+    original_text = prompt_text
+
+    # Step 0: Deduplicate criteria blocks
+    new_text = deduplicate_criteria_blocks(prompt_text)
+    if new_text != prompt_text:
+        prompt_text = new_text
+        changed = True
+
+    # Step A: Synchronize active criteria blocks
+    for c in active_criteria:
+        new_text, block_changed = sync_criterion_block(prompt_text, c)
+        if block_changed and new_text != prompt_text:
+            prompt_text = new_text
+            changed = True
+
+    # Step B: Clean orphaned blocks
+    new_text = clean_orphaned_blocks(prompt_text, active_criteria)
+    if new_text != prompt_text:
+        prompt_text = new_text
+        changed = True
+
+    # Step C: Synchronize Output JSON format
+    new_text, format_changed = sync_output_format_in_prompt(prompt_text, active_criteria, typologies)
+    if format_changed:
+        prompt_text = new_text
+        changed = True
+
+    # Step D: Clean whitespaces
+    prompt_text = clean_whitespaces(prompt_text)
+
+    # Re-verify if text is actually different from the start
+    if prompt_text != clean_whitespaces(original_text):
+        changed = True
+
+    return prompt_text, changed
+
+
 from app.models.prompts import Prompt, PromptVersion, PromptBaseStructure
 from app.schemas.prompts import (
     SavePromptRequest,
@@ -157,34 +289,9 @@ async def get_active_prompt(db: AsyncSession, prompt_type: str) -> dict | None:
     # Saneamiento automático / Sanity check antes de servir
     if current and prompt_text:
         try:
-            from app.services.criteria_service import sync_criterion_block, clean_orphaned_blocks, get_active_criteria, deduplicate_criteria_blocks
-            active_criteria = await get_active_criteria(db, p.prompt_id)
+            prompt_text, changed = await sync_prompt_text_with_active_criteria(db, p.prompt_id, prompt_text)
             
-            changed = False
-            
-            # 0. Deduplicar bloques duplicados antes de sincronizar
-            new_text_dedup = deduplicate_criteria_blocks(prompt_text)
-            if new_text_dedup != prompt_text:
-                prompt_text = new_text_dedup
-                changed = True
-            
-            # A. Sincronizar / Reconstruir bloques de criterios activos
-            for c in active_criteria:
-                new_text, block_changed = sync_criterion_block(prompt_text, c)
-                if block_changed and new_text != prompt_text:
-                    prompt_text = new_text
-                    changed = True
-            
-            # B. Limpiar bloques huérfanos
-            new_text_cleaned = clean_orphaned_blocks(prompt_text, active_criteria)
-            if new_text_cleaned != prompt_text:
-                prompt_text = new_text_cleaned
-                changed = True
-                
-            # C. Saneamiento de espacios en blanco
-            prompt_text = clean_whitespaces(prompt_text)
-            
-            # D. Si hubo cambios, persistir en base de datos
+            # Si hubo cambios, persistir en base de datos
             if changed or current.prompt != prompt_text:
                 from sqlalchemy import func
                 from datetime import timezone, datetime
