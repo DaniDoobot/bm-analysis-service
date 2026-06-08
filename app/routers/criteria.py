@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.dependencies import get_db
 from app.schemas.criteria import (
     CriteriaGroupedOut,
+    CriterionOut,
     SaveCriterionRequest,
     ToggleCriterionRequest,
     DeleteCriterionRequest,
@@ -41,7 +42,25 @@ async def save_criterion(
     try:
         criterion = await criteria_service.save_criterion(db, body)
         logger.info(f"Successfully saved criterion (ID: {criterion.criterion_id}, key: '{criterion.criterion_key}').")
-        return {"ok": True, "status": "saved", "criterion_id": criterion.criterion_id}
+        
+        # Run validation post-save
+        from app.services.prompts_service import validate_prompt_sync
+        val_result = await validate_prompt_sync(db, criterion.prompt_id)
+        
+        return {
+            "ok": True,
+            "status": "saved",
+            "criterion_id": criterion.criterion_id,
+            "criterion": CriterionOut.model_validate(criterion),
+            "prompt_sync": val_result
+        }
+    except criteria_service.CriterionSyncError as e:
+        return {
+            "ok": False,
+            "error": "CRITERION_SYNC_FAILED",
+            "missing_in_output_format": e.val_result["missing_in_output_format"],
+            "missing_in_prompt": e.val_result["missing_in_prompt"]
+        }
     except HTTPException as he:
         logger.warning(f"HTTPException while saving criterion: {he.detail} (status: {he.status_code})")
         raise he
@@ -59,8 +78,29 @@ async def toggle_criterion(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Activate or deactivate a criterion."""
-    await criteria_service.toggle_criterion(db, body.criterion_id, body.is_active)
-    return {"ok": True, "status": "updated", "criterion_id": body.criterion_id, "is_active": body.is_active}
+    try:
+        await criteria_service.toggle_criterion(db, body.criterion_id, body.is_active)
+        from app.services.prompts_service import validate_prompt_sync
+        from app.models.criteria import PromptCriterion
+        
+        criterion = await db.get(PromptCriterion, body.criterion_id)
+        prompt_id = criterion.prompt_id if criterion else 0
+        val_result = await validate_prompt_sync(db, prompt_id) if prompt_id else {"ok": True, "missing_in_prompt": [], "missing_in_output_format": [], "orphan_keys_removed": []}
+        
+        return {
+            "ok": True,
+            "status": "updated",
+            "criterion_id": body.criterion_id,
+            "is_active": body.is_active,
+            "prompt_sync": val_result
+        }
+    except criteria_service.CriterionSyncError as e:
+        return {
+            "ok": False,
+            "error": "CRITERION_SYNC_FAILED",
+            "missing_in_output_format": e.val_result["missing_in_output_format"],
+            "missing_in_prompt": e.val_result["missing_in_prompt"]
+        }
 
 
 @router.get("/prompt-criteria/{criterion_id}/typologies", response_model=list[CriterionTypologyAssociation])
@@ -79,7 +119,27 @@ async def update_criterion_typologies(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Update typology associations for a specific criterion."""
-    return await criteria_service.update_criterion_typologies(db, criterion_id=criterion_id, typology_ids=typology_ids)
+    try:
+        res = await criteria_service.update_criterion_typologies(db, criterion_id=criterion_id, typology_ids=typology_ids)
+        from app.services.prompts_service import validate_prompt_sync
+        from app.models.criteria import PromptCriterion
+        
+        criterion = await db.get(PromptCriterion, criterion_id)
+        prompt_id = criterion.prompt_id if criterion else 0
+        val_result = await validate_prompt_sync(db, prompt_id) if prompt_id else {"ok": True, "missing_in_prompt": [], "missing_in_output_format": [], "orphan_keys_removed": []}
+        
+        return {
+            "ok": True,
+            "detail": res.get("detail"),
+            "prompt_sync": val_result
+        }
+    except criteria_service.CriterionSyncError as e:
+        return {
+            "ok": False,
+            "error": "CRITERION_SYNC_FAILED",
+            "missing_in_output_format": e.val_result["missing_in_output_format"],
+            "missing_in_prompt": e.val_result["missing_in_prompt"]
+        }
 
 
 @router.delete("/prompt-criteria/{criterion_id}")
@@ -91,9 +151,31 @@ async def delete_criterion(
     """Delete or soft-delete a criterion."""
     try:
         email = body.performed_by_email if body else None
-        return await criteria_service.delete_criterion(db, criterion_id=criterion_id, performed_by_email=email)
-    except HTTPException:
-        raise
+        from app.models.criteria import PromptCriterion
+        
+        criterion = await db.get(PromptCriterion, criterion_id)
+        prompt_id = criterion.prompt_id if criterion else 0
+        
+        res = await criteria_service.delete_criterion(db, criterion_id=criterion_id, performed_by_email=email)
+        from app.services.prompts_service import validate_prompt_sync
+        val_result = await validate_prompt_sync(db, prompt_id) if prompt_id else {"ok": True, "missing_in_prompt": [], "missing_in_output_format": [], "orphan_keys_removed": []}
+        
+        return {
+            "ok": True,
+            "criterion_id": criterion_id,
+            "action": res.get("action"),
+            "message": res.get("message"),
+            "prompt_sync": val_result
+        }
+    except criteria_service.CriterionSyncError as e:
+        return {
+            "ok": False,
+            "error": "CRITERION_SYNC_FAILED",
+            "missing_in_output_format": e.val_result["missing_in_output_format"],
+            "missing_in_prompt": e.val_result["missing_in_prompt"]
+        }
+    except HTTPException as he:
+        raise he
     except Exception as e:
         logger.exception("Error deleting criterion %s: %s", criterion_id, e)
         raise HTTPException(status_code=400, detail=f"Error eliminando el criterio: {str(e)}")

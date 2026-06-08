@@ -1026,3 +1026,51 @@ async def build_fallback_prompt_from_criteria(db: AsyncSession, prompt_id: int) 
         
     return "\n".join(lines)
 
+
+async def validate_prompt_sync(db: AsyncSession, prompt_id: int) -> dict:
+    """
+    Valida que todas las claves esperadas de los criterios activos estén presentes
+    en el texto del prompt y en la sección del formato de salida JSON.
+    """
+    from app.services.criteria_service import get_active_criteria
+    import re
+
+    # 1. Fetch active criteria
+    active_criteria = await get_active_criteria(db, prompt_id)
+    
+    # 2. Get current version text
+    current_version = await _get_current_version(db, prompt_id)
+    prompt_text = current_version.prompt if current_version else ""
+    
+    # 3. Find format section
+    header_pattern = re.compile(
+        r"^(?:###?\s+)?(?:FORMATO\s+DE\s+(?:RESPUESTA|SALIDA(?:\s+JSON)?))\b",
+        re.IGNORECASE | re.MULTILINE
+    )
+    matches = list(header_pattern.finditer(prompt_text))
+    format_section = prompt_text[matches[-1].start():] if matches else ""
+
+    missing_in_prompt = []
+    missing_in_output_format = []
+
+    for c in active_criteria:
+        if c.output_key:
+            if c.output_key not in prompt_text:
+                missing_in_prompt.append(c.output_key)
+            if c.output_key not in format_section:
+                missing_in_output_format.append(c.output_key)
+        if c.feed_key:
+            if c.feed_key not in prompt_text:
+                missing_in_prompt.append(c.feed_key)
+            if c.feed_key not in format_section:
+                missing_in_output_format.append(c.feed_key)
+                
+    ok = (len(missing_in_prompt) == 0 and len(missing_in_output_format) == 0)
+    
+    return {
+        "ok": ok,
+        "missing_in_prompt": missing_in_prompt,
+        "missing_in_output_format": missing_in_output_format,
+        "orphan_keys_removed": []
+    }
+
