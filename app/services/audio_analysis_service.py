@@ -306,6 +306,35 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
         tipo_llamada = "otros"
         parsed["tipo_llamada"] = "otros"
 
+    # ── 6.5. Defensive Keys Guard ──────────────────────────────────────────
+    try:
+        if parsed and isinstance(parsed, dict):
+            from app.services.criteria_service import get_active_criteria
+            active_criteria_objs = await get_active_criteria(db, resolved_prompt_id)
+            if active_criteria_objs:
+                expected_keys = []
+                for c in active_criteria_objs:
+                    if c.output_key:
+                        expected_keys.append(c.output_key)
+                    if c.feed_key:
+                        expected_keys.append(c.feed_key)
+                
+                missing_result_keys = []
+                for key in expected_keys:
+                    if key not in parsed:
+                        parsed[key] = None
+                        missing_result_keys.append(key)
+                
+                if missing_result_keys:
+                    logger.warning(
+                        "Defensive Keys Guard: Injected missing keys in analysis result JSON: %s for call_id=%s, prompt_id=%s",
+                        missing_result_keys,
+                        call_id,
+                        resolved_prompt_id
+                    )
+    except Exception as ex:
+        logger.error("Error in Defensive Keys Guard for call_id=%s: %s", call_id, ex, exc_info=True)
+
     # ── 7. Persist ──────────────────────────────────────────────────────────
     call_metadata: dict[str, Any] = {
         "call_id": call_id,

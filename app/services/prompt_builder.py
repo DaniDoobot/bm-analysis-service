@@ -445,7 +445,8 @@ async def build_prompt_with_ai(
 
         generated_prompt = parsed.get("generated_prompt", "")
         from app.services.criteria_service import deduplicate_criteria_blocks
-        generated_prompt = deduplicate_criteria_blocks(generated_prompt)
+        from app.services.prompts_service import clean_whitespaces
+        generated_prompt = clean_whitespaces(deduplicate_criteria_blocks(generated_prompt))
         
         # --- POST-GENERATION VALIDATION ---
         validation_errors = []

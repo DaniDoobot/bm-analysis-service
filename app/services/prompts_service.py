@@ -8,7 +8,35 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import re
+
 logger = logging.getLogger(__name__)
+
+def clean_whitespaces(text: str) -> str:
+    """
+    Normalizes line endings, strips trailing spaces, limits consecutive blank lines to max 2,
+    and removes internal double/triple spaces without altering leading indentation.
+    """
+    if not text:
+        return text
+    # Normalize line endings
+    text = text.replace("\r\n", "\n")
+    lines = []
+    for line in text.splitlines():
+        # Strip trailing space
+        r_stripped = line.rstrip()
+        if not r_stripped:
+            lines.append("")
+            continue
+        # Deduplicate internal spaces (3 or more) without affecting leading indent
+        stripped = r_stripped.lstrip()
+        indent = r_stripped[:len(r_stripped) - len(stripped)]
+        cleaned_content = re.sub(r' {3,}', ' ', stripped)
+        lines.append(indent + cleaned_content)
+    text = "\n".join(lines)
+    # Limit consecutive newlines to maximum 2
+    text = re.sub(r'\n\n\n+', '\n\n', text)
+    return text
 
 from app.models.prompts import Prompt, PromptVersion, PromptBaseStructure
 from app.schemas.prompts import (
@@ -153,8 +181,11 @@ async def get_active_prompt(db: AsyncSession, prompt_type: str) -> dict | None:
                 prompt_text = new_text_cleaned
                 changed = True
                 
-            # C. Si hubo cambios, persistir en base de datos
-            if changed and current.prompt != prompt_text:
+            # C. Saneamiento de espacios en blanco
+            prompt_text = clean_whitespaces(prompt_text)
+            
+            # D. Si hubo cambios, persistir en base de datos
+            if changed or current.prompt != prompt_text:
                 from sqlalchemy import func
                 from datetime import timezone, datetime
                 current.prompt = prompt_text
@@ -263,7 +294,7 @@ async def save_prompt_version(db: AsyncSession, body: SavePromptRequest) -> Prom
 
     new_version = PromptVersion(
         prompt_id=body.prompt_id,
-        prompt=body.prompt,
+        prompt=clean_whitespaces(body.prompt),
         version_label=version_label,
         version_name=version_name,
         updated_by=body.updated_by,
@@ -324,7 +355,7 @@ async def update_prompt_current(
     now_label = _generate_label()
     new_version = PromptVersion(
         prompt_id=prompt_id,
-        prompt=prompt_text,
+        prompt=clean_whitespaces(prompt_text),
         version_label=now_label,
         version_name=f"Guardado {now_label}",
         updated_by=updated_by,
