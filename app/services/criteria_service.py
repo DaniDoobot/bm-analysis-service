@@ -1194,7 +1194,7 @@ def deduplicate_criteria_blocks(prompt_text: str) -> str:
     return "\n".join(new_lines)
 
 
-async def generate_criterion_description_ai(db: AsyncSession, criterion_id: int, body: Any) -> dict:
+async def generate_criterion_description_ai(db: AsyncSession, criterion_id: int | None, body: Any) -> dict:
     """
     Generate a professional, detailed description for a single criterion using AI.
     Applies strict validations to prevent formatting leaks, global instructions, JSON or duplications.

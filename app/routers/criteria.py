@@ -205,3 +205,29 @@ async def generate_ai_description(
             detail=f"Error al generar la descripción con IA: {str(e)}"
         )
 
+
+@router.post("/prompt-criteria/ai-description", response_model=AIDescriptionResponse)
+@router.post("/criteria/ai-description", response_model=AIDescriptionResponse)
+async def generate_ai_description_no_id(
+    body: AIDescriptionRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Generate or improve a single criterion's description using AI based on user instructions.
+    Does NOT require a criterion_id (used during creation).
+    Does NOT save automatically.
+    """
+    from fastapi import HTTPException
+    logger.info(f"Generating AI description for new criterion, name='{body.criterion_name}'")
+    try:
+        return await criteria_service.generate_criterion_description_ai(db, None, body)
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logger.exception("Unexpected error generating AI description for new criterion: %s", e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al generar la descripción con IA: {str(e)}"
+        )
+
+
