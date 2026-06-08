@@ -316,28 +316,28 @@ async def test_system_prompt_templates():
 
 
 async def test_length_limit():
-    print("=== TEST 7: LENGTH LIMIT (3500 chars) ===")
+    print("=== TEST 7: LENGTH LIMIT (5000 chars) ===")
     body = DummyBody(
         name="Test", item_type="score_1_10", out_key="test", feed_key=None,
         current_desc="", instr=""
     )
 
     # Under limit — no truncation
-    short = FULL_SCORE_RESPONSE.strip() + ("\nDetalle adicional. " * 60)
-    assert len(short) < 3500
+    short = FULL_SCORE_RESPONSE.strip() + ("\nDetalle adicional. " * 120)
+    assert len(short) < 5000, f"Mock too long: {len(short)}"
     openai_svc.complete_text = AsyncMock(return_value=short)
     res = await generate_criterion_description_ai(db=None, criterion_id=None, body=body)
     assert res["ok"] is True
-    assert not any("truncada" in w for w in res["warnings"]), "Should not truncate short response"
+    assert not any("recortado" in w for w in res["warnings"]), "Should not truncate short response"
 
     # Over limit — must truncate
-    very_long = FULL_SCORE_RESPONSE.strip() + ("\nDetalle adicional muy largo aquí. " * 200)
-    assert len(very_long) > 3500
+    very_long = FULL_SCORE_RESPONSE.strip() + ("\nDetalle adicional muy largo aqui. " * 500)
+    assert len(very_long) > 5000
     openai_svc.complete_text = AsyncMock(return_value=very_long)
     res = await generate_criterion_description_ai(db=None, criterion_id=None, body=body)
     assert res["ok"] is True
-    assert len(res["description"]) <= 3600
-    assert any("truncada" in w for w in res["warnings"]), "Expected truncation warning"
+    assert len(res["description"]) <= 5200
+    assert any("recortado" in w for w in res["warnings"]), "Expected truncation warning"
     print("PASSED\n")
 
 

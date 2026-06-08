@@ -1372,8 +1372,8 @@ async def generate_criterion_description_ai(db: AsyncSession, criterion_id: int 
         '', cleaned_desc, flags=re.IGNORECASE
     ).lstrip()
 
-    # D. Length control — allow up to 3500 chars
-    MAX_CHARS = 3500
+    # D. Length control — allow up to 5000 chars
+    MAX_CHARS = 5000
     if len(cleaned_desc) > MAX_CHARS:
         cut = cleaned_desc[:MAX_CHARS]
         last_break = max(cut.rfind('\n\n'), cut.rfind('. '))
@@ -1381,7 +1381,7 @@ async def generate_criterion_description_ai(db: AsyncSession, criterion_id: int 
             cleaned_desc = cleaned_desc[:last_break].rstrip() + "\n\n[Descripción truncada por exceder la longitud máxima.]"
         else:
             cleaned_desc = cut.rstrip() + "..."
-        warnings.append(f"La descripción superaba {MAX_CHARS} caracteres y fue truncada.")
+        warnings.append("La propuesta se ha recortado para mantener una longitud manejable.")
 
     # E. Structural quality checks for score_1_10
     if criterion_type == "score_1_10":
