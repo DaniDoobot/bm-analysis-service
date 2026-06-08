@@ -1196,145 +1196,226 @@ def deduplicate_criteria_blocks(prompt_text: str) -> str:
 
 async def generate_criterion_description_ai(db: AsyncSession, criterion_id: int | None, body: Any) -> dict:
     """
-    Generate a professional, detailed description for a single criterion using AI.
+    Generate a structured, operationally-focused mini-prompt for a single evaluation criterion using AI.
+    Produces sections (dimensions, rubric, penalties, null rules, feedback) so the analysis bot
+    can interpret and evaluate the criterion correctly.
     Applies strict validations to prevent formatting leaks, global instructions, JSON or duplications.
     """
     import re
     from app.services.openai_service import complete_text
-    from app.services.prompts_service import clean_whitespaces
 
     criterion_name = body.criterion_name
     criterion_type = body.criterion_type
     output_key = body.output_key
     feed_key = body.feed_key
     current_description = body.current_description or ""
-    instruction = body.instruction
+    instruction = (body.instruction or "").strip()
     typology_keys = body.typology_keys or []
 
-    # 1. Build OpenAI System Prompt
+    # Default instruction when the user leaves it blank
+    if not instruction:
+        instruction = (
+            "Convierte el criterio actual en una instrucción de evaluación clara, estructurada y operativa "
+            "para un bot de análisis de llamadas. No lo resumas. Reescríbelo como un mini-prompt de auditoría "
+            "con apartados, dimensiones de evaluación, reglas de puntuación, penalizaciones, cuándo devolver null "
+            "y cómo justificar el feedback. Mantén el sentido original, pero hazlo más preciso, exigente y fácil "
+            "de interpretar por el modelo."
+        )
+
+    # ── 1. System prompt ────────────────────────────────────────────────────────
     system_content = (
-        "Eres un experto en diseño de criterios de evaluación para auditoría de llamadas.\n"
-        "Tu tarea es redactar exclusivamente la descripción detallada de un criterio individual de evaluación.\n"
+        "Eres un experto en diseño de criterios de evaluación para auditoría de llamadas de centros médicos.\n"
+        "Tu tarea es generar una INSTRUCCIÓN DE EVALUACIÓN OPERATIVA y ESTRUCTURADA para un único criterio.\n"
+        "Esta instrucción será usada directamente por un modelo de IA para evaluar llamadas reales.\n\n"
         "REGLAS ABSOLUTAS E IRROMPIBLES:\n"
-        "1. NO generes código JSON, ni bloques de formato JSON, ni instrucciones globales.\n"
-        "2. NO inventes ni modifiques el nombre del criterio, tipo ni claves.\n"
-        "3. NO incluyas etiquetas técnicas como 'output_key:' o 'feed_key:' ni su valor en el texto.\n"
-        "4. NO menciones otros criterios del prompt.\n"
-        "5. La descripción debe ser clara, evaluable y redactada de forma profesional en español.\n"
-        "6. La longitud debe estar estrictamente entre 500 y 1500 caracteres (máximo 2000).\n"
-        "7. Devuelve EXCLUSIVAMENTE la descripción, sin introducciones ('Aquí tienes...', 'Claro, te ayudo...'), preámbulos ni notas adicionales.\n"
+        "1. NO generes código JSON, bloques de formato JSON, ni instrucciones globales del prompt.\n"
+        "2. NO inventes ni modifiques el nombre del criterio, tipo ni claves técnicas.\n"
+        "3. NO incluyas las etiquetas técnicas 'output_key:' o 'feed_key:' ni su valor literal en el texto.\n"
+        "4. NO menciones otros criterios del prompt ni el prompt en sí.\n"
+        "5. NO uses párrafos únicos gigantes. USA SIEMPRE secciones, apartados, listas y saltos de línea.\n"
+        "6. Redacta en español profesional con lenguaje de auditoría de calidad.\n"
+        "7. Devuelve EXCLUSIVAMENTE el texto del criterio, sin introducciones ni preámbulos "
+        "('Aquí tienes...', 'Claro...', 'Por supuesto...').\n"
+        "8. Longitud mínima orientativa: 800 caracteres para criterios complejos. "
+        "Puedes llegar hasta 3500 caracteres si el contenido es estructurado y útil.\n"
+        "9. Integra las instrucciones adicionales del usuario dentro de la estructura, "
+        "no las añadas como comentario suelto al final.\n"
     )
 
+    # ── Type-specific structural templates ──────────────────────────────────────
     if criterion_type == "score_1_10":
         system_content += (
-            "Directrices adicionales para score_1_10:\n"
-            "   - Explica detalladamente qué conducta o hecho evaluar en la llamada.\n"
-            "   - Define con precisión qué se considera una puntuación alta (ej: 9-10), puntuación media (ej: 5-8) y puntuación baja (ej: 0-4).\n"
-            "   - Indica explícitamente cuándo devolver null si el criterio no es aplicable o no se puede evaluar.\n"
+            "\nESTRUCTURA OBLIGATORIA para score_1_10 — usa EXACTAMENTE estas secciones:\n\n"
+            "  1. Frase de apertura: empieza con 'Actúa como un auditor de calidad [adjetivo]. Evalúa [objetivo].'\n"
+            "  2. 'Dimensiones de evaluación:' — lista numerada de 2-4 dimensiones.\n"
+            "     Cada dimensión: qué observar, qué penaliza, qué evidencias buscar.\n"
+            "  3. 'Reglas de puntuación:' — escala completa con criterio para cada tramo:\n"
+            "     - 1-2: Muy deficiente. [descripción]\n"
+            "     - 3-4: Deficiente. [descripción]\n"
+            "     - 5-6: Aceptable pero mejorable. [descripción]\n"
+            "     - 7-8: Bueno. [descripción]\n"
+            "     - 9-10: Excelente. [descripción]\n"
+            "  4. 'Criterios de penalización:' — lista de condiciones que rebajan la nota.\n"
+            "  5. 'Cuándo devolver null:' — una o dos condiciones claras y estrictas.\n"
         )
         if feed_key:
-            system_content += f"   - Explica que se debe justificar minuciosamente la puntuación en el feedback de justificación para '{feed_key}' aportando ejemplos o citas literales de la llamada.\n"
+            system_content += (
+                "  6. 'Formato de feedback:' — instrucción clara para justificar la puntuación.\n"
+                "     Pide ejemplos concretos, citas literales de la llamada, y explicación "
+                "de qué faltó si la nota es baja.\n"
+            )
+
     elif criterion_type == "boolean":
         system_content += (
-            "Directrices adicionales para boolean:\n"
-            "   - Indica con claridad en qué casos responder con 'Si', en cuáles con 'No', y cuándo devolver null (no aplicable/no mencionado).\n"
+            "\nESTRUCTURA OBLIGATORIA para boolean:\n"
+            "  1. Frase de apertura: 'Actúa como un auditor estricto. Verifica si el agente cumple: [objetivo].'\n"
+            "  2. 'Regla de evaluación:' — define exactamente cuándo devolver 'Si', 'No' y null.\n"
+            "  3. 'Evidencias:' — qué frases, comportamientos o señales buscar.\n"
+            "     No se presupone cumplimiento si no aparece explícitamente.\n"
+            "  4. 'Cuándo devolver null:' — condición exacta.\n"
         )
+        if feed_key:
+            system_content += (
+                "  5. 'Formato de feedback:' — justificar con frase literal o resumen de evidencia.\n"
+            )
+
     elif criterion_type in ("text", "free_text"):
         system_content += (
-            "Directrices adicionales para text:\n"
-            "   - Indica con claridad qué texto, dato o información exacta se debe extraer de la llamada.\n"
-            "   - Aclara que se debe devolver null si no se menciona.\n"
+            "\nESTRUCTURA OBLIGATORIA para text:\n"
+            "  1. Frase de apertura: 'Extrae de la llamada [dato solicitado].'\n"
+            "  2. 'Reglas:' — cómo extraer el dato, formato esperado, qué priorizar si hay varias opciones.\n"
+            "  3. 'Cuándo devolver null:' — si el dato no aparece en la llamada.\n"
+            "  4. 'Formato de respuesta:' — respuesta breve y sin elaboración adicional.\n"
         )
+        if feed_key:
+            system_content += "  5. 'Formato de feedback:' — qué contexto adicional incluir si aplica.\n"
+
     elif criterion_type in ("number", "percentage"):
         system_content += (
-            "Directrices adicionales para number/percentage:\n"
-            "   - Indica detalladamente cómo calcular u obtener el valor numérico/porcentaje y en qué formato exacto expresarlo.\n"
+            "\nESTRUCTURA OBLIGATORIA para number/percentage:\n"
+            "  1. Frase de apertura: 'Calcula o estima [métrica].'\n"
+            "  2. 'Reglas de cálculo:' — cómo obtener el valor, qué fuentes de la llamada usar.\n"
+            "  3. 'Formato del resultado:' — solo el número, sin símbolos adicionales.\n"
+            "  4. 'Cuándo devolver null:' — si no puede calcularse de forma fiable.\n"
         )
+        if feed_key:
+            system_content += "  5. 'Formato de feedback:' — explica la base del cálculo y fuentes usadas.\n"
 
-    # 2. Build User Prompt
+    else:
+        system_content += (
+            "\nUsa apartados claros: objetivo, qué evaluar, reglas, cuándo devolver null.\n"
+        )
+        if feed_key:
+            system_content += "Incluye también cómo justificar el feedback.\n"
+
+    # ── 2. User prompt ──────────────────────────────────────────────────────────
+    typologies_str = ", ".join(typology_keys) if typology_keys else "Todas las tipologías"
     user_content = (
         f"Datos del Criterio:\n"
         f"- Nombre: {criterion_name}\n"
         f"- Tipo: {criterion_type}\n"
-        f"- output_key: {output_key}\n"
-        f"- feed_key: {feed_key or 'No tiene'}\n"
-        f"- Tipologías asociadas: {', '.join(typology_keys) if typology_keys else 'Todas'}\n"
-        f"- Descripción actual: {current_description}\n\n"
-        f"Instrucción del usuario para la mejora/creación:\n"
-        f"\"{instruction}\"\n\n"
-        f"Por favor, genera la descripción detallada e implacable siguiendo las reglas anteriores."
+        f"- Tipologías de llamada asociadas: {typologies_str}\n"
+        f"- ¿Tiene feedback?: {'Sí' if feed_key else 'No'}\n"
+    )
+    if current_description:
+        user_content += f"- Descripción/instrucción actual:\n{current_description}\n\n"
+    else:
+        user_content += "- Descripción actual: (ninguna — criterio nuevo)\n\n"
+    user_content += (
+        f"Instrucción del usuario:\n\"{instruction}\"\n\n"
+        "Genera ahora la instrucción de evaluación estructurada. "
+        "No añadas introducciones. Empieza directamente con el contenido."
     )
 
     messages = [
         {"role": "system", "content": system_content},
-        {"role": "user", "content": user_content}
+        {"role": "user",   "content": user_content},
     ]
 
-    # 3. Call OpenAI in plain-text format (response_format=None)
+    # ── 3. Call OpenAI ──────────────────────────────────────────────────────────
     try:
         raw_description = await complete_text(
             messages=messages,
-            temperature=0.3,
+            temperature=0.4,
             response_format=None
         )
     except Exception as ex:
-        logger.error(f"Error calling OpenAI for single criterion AI description: {ex}", exc_info=True)
+        logger.error(f"Error calling OpenAI for criterion AI description: {ex}", exc_info=True)
         raise RuntimeError(f"Error en la llamada de IA: {str(ex)}")
 
-    # 4. Clean whitespaces & normalise
-    cleaned_desc = clean_whitespaces(raw_description.strip())
+    # ── 4. Normalise whitespace (preserve structure) ────────────────────────────
+    cleaned_desc = raw_description.strip()
+    cleaned_desc = re.sub(r'\n{3,}', '\n\n', cleaned_desc)   # max 2 blank lines
+    cleaned_desc = re.sub(r'[ \t]+\n', '\n', cleaned_desc)   # trailing spaces per line
+    cleaned_desc = re.sub(r'\n[ \t]+', '\n', cleaned_desc)   # leading spaces per line
+    cleaned_desc = cleaned_desc.strip()
 
-    # 5. Defensive Validations & Sanitizations
+    # ── 5. Defensive sanitisations ──────────────────────────────────────────────
     warnings = []
 
-    # A. JSON cleanup
+    # A. JSON block cleanup
     if "{" in cleaned_desc or "}" in cleaned_desc:
         cleaned_desc = re.sub(r'\{[^{}]*\}', '', cleaned_desc).strip()
         warnings.append("Se detectó y removió un posible bloque en formato JSON en el texto generado.")
 
-    # B. output_key / feed_key label cleanup
+    # B. output_key / feed_key literal label cleanup
     if "output_key" in cleaned_desc.lower() or "feed_key" in cleaned_desc.lower():
-        cleaned_desc = re.sub(r'output_key:\s*[a-zA-Z0-9_]+', '', cleaned_desc, flags=re.IGNORECASE)
-        cleaned_desc = re.sub(r'feed_key:\s*[a-zA-Z0-9_]+', '', cleaned_desc, flags=re.IGNORECASE)
+        cleaned_desc = re.sub(r'output_key\s*:\s*[a-zA-Z0-9_]+', '', cleaned_desc, flags=re.IGNORECASE)
+        cleaned_desc = re.sub(r'feed_key\s*:\s*[a-zA-Z0-9_]+', '', cleaned_desc, flags=re.IGNORECASE)
         cleaned_desc = re.sub(r'\boutput_key\b', '', cleaned_desc, flags=re.IGNORECASE)
         cleaned_desc = re.sub(r'\bfeed_key\b', '', cleaned_desc, flags=re.IGNORECASE)
         warnings.append("Se eliminaron menciones a los campos técnicos 'output_key' o 'feed_key' de la descripción.")
 
-    # C. Superar longitud máxima
-    if len(cleaned_desc) > 2200:
-        cleaned_desc = cleaned_desc[:2000] + "..."
-        warnings.append("La descripción propuesta superaba la longitud máxima y fue truncada a 2000 caracteres.")
+    # C. Strip model preamble lines
+    cleaned_desc = re.sub(
+        r'^(aquí tienes|claro[,!]?|por supuesto[,!]?|a continuación|como solicitaste|entendido[,!]?)[^\n]*\n',
+        '', cleaned_desc, flags=re.IGNORECASE
+    ).lstrip()
 
-    # D. Validar rúbrica para score_1_10
+    # D. Length control — allow up to 3500 chars
+    MAX_CHARS = 3500
+    if len(cleaned_desc) > MAX_CHARS:
+        cut = cleaned_desc[:MAX_CHARS]
+        last_break = max(cut.rfind('\n\n'), cut.rfind('. '))
+        if last_break > int(MAX_CHARS * 0.75):
+            cleaned_desc = cleaned_desc[:last_break].rstrip() + "\n\n[Descripción truncada por exceder la longitud máxima.]"
+        else:
+            cleaned_desc = cut.rstrip() + "..."
+        warnings.append(f"La descripción superaba {MAX_CHARS} caracteres y fue truncada.")
+
+    # E. Structural quality checks for score_1_10
     if criterion_type == "score_1_10":
         desc_lower = cleaned_desc.lower()
-        if not any(x in desc_lower for x in ("alta", "alto", "excelente", "9-10", "10")):
-            warnings.append("La descripción generada no parece detallar con claridad el criterio para puntuación alta.")
-        if not (any(x in desc_lower for x in ("media", "medio", "aceptable", "5-8")) or re.search(r'\b[58]\b', desc_lower)):
-            warnings.append("La descripción generada no parece detallar con claridad el criterio para puntuación media.")
-        if not (any(x in desc_lower for x in ("baja", "bajo", "suspenso", "0-4", "incorrecto")) or re.search(r'\b0\b', desc_lower)):
-            warnings.append("La descripción generada no parece detallar con claridad el criterio para puntuación baja o suspenso.")
+        if not any(x in desc_lower for x in ("9-10", "excelente", "9 -", "10:")):
+            warnings.append("La descripción no incluye criterio explícito para puntuación alta (9-10).")
+        if not any(x in desc_lower for x in ("5-6", "7-8", "aceptable", "bueno")):
+            warnings.append("La descripción no incluye criterio explícito para puntuación media (5-8).")
+        if not any(x in desc_lower for x in ("1-2", "3-4", "deficiente", "muy deficiente")):
+            warnings.append("La descripción no incluye criterio explícito para puntuación baja (1-4).")
+        if "dimensi" not in desc_lower and "criterio" not in desc_lower:
+            warnings.append("La descripción no incluye dimensiones de evaluación diferenciadas.")
+        if "penaliz" not in desc_lower:
+            warnings.append("La descripción no incluye criterios de penalización explícitos.")
+        if "null" not in desc_lower:
+            warnings.append("La descripción no especifica cuándo devolver null.")
 
-    # E. Validar justificación para feedback
+    # F. Feedback mention check
     if feed_key:
         desc_lower = cleaned_desc.lower()
-        if not any(x in desc_lower for x in ("justifica", "ejemplo", "transcri", "cita", "explic", "motivo")):
-            warnings.append(f"Se recomienda que la descripción indique explícitamente cómo justificar el feedback para '{feed_key}' con ejemplos.")
+        if not any(x in desc_lower for x in ("justifica", "ejemplo", "cita", "evidencia", "feedback", "explica")):
+            warnings.append(f"La descripción no indica cómo justificar el feedback (campo: {feed_key}).")
 
-    # F. Duplicaciones internas
-    phrases = [l.strip() for l in re.split(r'[\n.]', cleaned_desc) if len(l.strip()) > 30]
-    phrase_counts = {}
-    for p in phrases:
+    # G. Internal duplication check
+    lines_for_dup = [ln.strip() for ln in re.split(r'[\n.]', cleaned_desc) if len(ln.strip()) > 40]
+    phrase_counts: dict[str, int] = {}
+    for p in lines_for_dup:
         phrase_counts[p] = phrase_counts.get(p, 0) + 1
-    has_dups = any(v > 1 for v in phrase_counts.values())
-    if has_dups:
-        warnings.append("Se detectaron frases duplicadas en la descripción generada por la IA.")
-
-    # Re-apply clean_whitespaces after any regex cleanups
-    cleaned_desc = clean_whitespaces(cleaned_desc)
+    if any(v > 1 for v in phrase_counts.values()):
+        warnings.append("Se detectaron frases duplicadas en la descripción generada.")
 
     return {
         "ok": True,
         "description": cleaned_desc,
         "warnings": warnings
     }
+
