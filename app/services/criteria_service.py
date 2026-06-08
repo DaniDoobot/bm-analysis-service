@@ -1073,3 +1073,149 @@ def deduplicate_criteria_blocks(prompt_text: str) -> str:
         i += 1
         
     return "\n".join(new_lines)
+
+
+async def generate_criterion_description_ai(db: AsyncSession, criterion_id: int, body: Any) -> dict:
+    """
+    Generate a professional, detailed description for a single criterion using AI.
+    Applies strict validations to prevent formatting leaks, global instructions, JSON or duplications.
+    """
+    import re
+    from app.services.openai_service import complete_text
+    from app.services.prompts_service import clean_whitespaces
+
+    criterion_name = body.criterion_name
+    criterion_type = body.criterion_type
+    output_key = body.output_key
+    feed_key = body.feed_key
+    current_description = body.current_description or ""
+    instruction = body.instruction
+    typology_keys = body.typology_keys or []
+
+    # 1. Build OpenAI System Prompt
+    system_content = (
+        "Eres un experto en diseño de criterios de evaluación para auditoría de llamadas.\n"
+        "Tu tarea es redactar exclusivamente la descripción detallada de un criterio individual de evaluación.\n"
+        "REGLAS ABSOLUTAS E IRROMPIBLES:\n"
+        "1. NO generes código JSON, ni bloques de formato JSON, ni instrucciones globales.\n"
+        "2. NO inventes ni modifiques el nombre del criterio, tipo ni claves.\n"
+        "3. NO incluyas etiquetas técnicas como 'output_key:' o 'feed_key:' ni su valor en el texto.\n"
+        "4. NO menciones otros criterios del prompt.\n"
+        "5. La descripción debe ser clara, evaluable y redactada de forma profesional en español.\n"
+        "6. La longitud debe estar estrictamente entre 500 y 1500 caracteres (máximo 2000).\n"
+        "7. Devuelve EXCLUSIVAMENTE la descripción, sin introducciones ('Aquí tienes...', 'Claro, te ayudo...'), preámbulos ni notas adicionales.\n"
+    )
+
+    if criterion_type == "score_1_10":
+        system_content += (
+            "Directrices adicionales para score_1_10:\n"
+            "   - Explica detalladamente qué conducta o hecho evaluar en la llamada.\n"
+            "   - Define con precisión qué se considera una puntuación alta (ej: 9-10), puntuación media (ej: 5-8) y puntuación baja (ej: 0-4).\n"
+            "   - Indica explícitamente cuándo devolver null si el criterio no es aplicable o no se puede evaluar.\n"
+        )
+        if feed_key:
+            system_content += f"   - Explica que se debe justificar minuciosamente la puntuación en el feedback de justificación para '{feed_key}' aportando ejemplos o citas literales de la llamada.\n"
+    elif criterion_type == "boolean":
+        system_content += (
+            "Directrices adicionales para boolean:\n"
+            "   - Indica con claridad en qué casos responder con 'Si', en cuáles con 'No', y cuándo devolver null (no aplicable/no mencionado).\n"
+        )
+    elif criterion_type in ("text", "free_text"):
+        system_content += (
+            "Directrices adicionales para text:\n"
+            "   - Indica con claridad qué texto, dato o información exacta se debe extraer de la llamada.\n"
+            "   - Aclara que se debe devolver null si no se menciona.\n"
+        )
+    elif criterion_type in ("number", "percentage"):
+        system_content += (
+            "Directrices adicionales para number/percentage:\n"
+            "   - Indica detalladamente cómo calcular u obtener el valor numérico/porcentaje y en qué formato exacto expresarlo.\n"
+        )
+
+    # 2. Build User Prompt
+    user_content = (
+        f"Datos del Criterio:\n"
+        f"- Nombre: {criterion_name}\n"
+        f"- Tipo: {criterion_type}\n"
+        f"- output_key: {output_key}\n"
+        f"- feed_key: {feed_key or 'No tiene'}\n"
+        f"- Tipologías asociadas: {', '.join(typology_keys) if typology_keys else 'Todas'}\n"
+        f"- Descripción actual: {current_description}\n\n"
+        f"Instrucción del usuario para la mejora/creación:\n"
+        f"\"{instruction}\"\n\n"
+        f"Por favor, genera la descripción detallada e implacable siguiendo las reglas anteriores."
+    )
+
+    messages = [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": user_content}
+    ]
+
+    # 3. Call OpenAI in plain-text format (response_format=None)
+    try:
+        raw_description = await complete_text(
+            messages=messages,
+            temperature=0.3,
+            response_format=None
+        )
+    except Exception as ex:
+        logger.error(f"Error calling OpenAI for single criterion AI description: {ex}", exc_info=True)
+        raise RuntimeError(f"Error en la llamada de IA: {str(ex)}")
+
+    # 4. Clean whitespaces & normalise
+    cleaned_desc = clean_whitespaces(raw_description.strip())
+
+    # 5. Defensive Validations & Sanitizations
+    warnings = []
+
+    # A. JSON cleanup
+    if "{" in cleaned_desc or "}" in cleaned_desc:
+        cleaned_desc = re.sub(r'\{[^{}]*\}', '', cleaned_desc).strip()
+        warnings.append("Se detectó y removió un posible bloque en formato JSON en el texto generado.")
+
+    # B. output_key / feed_key label cleanup
+    if "output_key" in cleaned_desc.lower() or "feed_key" in cleaned_desc.lower():
+        cleaned_desc = re.sub(r'output_key:\s*[a-zA-Z0-9_]+', '', cleaned_desc, flags=re.IGNORECASE)
+        cleaned_desc = re.sub(r'feed_key:\s*[a-zA-Z0-9_]+', '', cleaned_desc, flags=re.IGNORECASE)
+        cleaned_desc = re.sub(r'\boutput_key\b', '', cleaned_desc, flags=re.IGNORECASE)
+        cleaned_desc = re.sub(r'\bfeed_key\b', '', cleaned_desc, flags=re.IGNORECASE)
+        warnings.append("Se eliminaron menciones a los campos técnicos 'output_key' o 'feed_key' de la descripción.")
+
+    # C. Superar longitud máxima
+    if len(cleaned_desc) > 2200:
+        cleaned_desc = cleaned_desc[:2000] + "..."
+        warnings.append("La descripción propuesta superaba la longitud máxima y fue truncada a 2000 caracteres.")
+
+    # D. Validar rúbrica para score_1_10
+    if criterion_type == "score_1_10":
+        desc_lower = cleaned_desc.lower()
+        if not any(x in desc_lower for x in ("alta", "alto", "excelente", "9-10", "10")):
+            warnings.append("La descripción generada no parece detallar con claridad el criterio para puntuación alta.")
+        if not (any(x in desc_lower for x in ("media", "medio", "aceptable", "5-8")) or re.search(r'\b[58]\b', desc_lower)):
+            warnings.append("La descripción generada no parece detallar con claridad el criterio para puntuación media.")
+        if not (any(x in desc_lower for x in ("baja", "bajo", "suspenso", "0-4", "incorrecto")) or re.search(r'\b0\b', desc_lower)):
+            warnings.append("La descripción generada no parece detallar con claridad el criterio para puntuación baja o suspenso.")
+
+    # E. Validar justificación para feedback
+    if feed_key:
+        desc_lower = cleaned_desc.lower()
+        if not any(x in desc_lower for x in ("justifica", "ejemplo", "transcri", "cita", "explic", "motivo")):
+            warnings.append(f"Se recomienda que la descripción indique explícitamente cómo justificar el feedback para '{feed_key}' con ejemplos.")
+
+    # F. Duplicaciones internas
+    phrases = [l.strip() for l in re.split(r'[\n.]', cleaned_desc) if len(l.strip()) > 30]
+    phrase_counts = {}
+    for p in phrases:
+        phrase_counts[p] = phrase_counts.get(p, 0) + 1
+    has_dups = any(v > 1 for v in phrase_counts.values())
+    if has_dups:
+        warnings.append("Se detectaron frases duplicadas en la descripción generada por la IA.")
+
+    # Re-apply clean_whitespaces after any regex cleanups
+    cleaned_desc = clean_whitespaces(cleaned_desc)
+
+    return {
+        "ok": True,
+        "description": cleaned_desc,
+        "warnings": warnings
+    }

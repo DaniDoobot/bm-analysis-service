@@ -57,3 +57,20 @@ class ToggleCriterionRequest(BaseModel):
 
 class DeleteCriterionRequest(BaseModel):
     performed_by_email: str | None = None
+
+
+class AIDescriptionRequest(BaseModel):
+    instruction: str
+    current_description: str | None = None
+    criterion_name: str
+    criterion_type: str
+    output_key: str | None = None
+    feed_key: str | None = None
+    service_id: int | None = None
+    typology_keys: list[str] | None = None
+
+
+class AIDescriptionResponse(BaseModel):
+    ok: bool
+    description: str
+    warnings: list[str] = []

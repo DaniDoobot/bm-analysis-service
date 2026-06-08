@@ -11,6 +11,8 @@ from app.schemas.criteria import (
     SaveCriterionRequest,
     ToggleCriterionRequest,
     DeleteCriterionRequest,
+    AIDescriptionRequest,
+    AIDescriptionResponse,
 )
 from app.schemas.typologies import CriterionTypologyAssociation
 from app.services import criteria_service
@@ -95,4 +97,29 @@ async def delete_criterion(
     except Exception as e:
         logger.exception("Error deleting criterion %s: %s", criterion_id, e)
         raise HTTPException(status_code=400, detail=f"Error eliminando el criterio: {str(e)}")
+
+
+@router.post("/prompt-criteria/{criterion_id}/ai-description", response_model=AIDescriptionResponse)
+@router.post("/criteria/{criterion_id}/ai-description", response_model=AIDescriptionResponse)
+async def generate_ai_description(
+    criterion_id: int,
+    body: AIDescriptionRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Generate or improve a single criterion's description using AI based on user instructions.
+    Does NOT save automatically; returns the generated text for review.
+    """
+    from fastapi import HTTPException
+    logger.info(f"Generating AI description for criterion_id={criterion_id}, name='{body.criterion_name}'")
+    try:
+        return await criteria_service.generate_criterion_description_ai(db, criterion_id, body)
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logger.exception(f"Unexpected error generating AI description for criterion_id={criterion_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al generar la descripción con IA: {str(e)}"
+        )
 
