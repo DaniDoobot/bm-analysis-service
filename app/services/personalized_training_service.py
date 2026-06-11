@@ -2505,9 +2505,9 @@ async def evaluate_training_session_task(session_id: int):
         
         if not service_id:
             # Fallback to general analyses
-            from app.models.analyses import Analysis
-            stmt_srv_an = select(Analysis.service_id).where(
-                Analysis.hubspot_owner_id == agent_id
+            from app.models.analyses import AnalysisCriterionResult
+            stmt_srv_an = select(AnalysisCriterionResult.service_id).where(
+                AnalysisCriterionResult.hs_object_id == agent_id
             ).limit(1)
             res_srv_an = await db.execute(stmt_srv_an)
             service_id = res_srv_an.scalar()

@@ -267,13 +267,15 @@ async def start_cycle_roleplay(db: AsyncSession, cycle: TrainingAgentReport, hub
     proto = request.headers.get("x-forwarded-proto", "http")
     scheme = "wss" if proto == "https" or "localhost" not in host else "ws"
     
-    ws_url = f"{scheme}://{host}/bm/training/voice/twilio/media-stream?session_id={session_id}"
+    ws_url = f"{scheme}://{host}/bm/training/voice/twilio/media-stream"
     
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Say language="es-ES">Perfecto. Iniciamos la simulación número {pending_prompt.prompt_number}. Prepárate.</Say>
         <Connect>
-            <Stream url="{ws_url}" />
+            <Stream url="{ws_url}">
+                <Parameter name="session_id" value="{session_id}" />
+            </Stream>
         </Connect>
     </Response>
     """
@@ -289,12 +291,14 @@ async def incoming_call(request: Request):
     proto = request.headers.get("x-forwarded-proto", "http")
     scheme = "wss" if proto == "https" or "localhost" not in host else "ws"
     
-    ws_url = f"{scheme}://{host}/bm/training/voice/twilio/media-stream?flow=identify"
+    ws_url = f"{scheme}://{host}/bm/training/voice/twilio/media-stream"
     
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Connect>
-            <Stream url="{ws_url}" />
+            <Stream url="{ws_url}">
+                <Parameter name="flow" value="identify" />
+            </Stream>
         </Connect>
     </Response>
     """
@@ -737,8 +741,47 @@ async def twilio_media_stream(
 ):
     """FastAPI WebSocket media stream connecting Twilio calls to Gemini Live Multimodal API."""
     await websocket.accept()
-    logger.info("Accepted Twilio WebSocket connection. flow=%s, session_id=%s", flow, session_id)
+    logger.info("Accepted Twilio WebSocket connection. Initial query params: flow=%s, session_id=%s", flow, session_id)
     
+    # Initialize variables that can be overridden by customParameters
+    start_event_data = None
+    stream_sid = None
+    call_sid = None
+    call_start_time = None
+    
+    # If parameters not provided in query params, wait for start event from Twilio
+    if flow is None and session_id is None:
+        try:
+            logger.info("No query params provided. Waiting for Twilio 'start' event to extract customParameters...")
+            first_msg = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+            data = json.loads(first_msg)
+            if data.get("event") == "start":
+                start_event_data = data
+                start_data = data.get("start", {})
+                stream_sid = start_data.get("streamSid")
+                call_sid = start_data.get("callSid")
+                call_start_time = datetime.now(timezone.utc)
+                
+                custom_params = start_data.get("customParameters", {})
+                flow = custom_params.get("flow")
+                sess_val = custom_params.get("session_id")
+                if sess_val is not None:
+                    try:
+                        session_id = int(sess_val)
+                    except ValueError:
+                        logger.warning("Invalid session_id in customParameters: %s", sess_val)
+                logger.info("Extracted parameters from start event. flow=%s, session_id=%s, stream_sid=%s, call_sid=%s", flow, session_id, stream_sid, call_sid)
+            else:
+                logger.warning("First message received was not a 'start' event: %s", first_msg)
+        except asyncio.TimeoutError:
+            logger.error("Timed out waiting for initial Twilio 'start' event.")
+            await websocket.close()
+            return
+        except Exception as e:
+            logger.error("Error receiving/parsing initial Twilio message: %s", e)
+            await websocket.close()
+            return
+
     gemini_api_key = settings.gemini_api_key
     gemini_model = settings.gemini_model or "models/gemini-3.1-flash-live-preview"
     if not gemini_api_key:
@@ -847,17 +890,23 @@ async def twilio_media_stream(
             logger.info("Sent Gemini Setup configuration.")
             
             # State variables for WS session scope
-            stream_sid = None
-            call_sid = None
             gemini_ready = False
             attempts = 0
-            call_start_time = None
             recording_sid = None
             redirected = False
             
             twilio_rate_state = None
             gemini_rate_state = None
             monitor_task = None
+            
+            # Start recording and duration monitor early if we already have session_id and call_sid from the early start event
+            if session_id is not None and call_sid:
+                logger.info("Triggering recording and duration monitor task early from pre-parsed start event.")
+                host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"
+                recording_sid = await start_twilio_recording(call_sid, host)
+                monitor_task = asyncio.create_task(
+                    duration_monitor_task(call_sid, stream_sid, gemini_ws, websocket, session_id)
+                )
             
             # Concurrency loops
             async def twilio_to_gemini_loop():
@@ -868,19 +917,22 @@ async def twilio_media_stream(
                         event = data.get("event")
                         
                         if event == "start":
-                            start_data = data.get("start", {})
-                            stream_sid = start_data.get("streamSid")
-                            call_sid = start_data.get("callSid")
-                            logger.info("Twilio stream start. stream_sid=%s, call_sid=%s", stream_sid, call_sid)
-                            call_start_time = datetime.now(timezone.utc)
-                            
-                            # In simulation, trigger recording and timeouts monitor
-                            if session_id is not None and call_sid:
-                                host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"
-                                recording_sid = await start_twilio_recording(call_sid, host)
-                                monitor_task = asyncio.create_task(
-                                    duration_monitor_task(call_sid, stream_sid, gemini_ws, websocket, session_id)
-                                )
+                            if not stream_sid:
+                                start_data = data.get("start", {})
+                                stream_sid = start_data.get("streamSid")
+                                call_sid = start_data.get("callSid")
+                                logger.info("Twilio stream start in loop. stream_sid=%s, call_sid=%s", stream_sid, call_sid)
+                                call_start_time = datetime.now(timezone.utc)
+                                
+                                # In simulation, trigger recording and timeouts monitor
+                                if session_id is not None and call_sid:
+                                    host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"
+                                    recording_sid = await start_twilio_recording(call_sid, host)
+                                    monitor_task = asyncio.create_task(
+                                        duration_monitor_task(call_sid, stream_sid, gemini_ws, websocket, session_id)
+                                    )
+                            else:
+                                logger.info("Twilio stream start event received in loop, but already initialized early.")
                         elif event == "media":
                             payload = data.get("media", {}).get("payload")
                             if payload and gemini_ready:
