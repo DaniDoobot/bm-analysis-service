@@ -55,7 +55,22 @@ async def test_websocket_media_stream_identify():
         # Connect to media-stream WebSocket using TestClient
         # We don't pass flow/session_id as query parameters.
         with client.websocket_connect("/bm/training/voice/twilio/media-stream") as ws:
-            # Send the initial Twilio "start" event JSON containing the customParameters
+            # Send the initial Twilio "connected" event
+            connected_event = {
+                "event": "connected",
+                "protocol": "Call",
+                "version": "1.0.0"
+            }
+            ws.send_text(json.dumps(connected_event))
+            
+            # Send an arbitrary pre-start event to make sure the server ignores it
+            dummy_event = {
+                "event": "dummy",
+                "some": "value"
+            }
+            ws.send_text(json.dumps(dummy_event))
+
+            # Send the Twilio "start" event JSON containing the customParameters
             start_event = {
                 "event": "start",
                 "sequenceNumber": "1",

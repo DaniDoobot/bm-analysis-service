@@ -753,26 +753,40 @@ async def twilio_media_stream(
     if flow is None and session_id is None:
         try:
             logger.info("No query params provided. Waiting for Twilio 'start' event to extract customParameters...")
-            first_msg = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
-            data = json.loads(first_msg)
-            if data.get("event") == "start":
-                start_event_data = data
-                start_data = data.get("start", {})
-                stream_sid = start_data.get("streamSid")
-                call_sid = start_data.get("callSid")
-                call_start_time = datetime.now(timezone.utc)
-                
-                custom_params = start_data.get("customParameters", {})
-                flow = custom_params.get("flow")
-                sess_val = custom_params.get("session_id")
-                if sess_val is not None:
-                    try:
-                        session_id = int(sess_val)
-                    except ValueError:
-                        logger.warning("Invalid session_id in customParameters: %s", sess_val)
-                logger.info("Extracted parameters from start event. flow=%s, session_id=%s, stream_sid=%s, call_sid=%s", flow, session_id, stream_sid, call_sid)
-            else:
-                logger.warning("First message received was not a 'start' event: %s", first_msg)
+            
+            async def wait_for_start_event():
+                nonlocal flow, session_id, start_event_data, stream_sid, call_sid, call_start_time
+                while True:
+                    msg = await websocket.receive_text()
+                    data = json.loads(msg)
+                    event = data.get("event")
+                    
+                    if event == "connected":
+                        logger.info("Twilio connected event received. Waiting for start event...")
+                        continue
+                    elif event == "start":
+                        start_event_data = data
+                        start_data = data.get("start", {})
+                        stream_sid = start_data.get("streamSid")
+                        call_sid = start_data.get("callSid")
+                        call_start_time = datetime.now(timezone.utc)
+                        
+                        custom_params = start_data.get("customParameters", {})
+                        flow = custom_params.get("flow")
+                        sess_val = custom_params.get("session_id")
+                        if sess_val is not None:
+                            try:
+                                session_id = int(sess_val)
+                            except ValueError:
+                                logger.warning("Invalid session_id in customParameters: %s", sess_val)
+                        logger.info("Extracted parameters from start event. flow=%s, session_id=%s, stream_sid=%s, call_sid=%s", flow, session_id, stream_sid, call_sid)
+                        return
+                    else:
+                        logger.info("Ignoring pre-start Twilio event: %s", event)
+            
+            # Timeout of 10.0 seconds for the entire loop
+            await asyncio.wait_for(wait_for_start_event(), timeout=10.0)
+            
         except asyncio.TimeoutError:
             logger.error("Timed out waiting for initial Twilio 'start' event.")
             await websocket.close()
