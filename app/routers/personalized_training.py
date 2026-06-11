@@ -103,7 +103,10 @@ async def update_agent_setting(
             hubspot_owner_id=hubspot_owner_id,
             is_enabled=payload.is_enabled,
             agent_name=payload.agent_name,
-            agent_initials=payload.agent_initials
+            agent_initials=payload.agent_initials,
+            training_code=payload.training_code,
+            training_numeric_code=payload.training_numeric_code,
+            training_code_enabled=payload.training_code_enabled
         )
         if not setting:
             raise HTTPException(

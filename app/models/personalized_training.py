@@ -27,6 +27,12 @@ class TrainingAgentSetting(Base):
     agent_name: Mapped[str] = mapped_column(Text, nullable=False)
     agent_initials: Mapped[str] = mapped_column(Text, nullable=False)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    training_code: Mapped[str | None] = mapped_column(Text, unique=True, nullable=True, index=True)
+    training_numeric_code: Mapped[str | None] = mapped_column(Text, unique=True, nullable=True, index=True)
+    training_code_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    training_code_updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), onupdate=func.now(), server_default=func.now()
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=func.now(), server_default=func.now()
@@ -94,6 +100,7 @@ class TrainingAgentReport(Base):
     evolution_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     general_objectives_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     specific_objectives_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    final_report_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     
     is_current: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
     superseded_by_report_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -158,6 +165,12 @@ class TrainingCompletionStatus(Base):
     training_call_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     training_phone_number: Mapped[str | None] = mapped_column(Text, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    call_session_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_training_call_sessions.session_id", ondelete="SET NULL"), nullable=True
+    )
+    evaluation_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_training_call_evaluations.evaluation_id", ondelete="SET NULL"), nullable=True
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=func.now(), server_default=func.now()
@@ -168,6 +181,8 @@ class TrainingCompletionStatus(Base):
 
     report = relationship("TrainingAgentReport", back_populates="completion_statuses")
     prompt = relationship("TrainingSimulationPrompt", back_populates="completion_status")
+    call_session = relationship("TrainingCallSession", foreign_keys=[call_session_id])
+    evaluation = relationship("TrainingCallEvaluation", foreign_keys=[evaluation_id])
 
 
 class TrainingSchedulerSetting(Base):
@@ -186,3 +201,82 @@ class TrainingSchedulerSetting(Base):
         DateTime(timezone=True), default=func.now(), onupdate=func.now(), server_default=func.now()
     )
     updated_by_email: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class TrainingCallSession(Base):
+    __tablename__ = "bm_training_call_sessions"
+
+    session_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    call_sid: Mapped[str] = mapped_column(Text, unique=True, nullable=False, index=True)
+    recording_sid: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
+    recording_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    cycle_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("bm_training_agent_reports.training_report_id", ondelete="CASCADE"), nullable=False
+    )
+    conversation_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("bm_training_simulation_prompts.simulation_prompt_id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(Text, default="in_progress", server_default="'in_progress'", nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), server_default=func.now()
+    )
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    recording_ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    evaluation_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    cycle = relationship("TrainingAgentReport")
+    prompt = relationship("TrainingSimulationPrompt")
+
+
+class TrainingEvaluationPrompt(Base):
+    __tablename__ = "bm_training_evaluation_prompts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    service_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("bm_services.service_id", ondelete="CASCADE"), nullable=False
+    )
+    prompt_text: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    created_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), onupdate=func.now(), server_default=func.now()
+    )
+
+    service = relationship("Service")
+
+
+class TrainingCallEvaluation(Base):
+    __tablename__ = "bm_training_call_evaluations"
+
+    evaluation_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("bm_training_call_sessions.session_id", ondelete="CASCADE"), nullable=False
+    )
+    cycle_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("bm_training_agent_reports.training_report_id", ondelete="CASCADE"), nullable=False
+    )
+    conversation_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("bm_training_simulation_prompts.simulation_prompt_id", ondelete="CASCADE"), nullable=False
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    prompt_version_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("bm_training_evaluation_prompts.id"), nullable=False
+    )
+    transcription: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), server_default=func.now()
+    )
+
+    session = relationship("TrainingCallSession")
+    cycle = relationship("TrainingAgentReport")
+    prompt = relationship("TrainingSimulationPrompt")
+    prompt_version = relationship("TrainingEvaluationPrompt")

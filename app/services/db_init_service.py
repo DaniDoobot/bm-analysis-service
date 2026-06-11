@@ -144,6 +144,36 @@ async def init_db():
             except Exception as e:
                 logger.error("Failed to clear plain-text dev passwords: %s", e)
 
+        # 1.2.c Early dynamic column migration for bm_training_agent_settings (required before query/seeding)
+        async with engine.begin() as conn:
+            for col_name, col_type, col_default in [
+                ("training_code", "TEXT", "NULL"),
+                ("training_numeric_code", "TEXT", "NULL"),
+                ("training_code_enabled", "BOOLEAN", "DEFAULT TRUE NOT NULL"),
+                ("training_code_updated_at", "TIMESTAMPTZ", "DEFAULT CURRENT_TIMESTAMP NOT NULL"),
+            ]:
+                res = await conn.execute(
+                    text(f"""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.columns 
+                            WHERE table_schema = 'public' 
+                              AND table_name = 'bm_training_agent_settings' 
+                              AND column_name = '{col_name}'
+                        );
+                    """)
+                )
+                if not res.scalar():
+                    logger.info("Early adding column '%s' to 'bm_training_agent_settings' table...", col_name)
+                    await conn.execute(
+                        text(f"ALTER TABLE bm_training_agent_settings ADD COLUMN {col_name} {col_type} {col_default};")
+                    )
+                    if col_name in ["training_code", "training_numeric_code"]:
+                        try:
+                            suffix = "code" if col_name == "training_code" else "numeric"
+                            await conn.execute(text(f"ALTER TABLE bm_training_agent_settings ADD CONSTRAINT uq_bm_training_settings_{suffix} UNIQUE ({col_name});"))
+                        except Exception as e_uq:
+                            logger.warning("Could not add unique constraint to %s: %s", col_name, e_uq)
+                    logger.info("Column '%s' added successfully to 'bm_training_agent_settings'.", col_name)
 
         # 1.3. Seed default training agents if bm_training_agent_settings is empty
         from app.models.personalized_training import TrainingAgentSetting
@@ -379,6 +409,77 @@ async def init_db():
                     text("ALTER TABLE bm_mass_analysis_automations ADD COLUMN job_id INTEGER NULL;")
                 )
                 logger.info("Column 'job_id' added successfully to 'bm_mass_analysis_automations'.")
+
+            # 1.6.8 Training voice roleplay support columns
+            # 1.6.8.1 bm_training_agent_settings
+            for col_name, col_type, col_default in [
+                ("training_code", "TEXT", "NULL"),
+                ("training_numeric_code", "TEXT", "NULL"),
+                ("training_code_enabled", "BOOLEAN", "DEFAULT TRUE NOT NULL"),
+                ("training_code_updated_at", "TIMESTAMPTZ", "DEFAULT CURRENT_TIMESTAMP NOT NULL"),
+            ]:
+                res = await conn.execute(
+                    text(f"""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.columns 
+                            WHERE table_schema = 'public' 
+                              AND table_name = 'bm_training_agent_settings' 
+                              AND column_name = '{col_name}'
+                        );
+                    """)
+                )
+                if not res.scalar():
+                    logger.info("Adding column '%s' to 'bm_training_agent_settings' table...", col_name)
+                    await conn.execute(
+                        text(f"ALTER TABLE bm_training_agent_settings ADD COLUMN {col_name} {col_type} {col_default};")
+                    )
+                    if col_name in ["training_code", "training_numeric_code"]:
+                        try:
+                            suffix = "code" if col_name == "training_code" else "numeric"
+                            await conn.execute(text(f"ALTER TABLE bm_training_agent_settings ADD CONSTRAINT uq_bm_training_settings_{suffix} UNIQUE ({col_name});"))
+                        except Exception as e_uq:
+                            logger.warning("Could not add unique constraint to %s: %s", col_name, e_uq)
+                    logger.info("Column '%s' added successfully to 'bm_training_agent_settings'.", col_name)
+
+            # 1.6.8.2 bm_training_agent_reports
+            res = await conn.execute(
+                text("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.columns 
+                        WHERE table_schema = 'public' 
+                          AND table_name = 'bm_training_agent_reports' 
+                          AND column_name = 'final_report_json'
+                    );
+                """)
+            )
+            if not res.scalar():
+                logger.info("Adding column 'final_report_json' to 'bm_training_agent_reports' table...")
+                await conn.execute(
+                    text("ALTER TABLE bm_training_agent_reports ADD COLUMN final_report_json JSONB NULL;")
+                )
+                logger.info("Column 'final_report_json' added successfully to 'bm_training_agent_reports'.")
+
+            # 1.6.8.3 bm_training_completion_status
+            for col_name, col_type, col_ref in [
+                ("call_session_id", "INTEGER", "REFERENCES bm_training_call_sessions(session_id) ON DELETE SET NULL"),
+                ("evaluation_id", "INTEGER", "REFERENCES bm_training_call_evaluations(evaluation_id) ON DELETE SET NULL"),
+            ]:
+                res = await conn.execute(
+                    text(f"""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.columns 
+                            WHERE table_schema = 'public' 
+                              AND table_name = 'bm_training_completion_status' 
+                              AND column_name = '{col_name}'
+                        );
+                    """)
+                )
+                if not res.scalar():
+                    logger.info("Adding column '%s' to 'bm_training_completion_status' table...", col_name)
+                    await conn.execute(
+                        text(f"ALTER TABLE bm_training_completion_status ADD COLUMN {col_name} {col_type} {col_ref};")
+                    )
+                    logger.info("Column '%s' added successfully to 'bm_training_completion_status'.", col_name)
 
             # Drop individual views first to avoid InvalidTableDefinitionError if column names or positions changed
             await conn.execute(text("DROP VIEW IF EXISTS vw_bm_analysis_criteria_flat CASCADE;"))

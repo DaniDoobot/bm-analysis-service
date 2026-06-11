@@ -12,10 +12,14 @@ class TrainingAgentSettingBase(BaseModel):
     agent_name: str
     agent_initials: str
     is_enabled: bool = True
+    training_code: Optional[str] = None
+    training_numeric_code: Optional[str] = None
+    training_code_enabled: bool = True
 
 
 class TrainingAgentSettingOut(TrainingAgentSettingBase):
     setting_id: int
+    training_code_updated_at: datetime
     created_at: datetime
     updated_at: datetime
 
@@ -27,6 +31,9 @@ class TrainingAgentSettingUpdate(BaseModel):
     is_enabled: Optional[bool] = None
     agent_name: Optional[str] = None
     agent_initials: Optional[str] = None
+    training_code: Optional[str] = None
+    training_numeric_code: Optional[str] = None
+    training_code_enabled: Optional[bool] = None
 
 
 # ── Objectives & Prompts sub-schemas ──────────────────────────────────────────

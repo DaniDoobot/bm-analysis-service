@@ -21,6 +21,8 @@ class Settings(BaseSettings):
 
     # ── Azure OpenAI ──────────────────────────────────────────────────────────
     azure_openai_api_version: str = "2025-01-01-preview"
+    gemini_api_key: str = ""
+    gemini_model: str = "models/gemini-3.1-flash-live-preview"
 
     azure_openai_text_endpoint: str = "https://azure-openai-gpt-4-ecustomer.openai.azure.com/"
     azure_openai_text_api_key: str = ""

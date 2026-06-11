@@ -14,6 +14,9 @@ from app.models.personalized_training import (
     TrainingSimulationPrompt,
     TrainingCompletionStatus,
     TrainingSchedulerSetting,
+    TrainingCallSession,
+    TrainingEvaluationPrompt,
+    TrainingCallEvaluation,
 )
 
 __all__ = [
@@ -40,6 +43,9 @@ __all__ = [
     "TrainingSimulationPrompt",
     "TrainingCompletionStatus",
     "TrainingSchedulerSetting",
+    "TrainingCallSession",
+    "TrainingEvaluationPrompt",
+    "TrainingCallEvaluation",
 ]
 
 
