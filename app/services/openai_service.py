@@ -192,10 +192,15 @@ async def analyze_audio_bytes(audio_bytes: bytes, prompt_text: str, audio_format
 
     encoded_audio = base64.b64encode(audio_bytes).decode("utf-8")
 
-    # Force strict JSON in the instruction as requested
+    # Strict JSON instruction — explicitly forbids unescaped quotes/newlines inside strings
     system_prompt = (
         "Eres un experto analizador de llamadas. "
-        "Devuelve exclusivamente JSON válido, sin markdown ni texto adicional."
+        "Devuelve EXCLUSIVAMENTE un objeto JSON válido y bien formado, sin markdown ni texto adicional. "
+        "REGLAS CRÍTICAS para el JSON: "
+        "1) Todos los caracteres especiales dentro de strings (comillas, saltos de línea, tabulaciones) DEBEN estar escapados correctamente (e.g. \\\" para comillas, \\n para saltos de línea). "
+        "2) Nunca insertes saltos de línea literales dentro de valores de string JSON. "
+        "3) El campo 'transcription' debe ser una cadena de texto plana con los turnos de conversación separados por \\n. "
+        "4) No añadas ningún texto fuera del objeto JSON."
     )
 
     messages = [
@@ -219,10 +224,19 @@ async def analyze_audio_bytes(audio_bytes: bytes, prompt_text: str, audio_format
     ]
 
     t_start = time.perf_counter()
-    response = await client.chat.completions.create(
-        model=deployment,
-        messages=messages,
-    )
+    # Try with response_format=json_object first (enforces valid JSON at model level)
+    # Fall back to plain call if the deployment does not support it
+    try:
+        response = await client.chat.completions.create(
+            model=deployment,
+            messages=messages,
+            response_format={"type": "json_object"},
+        )
+    except Exception:
+        response = await client.chat.completions.create(
+            model=deployment,
+            messages=messages,
+        )
     t_end = time.perf_counter()
     
     _log_completion_metrics(response, deployment, "analyze_audio_bytes", t_end - t_start)
