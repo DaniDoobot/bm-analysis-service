@@ -305,17 +305,9 @@ async def start_cycle_roleplay(db: AsyncSession, cycle: TrainingAgentReport, hub
     pending_prompt = None
     for p in prompts:
         comp = comps.get(p.simulation_prompt_id)
-        if comp and comp.status == "pending":
+        if comp and comp.status in ["pending", "in_progress"]:
             pending_prompt = p
             break
-            
-    if not pending_prompt:
-        # Retry with in_progress if we had a disconnected call
-        for p in prompts:
-            comp = comps.get(p.simulation_prompt_id)
-            if comp and comp.status == "in_progress":
-                pending_prompt = p
-                break
                 
     if not pending_prompt:
         twiml = """<?xml version="1.0" encoding="UTF-8"?>
