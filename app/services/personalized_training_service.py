@@ -656,13 +656,20 @@ class PersonalizedTrainingService:
 
         mapped_history = []
         for h in history:
+            # Fetch prompts for each cycle so all cycles show full simulation detail
+            stmt_prompts_h = select(TrainingSimulationPrompt).where(
+                TrainingSimulationPrompt.training_report_id == h.training_report_id
+            ).order_by(TrainingSimulationPrompt.prompt_number.asc())
+            res_prompts_h = await db.execute(stmt_prompts_h)
+            prompts_h = list(res_prompts_h.scalars().all())
+
             stmt_comp_h = select(TrainingCompletionStatus).where(
                 TrainingCompletionStatus.training_report_id == h.training_report_id
             ).order_by(TrainingCompletionStatus.completion_id.asc())
             res_comp_h = await db.execute(stmt_comp_h)
             completions_h = list(res_comp_h.scalars().all())
             
-            mapped_h = PersonalizedTrainingService._map_report_to_dict(h, completions=completions_h)
+            mapped_h = PersonalizedTrainingService._map_report_to_dict(h, prompts=prompts_h, completions=completions_h)
             mapped_history.append(mapped_h)
 
         return {
