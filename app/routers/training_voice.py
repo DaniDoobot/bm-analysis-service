@@ -575,7 +575,7 @@ async def duration_monitor_task(
             "clientContent": {
                 "turns": [{
                     "role": "user",
-                    "parts": [{"text": "[INSTRUCCIÓN DEL SISTEMA: La prueba ha terminado. Sal del personaje de forma amigable y pronuncia exactamente la frase obligatoria: 'La prueba ha terminado. Gracias por participar.' e invoca inmediatamente la herramienta hangup_call.]"}]
+                    "parts": [{"text": "[INSTRUCCIÓN DEL SISTEMA: El entrenamiento ha terminado. Sal del personaje de forma amigable y pronuncia exactamente la frase obligatoria: 'El entrenamiento ha terminado, ten un buen día y muchas gracias' e invoca inmediatamente la herramienta hangup_call.]"}]
                 }],
                 "turnComplete": True
             }
