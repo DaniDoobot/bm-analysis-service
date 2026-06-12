@@ -41,14 +41,18 @@ router = APIRouter(prefix="/bm/training", tags=["Training Voice Voice/IVR"])
 
 IDENTIFICATION_SYSTEM_INSTRUCTION = """
 Eres el Asistente de Identificación por Voz de Boston Medical Group.
-Tu única labor en esta fase es dar la bienvenida al agente y solicitarle de forma amable que te diga su código corto de empleado (que consiste en dos letras seguidas de números, por ejemplo: LD23, FR45, CM21, EC7).
+Tu labor en esta fase es identificar al agente y, si tiene varios ciclos de entrenamiento pendientes, ayudarle a seleccionar uno de ellos por voz.
 
 Sigue estas pautas estrictas:
-- Mantén un tono sumamente amable, profesional y claro.
-- Una vez que el agente te diga su código (puede decirlo deletreando, con letras sueltas, o pronunciándolo de varias formas, e.g. "ele de veintitrés", "L D veintitrés", "efe erre cuarenta y cinco"), debes extraerlo, normalizarlo en mayúsculas y sin espacios, y llamar inmediatamente a la herramienta `verify_agent_code(agent_code=codigo_extraido)`.
-- Si el backend te devuelve que el código es incorrecto, debes informar al agente con tacto y pedirle que lo intente de nuevo.
-- Si el backend te devuelve que se inicia la redirección, avisa brevemente ("Código verificado, un momento por favor...") y no digas nada más.
-- Si el backend te devuelve que no hay ciclos activos (status es "no_active_cycles"), debes indicárselo claramente diciendo exactamente: "He visto que no tienes ningún entrenamiento en proceso, vas al día con todo." y luego despedirte amablemente. No intentes pedir el código otra vez.
+1. Pide de forma amable al agente que te diga su código corto de empleado (que consiste en dos letras seguidas de números, por ejemplo: LD23, FR45, CM21, EC7).
+2. Una vez que el agente te diga su código (ej. "ele de veintitrés", "L D veintitrés", "efe erre cuarenta y cinco"), extráelo, normalízalo en mayúsculas y sin espacios, y llamar inmediatamente a la herramienta `verify_agent_code(agent_code=codigo_extraido)`.
+3. Si el backend te devuelve que el código es incorrecto (status es "invalid"), infórmale con tacto y pídele que lo intente de nuevo.
+4. Si el backend te devuelve que se inicia la redirección directamente (status es "redirecting"), avisa brevemente ("Código verificado, un momento por favor...") y no digas nada más.
+5. Si el backend te devuelve que no hay ciclos activos (status es "no_active_cycles"), indícaselo claramente diciendo exactamente: "He visto que no tienes ningún entrenamiento en proceso, vas al día con todo." y luego despídete amablemente. No intentes pedir el código otra vez.
+6. Si el backend te devuelve que hay varios ciclos activos (status es "multiple_cycles"), debes saludar amistosamente al agente usando su nombre (ej. "Perfecto Fernanda, vamos a ver qué ciclos tienes pendientes.") y luego presentarle las opciones de ciclos de forma muy clara usando sus fechas formateadas (ej. "¿Quieres hacer el ciclo del 1 al 17 de mayo o el ciclo del 18 al 31 de mayo?").
+7. Escucha atentamente la respuesta de voz del agente. El agente elegirá diciendo cosas como "el primero", "el segundo", "el de la primera quincena", "el uno", "el de mayo", etc.
+8. Asocia la respuesta del agente al ciclo correspondiente de la lista y llama inmediatamente a la herramienta `select_training_cycle(cycle_id=ID_DEL_CICLO)`.
+9. Cuando llames a `select_training_cycle`, hazlo inmediatamente después de que el usuario elija, sin añadir explicaciones largas ni despedidas adicionales, ya que la llamada se transferirá de forma inmediata.
 """
 
 SPANISH_VOICE_RULES = """
@@ -668,17 +672,25 @@ async def handle_verify_agent_code(
             await redirect_twilio_call(call_sid, host, hubspot_owner_id, active_cycles[0].training_report_id)
             return {"attempts": attempts, "result": {"status": "redirecting"}, "redirected": True}
         else:
-            logger.info("Agent %s identified with %d active cycles. Redirecting to select-cycle-menu.", setting.agent_name, len(active_cycles))
-            scheme = "https" if "localhost" not in host and "127.0.0.1" not in host else "http"
-            redirect_url = f"{scheme}://{host}/bm/training/voice/twilio/select-cycle-menu?agent_id={hubspot_owner_id}&call_sid={call_sid}"
-            
-            account_sid = settings.twilio_account_sid
-            auth_token = settings.twilio_auth_token
-            if account_sid and auth_token:
-                url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Calls/{call_sid}.json"
-                async with httpx.AsyncClient() as client:
-                    await client.post(url, auth=(account_sid, auth_token), data={"Url": redirect_url})
-            return {"attempts": attempts, "result": {"status": "redirecting"}, "redirected": True}
+            logger.info("Agent %s identified with %d active cycles. Remaining in WebSocket to select cycle by voice.", setting.agent_name, len(active_cycles))
+            cycles_data = []
+            for idx, c in enumerate(active_cycles):
+                p = format_period_spanish(c.period_start, c.period_end)
+                cycles_data.append({
+                    "cycle_id": c.training_report_id,
+                    "index": idx + 1,
+                    "period_text": p
+                })
+            return {
+                "attempts": attempts,
+                "agent_id": hubspot_owner_id,
+                "result": {
+                    "status": "multiple_cycles",
+                    "agent_name": setting.agent_name.split()[0],
+                    "cycles": cycles_data
+                },
+                "redirected": False
+            }
 
 
 async def handle_roleplay_hangup(
@@ -874,6 +886,20 @@ async def twilio_media_stream(
                             },
                             "required": ["agent_code"]
                         }
+                    },
+                    {
+                        "name": "select_training_cycle",
+                        "description": "Permite seleccionar uno de los ciclos activos cuando el agente tiene múltiples opciones.",
+                        "parameters": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "cycle_id": {
+                                    "type": "INTEGER",
+                                    "description": "El ID del ciclo de entrenamiento seleccionado."
+                                }
+                            },
+                            "required": ["cycle_id"]
+                        }
                     }
                 ]
             }
@@ -985,6 +1011,7 @@ async def twilio_media_stream(
             attempts = 0
             recording_sid = None
             redirected = False
+            identified_agent_id = None
             
             twilio_rate_state = None
             gemini_rate_state = None
@@ -1046,7 +1073,7 @@ async def twilio_media_stream(
                         break
                         
             async def gemini_to_twilio_loop():
-                nonlocal gemini_ready, attempts, redirected, gemini_rate_state
+                nonlocal gemini_ready, attempts, redirected, gemini_rate_state, identified_agent_id
                 async for raw_msg in gemini_ws:
                     try:
                         data = json.loads(raw_msg)
@@ -1103,6 +1130,8 @@ async def twilio_media_stream(
                                     )
                                     attempts = status_res.get("attempts", attempts)
                                     result_val = status_res.get("result", {})
+                                    if "agent_id" in status_res:
+                                        identified_agent_id = status_res["agent_id"]
                                     
                                     # Respond to Gemini
                                     resp_msg = {
@@ -1127,6 +1156,49 @@ async def twilio_media_stream(
                                             logger.info("No active cycles: hanging up Twilio call %s.", call_sid)
                                             await hangup_twilio_call(call_sid)
                                         asyncio.create_task(delayed_no_cycles_hangup())
+                                        
+                                elif name == "select_training_cycle" and flow == "identify":
+                                    cycle_id = args.get("cycle_id")
+                                    # Ensure we have the identified agent_id
+                                    if not identified_agent_id and cycle_id:
+                                        # Lookup from database
+                                        engine = get_engine()
+                                        async with AsyncSession(engine) as db:
+                                            stmt_c = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == cycle_id)
+                                            res_c = await db.execute(stmt_c)
+                                            cycle_obj = res_c.scalars().first()
+                                            if cycle_obj:
+                                                identified_agent_id = cycle_obj.hubspot_owner_id
+                                    
+                                    if identified_agent_id and cycle_id:
+                                        host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"
+                                        logger.info("Voice cycle selection received. Redirecting Twilio call %s to cycle %s for agent %s.", call_sid, cycle_id, identified_agent_id)
+                                        await redirect_twilio_call(call_sid, host, identified_agent_id, cycle_id)
+                                        
+                                        resp_msg = {
+                                            "toolResponse": {
+                                                "functionResponses": [{
+                                                    "id": call_id,
+                                                    "name": name,
+                                                    "response": {"result": {"status": "redirecting"}}
+                                                }]
+                                            }
+                                        }
+                                        await gemini_ws.send(json.dumps(resp_msg))
+                                        redirected = True
+                                        return
+                                    else:
+                                        logger.error("Failed to redirect voice cycle selection: agent_id=%s, cycle_id=%s", identified_agent_id, cycle_id)
+                                        resp_msg = {
+                                            "toolResponse": {
+                                                "functionResponses": [{
+                                                    "id": call_id,
+                                                    "name": name,
+                                                    "response": {"result": {"status": "error", "message": "Falta información del agente o del ciclo."}}
+                                                }]
+                                            }
+                                        }
+                                        await gemini_ws.send(json.dumps(resp_msg))
                                         
                                 elif name == "hangup_call":
                                     reason = args.get("reason", "fin_de_conversacion")
