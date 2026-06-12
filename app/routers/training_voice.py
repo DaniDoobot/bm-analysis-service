@@ -48,6 +48,30 @@ Sigue estas pautas estrictas:
 - Una vez que el agente te diga su código (puede decirlo deletreando, con letras sueltas, o pronunciándolo de varias formas, e.g. "ele de veintitrés", "L D veintitrés", "efe erre cuarenta y cinco"), debes extraerlo, normalizarlo en mayúsculas y sin espacios, y llamar inmediatamente a la herramienta `verify_agent_code(agent_code=codigo_extraido)`.
 - Si el backend te devuelve que el código es incorrecto, debes informar al agente con tacto y pedirle que lo intente de nuevo.
 - Si el backend te devuelve que se inicia la redirección, avisa brevemente ("Código verificado, un momento por favor...") y no digas nada más.
+- Si el backend te devuelve que no hay ciclos activos (status es "no_active_cycles"), debes indicárselo claramente diciendo exactamente: "He visto que no tienes ningún entrenamiento en proceso, vas al día con todo." y luego despedirte amablemente. No intentes pedir el código otra vez.
+"""
+
+SPANISH_VOICE_RULES = """
+=================================================
+REGLAS GENERALES DE VOZ (OBLIGATORIAS)
+=================================================
+- Conversación telefónica natural y fluida.
+- Respuestas cortas y directas. No des explicaciones largas.
+- Responde siempre en español de España, con pronunciación peninsular.
+- Evita seseo: pronuncia claramente “c” y “z” como español de España.
+- Evita giros, entonación o dejes latinoamericanos.
+- Voz adulta, estable y madura.
+- Usa una entonación sobria, de locutor telefónico adulto.
+- Evita cambios bruscos de tono dentro de una misma frase. No hagas quiebros de voz.
+- No uses una prosodia juvenil, exagerada o inestable.
+- Evita subidas repentinas de tono en palabras sueltas. No hagas variaciones melódicas innecesarias.
+- No termines las frases con subida aguda de tono. Mantén una entonación descendente o neutra al final de las frases.
+- Evita sonar cantarín. Usa una voz uniforme, estable y contenida.
+- No uses una entonación excesivamente expresiva.
+- No alargues vocales al final de las frases.
+- No conviertas afirmaciones en preguntas por entonación.
+- Cuando cierres una frase, baja ligeramente la entonación.
+- Habla con claridad, sin sonar robótico.
 """
 
 
@@ -808,7 +832,7 @@ async def twilio_media_stream(
     tools = []
     
     if flow == "identify":
-        instruction = IDENTIFICATION_SYSTEM_INSTRUCTION
+        instruction = IDENTIFICATION_SYSTEM_INSTRUCTION + "\n" + SPANISH_VOICE_RULES
         tools = [
             {
                 "functionDeclarations": [
@@ -846,7 +870,7 @@ async def twilio_media_stream(
                 logger.error("Simulation prompt not found in DB.")
                 await websocket.close()
                 return
-            instruction = prompt.prompt_text
+            instruction = prompt.prompt_text + "\n" + SPANISH_VOICE_RULES
             tools = [
                 {
                     "functionDeclarations": [
@@ -886,13 +910,24 @@ async def twilio_media_stream(
                         "speechConfig": {
                             "voiceConfig": {
                                 "prebuiltVoiceConfig": {
-                                    "voiceName": "Charon"  # Friendly prebuilt voice
+                                    "voiceName": "Algenib"  # Fixed voice from demo, sounds more natural & peninsular
                                 }
                             }
                         },
                         "thinkingConfig": {
                             "thinkingLevel": "minimal"
                         }
+                    },
+                    "realtimeInputConfig": {
+                        "automaticActivityDetection": {
+                            "disabled": False,
+                            "startOfSpeechSensitivity": "START_SENSITIVITY_LOW",
+                            "endOfSpeechSensitivity": "END_SENSITIVITY_HIGH",
+                            "prefixPaddingMs": 120,
+                            "silenceDurationMs": 130,
+                        },
+                        "turnCoverage": "TURN_INCLUDES_ONLY_ACTIVITY",
+                        "activityHandling": "START_OF_ACTIVITY_INTERRUPTS",
                     },
                     "systemInstruction": {
                         "parts": [{"text": instruction.strip()}]
@@ -1037,6 +1072,14 @@ async def twilio_media_stream(
                                     if status_res.get("redirected"):
                                         redirected = True
                                         return
+                                        
+                                    if result_val.get("status") == "no_active_cycles":
+                                        # Schedule an asynchronous hangup after 6 seconds to let Gemini say the phrase
+                                        async def delayed_no_cycles_hangup():
+                                            await asyncio.sleep(6)
+                                            logger.info("No active cycles: hanging up Twilio call %s.", call_sid)
+                                            await hangup_twilio_call(call_sid)
+                                        asyncio.create_task(delayed_no_cycles_hangup())
                                         
                                 elif name == "hangup_call":
                                     reason = args.get("reason", "fin_de_conversacion")
