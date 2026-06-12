@@ -2704,7 +2704,40 @@ async def evaluate_training_session_task(session_id: int):
         parsed_res = safe_parse_json(raw_response)
         
         if not parsed_res:
-            logger.error("Failed to parse JSON response from Azure OpenAI for session %d: %s", session_id, raw_response[:300])
+            logger.warning(
+                "Initial JSON parse failed for session %d. Attempting text-only repair call. Raw (first 200): %s",
+                session_id, raw_response[:200]
+            )
+            # Retry: ask a text model to fix the broken JSON (no audio, just repair)
+            try:
+                from app.services.openai_service import complete_text
+                repair_messages = [
+                    {
+                        "role": "system",
+                        "content": "Eres un experto en reparar JSON malformado. Tu única tarea es devolver un JSON válido y correcto."
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            "El siguiente texto debería ser un JSON válido pero contiene errores de formato "
+                            "(por ejemplo, comillas sin escapar, saltos de línea en strings, etc.).\n"
+                            "Devuelve exclusivamente el JSON corregido y válido, sin texto adicional ni markdown:\n\n"
+                            + raw_response
+                        )
+                    }
+                ]
+                repaired_raw = await complete_text(messages=repair_messages, temperature=0.0)
+                parsed_res = safe_parse_json(repaired_raw)
+                if parsed_res:
+                    logger.info("JSON repair succeeded for session %d.", session_id)
+                else:
+                    logger.error("JSON repair also failed for session %d. Raw repair response (first 200): %s", session_id, repaired_raw[:200])
+            except Exception as repair_exc:
+                logger.exception("JSON repair call failed for session %d: %s", session_id, repair_exc)
+                parsed_res = None
+
+        if not parsed_res:
+            logger.error("Failed to parse JSON response from Azure OpenAI for session %d after retry: %s", session_id, raw_response[:300])
             session.status = "failed"
             session.error_message = "OpenAI response was not valid JSON."
             if comp:
@@ -2713,6 +2746,7 @@ async def evaluate_training_session_task(session_id: int):
                 comp.evaluation_id = None
             await db.commit()
             return
+
             
         # Extract evaluation metrics
         score = parsed_res.get("score")

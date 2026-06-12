@@ -1454,3 +1454,63 @@ async def update_evaluation_prompt(
         "created_at": new_prompt.created_at,
         "updated_at": new_prompt.updated_at
     }
+
+
+@router.post("/admin/sessions/{session_id}/retry-evaluation")
+async def retry_session_evaluation(
+    session_id: int,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    Admin endpoint: Re-trigger the background evaluation task for a training call session.
+    Useful when a session has status 'failed' due to a transient error (e.g., JSON parse failure)
+    but the recording URL is still accessible.
+    Resets session status to 'in_progress' so the evaluator can process it again.
+    """
+    from app.models.personalized_training import TrainingCallSession, TrainingCompletionStatus
+    from app.services.personalized_training_service import evaluate_training_session_task
+
+    stmt = select(TrainingCallSession).where(TrainingCallSession.session_id == session_id)
+    res = await db.execute(stmt)
+    session = res.scalars().first()
+
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found.")
+
+    if not session.recording_url:
+        raise HTTPException(
+            status_code=400,
+            detail="Session has no recording URL. Cannot re-evaluate without a recording."
+        )
+
+    # Reset session to allow re-evaluation
+    session.status = "in_progress"
+    session.error_message = None
+
+    # Reset the associated completion status to pending if it exists
+    stmt_comp = select(TrainingCompletionStatus).where(
+        TrainingCompletionStatus.training_report_id == session.cycle_id,
+        TrainingCompletionStatus.prompt_number == session.prompt_number,
+    )
+    res_comp = await db.execute(stmt_comp)
+    comp = res_comp.scalars().first()
+    if comp and comp.status != "completed":
+        comp.status = "pending"
+        comp.completed_at = None
+        comp.evaluation_id = None
+
+    await db.commit()
+
+    background_tasks.add_task(evaluate_training_session_task, session_id)
+
+    logger.info(
+        "Admin re-triggered evaluation for session %d (agent %s, cycle %s).",
+        session_id, session.agent_id, session.cycle_id
+    )
+    return {
+        "message": f"Evaluation re-triggered for session {session_id}.",
+        "session_id": session_id,
+        "recording_url": session.recording_url,
+    }
