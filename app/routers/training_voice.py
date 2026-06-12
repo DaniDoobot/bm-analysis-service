@@ -954,12 +954,10 @@ async def twilio_media_stream(
                                 if pcm_16k_base64:
                                     gemini_audio = {
                                         "realtimeInput": {
-                                            "mediaChunks": [
-                                                {
-                                                    "mimeType": "audio/pcm",
-                                                    "data": pcm_16k_base64
-                                                }
-                                            ]
+                                            "audio": {
+                                                "mimeType": "audio/pcm;rate=16000",
+                                                "data": pcm_16k_base64
+                                            }
                                         }
                                     }
                                     await gemini_ws.send(json.dumps(gemini_audio))

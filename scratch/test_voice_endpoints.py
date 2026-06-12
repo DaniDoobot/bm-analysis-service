@@ -40,8 +40,12 @@ async def test_websocket_media_stream_identify():
     mock_gemini_ws.send = AsyncMock()
     # Mocking async iterator for gemini_ws
     # When iterating over gemini_ws, it receives messages from Gemini.
-    # We can simulate sending a setupComplete message first
-    mock_gemini_ws.__aiter__.return_value = ["{\"setupComplete\": {}}"]
+    # We can simulate sending a setupComplete message first and then sleep forever
+    # to prevent the gemini_to_twilio_loop from ending and cancelling the twilio_to_gemini_loop.
+    async def mock_gemini_messages(*args, **kwargs):
+        yield "{\"setupComplete\": {}}"
+        await asyncio.sleep(3600)
+    mock_gemini_ws.__aiter__ = mock_gemini_messages
     
     from unittest.mock import MagicMock
     
@@ -90,6 +94,19 @@ async def test_websocket_media_stream_identify():
             # Let's wait a bit to let async tasks execute
             await asyncio.sleep(0.5)
             
+            # Send a media event containing base64 audio payload (silence representation)
+            silence_payload = "f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/"
+            media_event = {
+                "event": "media",
+                "media": {
+                    "payload": silence_payload
+                }
+            }
+            ws.send_text(json.dumps(media_event))
+            
+            # Wait a bit to let the handler process the media event and send it to Gemini
+            await asyncio.sleep(0.5)
+            
             # Verify websockets.connect was called with gemini URL using v1beta version
             mock_connect.assert_called_once()
             args, kwargs = mock_connect.call_args
@@ -97,8 +114,9 @@ async def test_websocket_media_stream_identify():
             assert "v1beta" in args[0]
             
             # Verify the Setup Configuration was sent to Gemini
-            # Locate all calls to mock_gemini_ws.send and check if setup is present
+            # Locate all calls to mock_gemini_ws.send and check if setup and realtimeInput are present
             called_setup = False
+            called_audio = False
             for call in mock_gemini_ws.send.call_args_list:
                 msg = json.loads(call[0][0])
                 if "setup" in msg:
@@ -106,8 +124,22 @@ async def test_websocket_media_stream_identify():
                     setup = msg["setup"]
                     assert "Identificación" in setup["systemInstruction"]["parts"][0]["text"]
                     assert setup["tools"][0]["functionDeclarations"][0]["name"] == "verify_agent_code"
+                elif "realtimeInput" in msg:
+                    called_audio = True
+                    rt_input = msg["realtimeInput"]
+                    
+                    # Assert that mediaChunks or media_chunks is not present in the payload
+                    assert "mediaChunks" not in rt_input
+                    assert "media_chunks" not in rt_input
+                    
+                    # Assert the correct format uses audio field
+                    assert "audio" in rt_input
+                    audio_payload = rt_input["audio"]
+                    assert audio_payload["mimeType"] == "audio/pcm;rate=16000"
+                    assert "data" in audio_payload
             
             assert called_setup, "Gemini setup message was not sent"
+            assert called_audio, "Gemini audio payload was not sent"
             print("[OK] WebSocket media-stream identify verified.")
 
 async def run_all():
