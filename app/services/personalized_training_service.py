@@ -1631,6 +1631,8 @@ class PersonalizedTrainingService:
 
             prev_context = "No hay informes de entrenamiento anteriores disponibles (Este es el primer informe del agente)."
             carried_over_context = "No hay objetivos arrastrados del ciclo anterior."
+            carried_over_general = []
+            carried_over_specific = []
             if prev_report:
                 prev_context = (
                     f"Informe anterior del periodo {prev_report.period_start} al {prev_report.period_end}.\n"
@@ -1640,8 +1642,6 @@ class PersonalizedTrainingService:
                 )
                 
                 # Check for carried over objectives from final_report_json
-                carried_over_general = []
-                carried_over_specific = []
                 if prev_report and prev_report.final_report_json:
                     carried_over_list = []
                     obj_status = prev_report.final_report_json.get("objectives_status") or []
