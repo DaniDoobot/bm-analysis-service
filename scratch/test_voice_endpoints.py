@@ -90,10 +90,11 @@ async def test_websocket_media_stream_identify():
             # Let's wait a bit to let async tasks execute
             await asyncio.sleep(0.5)
             
-            # Verify websockets.connect was called with gemini URL
+            # Verify websockets.connect was called with gemini URL using v1beta version
             mock_connect.assert_called_once()
             args, kwargs = mock_connect.call_args
             assert "generativelanguage.googleapis.com" in args[0]
+            assert "v1beta" in args[0]
             
             # Verify the Setup Configuration was sent to Gemini
             # Locate all calls to mock_gemini_ws.send and check if setup is present

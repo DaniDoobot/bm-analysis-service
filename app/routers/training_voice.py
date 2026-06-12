@@ -871,7 +871,7 @@ async def twilio_media_stream(
         await websocket.close()
         return
         
-    gemini_url = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={gemini_api_key}"
+    gemini_url = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={gemini_api_key}"
     
     try:
         async with websockets.connect(gemini_url) as gemini_ws:
