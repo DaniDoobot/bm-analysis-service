@@ -295,7 +295,6 @@ async def start_cycle_roleplay(db: AsyncSession, cycle: TrainingAgentReport, hub
     
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
-        <Say language="es-ES">Perfecto. Iniciamos la simulación número {pending_prompt.prompt_number}. Prepárate.</Say>
         <Connect>
             <Stream url="{ws_url}">
                 <Parameter name="session_id" value="{session_id}" />
@@ -1044,7 +1043,7 @@ async def twilio_media_stream(
                                     "clientContent": {
                                         "turns": [{
                                             "role": "user",
-                                            "parts": [{"text": "El agente se ha conectado a la llamada. Empieza con tu personaje del roleplay."}]
+                                            "parts": [{"text": f"Di exactamente: 'Perfecto. Iniciamos la simulación número {prompt.prompt_number}. Prepárate.' y a continuación, sin pausar, inicia la conversación asumiendo tu personaje del roleplay."}]
                                         }],
                                         "turnComplete": True
                                     }
