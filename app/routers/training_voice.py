@@ -11,7 +11,7 @@ from decimal import Decimal
 from datetime import datetime, timezone
 from typing import List, Optional, Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Query, Request, Response, WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, or_, desc, func
 
