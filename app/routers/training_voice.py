@@ -910,7 +910,7 @@ async def twilio_media_stream(
                         "speechConfig": {
                             "voiceConfig": {
                                 "prebuiltVoiceConfig": {
-                                    "voiceName": "Algenib"  # Fixed voice from demo, sounds more natural & peninsular
+                                    "voiceName": "Algieba"  # Requested voice, sounds natural & peninsular
                                 }
                             }
                         },
