@@ -380,6 +380,10 @@ class PersonalizedTrainingService:
             "agent_name": s.agent_name,
             "agent_initials": s.agent_initials,
             "is_enabled": s.is_enabled,
+            "training_code": s.training_code,
+            "training_numeric_code": s.training_numeric_code,
+            "training_code_enabled": s.training_code_enabled,
+            "training_code_updated_at": s.training_code_updated_at or s.updated_at or datetime.now(timezone.utc),
             "created_at": s.created_at,
             "updated_at": s.updated_at,
         }
