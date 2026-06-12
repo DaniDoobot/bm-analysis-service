@@ -2559,11 +2559,25 @@ async def evaluate_training_session_task(session_id: int):
             logger.info("Session %d already evaluated. Skipping.", session_id)
             return
             
+        # Fetch completion status early so we can restore it on failures
+        stmt_comp = select(TrainingCompletionStatus).where(
+            and_(
+                TrainingCompletionStatus.training_report_id == cycle_id,
+                TrainingCompletionStatus.simulation_prompt_id == conversation_id
+            )
+        )
+        res_comp = await db.execute(stmt_comp)
+        comp = res_comp.scalars().first()
+            
         recording_url = session.recording_url
         if not recording_url:
             logger.error("Call Session ID %d has no recording_url.", session_id)
             session.status = "failed"
             session.error_message = "No recording URL provided."
+            if comp:
+                comp.status = "pending"
+                comp.completed_at = None
+                comp.evaluation_id = None
             await db.commit()
             return
             
@@ -2596,6 +2610,10 @@ async def evaluate_training_session_task(session_id: int):
             logger.error("No active service found in database to evaluate session %d.", session_id)
             session.status = "failed"
             session.error_message = "No active service found to resolve evaluation prompt."
+            if comp:
+                comp.status = "pending"
+                comp.completed_at = None
+                comp.evaluation_id = None
             await db.commit()
             return
             
@@ -2621,7 +2639,14 @@ async def evaluate_training_session_task(session_id: int):
             db.add(eval_prompt)
             await db.flush()
             
-        prompt_text = eval_prompt.prompt_text
+        # Inject dynamic instruction to evaluate is_valid_roleplay
+        is_valid_rule = (
+            "\nAdemás de los campos solicitados, DEBES incluir obligatoriamente el siguiente campo en la raíz del JSON devuelto:\n"
+            "- is_valid_roleplay: un valor booleano (true o false) que indique si la llamada es válida para ser evaluada. "
+            "Debe ser true si el agente realizó una interacción de roleplay sustancial, completó el juego de rol o al menos llegó a la fase de despedida/cierre antes de que la llamada se cortara. "
+            "Debe ser false únicamente si la llamada se cortó de forma muy abrupta al principio, si no hubo interacción real de roleplay, o si el agente colgó inmediatamente después de presentarse sin abordar los objetivos en absoluto."
+        )
+        prompt_text = eval_prompt.prompt_text + is_valid_rule
         prompt_version_id = eval_prompt.id
         
         # 4. Download recording audio bytes using TwilioService
@@ -2635,6 +2660,10 @@ async def evaluate_training_session_task(session_id: int):
             logger.exception("Failed to download recording audio for session %d: %s", session_id, e)
             session.status = "failed"
             session.error_message = f"Audio download failed: {str(e)}"
+            if comp:
+                comp.status = "pending"
+                comp.completed_at = None
+                comp.evaluation_id = None
             await db.commit()
             return
             
@@ -2656,6 +2685,10 @@ async def evaluate_training_session_task(session_id: int):
             logger.exception("Azure OpenAI analysis failed for session %d: %s", session_id, e)
             session.status = "failed"
             session.error_message = f"Azure OpenAI analysis failed: {str(e)}"
+            if comp:
+                comp.status = "pending"
+                comp.completed_at = None
+                comp.evaluation_id = None
             await db.commit()
             return
             
@@ -2667,6 +2700,10 @@ async def evaluate_training_session_task(session_id: int):
             logger.error("Failed to parse JSON response from Azure OpenAI for session %d: %s", session_id, raw_response[:300])
             session.status = "failed"
             session.error_message = "OpenAI response was not valid JSON."
+            if comp:
+                comp.status = "pending"
+                comp.completed_at = None
+                comp.evaluation_id = None
             await db.commit()
             return
             
@@ -2699,28 +2736,34 @@ async def evaluate_training_session_task(session_id: int):
         await db.flush()
         eval_id = evaluation.evaluation_id
         
-        # 8. Update Session and Completion Status
-        session.status = "evaluated"
-        session.evaluation_completed_at = datetime.now(timezone.utc)
-        
-        stmt_comp = select(TrainingCompletionStatus).where(
-            and_(
-                TrainingCompletionStatus.training_report_id == cycle_id,
-                TrainingCompletionStatus.simulation_prompt_id == conversation_id
-            )
-        )
-        res_comp = await db.execute(stmt_comp)
-        comp = res_comp.scalars().first()
-        if comp:
-            comp.status = "completed"
-            comp.completed_at = datetime.now(timezone.utc)
-            comp.evaluation_id = eval_id
+        # 8. Update Session and Completion Status based on validity of roleplay
+        is_valid = parsed_res.get("is_valid_roleplay")
+        if is_valid is None:
+            is_valid = True  # Default to True to avoid accidental discards
+            
+        if is_valid:
+            session.status = "evaluated"
+            session.evaluation_completed_at = datetime.now(timezone.utc)
+            if comp:
+                comp.status = "completed"
+                comp.completed_at = datetime.now(timezone.utc)
+                comp.evaluation_id = eval_id
+            logger.info("Successfully evaluated session %d (valid roleplay). Saved evaluation ID: %d", session_id, eval_id)
+        else:
+            session.status = "failed"
+            session.error_message = "El análisis determinó que el juego de rol no fue válido o se cortó prematuramente."
+            session.evaluation_completed_at = datetime.now(timezone.utc)
+            if comp:
+                comp.status = "pending"
+                comp.completed_at = None
+                comp.evaluation_id = None
+            logger.info("Successfully evaluated session %d but marked as invalid/incomplete. Resetting completion to pending.", session_id)
             
         await db.commit()
-        logger.info("Successfully evaluated session %d. Saved evaluation ID: %d", session_id, eval_id)
         
         # 9. Check if the cycle is completed (4/4 conversations complete) and finalize it if so
-        await check_and_finalize_training_cycle(db, cycle_id)
+        if is_valid:
+            await check_and_finalize_training_cycle(db, cycle_id)
 
 
 async def check_and_finalize_training_cycle(db: AsyncSession, cycle_id: int):

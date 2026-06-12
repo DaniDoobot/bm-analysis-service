@@ -705,11 +705,11 @@ async def handle_roleplay_hangup(
             
             logger.info("Training voice session ended. duration=%.2f seconds, reason=%s", duration_seconds, reason)
             
-            # Short Call Rule: < 2 minutes is marked as failed, resetting progress status to pending
-            if duration_seconds < 120 and reason != "exito_conversacional":
-                logger.warning("Short call duration < 2 minutes. Setting status to failed. Resetting completion progress.")
+            # Short Call Rule: < 15 seconds is marked as failed, resetting progress status to pending
+            if duration_seconds < 15 and reason != "exito_conversacional":
+                logger.warning("Short call duration < 15 seconds. Setting status to failed. Resetting completion progress.")
                 session.status = "failed"
-                session.error_message = f"Llamada menor a 2 minutos: {int(duration_seconds)} segundos."
+                session.error_message = f"Llamada menor a 15 segundos: {int(duration_seconds)} segundos."
                 session.ended_at = datetime.now(timezone.utc)
                 
                 stmt_comp = select(TrainingCompletionStatus).where(
@@ -1306,26 +1306,12 @@ async def recording_completed(
         logger.warning("Recording not completed successfully. Status: %s", recording_status)
         return Response(content="ok", media_type="text/plain")
         
-    # Find matching call session
+    # Find matching call session by call_sid
     stmt = select(TrainingCallSession).where(
-        and_(
-            TrainingCallSession.call_sid == call_sid,
-            TrainingCallSession.status == "completed"
-        )
+        TrainingCallSession.call_sid == call_sid
     ).order_by(desc(TrainingCallSession.session_id))
     res = await db.execute(stmt)
     session = res.scalars().first()
-    
-    if not session:
-        # Try fallback matching call session in_progress (just in case)
-        stmt_fb = select(TrainingCallSession).where(
-            and_(
-                TrainingCallSession.call_sid == call_sid,
-                TrainingCallSession.status == "in_progress"
-            )
-        ).order_by(desc(TrainingCallSession.session_id))
-        res_fb = await db.execute(stmt_fb)
-        session = res_fb.scalars().first()
         
     if not session:
         logger.error("No active/completed Call Session found for call_sid: %s", call_sid)
