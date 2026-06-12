@@ -631,23 +631,37 @@ async def handle_verify_agent_code(
         stmt_cycles = select(TrainingAgentReport).where(
             and_(
                 TrainingAgentReport.hubspot_owner_id == hubspot_owner_id,
-                TrainingAgentReport.status.in_(["pending", "running"]),
+                TrainingAgentReport.status.in_(["pending", "running", "completed"]),
                 TrainingAgentReport.is_current == True
             )
         ).order_by(desc(TrainingAgentReport.training_report_id))
         res_cycles = await db.execute(stmt_cycles)
         cycles = list(res_cycles.scalars().all())
         
-        if not cycles:
-            logger.info("Agent %s identified, but has no active cycles.", setting.agent_name)
+        # Filter cycles to verify if they have any pending or in_progress simulations
+        active_cycles = []
+        for c in cycles:
+            stmt_comps = select(TrainingCompletionStatus).where(
+                and_(
+                    TrainingCompletionStatus.training_report_id == c.training_report_id,
+                    TrainingCompletionStatus.status.in_(["pending", "in_progress"])
+                )
+            )
+            res_comps = await db.execute(stmt_comps)
+            pending_comps = list(res_comps.scalars().all())
+            if pending_comps:
+                active_cycles.append(c)
+        
+        if not active_cycles:
+            logger.info("Agent %s identified, but has no active cycles with pending simulations.", setting.agent_name)
             return {"attempts": attempts, "result": {"status": "no_active_cycles", "agent_name": setting.agent_name}, "redirected": False}
             
-        if len(cycles) == 1:
+        if len(active_cycles) == 1:
             logger.info("Agent %s identified with 1 active cycle. Redirecting to start-roleplay.", setting.agent_name)
-            await redirect_twilio_call(call_sid, host, hubspot_owner_id, cycles[0].training_report_id)
+            await redirect_twilio_call(call_sid, host, hubspot_owner_id, active_cycles[0].training_report_id)
             return {"attempts": attempts, "result": {"status": "redirecting"}, "redirected": True}
         else:
-            logger.info("Agent %s identified with %d active cycles. Redirecting to select-cycle-menu.", setting.agent_name, len(cycles))
+            logger.info("Agent %s identified with %d active cycles. Redirecting to select-cycle-menu.", setting.agent_name, len(active_cycles))
             scheme = "https" if "localhost" not in host and "127.0.0.1" not in host else "http"
             redirect_url = f"{scheme}://{host}/bm/training/voice/twilio/select-cycle-menu?agent_id={hubspot_owner_id}&call_sid={call_sid}"
             
