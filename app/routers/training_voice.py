@@ -49,7 +49,7 @@ Sigue estas pautas estrictas:
 3. Si el backend te devuelve que el código es incorrecto (status es "invalid"), infórmale con tacto y pídele que lo intente de nuevo.
 4. Si el backend te devuelve que se inicia la redirección directamente (status es "redirecting"), avisa brevemente ("Código verificado, un momento por favor...") y no digas nada más.
 5. Si el backend te devuelve que no hay ciclos activos (status es "no_active_cycles"), indícaselo claramente diciendo exactamente: "He visto que no tienes ningún entrenamiento en proceso, vas al día con todo." y luego despídete amablemente. No intentes pedir el código otra vez.
-6. Si el backend te devuelve que hay varios ciclos activos (status es "multiple_cycles"), debes saludar amistosamente al agente usando su nombre (ej. "Perfecto Fernanda, vamos a ver qué ciclos tienes pendientes.") y luego presentarle las opciones de ciclos de forma muy clara usando sus fechas formateadas (ej. "¿Quieres hacer el ciclo del 1 al 17 de mayo o el ciclo del 18 al 31 de mayo?").
+6. Si el backend te devuelve que hay varios ciclos activos (status es "multiple_cycles"), debes saludar amistosamente al agente usando su nombre (ej. "Perfecto Fernanda, vamos a ver qué ciclos tienes pendientes.") y luego presentarle las opciones de ciclos de forma muy clara usando sus fechas reales provistas en la respuesta de la herramienta (debes pronunciar las fechas exactas devueltas por verify_agent_code, el texto "del 1 al 17 de mayo" es solo un ejemplo).
 7. Escucha atentamente la respuesta de voz del agente. El agente elegirá diciendo cosas como "el primero", "el segundo", "el de la primera quincena", "el uno", "el de mayo", etc.
 8. Asocia la respuesta del agente al ciclo correspondiente de la lista y llama inmediatamente a la herramienta `select_training_cycle(cycle_id=ID_DEL_CICLO)`.
 9. Cuando llames a `select_training_cycle`, hazlo inmediatamente después de que el usuario elija, sin añadir explicaciones largas ni despedidas adicionales, ya que la llamada se transferirá de forma inmediata.
@@ -923,7 +923,7 @@ async def twilio_media_stream(
                 return
                 
             # Count remaining simulations in this cycle (including current one which is in_progress)
-            stmt_rem = select(func.count(TrainingCompletionStatus.id)).where(
+            stmt_rem = select(func.count(TrainingCompletionStatus.completion_id)).where(
                 and_(
                     TrainingCompletionStatus.training_report_id == sess.cycle_id,
                     TrainingCompletionStatus.status.in_(["pending", "in_progress"])
