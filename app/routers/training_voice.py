@@ -139,6 +139,45 @@ async def start_simulation_redirect(db: AsyncSession, agent_id: str, cycle_id: i
     return Response(content=twiml, media_type="application/xml")
 
 
+def format_period_spanish(start: datetime, end: datetime) -> str:
+    """Format datetime period into natural Spanish phrasing."""
+    meses = {
+        1: "enero", 2: "febrero", 3: "marzo", 4: "abril", 5: "mayo", 6: "junio",
+        7: "julio", 8: "agosto", 9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre"
+    }
+    if start.month == end.month:
+        return f"del {start.day} al {end.day} de {meses[start.month]}"
+    else:
+        return f"del {start.day} de {meses[start.month]} al {end.day} de {meses[end.month]}"
+
+
+async def get_active_cycles_for_agent(db: AsyncSession, hubspot_owner_id: str) -> List[TrainingAgentReport]:
+    """Retrieve all cycles for an agent that have pending or in_progress simulations."""
+    stmt_cycles = select(TrainingAgentReport).where(
+        and_(
+            TrainingAgentReport.hubspot_owner_id == hubspot_owner_id,
+            TrainingAgentReport.status.in_(["pending", "running", "completed"])
+        )
+    ).order_by(desc(TrainingAgentReport.training_report_id))
+    res_cycles = await db.execute(stmt_cycles)
+    cycles = list(res_cycles.scalars().all())
+    
+    active_cycles = []
+    for c in cycles:
+        stmt_comps = select(TrainingCompletionStatus).where(
+            and_(
+                TrainingCompletionStatus.training_report_id == c.training_report_id,
+                TrainingCompletionStatus.status.in_(["pending", "in_progress"])
+            )
+        )
+        res_comps = await db.execute(stmt_comps)
+        pending_comps = list(res_comps.scalars().all())
+        if pending_comps:
+            active_cycles.append(c)
+            
+    return active_cycles
+
+
 def enforce_admin_role(user: User):
     """Enforce that the logged-in user is an administrator."""
     if user.role not in ["admin", "administrador"]:
@@ -389,15 +428,7 @@ async def verify_numeric_code(
     hubspot_owner_id = setting.hubspot_owner_id
     
     # Query active reports (cycles)
-    stmt_cycles = select(TrainingAgentReport).where(
-        and_(
-            TrainingAgentReport.hubspot_owner_id == hubspot_owner_id,
-            TrainingAgentReport.status.in_(["pending", "running"]),
-            TrainingAgentReport.is_current == True
-        )
-    ).order_by(desc(TrainingAgentReport.training_report_id))
-    res_cycles = await db.execute(stmt_cycles)
-    cycles = list(res_cycles.scalars().all())
+    cycles = await get_active_cycles_for_agent(db, hubspot_owner_id)
     
     if not cycles:
         twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -414,10 +445,17 @@ async def verify_numeric_code(
         return await start_simulation_redirect(db, hubspot_owner_id, cycles[0].training_report_id, call_sid, host)
         
     # Multiple active cycles, prompt to choose one
-    say_text = f"Hola {agent_name}. Tienes {len(cycles)} ciclos activos. "
-    for i, c in enumerate(cycles[:3]):
-        period_str = c.period_start.strftime("%d de %B") if c.period_start else "sin fecha"
-        say_text += f"Para el ciclo del {period_str}, presiona {i+1}. "
+    first_name = agent_name.split()[0] if agent_name else "Agente"
+    say_text = f"Perfecto {first_name}, vamos a ver qué ciclos tienes pendientes. "
+    if len(cycles) == 2:
+        p1 = format_period_spanish(cycles[0].period_start, cycles[0].period_end)
+        p2 = format_period_spanish(cycles[1].period_start, cycles[1].period_end)
+        say_text += f"¿Quieres hacer el ciclo {p1} o el ciclo {p2}? Presiona 1 o 2 respectivamente."
+    else:
+        say_text += f"Tienes {len(cycles)} ciclos activos. "
+        for i, c in enumerate(cycles[:3]):
+            p = format_period_spanish(c.period_start, c.period_end)
+            say_text += f"Para el ciclo {p}, presiona {i+1}. "
         
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
@@ -453,15 +491,7 @@ async def select_cycle(
         """
         return Response(content=twiml, media_type="application/xml")
         
-    stmt_cycles = select(TrainingAgentReport).where(
-        and_(
-            TrainingAgentReport.hubspot_owner_id == agent_id,
-            TrainingAgentReport.status.in_(["pending", "running"]),
-            TrainingAgentReport.is_current == True
-        )
-    ).order_by(desc(TrainingAgentReport.training_report_id))
-    res_cycles = await db.execute(stmt_cycles)
-    cycles = list(res_cycles.scalars().all())
+    cycles = await get_active_cycles_for_agent(db, agent_id)
     
     if selection_idx < 0 or selection_idx >= len(cycles):
         twiml = """<?xml version="1.0" encoding="UTF-8"?>
@@ -627,29 +657,7 @@ async def handle_verify_agent_code(
         
         # Verify active cycles
         hubspot_owner_id = setting.hubspot_owner_id
-        stmt_cycles = select(TrainingAgentReport).where(
-            and_(
-                TrainingAgentReport.hubspot_owner_id == hubspot_owner_id,
-                TrainingAgentReport.status.in_(["pending", "running", "completed"]),
-                TrainingAgentReport.is_current == True
-            )
-        ).order_by(desc(TrainingAgentReport.training_report_id))
-        res_cycles = await db.execute(stmt_cycles)
-        cycles = list(res_cycles.scalars().all())
-        
-        # Filter cycles to verify if they have any pending or in_progress simulations
-        active_cycles = []
-        for c in cycles:
-            stmt_comps = select(TrainingCompletionStatus).where(
-                and_(
-                    TrainingCompletionStatus.training_report_id == c.training_report_id,
-                    TrainingCompletionStatus.status.in_(["pending", "in_progress"])
-                )
-            )
-            res_comps = await db.execute(stmt_comps)
-            pending_comps = list(res_comps.scalars().all())
-            if pending_comps:
-                active_cycles.append(c)
+        active_cycles = await get_active_cycles_for_agent(db, hubspot_owner_id)
         
         if not active_cycles:
             logger.info("Agent %s identified, but has no active cycles with pending simulations.", setting.agent_name)
@@ -730,15 +738,7 @@ async def select_cycle_menu(
     db: AsyncSession = Depends(get_db)
 ):
     """Webhook menu to handle cycle selection when agent has multiple active cycles."""
-    stmt_cycles = select(TrainingAgentReport).where(
-        and_(
-            TrainingAgentReport.hubspot_owner_id == agent_id,
-            TrainingAgentReport.status.in_(["pending", "running"]),
-            TrainingAgentReport.is_current == True
-        )
-    ).order_by(desc(TrainingAgentReport.training_report_id))
-    res_cycles = await db.execute(stmt_cycles)
-    cycles = list(res_cycles.scalars().all())
+    cycles = await get_active_cycles_for_agent(db, agent_id)
     
     if not cycles:
         twiml = """<?xml version="1.0" encoding="UTF-8"?>
@@ -749,10 +749,22 @@ async def select_cycle_menu(
         """
         return Response(content=twiml, media_type="application/xml")
         
-    say_text = "Tienes múltiples ciclos de entrenamiento activos. "
-    for i, c in enumerate(cycles[:3]):
-        period_str = c.period_start.strftime("%d de %B") if c.period_start else "sin fecha"
-        say_text += f"Para el ciclo del {period_str}, presiona {i+1}. "
+    # Get agent first name
+    stmt_set = select(TrainingAgentSetting).where(TrainingAgentSetting.hubspot_owner_id == agent_id)
+    res_set = await db.execute(stmt_set)
+    setting = res_set.scalars().first()
+    first_name = setting.agent_name.split()[0] if setting else "Agente"
+    
+    say_text = f"Perfecto {first_name}, vamos a ver qué ciclos tienes pendientes. "
+    if len(cycles) == 2:
+        p1 = format_period_spanish(cycles[0].period_start, cycles[0].period_end)
+        p2 = format_period_spanish(cycles[1].period_start, cycles[1].period_end)
+        say_text += f"¿Quieres hacer el ciclo {p1} o el ciclo {p2}? Presiona 1 o 2 respectivamente."
+    else:
+        say_text += f"Tienes {len(cycles)} ciclos activos. "
+        for i, c in enumerate(cycles[:3]):
+            p = format_period_spanish(c.period_start, c.period_end)
+            say_text += f"Para el ciclo {p}, presiona {i+1}. "
         
     action_url = f"/bm/training/voice/twilio/select-cycle?agent_id={agent_id}&amp;call_sid={call_sid}"
     
@@ -883,6 +895,23 @@ async def twilio_media_stream(
                 logger.error("Simulation prompt not found in DB.")
                 await websocket.close()
                 return
+                
+            # Count remaining simulations in this cycle (including current one which is in_progress)
+            stmt_rem = select(func.count(TrainingCompletionStatus.id)).where(
+                and_(
+                    TrainingCompletionStatus.training_report_id == sess.cycle_id,
+                    TrainingCompletionStatus.status.in_(["pending", "in_progress"])
+                )
+            )
+            res_rem = await db.execute(stmt_rem)
+            remaining_count = res_rem.scalar() or 1
+            
+            # Fetch agent name to personalize
+            stmt_set = select(TrainingAgentSetting).where(TrainingAgentSetting.hubspot_owner_id == sess.agent_id)
+            res_set = await db.execute(stmt_set)
+            setting = res_set.scalars().first()
+            agent_first_name = setting.agent_name.split()[0] if setting else "Agente"
+            
             instruction = prompt.prompt_text + "\n" + SPANISH_VOICE_RULES
             tools = [
                 {
@@ -1039,11 +1068,16 @@ async def twilio_media_stream(
                                 }
                                 await gemini_ws.send(json.dumps(greet_msg))
                             else:
+                                if remaining_count == 1:
+                                    rem_text = "te queda solo este entrenamiento, así que vamos a ello."
+                                else:
+                                    rem_text = f"te quedan {remaining_count} entrenamientos, así que vamos a ello."
+                                    
                                 greet_msg = {
                                     "clientContent": {
                                         "turns": [{
                                             "role": "user",
-                                            "parts": [{"text": f"Di exactamente: 'Perfecto. Iniciamos la simulación número {prompt.prompt_number}. Prepárate.' y a continuación, sin pausar, inicia la conversación asumiendo tu personaje del roleplay."}]
+                                            "parts": [{"text": f"Di exactamente: 'Perfecto {agent_first_name}, pues vamos con ese. {rem_text} Iniciamos la simulación número {prompt.prompt_number}. Prepárate.' y a continuación, sin pausar, inicia la conversación asumiendo tu personaje del roleplay."}]
                                         }],
                                         "turnComplete": True
                                     }
