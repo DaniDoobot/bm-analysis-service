@@ -444,10 +444,46 @@ class PersonalizedTrainingService:
             return None
             
         score = None
-        # Safely check if evaluation is loaded to avoid detached session issues
+        prompt_number = None
+        feedback = None
+        criteria = None
+        transcription_turns = None
+        
+        # Safely extract from loaded relationships
+        try:
+            if hasattr(c, "prompt") and c.prompt is not None:
+                prompt_number = c.prompt.prompt_number
+        except Exception:
+            pass
+            
         try:
             if hasattr(c, "evaluation") and c.evaluation is not None:
                 score = float(c.evaluation.score) if c.evaluation.score is not None else None
+                feedback = c.evaluation.feedback
+                
+                # Extract criteria
+                if c.evaluation.result_json:
+                    raw = c.evaluation.result_json
+                    inner = raw.get("result_json") if isinstance(raw, dict) else None
+                    if isinstance(inner, dict):
+                        criteria = inner
+                    elif isinstance(raw, dict):
+                        criteria = {k: v for k, v in raw.items() if isinstance(v, bool)}
+                
+                # Extract transcription turns mapped to agente/paciente
+                if c.evaluation.transcription:
+                    turns = []
+                    for line in c.evaluation.transcription.split("\n"):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        if line.startswith("Agente:"):
+                            turns.append({"role": "agente", "text": line[len("Agente:"):].strip()})
+                        elif line.startswith("Paciente:"):
+                            turns.append({"role": "paciente", "text": line[len("Paciente:"):].strip()})
+                        else:
+                            turns.append({"role": "unknown", "text": line})
+                    transcription_turns = turns
         except Exception:
             pass
 
@@ -464,6 +500,10 @@ class PersonalizedTrainingService:
             "training_phone_number": c.training_phone_number,
             "notes": c.notes,
             "score": score,
+            "prompt_number": prompt_number,
+            "feedback": feedback,
+            "criteria": criteria,
+            "transcription_turns": transcription_turns,
             "created_at": c.created_at,
         }
 
@@ -574,6 +614,24 @@ class PersonalizedTrainingService:
             progress_completed = completed_count
             progress_percentage = Decimal(str(completed_count / 4.0 * 100.0)).quantize(Decimal("0.01"))
 
+        # Normalize final_report_json for Lovable frontend compatibility
+        final_report = r.final_report_json
+        if final_report and isinstance(final_report, dict):
+            final_report = dict(final_report)
+            obj_status = final_report.get("objectives_status")
+            if isinstance(obj_status, list):
+                new_obj_status = []
+                for obj in obj_status:
+                    if isinstance(obj, dict):
+                        obj_copy = dict(obj)
+                        raw_status = str(obj_copy.get("status") or "").lower()
+                        if "no" in raw_status:
+                            obj_copy["status"] = "NO SUPERADO"
+                        else:
+                            obj_copy["status"] = "SUPERADO"
+                        new_obj_status.append(obj_copy)
+                final_report["objectives_status"] = new_obj_status
+
         mapped = {
             "training_report_id": r.training_report_id,
             "training_run_id": r.training_run_id,
@@ -601,7 +659,7 @@ class PersonalizedTrainingService:
             "progress_completed": progress_completed,
             "progress_total": 4,
             "progress_percentage": progress_percentage,
-            "final_report_json": r.final_report_json,
+            "final_report_json": final_report,
         }
         
         if prompts is not None:
@@ -655,10 +713,11 @@ class PersonalizedTrainingService:
             res_prompts = await db.execute(stmt_prompts)
             prompts = list(res_prompts.scalars().all())
 
-            # Fetch completion statuses eagerly loading evaluation
+            # Fetch completion statuses eagerly loading evaluation and prompt details
             from sqlalchemy.orm import selectinload
             stmt_comp = select(TrainingCompletionStatus).options(
-                selectinload(TrainingCompletionStatus.evaluation)
+                selectinload(TrainingCompletionStatus.evaluation),
+                selectinload(TrainingCompletionStatus.prompt)
             ).where(
                 TrainingCompletionStatus.training_report_id == report.training_report_id
             ).order_by(TrainingCompletionStatus.completion_id.asc())
@@ -693,7 +752,8 @@ class PersonalizedTrainingService:
 
             from sqlalchemy.orm import selectinload
             stmt_comp_h = select(TrainingCompletionStatus).options(
-                selectinload(TrainingCompletionStatus.evaluation)
+                selectinload(TrainingCompletionStatus.evaluation),
+                selectinload(TrainingCompletionStatus.prompt)
             ).where(
                 TrainingCompletionStatus.training_report_id == h.training_report_id
             ).order_by(TrainingCompletionStatus.completion_id.asc())
@@ -1394,8 +1454,12 @@ class PersonalizedTrainingService:
         res_prompts = await db.execute(stmt_prompts)
         prompts = list(res_prompts.scalars().all())
 
-        # Fetch completion statuses
-        stmt_comp = select(TrainingCompletionStatus).where(
+        # Fetch completion statuses eagerly loading evaluation and prompt details
+        from sqlalchemy.orm import selectinload
+        stmt_comp = select(TrainingCompletionStatus).options(
+            selectinload(TrainingCompletionStatus.evaluation),
+            selectinload(TrainingCompletionStatus.prompt)
+        ).where(
             TrainingCompletionStatus.training_report_id == report_id
         ).order_by(TrainingCompletionStatus.completion_id.asc())
         res_comp = await db.execute(stmt_comp)

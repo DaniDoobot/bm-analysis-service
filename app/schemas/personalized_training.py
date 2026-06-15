@@ -98,6 +98,10 @@ class CompletionStatusOut(BaseModel):
     training_phone_number: Optional[str] = None
     notes: Optional[str] = None
     score: Optional[float] = None
+    prompt_number: Optional[int] = None
+    feedback: Optional[str] = None
+    criteria: Optional[dict[str, Any]] = None
+    transcription_turns: Optional[List[dict[str, Any]]] = None
     created_at: datetime
 
     class Config:
