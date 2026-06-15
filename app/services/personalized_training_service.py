@@ -838,17 +838,17 @@ class PersonalizedTrainingService:
             agent_status = "stagnant"
             reason = "Rendimiento estable"
             
-            if score is not None:
-                if score < 6.5 or agent_pending_cycles > 0:
-                    agent_status = "requires_attention"
-                    agents_requiring_attention += 1
-                    if score < 6.5 and agent_pending_cycles > 0:
-                        reason = "Score bajo y ciclos pendientes"
-                    elif score < 6.5:
-                        reason = "Score bajo en el último ciclo"
-                    else:
-                        reason = "Ciclos pendientes acumulados"
-                elif score_delta is not None:
+            if agent_pending_cycles > 0 or (score is not None and score < 6.5):
+                agent_status = "requires_attention"
+                agents_requiring_attention += 1
+                if score is not None and score < 6.5 and agent_pending_cycles > 0:
+                    reason = "Score bajo y ciclos pendientes"
+                elif score is not None and score < 6.5:
+                    reason = "Score bajo en el último ciclo"
+                else:
+                    reason = "Ciclos pendientes acumulados"
+            elif score is not None:
+                if score_delta is not None:
                     if score_delta > 0.1:
                         agent_status = "improving"
                         agents_improving += 1
