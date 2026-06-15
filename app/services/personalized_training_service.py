@@ -3028,6 +3028,14 @@ async def check_and_finalize_training_cycle(db: AsyncSession, cycle_id: int):
         
         from app.utils.json_utils import safe_parse_json
         parsed_report = safe_parse_json(raw_response)
+
+        # Retry if JSON parse failed
+        if not parsed_report:
+            logger.warning("Failed to parse cycle %d consolidation report (attempt 1). Retrying...", cycle_id)
+            messages.append({"role": "assistant", "content": raw_response})
+            messages.append({"role": "user", "content": "Error: La respuesta no era JSON válido. Devuelve estrictamente el objeto JSON sin envoltorios markdown."})
+            raw_response = await complete_text(messages=messages, temperature=0.0, response_format="json_object")
+            parsed_report = safe_parse_json(raw_response)
         
         if parsed_report:
             # Enforce mathematical calculations to prevent LLM errors or hallucinations
@@ -3072,9 +3080,17 @@ async def check_and_finalize_training_cycle(db: AsyncSession, cycle_id: int):
             await db.commit()
             logger.info("Successfully finalized training cycle ID %d.", cycle_id)
         else:
-            logger.error("Failed to parse consolidated report JSON for cycle %d: %s", cycle_id, raw_response[:300])
+            logger.error("Failed to parse consolidated report JSON for cycle %d after retry: %s", cycle_id, raw_response[:300])
+            report.status = "finalization_failed"
+            await db.commit()
             
     except Exception as e:
         logger.exception("Failed to consolidate training cycle report for cycle %d: %s", cycle_id, e)
+        try:
+            report.status = "finalization_failed"
+            await db.commit()
+        except Exception:
+            pass
+
 
 

@@ -1514,3 +1514,103 @@ async def retry_session_evaluation(
         "session_id": session_id,
         "recording_url": session.recording_url,
     }
+
+
+@router.post("/admin/cycles/{cycle_id}/retry-finalization")
+async def retry_cycle_finalization(
+    cycle_id: int,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    Admin endpoint: Re-trigger the final cycle consolidation report for a cycle
+    that has all 4 simulations completed but failed to generate its final report
+    (status = 'finalization_failed' or stuck in another non-completed state).
+    """
+    from app.models.personalized_training import TrainingAgentReport, TrainingCompletionStatus
+    from app.services.personalized_training_service import check_and_finalize_training_cycle
+
+    stmt = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == cycle_id)
+    res = await db.execute(stmt)
+    report = res.scalars().first()
+
+    if not report:
+        raise HTTPException(status_code=404, detail=f"Cycle {cycle_id} not found.")
+
+    if report.status == "completed" and report.final_report_json is not None:
+        raise HTTPException(status_code=400, detail="Cycle is already finalized successfully.")
+
+    # Verify all 4 are actually completed
+    stmt_done = select(func.count(TrainingCompletionStatus.completion_id)).where(
+        and_(
+            TrainingCompletionStatus.training_report_id == cycle_id,
+            TrainingCompletionStatus.status == "completed"
+        )
+    )
+    res_done = await db.execute(stmt_done)
+    done_count = res_done.scalar() or 0
+
+    if done_count < 4:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cycle only has {done_count}/4 simulations completed. Cannot finalize yet."
+        )
+
+    # Reset status so finalization can proceed
+    report.status = "in_progress"
+    await db.commit()
+
+    background_tasks.add_task(check_and_finalize_training_cycle, db, cycle_id)
+
+    logger.info("Admin re-triggered finalization for cycle %d.", cycle_id)
+    return {
+        "message": f"Finalization re-triggered for cycle {cycle_id}.",
+        "cycle_id": cycle_id,
+        "completed_simulations": done_count,
+    }
+
+
+@router.get("/admin/cycles/{cycle_id}/status")
+async def get_cycle_status(
+    cycle_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    Admin endpoint: Get the current status of a training cycle,
+    including how many simulations are completed and the report status.
+    """
+    from app.models.personalized_training import TrainingAgentReport, TrainingCompletionStatus
+
+    stmt = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == cycle_id)
+    res = await db.execute(stmt)
+    report = res.scalars().first()
+
+    if not report:
+        raise HTTPException(status_code=404, detail=f"Cycle {cycle_id} not found.")
+
+    stmt_all = select(TrainingCompletionStatus).where(
+        TrainingCompletionStatus.training_report_id == cycle_id
+    ).order_by(TrainingCompletionStatus.prompt_number.asc())
+    res_all = await db.execute(stmt_all)
+    completions = list(res_all.scalars().all())
+
+    return {
+        "cycle_id": cycle_id,
+        "report_status": report.status,
+        "has_final_report": report.final_report_json is not None,
+        "agent_name": report.agent_name,
+        "period": f"{report.period_start} – {report.period_end}",
+        "simulations": [
+            {
+                "prompt_number": c.prompt_number,
+                "status": c.status,
+                "evaluation_id": c.evaluation_id,
+                "completed_at": c.completed_at,
+            }
+            for c in completions
+        ],
+        "completed_count": sum(1 for c in completions if c.status == "completed"),
+        "total_count": len(completions),
+    }
