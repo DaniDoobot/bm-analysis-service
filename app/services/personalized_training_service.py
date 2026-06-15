@@ -251,24 +251,23 @@ class PersonalizedTrainingService:
             completed_cycles = 0
             
             for r in all_agent_reps:
-                if r.status == "completed":
-                    # Check how many simulations are completed for this report
-                    stmt_sim_c = select(func.count(TrainingCompletionStatus.completion_id)).where(
-                        and_(
-                            TrainingCompletionStatus.training_report_id == r.training_report_id,
-                            TrainingCompletionStatus.status == "completed"
-                        )
+                # Count completed simulations for this report
+                stmt_sim_c = select(func.count(TrainingCompletionStatus.completion_id)).where(
+                    and_(
+                        TrainingCompletionStatus.training_report_id == r.training_report_id,
+                        TrainingCompletionStatus.status == "completed"
                     )
-                    res_sim_c = await db.execute(stmt_sim_c)
-                    sim_comp_count = res_sim_c.scalar() or 0
-                    
-                    if sim_comp_count == 4:
-                        completed_cycles += 1
-                    else:
-                        pending_cycles += 1
-                        pending_simulations += (4 - sim_comp_count)
-                        if sim_comp_count > 0:
-                            active_cycles += 1
+                )
+                res_sim_c = await db.execute(stmt_sim_c)
+                sim_comp_count = res_sim_c.scalar() or 0
+                
+                if r.status in ["completed", "superseded"]:
+                    completed_cycles += 1
+                elif r.status in ["pending", "in_progress", "running", "finalization_failed"]:
+                    pending_cycles += 1
+                    pending_simulations += max(0, 4 - sim_comp_count)
+                    if sim_comp_count > 0:
+                        active_cycles += 1
 
             # Latest cycle info
             active_reps = [r for r in all_agent_reps if r.status != "superseded"]
@@ -285,27 +284,31 @@ class PersonalizedTrainingService:
                 latest_cycle_period_end = latest_r.period_end
                 latest_cycle_avg_score = latest_r.avg_evaluacion_global
                 
+                stmt_latest_comp = select(func.count(TrainingCompletionStatus.completion_id)).where(
+                    and_(
+                        TrainingCompletionStatus.training_report_id == latest_r.training_report_id,
+                        TrainingCompletionStatus.status == "completed"
+                    )
+                )
+                res_latest_comp = await db.execute(stmt_latest_comp)
+                latest_comp_count = res_latest_comp.scalar() or 0
+                latest_cycle_progress_completed = latest_comp_count
+
                 if latest_r.status == "failed":
                     latest_cycle_status = "failed"
                 elif latest_r.status == "skipped":
                     latest_cycle_status = "skipped"
+                elif latest_r.status == "finalization_failed":
+                    latest_cycle_status = "finalization_failed"
                 elif latest_r.status == "completed":
-                    stmt_latest_comp = select(func.count(TrainingCompletionStatus.completion_id)).where(
-                        and_(
-                            TrainingCompletionStatus.training_report_id == latest_r.training_report_id,
-                            TrainingCompletionStatus.status == "completed"
-                        )
-                    )
-                    res_latest_comp = await db.execute(stmt_latest_comp)
-                    latest_comp_count = res_latest_comp.scalar() or 0
-                    
-                    latest_cycle_progress_completed = latest_comp_count
+                    latest_cycle_status = "completed"
+                else:
                     if latest_comp_count == 0:
                         latest_cycle_status = "pending"
                     elif latest_comp_count == 4:
                         latest_cycle_status = "completed"
                     else:
-                        latest_cycle_status = "running"
+                        latest_cycle_status = "in_progress"
 
             item = {
                 "hubspot_owner_id": s.hubspot_owner_id,
@@ -750,19 +753,19 @@ class PersonalizedTrainingService:
             # Count cycles
             total_cycles += len(valid_reps)
             completed_cycles_total += sum(1 for r in valid_reps if r.status == "completed")
-            running_cycles_total += sum(1 for r in valid_reps if r.status == "running")
+            running_cycles_total += sum(1 for r in valid_reps if r.status in ["running", "in_progress"])
             
             # Find the latest and second latest completed (non-archived/non-superseded) reports
             completed_reps = [r for r in reps if r.status == "completed"]
             latest_r = completed_reps[0] if completed_reps else None
             prev_r = completed_reps[1] if len(completed_reps) > 1 else None
             
-            # Count pending simulations across all COMPLETED reports for this agent
+            # Count pending simulations across all active/pending reports for this agent
             agent_pending_cycles = 0
             agent_pending_simulations = 0
             
             for r in reps:
-                if r.status == "completed":
+                if r.status in ["pending", "in_progress", "running", "finalization_failed"]:
                     stmt_sim_c = select(func.count(TrainingCompletionStatus.completion_id)).where(
                         and_(
                             TrainingCompletionStatus.training_report_id == r.training_report_id,
@@ -771,10 +774,9 @@ class PersonalizedTrainingService:
                     )
                     res_sim_c = await db.execute(stmt_sim_c)
                     sim_comp_count = res_sim_c.scalar() or 0
-                    if sim_comp_count < 4:
-                        agent_pending_cycles += 1
-                        agent_pending_simulations += (4 - sim_comp_count)
-
+                    agent_pending_cycles += 1
+                    agent_pending_simulations += max(0, 4 - sim_comp_count)
+ 
             total_pending_cycles += agent_pending_cycles
             total_pending_simulations += agent_pending_simulations
             
@@ -2150,7 +2152,7 @@ class PersonalizedTrainingService:
 
             # 6. Save report
             logger.info("[training] save_report_start")
-            new_report.status = "completed"
+            new_report.status = "in_progress"
             new_report.evaluations_count = aggregates["evaluations_count"]
             new_report.calls_count = aggregates["calls_count"]
             new_report.avg_evaluacion_global = Decimal(str(avg_val_global)).quantize(Decimal("0.01")) if avg_val_global is not None else None
