@@ -97,6 +97,7 @@ class CompletionStatusOut(BaseModel):
     training_call_id: Optional[str] = None
     training_phone_number: Optional[str] = None
     notes: Optional[str] = None
+    score: Optional[float] = None
     created_at: datetime
 
     class Config:
@@ -195,6 +196,9 @@ class AgentOverviewItem(BaseModel):
     error_message: Optional[str] = None
 
     # Advanced cycle metrics
+    pending_cycles: int = 0
+    pending_simulations: int = 0
+    completed_cycles: int = 0
     pending_cycles_count: int = 0
     pending_simulations_count: int = 0
     active_cycles_count: int = 0

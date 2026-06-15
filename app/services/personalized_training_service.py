@@ -330,6 +330,9 @@ class PersonalizedTrainingService:
                 "previous_reports_count": prev_count,
                 "error_message": None,
                 # New fields
+                "pending_cycles": pending_cycles,
+                "pending_simulations": pending_simulations,
+                "completed_cycles": completed_cycles,
                 "pending_cycles_count": pending_cycles,
                 "pending_simulations_count": pending_simulations,
                 "active_cycles_count": active_cycles,
@@ -439,6 +442,15 @@ class PersonalizedTrainingService:
     def _map_completion_to_dict(c: TrainingCompletionStatus) -> Optional[dict]:
         if not c:
             return None
+            
+        score = None
+        # Safely check if evaluation is loaded to avoid detached session issues
+        try:
+            if hasattr(c, "evaluation") and c.evaluation is not None:
+                score = float(c.evaluation.score) if c.evaluation.score is not None else None
+        except Exception:
+            pass
+
         return {
             "completion_id": c.completion_id,
             "training_report_id": c.training_report_id,
@@ -451,6 +463,7 @@ class PersonalizedTrainingService:
             "training_call_id": c.training_call_id,
             "training_phone_number": c.training_phone_number,
             "notes": c.notes,
+            "score": score,
             "created_at": c.created_at,
         }
 
@@ -642,8 +655,11 @@ class PersonalizedTrainingService:
             res_prompts = await db.execute(stmt_prompts)
             prompts = list(res_prompts.scalars().all())
 
-            # Fetch completion statuses
-            stmt_comp = select(TrainingCompletionStatus).where(
+            # Fetch completion statuses eagerly loading evaluation
+            from sqlalchemy.orm import selectinload
+            stmt_comp = select(TrainingCompletionStatus).options(
+                selectinload(TrainingCompletionStatus.evaluation)
+            ).where(
                 TrainingCompletionStatus.training_report_id == report.training_report_id
             ).order_by(TrainingCompletionStatus.completion_id.asc())
             res_comp = await db.execute(stmt_comp)
@@ -675,7 +691,10 @@ class PersonalizedTrainingService:
             res_prompts_h = await db.execute(stmt_prompts_h)
             prompts_h = list(res_prompts_h.scalars().all())
 
-            stmt_comp_h = select(TrainingCompletionStatus).where(
+            from sqlalchemy.orm import selectinload
+            stmt_comp_h = select(TrainingCompletionStatus).options(
+                selectinload(TrainingCompletionStatus.evaluation)
+            ).where(
                 TrainingCompletionStatus.training_report_id == h.training_report_id
             ).order_by(TrainingCompletionStatus.completion_id.asc())
             res_comp_h = await db.execute(stmt_comp_h)
