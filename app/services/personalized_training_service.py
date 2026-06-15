@@ -443,6 +443,8 @@ class PersonalizedTrainingService:
             "hubspot_owner_id": c.hubspot_owner_id,
             "status": c.status or "pending",
             "completed_at": c.completed_at,
+            "evaluation_id": c.evaluation_id,
+            "call_session_id": c.call_session_id,
             "training_call_id": c.training_call_id,
             "training_phone_number": c.training_phone_number,
             "notes": c.notes,
@@ -590,12 +592,18 @@ class PersonalizedTrainingService:
             mapped["prompts"] = [PersonalizedTrainingService._map_prompt_to_dict(p) for p in prompts]
         else:
             mapped["prompts"] = []
-            
+
+        # Key is 'simulations' (matches Lovable frontend contract)
+        # Each slot links to a prompt via simulation_prompt_id,
+        # and to an evaluation via evaluation_id (may be null if pending)
         if completions is not None:
-            mapped["completion_statuses"] = [PersonalizedTrainingService._map_completion_to_dict(c) for c in completions]
+            mapped["simulations"] = [PersonalizedTrainingService._map_completion_to_dict(c) for c in completions]
+            # Keep legacy key for backwards compat
+            mapped["completion_statuses"] = mapped["simulations"]
         else:
+            mapped["simulations"] = []
             mapped["completion_statuses"] = []
-            
+
         return mapped
 
     @staticmethod
