@@ -582,7 +582,8 @@ class PersonalizedTrainingService:
             "error_message": r.error_message,
             "progress_completed": progress_completed,
             "progress_total": 4,
-            "progress_percentage": progress_percentage
+            "progress_percentage": progress_percentage,
+            "final_report_json": r.final_report_json,
         }
         
         if prompts is not None:
@@ -731,7 +732,7 @@ class PersonalizedTrainingService:
 
             # Skip agents with no valid reports at all (they have no data to show)
             # Skipped and failed reports do not count as valid/active training cycles
-            valid_reps = [r for r in reps if r.status in ["completed", "pending", "running"]]
+            valid_reps = [r for r in reps if r.status in ["completed", "pending", "running", "in_progress", "finalization_failed"]]
             if not valid_reps:
                 continue
 

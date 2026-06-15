@@ -421,5 +421,74 @@ async def hard_delete_training_report(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Informe de entrenamiento ID {training_report_id} no encontrado."
         )
-    return {"message": f"Informe de entrenamiento ID {training_report_id} eliminado físicamente con éxito."}
+    return {\"message\": f\"Informe de entrenamiento ID {training_report_id} eliminado físicamente con éxito.\"}
+
+
+@router.get(\"/admin/evaluations/{evaluation_id}\")
+async def get_evaluation_detail(
+    evaluation_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: AsyncSession = Depends(get_db),
+):
+    \"\"\"
+    Returns the full detail of a training call evaluation, including score,
+    feedback, transcription (formatted as conversation turns), and the
+    result_json criteria checklist.
+    Accessible by admins and by the agent who owns the evaluation.
+    \"\"\"
+    from app.models.personalized_training import TrainingCallEvaluation, TrainingCallSession
+
+    stmt = select(TrainingCallEvaluation).where(TrainingCallEvaluation.evaluation_id == evaluation_id)
+    res = await db.execute(stmt)
+    ev = res.scalars().first()
+
+    if not ev:
+        raise HTTPException(status_code=404, detail=f\"Evaluación {evaluation_id} no encontrada.\")
+
+    # Ownership check: admin can see all; agents can only see their own
+    if current_user.role not in [\"admin\", \"administrador\"]:
+        stmt_sess = select(TrainingCallSession).where(TrainingCallSession.session_id == ev.session_id)
+        res_sess = await db.execute(stmt_sess)
+        session = res_sess.scalars().first()
+        if not session or session.agent_id != (current_user.hubspot_owner_id or \"\"):
+            raise HTTPException(status_code=403, detail=\"No tienes acceso a esta evaluación.\")
+
+    # Parse transcription into conversation turns for easy rendering
+    turns = []
+    if ev.transcription:
+        for line in ev.transcription.split(\"\\n\"):
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith(\"Agente:\"):
+                turns.append({\"role\": \"agent\", \"text\": line[len(\"Agente:\"):].strip()})
+            elif line.startswith(\"Paciente:\"):
+                turns.append({\"role\": \"patient\", \"text\": line[len(\"Paciente:\"):].strip()})
+            else:
+                turns.append({\"role\": \"unknown\", \"text\": line})
+
+    # Extract criteria checklist from result_json (handles nested structure)
+    criteria = {}
+    if ev.result_json:
+        raw = ev.result_json
+        # Handle nested: { ..., result_json: { key: bool } }
+        inner = raw.get(\"result_json\") if isinstance(raw, dict) else None
+        if isinstance(inner, dict):
+            criteria = inner
+        elif isinstance(raw, dict):
+            # Flat structure — pick only boolean values as criteria
+            criteria = {k: v for k, v in raw.items() if isinstance(v, bool)}
+
+    return {
+        \"evaluation_id\": ev.evaluation_id,
+        \"session_id\": ev.session_id,
+        \"cycle_id\": ev.cycle_id,
+        \"score\": float(ev.score) if ev.score is not None else None,
+        \"feedback\": ev.feedback,
+        \"transcription_raw\": ev.transcription,
+        \"transcription_turns\": turns,
+        \"criteria\": criteria,
+        \"result_json\": ev.result_json,
+        \"created_at\": ev.created_at,
+    }
 
