@@ -102,6 +102,9 @@ class CompletionStatusOut(BaseModel):
     feedback: Optional[str] = None
     criteria: Optional[dict[str, Any]] = None
     transcription_turns: Optional[List[dict[str, Any]]] = None
+    evaluation_id: Optional[int] = None
+    call_session_id: Optional[int] = None
+    title: Optional[str] = None
     created_at: datetime
 
     class Config:
@@ -131,6 +134,7 @@ class TrainingAgentReportBase(BaseModel):
     evolution_summary: Optional[str] = None
     general_objectives_json: Optional[List[GeneralObjectiveDetail]] = None
     specific_objectives_json: Optional[List[SpecificObjectiveDetail]] = None
+    final_report_json: Optional[dict[str, Any]] = None
     
     is_current: bool
     created_at: datetime
@@ -149,6 +153,7 @@ class TrainingAgentReportBase(BaseModel):
 class TrainingAgentReportOut(TrainingAgentReportBase):
     prompts: List[SimulationPromptOut] = []
     completion_statuses: List[CompletionStatusOut] = []
+    simulations: List[CompletionStatusOut] = []
 
     class Config:
         from_attributes = True

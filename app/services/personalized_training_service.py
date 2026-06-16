@@ -445,6 +445,7 @@ class PersonalizedTrainingService:
             
         score = None
         prompt_number = None
+        title = None
         feedback = None
         criteria = None
         transcription_turns = None
@@ -453,6 +454,7 @@ class PersonalizedTrainingService:
         try:
             if hasattr(c, "prompt") and c.prompt is not None:
                 prompt_number = c.prompt.prompt_number
+                title = c.prompt.title
         except Exception:
             pass
             
@@ -501,6 +503,7 @@ class PersonalizedTrainingService:
             "notes": c.notes,
             "score": score,
             "prompt_number": prompt_number,
+            "title": title,
             "feedback": feedback,
             "criteria": criteria,
             "transcription_turns": transcription_turns,
