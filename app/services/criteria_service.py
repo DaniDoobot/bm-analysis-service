@@ -182,6 +182,10 @@ def sync_criterion_block(prompt_text: str, criterion, old_output_key: str | None
             block_end_idx = j
             break
 
+    # Ajustar block_end_idx para excluir líneas en blanco al final del bloque
+    while block_end_idx > header_idx + 1 and lines[block_end_idx - 1].strip() == "":
+        block_end_idx -= 1
+
     block_lines = lines[header_idx:block_end_idx]
     header_line = block_lines[0]
     technical_lines = []
@@ -205,10 +209,7 @@ def sync_criterion_block(prompt_text: str, criterion, old_output_key: str | None
         if is_tech:
             technical_lines.append(line)
         else:
-            if line.strip():
-                original_description_lines.append(line)
-            else:
-                technical_lines.append(line)
+            original_description_lines.append(line)
 
     # Indentación original
     indent = "  "
