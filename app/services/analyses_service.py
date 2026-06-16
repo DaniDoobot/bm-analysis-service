@@ -26,6 +26,8 @@ async def list_analyses(
     date_to: str | None = None,
     limit: int = 100,
     offset: int = 0,
+    global_score_min: float | None = None,
+    global_score_max: float | None = None,
 ) -> list[CallAnalysisCurrent]:
     """List analyses from bm_call_analysis_current with optional filters."""
     query = select(CallAnalysisCurrent)
@@ -50,6 +52,12 @@ async def list_analyses(
             query = query.where(CallAnalysisCurrent.updated_at <= date_to)
         except Exception:
             logger.warning("Invalid date_to value: %s — skipping filter", date_to)
+    if global_score_min is not None:
+        query = query.where(CallAnalysisCurrent.evaluacion_global.is_not(None))
+        query = query.where(CallAnalysisCurrent.evaluacion_global >= global_score_min)
+    if global_score_max is not None:
+        query = query.where(CallAnalysisCurrent.evaluacion_global.is_not(None))
+        query = query.where(CallAnalysisCurrent.evaluacion_global <= global_score_max)
 
     query = query.order_by(CallAnalysisCurrent.updated_at.desc()).limit(limit).offset(offset)
 
@@ -70,8 +78,10 @@ async def list_analyses_history(
     date_to: str | None = None,
     limit: int = 100,
     offset: int = 0,
+    global_score_min: float | None = None,
+    global_score_max: float | None = None,
 ) -> list[Analysis]:
-    """List all analyses from bm_analyses (history) with optional filters."""
+    """List all historical analyses from bm_analyses (history) with optional filters."""
     query = select(Analysis)
 
     if analysis_type:
@@ -94,6 +104,12 @@ async def list_analyses_history(
             query = query.where(Analysis.created_at <= date_to)
         except Exception:
             logger.warning("Invalid date_to value: %s — skipping filter", date_to)
+    if global_score_min is not None:
+        query = query.where(Analysis.evaluacion_global.is_not(None))
+        query = query.where(Analysis.evaluacion_global >= global_score_min)
+    if global_score_max is not None:
+        query = query.where(Analysis.evaluacion_global.is_not(None))
+        query = query.where(Analysis.evaluacion_global <= global_score_max)
 
     query = query.order_by(Analysis.analysis_id.desc()).limit(limit).offset(offset)
 

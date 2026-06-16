@@ -78,6 +78,7 @@ def build_summary(analysis: Analysis, results: list[AnalysisResult]) -> dict[str
         "agente_telefonico": analysis.agente_telefonico,
         "tipo_llamada": analysis.tipo_llamada,
         "evaluacion_global": analysis.evaluacion_global,
+        "global_score": float(analysis.evaluacion_global) if analysis.evaluacion_global is not None else None,
         "fecha_eval": analysis.fecha_eval,
         "model_provider": analysis.model_provider,
         "model_name": analysis.model_name,

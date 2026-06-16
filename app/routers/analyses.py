@@ -26,11 +26,20 @@ async def list_analyses(
     date_to: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
+    global_score_min: Annotated[float | None, Query(ge=0.0, le=10.0)] = None,
+    global_score_max: Annotated[float | None, Query(ge=0.0, le=10.0)] = None,
 ):
     """
     Legacy endpoint. List all current analyses from bm_call_analysis_current.
     Filters are applied only when provided.
     """
+    if global_score_min is not None and global_score_max is not None:
+        if global_score_min > global_score_max:
+            raise HTTPException(
+                status_code=422,
+                detail="global_score_min cannot be greater than global_score_max",
+            )
+
     return await analyses_service.list_analyses(
         db,
         analysis_type=type,
@@ -42,6 +51,8 @@ async def list_analyses(
         date_to=date_to,
         limit=limit,
         offset=offset,
+        global_score_min=global_score_min,
+        global_score_max=global_score_max,
     )
 
 
@@ -57,10 +68,19 @@ async def list_analyses_current(
     date_to: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
+    global_score_min: Annotated[float | None, Query(ge=0.0, le=10.0)] = None,
+    global_score_max: Annotated[float | None, Query(ge=0.0, le=10.0)] = None,
 ):
     """
     List all current analyses from bm_call_analysis_current (one per call_id).
     """
+    if global_score_min is not None and global_score_max is not None:
+        if global_score_min > global_score_max:
+            raise HTTPException(
+                status_code=422,
+                detail="global_score_min cannot be greater than global_score_max",
+            )
+
     return await analyses_service.list_analyses(
         db,
         analysis_type=type,
@@ -72,6 +92,8 @@ async def list_analyses_current(
         date_to=date_to,
         limit=limit,
         offset=offset,
+        global_score_min=global_score_min,
+        global_score_max=global_score_max,
     )
 
 
@@ -87,10 +109,19 @@ async def list_analyses_history(
     date_to: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
+    global_score_min: Annotated[float | None, Query(ge=0.0, le=10.0)] = None,
+    global_score_max: Annotated[float | None, Query(ge=0.0, le=10.0)] = None,
 ):
     """
     List all historical analyses from bm_analyses (multiple per call_id possible).
     """
+    if global_score_min is not None and global_score_max is not None:
+        if global_score_min > global_score_max:
+            raise HTTPException(
+                status_code=422,
+                detail="global_score_min cannot be greater than global_score_max",
+            )
+
     return await analyses_service.list_analyses_history(
         db,
         analysis_type=type,
@@ -102,6 +133,8 @@ async def list_analyses_history(
         date_to=date_to,
         limit=limit,
         offset=offset,
+        global_score_min=global_score_min,
+        global_score_max=global_score_max,
     )
 
 

@@ -30,6 +30,7 @@ class AnalysisListItem(BaseModel):
     status: str | None = None
     tipo_llamada: str | None = None
     evaluacion_global: Any | None = None
+    global_score: float | None = None
     result: Any | None = None
     payload: Any | None = None
 
@@ -71,6 +72,7 @@ class AnalysisDetail(BaseModel):
     status: str | None = None
     tipo_llamada: str | None = None
     evaluacion_global: Any | None = None
+    global_score: float | None = None
     result: Any | None = None
     payload: Any | None = None
     error_message: str | None = None

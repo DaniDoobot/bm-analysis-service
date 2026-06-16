@@ -58,6 +58,10 @@ class Analysis(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
+    @property
+    def global_score(self) -> float | None:
+        return float(self.evaluacion_global) if self.evaluacion_global is not None else None
+
 
 class CallAnalysisCurrent(Base):
     """
@@ -97,6 +101,10 @@ class CallAnalysisCurrent(Base):
     @property
     def analysis_id(self) -> int | None:
         return self.latest_analysis_id
+
+    @property
+    def global_score(self) -> float | None:
+        return float(self.evaluacion_global) if self.evaluacion_global is not None else None
 
 
 class AnalysisResult(Base):
