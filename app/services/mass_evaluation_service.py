@@ -4,6 +4,7 @@ import logging
 import sys
 import zoneinfo
 from datetime import datetime, time, timedelta, timezone
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select, update, delete, desc, func, and_, or_
