@@ -1,8 +1,10 @@
 """
 Criteria sync service — business logic to synchronize visible criteria names in historical results.
+Optimized to prevent N+1 query overhead.
 """
 import logging
 from typing import Any
+from collections import defaultdict
 from sqlalchemy import select, func, update, text
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -21,9 +23,9 @@ class ConcurrencyConflictError(Exception):
 async def preview_sync_criteria_names(db: AsyncSession, prompt_id: int | None = None) -> dict[str, Any]:
     """
     Previews the synchronization of criterion names in historical results.
-    Does not modify any database records.
+    Optimized to fetch mismatches in bulk, executing exactly 4 database queries.
     """
-    # 1. Fetch criteria
+    # 1. Fetch criteria (Query 1)
     stmt = select(PromptCriterion)
     if prompt_id is not None:
         stmt = stmt.where(PromptCriterion.prompt_id == prompt_id)
@@ -38,17 +40,102 @@ async def preview_sync_criteria_names(db: AsyncSession, prompt_id: int | None = 
         if len(c_name) > 255:
             raise ValueError("El nombre del criterio es excesivamente largo (máximo 255 caracteres).")
 
-    details = []
-    total_criteria_to_sync = 0
-    individual_results_to_update = 0
-    mass_results_to_update = 0
+    c_ids = [c.criterion_id for c in criteria if c.criterion_id is not None]
+    if not c_ids:
+        return {
+            "total_criteria_to_sync": 0,
+            "individual_results_to_update": 0,
+            "mass_results_to_update": 0,
+            "details": []
+        }
 
-    # 2. Fetch parent MassEvaluationResult rows early if we want to check items_json
+    # 2. Fetch mismatching individual results in bulk (Query 2)
+    ind_mismatch_stmt = (
+        select(AnalysisCriterionResult.criterion_id, AnalysisCriterionResult.criterion_name)
+        .join(PromptCriterion, AnalysisCriterionResult.criterion_id == PromptCriterion.criterion_id)
+        .where(
+            AnalysisCriterionResult.criterion_id.in_(c_ids),
+            AnalysisCriterionResult.criterion_name != PromptCriterion.criterion_name
+        )
+    )
+    ind_mismatch_res = await db.execute(ind_mismatch_stmt)
+    ind_rows = ind_mismatch_res.all()
+
+    ind_counts = defaultdict(int)
+    ind_old_names = defaultdict(set)
+    for c_id, old_name in ind_rows:
+        ind_counts[c_id] += 1
+        if old_name:
+            ind_old_names[c_id].add(old_name)
+
+    # 3. Fetch mismatching mass criterion results in bulk (Query 3)
+    mass_mismatch_stmt = (
+        select(MassEvaluationCriterionResult.criterion_id, MassEvaluationCriterionResult.criterion_name)
+        .join(PromptCriterion, MassEvaluationCriterionResult.criterion_id == PromptCriterion.criterion_id)
+        .where(
+            MassEvaluationCriterionResult.criterion_id.in_(c_ids),
+            MassEvaluationCriterionResult.criterion_name != PromptCriterion.criterion_name
+        )
+    )
+    mass_mismatch_res = await db.execute(mass_mismatch_stmt)
+    mass_rows = mass_mismatch_res.all()
+
+    mass_counts = defaultdict(int)
+    mass_old_names = defaultdict(set)
+    for c_id, old_name in mass_rows:
+        mass_counts[c_id] += 1
+        if old_name:
+            mass_old_names[c_id].add(old_name)
+
+    # 4. Fetch parent MassEvaluationResult rows for items_json (Query 4)
     mass_results_stmt = select(MassEvaluationResult)
     if prompt_id is not None:
         mass_results_stmt = mass_results_stmt.where(MassEvaluationResult.prompt_id == prompt_id)
     mass_results_res = await db.execute(mass_results_stmt)
     all_mass_results = mass_results_res.scalars().all()
+
+    # Pre-build lookup maps for items_json matching
+    c_id_to_name = {c.criterion_id: c.criterion_name for c in criteria if c.criterion_id is not None}
+    c_key_to_name = {(c.prompt_id, c.criterion_key): c.criterion_name for c in criteria if c.criterion_key is not None}
+
+    items_mismatch_counts = defaultdict(int)
+    items_old_names = defaultdict(set)
+
+    for r in all_mass_results:
+        if not isinstance(r.items_json, list):
+            continue
+        updated_criteria_in_row = set()
+        for item in r.items_json:
+            if not isinstance(item, dict):
+                continue
+            item_cid = item.get("criterion_id")
+            item_ckey = item.get("criterion_key") or item.get("output_key")
+
+            target_c_id = None
+            target_c_name = None
+
+            if item_cid is not None and item_cid in c_id_to_name:
+                target_c_id = item_cid
+                target_c_name = c_id_to_name[item_cid]
+            elif item_ckey is not None and (r.prompt_id, item_ckey) in c_key_to_name:
+                # Find matching criterion by key and prompt
+                target_c_obj = next((c for c in criteria if c.criterion_key == item_ckey and c.prompt_id == r.prompt_id), None)
+                if target_c_obj:
+                    target_c_id = target_c_obj.criterion_id
+                    target_c_name = target_c_obj.criterion_name
+
+            if target_c_id is not None and item.get("name") != target_c_name:
+                if target_c_id not in updated_criteria_in_row:
+                    items_mismatch_counts[target_c_id] += 1
+                    updated_criteria_in_row.add(target_c_id)
+                if item.get("name"):
+                    items_old_names[target_c_id].add(item.get("name"))
+
+    # 5. Build preview details
+    details = []
+    total_criteria_to_sync = 0
+    individual_results_to_update = 0
+    mass_results_to_update = 0
 
     for criterion in criteria:
         c_id = criterion.criterion_id
@@ -56,70 +143,19 @@ async def preview_sync_criteria_names(db: AsyncSession, prompt_id: int | None = 
         c_key = criterion.criterion_key
         c_prompt_id = criterion.prompt_id
 
-        # A. Check individual results mismatch
-        ind_count_stmt = select(func.count(AnalysisCriterionResult.id)).where(
-            AnalysisCriterionResult.criterion_id == c_id,
-            AnalysisCriterionResult.criterion_name != c_name
-        )
-        ind_count = await db.scalar(ind_count_stmt) or 0
+        ind_count = ind_counts.get(c_id, 0)
+        mass_count = mass_counts.get(c_id, 0)
+        items_count = items_mismatch_counts.get(c_id, 0)
 
-        # B. Check mass criterion results mismatch
-        mass_count_stmt = select(func.count(MassEvaluationCriterionResult.id)).where(
-            MassEvaluationCriterionResult.criterion_id == c_id,
-            MassEvaluationCriterionResult.criterion_name != c_name
-        )
-        mass_count = await db.scalar(mass_count_stmt) or 0
-
-        # C. Find distinct old names from tables
-        old_names = set()
-        if ind_count > 0:
-            ind_names_stmt = select(AnalysisCriterionResult.criterion_name).where(
-                AnalysisCriterionResult.criterion_id == c_id,
-                AnalysisCriterionResult.criterion_name != c_name
-            ).distinct()
-            ind_names_res = await db.execute(ind_names_stmt)
-            for name in ind_names_res.scalars().all():
-                if name:
-                    old_names.add(name)
-
-        if mass_count > 0:
-            mass_names_stmt = select(MassEvaluationCriterionResult.criterion_name).where(
-                MassEvaluationCriterionResult.criterion_id == c_id,
-                MassEvaluationCriterionResult.criterion_name != c_name
-            ).distinct()
-            mass_names_res = await db.execute(mass_names_stmt)
-            for name in mass_names_res.scalars().all():
-                if name:
-                    old_names.add(name)
-
-        # D. Check mismatches in items_json of mass results
-        items_mismatch_count = 0
-        for r in all_mass_results:
-            if not isinstance(r.items_json, list):
-                continue
-            for item in r.items_json:
-                if not isinstance(item, dict):
-                    continue
-                # Match by criterion_id or criterion_key
-                item_cid = item.get("criterion_id")
-                item_ckey = item.get("criterion_key") or item.get("output_key")
-                match_by_id = (item_cid is not None and c_id is not None and item_cid == c_id)
-                match_by_key = (item_ckey is not None and c_key is not None and item_ckey == c_key and r.prompt_id == c_prompt_id)
-                
-                if (match_by_id or match_by_key) and item.get("name") != c_name:
-                    items_mismatch_count += 1
-                    if item.get("name"):
-                        old_names.add(item.get("name"))
-
-        # If there are mismatches in individual results, mass criterion results, or items_json
-        if ind_count > 0 or mass_count > 0 or items_mismatch_count > 0:
+        if ind_count > 0 or mass_count > 0 or items_count > 0:
             total_criteria_to_sync += 1
             individual_results_to_update += ind_count
             mass_results_to_update += mass_count
 
-            # Prepare old name representation
-            old_name_str = ", ".join(sorted(old_names)) if old_names else ""
-            
+            # Combine all unique old names
+            all_names = ind_old_names[c_id] | mass_old_names[c_id] | items_old_names[c_id]
+            old_name_str = ", ".join(sorted(all_names)) if all_names else ""
+
             details.append({
                 "prompt_id": c_prompt_id,
                 "criterion_key": c_key,
@@ -153,7 +189,7 @@ async def execute_sync_criteria_names(
         logger.info("Acquiring transactional advisory lock for criteria sync...")
         await db.execute(text("SELECT pg_advisory_xact_lock(987654321)"))
 
-    # 1. Recalculate current counts for concurrency checks
+    # 1. Recalculate current counts for concurrency checks (takes exactly 4 queries)
     current_preview = await preview_sync_criteria_names(db, prompt_id=prompt_id)
     
     current_ind = current_preview["individual_results_to_update"]
@@ -190,8 +226,8 @@ async def execute_sync_criteria_names(
     mass_results_rows_updated = 0
 
     # Maps for items_json matches
-    id_to_name = {c.criterion_id: c.criterion_name for c in criteria}
-    key_to_name = {(c.prompt_id, c.criterion_key): c.criterion_name for c in criteria}
+    id_to_name = {c.criterion_id: c.criterion_name for c in criteria if c.criterion_id is not None}
+    key_to_name = {(c.prompt_id, c.criterion_key): c.criterion_name for c in criteria if c.criterion_key is not None}
 
     # 3. Synchronize each criterion
     for criterion in criteria:
@@ -280,7 +316,7 @@ async def execute_sync_criteria_names(
                 flag_modified(r, "items_json")
                 db.add(r)
                 criterion_mass_parent_rows_affected += 1
-                mass_results_rows_updated += 1  # Note: this is global counter, but we deduplicate globally later
+                mass_results_rows_updated += 1
 
         # E. Persist CriteriaSyncLog if any row was affected
         if ind_affected > 0 or mass_affected > 0 or criterion_mass_parent_rows_affected > 0:
@@ -298,9 +334,7 @@ async def execute_sync_criteria_names(
             )
             db.add(log_entry)
 
-    # De-duplicate mass_results_rows_updated because multiple criteria updates in a single MassEvaluationResult
-    # could increment the count multiple times, but we want the actual number of unique parent rows updated.
-    # Let's count how many mass_results are currently dirty.
+    # De-duplicate mass_results_rows_updated
     unique_mer_updated = 0
     for r in db.dirty:
         if isinstance(r, MassEvaluationResult):

@@ -345,8 +345,8 @@ async def run_tests():
                 "expected_individual_results_to_update": 2,
                 "expected_mass_results_to_update": 2
             })
-            assert r.status_code == 400
-            assert "Simulated DB Crash" in r.text
+            assert r.status_code == 500
+            assert "No se ha podido ejecutar la sincronización de nombres" in r.json()["detail"]
 
         # Verify that even though individual results updates were executed before items_json, they were rolled back!
         async with AsyncSessionLocal() as db:

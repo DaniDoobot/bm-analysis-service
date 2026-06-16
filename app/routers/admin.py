@@ -247,8 +247,8 @@ async def sync_criteria_names_preview(
     except Exception as e:
         logger.exception("Error during sync-criteria-names preview: %s", e)
         raise HTTPException(
-            status_code=400,
-            detail=f"Error during preview: {str(e)}",
+            status_code=500,
+            detail="No se ha podido calcular la previsualización de sincronización."
         )
 
 
@@ -289,7 +289,7 @@ async def sync_criteria_names_execute(
         await db.rollback()
         logger.exception("Error during sync-criteria-names execute: %s", e)
         raise HTTPException(
-            status_code=400,
-            detail=f"Error during execution: {str(e)}",
+            status_code=500,
+            detail="No se ha podido ejecutar la sincronización de nombres."
         )
 
