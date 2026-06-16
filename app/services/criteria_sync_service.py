@@ -6,6 +6,7 @@ import logging
 from typing import Any
 from collections import defaultdict
 from sqlalchemy import select, func, update, text
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.models.criteria import PromptCriterion, CriteriaSyncLog

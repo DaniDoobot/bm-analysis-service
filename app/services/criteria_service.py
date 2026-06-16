@@ -834,6 +834,9 @@ async def save_criterion(db: AsyncSession, body: SaveCriterionRequest) -> Prompt
         PromptCriterion.prompt_id == body.prompt_id,
         or_(*conflict_conditions)
     )
+    if body.criterion_id:
+        query = query.where(PromptCriterion.criterion_id != body.criterion_id)
+        
     res = await db.execute(query)
     conflicting_items = res.scalars().all()
 
