@@ -9,7 +9,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import get_db
+from app.dependencies import get_db, require_admin
+from app.models.users import User
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/bm/admin", tags=["Admin"])
@@ -192,5 +193,103 @@ async def cleanup_typology_results(
         raise HTTPException(
             status_code=400,
             detail=f"Error durante la limpieza de tipología: {str(e)}",
+        )
+
+
+class SyncCriteriaNamesRequest(BaseModel):
+    prompt_id: int | None = Field(default=None, description="Optional prompt ID to restrict synchronization")
+    expected_individual_results_to_update: int | None = Field(default=None, description="Expected individual results count to prevent concurrent updates conflict")
+    expected_mass_results_to_update: int | None = Field(default=None, description="Expected mass results count to prevent concurrent updates conflict")
+
+
+class CriterionSyncDetail(BaseModel):
+    prompt_id: int | None
+    criterion_key: str | None
+    old_name: str
+    new_name: str | None
+    individual_rows_affected: int
+    mass_rows_affected: int
+
+
+class SyncCriteriaNamesPreviewResponse(BaseModel):
+    total_criteria_to_sync: int
+    individual_results_to_update: int
+    mass_results_to_update: int
+    details: list[CriterionSyncDetail]
+
+
+class SyncCriteriaNamesExecuteResponse(BaseModel):
+    ok: bool
+    individual_criteria_rows_updated: int
+    mass_criteria_rows_updated: int
+    mass_results_rows_updated: int
+
+
+@router.post("/sync-criteria-names/preview", response_model=SyncCriteriaNamesPreviewResponse)
+async def sync_criteria_names_preview(
+    body: SyncCriteriaNamesRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_admin)],
+):
+    """
+    Preview the synchronization of visible names in historical results.
+    Does not modify any database records.
+    """
+    from app.services.criteria_sync_service import preview_sync_criteria_names
+    try:
+        res = await preview_sync_criteria_names(db, prompt_id=body.prompt_id)
+        return res
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=422,
+            detail=str(ve),
+        )
+    except Exception as e:
+        logger.exception("Error during sync-criteria-names preview: %s", e)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error during preview: {str(e)}",
+        )
+
+
+@router.post("/sync-criteria-names/execute", response_model=SyncCriteriaNamesExecuteResponse)
+async def sync_criteria_names_execute(
+    body: SyncCriteriaNamesRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_admin)],
+):
+    """
+    Execute the synchronization of visible names in historical results.
+    Performs updates inside a single transaction.
+    """
+    from app.services.criteria_sync_service import execute_sync_criteria_names, ConcurrencyConflictError
+    try:
+        res = await execute_sync_criteria_names(
+            db,
+            prompt_id=body.prompt_id,
+            performed_by_email=current_user.email,
+            expected_individual_results_to_update=body.expected_individual_results_to_update,
+            expected_mass_results_to_update=body.expected_mass_results_to_update
+        )
+        await db.commit()
+        return res
+    except ConcurrencyConflictError as cce:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=str(cce),
+        )
+    except ValueError as ve:
+        await db.rollback()
+        raise HTTPException(
+            status_code=422,
+            detail=str(ve),
+        )
+    except Exception as e:
+        await db.rollback()
+        logger.exception("Error during sync-criteria-names execute: %s", e)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error during execution: {str(e)}",
         )
 

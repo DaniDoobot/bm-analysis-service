@@ -58,3 +58,21 @@ class PromptCriterionTypology(Base):
     )
 
 
+class CriteriaSyncLog(Base):
+    __tablename__ = "bm_criteria_sync_logs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    prompt_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    criterion_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    criterion_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    old_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    new_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    individual_rows_affected: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    mass_rows_affected: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    mass_results_rows_affected: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    performed_by_email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), server_default=func.now()
+    )
+
+
