@@ -12,6 +12,11 @@ import re
 
 logger = logging.getLogger(__name__)
 
+
+class PromptValidationError(Exception):
+    """Exception raised when prompt validation fails due to size limits or duplicate keys."""
+    pass
+
 def clean_whitespaces(text: str) -> str:
     """
     Normalizes line endings, strips trailing spaces, limits consecutive blank lines to max 2,
@@ -95,6 +100,7 @@ async def sync_prompt_text_with_active_criteria(
     Sincroniza el texto del prompt con los criterios activos de la base de datos.
     Deduplica bloques, sincroniza la descripción de criterios activos, limpia huérfanos,
     actualiza el formato JSON de salida y sanea espacios en blanco.
+    Valida límites defensivos de longitud y duplicación.
     Retorna (new_prompt_text, changed).
     """
     if not prompt_text:
@@ -132,6 +138,21 @@ async def sync_prompt_text_with_active_criteria(
     # 3. Fetch active criteria
     active_criteria = await get_active_criteria(db, prompt_id)
 
+    # LÍMITE DEFENSIVO: Criterios únicos máximos
+    MAX_CRITERIA_LIMIT = 100
+    if len(active_criteria) > MAX_CRITERIA_LIMIT:
+        raise PromptValidationError(
+            f"Prompt build failed: Active criteria count ({len(active_criteria)}) exceeds "
+            f"the maximum allowed limit of {MAX_CRITERIA_LIMIT}."
+        )
+
+    # 4. Contar filas crudas antes de deduplicar (para diagnóstico de logs)
+    # Usamos marcas comunes como "Reglas de puntuación" o "Cuándo devolver null" como proxy para bloques repetidos sin cabeceras
+    total_raw_rows = len(re.findall(r"Cuándo devolver null|Criterios de penalización", prompt_text, re.IGNORECASE))
+    # Si da 0 (ej. estructura base sin descripciones detalladas), usamos el conteo de cabeceras tradicionales
+    if total_raw_rows == 0:
+        total_raw_rows = len(re.findall(r"^\s*[-*]\s*\[[^\]]+\]", prompt_text, re.MULTILINE))
+
     changed = False
     original_text = prompt_text
 
@@ -166,6 +187,68 @@ async def sync_prompt_text_with_active_criteria(
     # Re-verify if text is actually different from the start
     if prompt_text != clean_whitespaces(original_text):
         changed = True
+
+    # 5. Contar ocurrencias en el prompt finalizado para validar duplicados
+    final_header_occurrences = {}
+    lines = prompt_text.splitlines()
+    for c in active_criteria:
+        canonical_key = c.criterion_key or c.output_key or f"id:{c.criterion_id}"
+        final_header_occurrences[canonical_key] = 0
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("- [") or stripped.startswith("* [") or stripped.startswith("-  [") or stripped.startswith("*  ["):
+                # Verificar si esta línea de cabecera contiene la clave técnica exacta en sus metadatos
+                has_meta = "output_key:" in line.lower() or "feed_key:" in line.lower()
+                if has_meta:
+                    matched = False
+                    if c.output_key and re.search(rf"output_key:\s*{re.escape(c.output_key)}\b", line, re.IGNORECASE):
+                        matched = True
+                    elif c.feed_key and re.search(rf"feed_key:\s*{re.escape(c.feed_key)}\b", line, re.IGNORECASE):
+                        matched = True
+                    
+                    if matched:
+                        final_header_occurrences[canonical_key] += 1
+                else:
+                    # Fallback a nombre de visualización exacto
+                    name_match = re.search(r"\]\s*([^(#\n]+)", stripped)
+                    if name_match:
+                        name_str = name_match.group(1).strip().lower()
+                        if c.criterion_name and c.criterion_name.strip().lower() == name_str:
+                            final_header_occurrences[canonical_key] += 1
+
+    duplicate_keys = {k: v for k, v in final_header_occurrences.items() if v > 1}
+    total_removed = total_raw_rows - len(active_criteria) if total_raw_rows > len(active_criteria) else 0
+
+    # Registrar estadísticas en logs
+    logger.info(
+        "Prompt build:\n"
+        "- raw criteria rows: %d\n"
+        "- unique criteria: %d\n"
+        "- duplicated rows removed: %d\n"
+        "- final prompt chars: %d\n"
+        "- duplicate keys detected:\n%s",
+        total_raw_rows if total_raw_rows > 0 else len(active_criteria),
+        len(active_criteria),
+        total_removed,
+        len(prompt_text),
+        "\n".join(f"  {k}: {v}" for k, v in duplicate_keys.items()) if duplicate_keys else "  None"
+    )
+
+    # 6. Validaciones defensivas del prompt finalizado
+    if duplicate_keys:
+        dup_details = ", ".join(f"{k}: {v}" for k, v in duplicate_keys.items())
+        logger.warning(f"Validation failed: Duplicate keys detected: {dup_details}")
+        raise PromptValidationError(
+            f"Prompt build failed: Duplicate criteria keys detected in finalized prompt: {dup_details}."
+        )
+
+    # LÍMITE DEFENSIVO: Longitud máxima de caracteres (120,000)
+    MAX_CHARACTERS_LIMIT = 120000
+    if len(prompt_text) > MAX_CHARACTERS_LIMIT:
+        raise PromptValidationError(
+            f"Prompt build failed: Prompt length ({len(prompt_text)} characters) exceeds "
+            f"the maximum allowed defensive limit of {MAX_CHARACTERS_LIMIT} characters."
+        )
 
     return prompt_text, changed
 

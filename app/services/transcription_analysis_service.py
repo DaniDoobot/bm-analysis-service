@@ -138,7 +138,7 @@ async def analyze_transcription_pipeline(
 
     # Self-heal/Sync the prompt content with active criteria before validating or analyzing
     try:
-        from app.services.prompts_service import sync_prompt_text_with_active_criteria
+        from app.services.prompts_service import sync_prompt_text_with_active_criteria, PromptValidationError
         from app.models.prompts import PromptVersion
         
         prompt_content_healed, changed = await sync_prompt_text_with_active_criteria(db, resolved_prompt_id, prompt_content)
@@ -152,6 +152,14 @@ async def analyze_transcription_pipeline(
                 db.add(v_obj)
                 await db.commit()
                 logger.info("Self-healed prompt version ID %s in transcription analysis pipeline.", resolved_version_id)
+    except PromptValidationError as val_ex:
+        logger.error("Prompt validation failed: %s", val_ex)
+        return {
+            "ok": False,
+            "status": "error",
+            "stage": "prompt_validation",
+            "error_message": f"Prompt validation failed: {str(val_ex)}",
+        }
     except Exception as ex:
         logger.error("Error during prompt self-healing in transcription analysis pipeline: %s", ex, exc_info=True)
 

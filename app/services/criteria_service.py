@@ -22,6 +22,72 @@ class CriterionSyncError(Exception):
         super().__init__("Criterion synchronization validation failed")
 
 
+def _find_criterion_header_idx(lines: list[str], criterion, search_keys: list[str]) -> int:
+    """
+    Finds the index of the header line for the given criterion in a list of prompt lines,
+    avoiding collisions with similar keys (e.g. matching 'propension' vs 'prueba_propension').
+    """
+    import re
+    target_id = getattr(criterion, "criterion_id", None)
+    target_name = getattr(criterion, "criterion_name", None)
+    
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        # A valid header must start with a list marker and brackets or contain output_key metadata
+        if not (stripped.startswith("- [") or stripped.startswith("* [") or stripped.startswith("-  [") or stripped.startswith("*  [") or "output_key:" in stripped):
+            continue
+            
+        # Parse the header metadata
+        match_ok = re.search(r"output_key:\s*([a-zA-Z0-9_]+)", line, re.IGNORECASE)
+        match_fk = re.search(r"feed_key:\s*([a-zA-Z0-9_]+)", line, re.IGNORECASE)
+        match_id = re.search(r"\[ID:\s*(\d+)\]", line, re.IGNORECASE)
+        
+        header_ok = match_ok.group(1) if match_ok else None
+        header_fk = match_fk.group(1) if match_fk else None
+        header_id = int(match_id.group(1)) if match_id else None
+        
+        # Extract display name: e.g. "- [type] Name (metadata)"
+        type_match = re.match(r"^[-*]\s*\[([^\]]+)\]", stripped)
+        header_name = None
+        if type_match:
+            remaining = stripped[type_match.end():].strip()
+            # remove [ID: \d+]
+            remaining = re.sub(r"^\[ID:\s*\d+\]", "", remaining).strip()
+            if "(" in remaining:
+                header_name = remaining.split("(", 1)[0].strip()
+            else:
+                header_name = remaining.strip()
+                
+        is_match = False
+        
+        # 1. Match by ID if both have it
+        if header_id is not None and target_id is not None and header_id == target_id:
+            is_match = True
+            
+        # 2. Match by output_key matching search_keys
+        if not is_match and header_ok and header_ok in search_keys:
+            is_match = True
+            
+        # 3. Match by feed_key matching search_keys
+        if not is_match and header_fk and header_fk in search_keys:
+            is_match = True
+            
+        # 4. Match by display name exactly (case insensitive) as a fallback
+        if not is_match and header_name and target_name:
+            if header_name.lower().strip() == target_name.lower().strip():
+                is_match = True
+                
+        # Guard against key collisions:
+        # If the header has an output_key that is NOT in search_keys, it belongs to a different criterion.
+        if is_match and header_ok and header_ok not in search_keys:
+            is_match = False
+            
+        if is_match:
+            return i
+            
+    return -1
+
+
 def sync_criterion_block(prompt_text: str, criterion, old_output_key: str | None = None, old_criterion_key: str | None = None) -> tuple[str, bool]:
     """
     Sincroniza el bloque completo de un criterio en el texto del prompt usando claves técnicas.
@@ -56,35 +122,7 @@ def sync_criterion_block(prompt_text: str, criterion, old_output_key: str | None
         return prompt_text, False
 
     lines = prompt_text.splitlines()
-    header_idx = -1
-    
-    for i, line in enumerate(lines):
-        has_key = False
-        normalized_line = line.lower()
-        for sk in search_keys:
-            if re.search(rf"\b{re.escape(sk)}\b", line, re.IGNORECASE):
-                has_key = True
-                break
-        
-        if has_key:
-            stripped = line.strip()
-            # A valid header must either start with a list marker and brackets (e.g., "- [score_1_10]"),
-            # or contain the explicit output_key/feed_key metadata format (e.g. "(output_key: tono_simpatia)")
-            is_header = False
-            if stripped.startswith("- [") or stripped.startswith("* [") or stripped.startswith("-  [") or stripped.startswith("*  ["):
-                is_header = True
-            else:
-                for sk in search_keys:
-                    if re.search(rf"output_key:\s*{re.escape(sk)}\b", line, re.IGNORECASE):
-                        is_header = True
-                        break
-                    if re.search(rf"feed_key:\s*{re.escape(sk)}\b", line, re.IGNORECASE):
-                        is_header = True
-                        break
-            
-            if is_header:
-                header_idx = i
-                break
+    header_idx = _find_criterion_header_idx(lines, criterion, search_keys)
 
     if header_idx == -1:
         # Fallback: Si no se encuentra el bloque del criterio, lo insertamos en la sección "CRITERIOS DE ANÁLISIS"
@@ -140,7 +178,7 @@ def sync_criterion_block(prompt_text: str, criterion, old_output_key: str | None
                     block_end_idx = j
                     break
         # 4. Palabras clave de fin de sección
-        if re.match(r"^\s*(?:###?\s+)?(?:FORMATO DE SALIDA|REGLAS|DEFINICIÓN|TAREA|CONTEXTO)", line, re.IGNORECASE):
+        if re.match(r"^\s*###?\s+(?:FORMATO DE SALIDA|REGLAS|DEFINICIÓN|TAREA|CONTEXTO)", line, re.IGNORECASE):
             block_end_idx = j
             break
 
@@ -149,16 +187,21 @@ def sync_criterion_block(prompt_text: str, criterion, old_output_key: str | None
     technical_lines = []
     original_description_lines = []
     
-    # Palabras clave para identificar metadatos técnicos del bloque
-    tech_indicators = ["tipología", "tipologia", "aplicable", "valor", "allowed", "applies", "output_key", "feed_key"]
+    # Prefijos estrictos para identificar metadatos técnicos del bloque
+    tech_prefixes = (
+        "tipologías aplicables:",
+        "tipologias aplicables:",
+        "valores permitidos:",
+        "valores:",
+        "output_key:",
+        "feed_key:",
+        "applies_to_types:",
+        "allowed_values:"
+    )
     
     for line in block_lines[1:]:
-        is_tech = False
-        normalized_line = line.lower()
-        for pat in tech_indicators:
-            if pat in normalized_line:
-                is_tech = True
-                break
+        stripped_line = line.strip().lower()
+        is_tech = stripped_line.startswith(tech_prefixes)
         if is_tech:
             technical_lines.append(line)
         else:
@@ -264,33 +307,7 @@ def remove_criterion_block(prompt_text: str, criterion) -> tuple[str, bool]:
         return prompt_text, False
 
     lines = prompt_text.splitlines()
-    header_idx = -1
-    
-    for i, line in enumerate(lines):
-        has_key = False
-        normalized_line = line.lower()
-        for sk in search_keys:
-            if re.search(rf"\b{re.escape(sk)}\b", line, re.IGNORECASE):
-                has_key = True
-                break
-        
-        if has_key:
-            stripped = line.strip()
-            is_header = False
-            if stripped.startswith("- [") or stripped.startswith("* [") or stripped.startswith("-  [") or stripped.startswith("*  ["):
-                is_header = True
-            else:
-                for sk in search_keys:
-                    if re.search(rf"output_key:\s*{re.escape(sk)}\b", line, re.IGNORECASE):
-                        is_header = True
-                        break
-                    if re.search(rf"feed_key:\s*{re.escape(sk)}\b", line, re.IGNORECASE):
-                        is_header = True
-                        break
-            
-            if is_header:
-                header_idx = i
-                break
+    header_idx = _find_criterion_header_idx(lines, criterion, search_keys)
 
     if header_idx == -1:
         return prompt_text, False
@@ -312,7 +329,7 @@ def remove_criterion_block(prompt_text: str, criterion) -> tuple[str, bool]:
                 if other_key != output_key:
                     block_end_idx = j
                     break
-        if re.match(r"^\s*(?:###?\s+)?(?:FORMATO DE SALIDA|REGLAS|DEFINICIÓN|TAREA|CONTEXTO)", line, re.IGNORECASE):
+        if re.match(r"^\s*###?\s+(?:FORMATO DE SALIDA|REGLAS|DEFINICIÓN|TAREA|CONTEXTO)", line, re.IGNORECASE):
             block_end_idx = j
             break
 
@@ -422,6 +439,7 @@ async def _sync_prompt_on_removal(db: AsyncSession, prompt_id: int, criterion) -
         )
         active_res = await db.execute(active_criteria_stmt)
         remaining_criteria = list(active_res.scalars().all())
+        remaining_criteria = _deduplicate_criteria_list(remaining_criteria)
 
         # 1. Sincronizar en PromptVersion
         current_version = await _get_current_version(db, prompt_id)
@@ -535,6 +553,32 @@ async def _ensure_typology_associations(db: AsyncSession, criterion: PromptCrite
                 db.add(new_assoc)
 
 
+def _deduplicate_criteria_list(criteria: list[PromptCriterion]) -> list[PromptCriterion]:
+    """
+    Deduplicates a list of criteria keeping order and first occurrence based on:
+    1. criterion_key
+    2. output_key
+    3. f"id:{criterion_id}"
+    """
+    seen = set()
+    unique_criteria = []
+    for c in criteria:
+        canonical_key = (
+            c.criterion_key
+            or c.output_key
+            or (f"id:{c.criterion_id}" if hasattr(c, "criterion_id") else None)
+        )
+        if not canonical_key:
+            unique_criteria.append(c)
+            continue
+        if canonical_key in seen:
+            logger.info(f"Deduplicating criteria list: Removing duplicate for canonical key '{canonical_key}'")
+            continue
+        seen.add(canonical_key)
+        unique_criteria.append(c)
+    return unique_criteria
+
+
 async def get_criteria_grouped(db: AsyncSession, prompt_id: int, include_deleted: bool = False) -> CriteriaGroupedOut:
     """Return active criteria grouped by type, plus the current prompt text."""
     # Get current prompt text
@@ -554,7 +598,8 @@ async def get_criteria_grouped(db: AsyncSession, prompt_id: int, include_deleted
     query = query.order_by(PromptCriterion.order_index.asc().nullslast(), PromptCriterion.criterion_id.asc())
 
     criteria_result = await db.execute(query)
-    all_criteria = criteria_result.scalars().all()
+    all_criteria = list(criteria_result.scalars().all())
+    all_criteria = _deduplicate_criteria_list(all_criteria)
 
     # Group by type
     grouped: dict[str, list] = {t: [] for t in CRITERION_TYPES}
@@ -566,7 +611,7 @@ async def get_criteria_grouped(db: AsyncSession, prompt_id: int, include_deleted
 
     return CriteriaGroupedOut(
         prompt=prompt_text,
-        criteria=list(all_criteria),
+        criteria=all_criteria,
         grouped=grouped,
     )
 
@@ -582,7 +627,8 @@ async def get_active_criteria(db: AsyncSession, prompt_id: int) -> list[PromptCr
         )
         .order_by(PromptCriterion.order_index.asc().nullslast(), PromptCriterion.criterion_id.asc())
     )
-    return result.scalars().all()
+    criteria = list(result.scalars().all())
+    return _deduplicate_criteria_list(criteria)
 
 
 async def _sync_criterion_on_save(
@@ -622,6 +668,7 @@ async def _sync_criterion_on_save(
         )
         active_criteria_res = await db.execute(active_criteria_stmt)
         active_criteria = list(active_criteria_res.scalars().all())
+        active_criteria = _deduplicate_criteria_list(active_criteria)
         
         # Asegurar que el criterio actual esté en active_criteria para que no se considere huérfano
         if not any(c.criterion_id == criterion.criterion_id or c.criterion_key == criterion.criterion_key for c in active_criteria):
@@ -1140,8 +1187,8 @@ async def delete_criterion(db: AsyncSession, criterion_id: int, performed_by_ema
 def deduplicate_criteria_blocks(prompt_text: str) -> str:
     """
     Scans the prompt text and removes any duplicate criterion blocks.
-    A block is recognized by standard headers: '- [type]' or '* [type]' containing output_key.
-    Keeps only the first occurrence of each output_key block.
+    A block is recognized by standard headers: '- [type]' or '* [type]'.
+    Keeps only the first occurrence of each canonical block key parsed from header.
     """
     if not prompt_text:
         return prompt_text
@@ -1157,17 +1204,35 @@ def deduplicate_criteria_blocks(prompt_text: str) -> str:
         stripped = line.strip()
         
         is_header = False
-        output_key = None
+        canonical_key = None
         
         if stripped.startswith("- [") or stripped.startswith("* [") or stripped.startswith("-  [") or stripped.startswith("*  ["):
+            # Try to match output_key
             match = re.search(r"output_key:\s*([a-zA-Z0-9_]+)", line, re.IGNORECASE)
+            # Try to match feed_key
+            feed_match = re.search(r"feed_key:\s*([a-zA-Z0-9_]+)", line, re.IGNORECASE)
+            # Try to match ID
+            id_match = re.search(r"\[ID:\s*(\d+)\]", line, re.IGNORECASE)
+            
             if match:
+                canonical_key = match.group(1)
+            elif feed_match:
+                canonical_key = feed_match.group(1)
+            elif id_match:
+                canonical_key = f"id:{id_match.group(1)}"
+            else:
+                # Fallback to display name slug
+                name_match = re.search(r"\]\s*([^(#\n]+)", stripped)
+                if name_match:
+                    name_str = name_match.group(1).strip().lower()
+                    canonical_key = re.sub(r"[^a-z0-9_]+", "_", name_str).strip("_")
+            
+            if canonical_key:
                 is_header = True
-                output_key = match.group(1)
                 
-        if is_header and output_key:
-            if output_key in seen_keys:
-                logger.info(f"Deduplication: Removing duplicate block for '{output_key}' starting at line {i}")
+        if is_header and canonical_key:
+            if canonical_key in seen_keys:
+                logger.info(f"Deduplication: Removing duplicate block for '{canonical_key}' starting at line {i}")
                 # Scan forward until the next block boundary
                 i += 1
                 while i < len(lines):
@@ -1179,14 +1244,16 @@ def deduplicate_criteria_blocks(prompt_text: str) -> str:
                         break
                     if "output_key:" in next_line:
                         other_key_match = re.search(r"output_key:\s*([a-zA-Z0-9_]+)", next_line, re.IGNORECASE)
-                        if other_key_match and other_key_match.group(1) != output_key:
-                            break
-                    if re.match(r"^\s*(?:###?\s+)?(?:FORMATO DE SALIDA|REGLAS|DEFINICIÓN|TAREA|CONTEXTO)", next_line, re.IGNORECASE):
+                        if other_key_match:
+                            other_key = other_key_match.group(1)
+                            if other_key != canonical_key:
+                                break
+                    if re.match(r"^\s*###?\s+(?:FORMATO DE SALIDA|REGLAS|DEFINICIÓN|TAREA|CONTEXTO)", next_line, re.IGNORECASE):
                         break
                     i += 1
                 continue
             else:
-                seen_keys.add(output_key)
+                seen_keys.add(canonical_key)
                 
         new_lines.append(line)
         i += 1
