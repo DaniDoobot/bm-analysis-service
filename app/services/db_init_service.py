@@ -311,6 +311,7 @@ async def init_db():
                 ("typology_id", "INTEGER"),
                 ("typology_key", "TEXT"),
                 ("typology_name", "TEXT"),
+                ("evaluacion_global", "NUMERIC(5, 2)"),
             ]:
                 res = await conn.execute(
                     text(f"""
