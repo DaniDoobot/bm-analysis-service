@@ -353,20 +353,12 @@ def extract_score_from_mass(result_json: Any, items_json: Any, key: str, is_fall
 
     # 3. Fallback calculation for evaluacion_global if not explicitly found
     if key == "evaluacion_global" and not is_fallback_call:
-        other_keys = [
-            "empatia", "simpatia", "claridad", "procedimiento", "saludo_inicio",
-            "n3_preguntas", "despedida_con_refuerzo", "gestion_objeciones",
-            "uso_nombre_paciente", "uso_preguntas", "explicaciones_medicas",
-            "claridad_explicacion_economica", "siguiente_paso"
-        ]
-        other_scores = []
-        for ok in other_keys:
-            ov = extract_score_from_mass(result_json, items_json, ok, is_fallback_call=True)
-            if ov is not None:
-                other_scores.append(ov)
-        if other_scores:
-            return to_float(round(sum(other_scores) / len(other_scores), 1))
-
+        from app.utils.scores import calculate_score_from_items
+        items = items_json if isinstance(items_json, list) else []
+        val = calculate_score_from_items(items)
+        if val is not None:
+            return to_float(val)
+        
     return None
 
 
