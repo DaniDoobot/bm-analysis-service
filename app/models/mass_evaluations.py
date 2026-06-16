@@ -160,9 +160,14 @@ class MassEvaluationResult(Base):
     status: Mapped[str] = mapped_column(Text, default="completed", server_default="'completed'")  # completed, failed, skipped
     result_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     items_json: Mapped[list[Any] | dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    evaluacion_global: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
     hubspot_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), server_default=func.now())
+
+    @property
+    def global_score(self) -> float | None:
+        return float(self.evaluacion_global) if self.evaluacion_global is not None else None
 
     # Relationships
     job = relationship("MassEvaluationJob", back_populates="results")

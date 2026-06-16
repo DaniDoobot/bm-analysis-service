@@ -242,9 +242,18 @@ async def list_results(
     date_to: datetime | None = Query(None),
     execution_source: str | None = Query(None, description="on_demand | automation"),
     limit: int = Query(100, ge=1, le=1000),
+    global_score_min: float | None = Query(None, ge=0.0, le=10.0),
+    global_score_max: float | None = Query(None, ge=0.0, le=10.0),
     db: AsyncSession = Depends(get_db)
 ):
     """List detailed mass analysis call results with advanced filtering options."""
+    if global_score_min is not None and global_score_max is not None:
+        if global_score_min > global_score_max:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="global_score_min cannot be greater than global_score_max",
+            )
+
     from app.utils.visual_formatters import build_items_visual
     results = await MassEvaluationService.list_results(
         db,
@@ -255,7 +264,9 @@ async def list_results(
         date_from=date_from,
         date_to=date_to,
         execution_source=execution_source,
-        limit=limit
+        limit=limit,
+        global_score_min=global_score_min,
+        global_score_max=global_score_max
     )
     
     out = []

@@ -357,6 +357,7 @@ class MassEvaluationResultResponse(BaseModel):
     result_json: dict[str, Any] | None
     items_json: Any
     items_visual: list[dict[str, Any]] | None = None
+    global_score: float | None = None
     hubspot_metadata: dict[str, Any] | None
     error_message: str | None
     created_at: datetime

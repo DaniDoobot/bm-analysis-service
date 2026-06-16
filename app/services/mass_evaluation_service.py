@@ -877,6 +877,10 @@ class MassEvaluationService:
                         owner_id = call["hubspot_owner_id"]
                         resolved_agent = resolve_agent_display(None, owner_id)
                         
+                        from app.utils.scores import calculate_score_from_items
+                        eval_val = calculate_score_from_items(items)
+                        eval_decimal = Decimal(str(eval_val)) if eval_val is not None else None
+
                         # Persist Result
                         res_row = MassEvaluationResult(
                             run_id=run_id,
@@ -899,6 +903,7 @@ class MassEvaluationService:
                             status="completed",
                             result_json=clean_result,
                             items_json=items,
+                            evaluacion_global=eval_decimal,
                             hubspot_metadata=call,
                             service_id=service_id,
                             service_key=service_key,
@@ -1151,7 +1156,9 @@ class MassEvaluationService:
         date_from: datetime | None = None,
         date_to: datetime | None = None,
         execution_source: str | None = None,
-        limit: int = 100
+        limit: int = 100,
+        global_score_min: float | None = None,
+        global_score_max: float | None = None,
     ) -> list[MassEvaluationResult]:
         stmt = select(MassEvaluationResult)
         filters = []
@@ -1175,6 +1182,12 @@ class MassEvaluationService:
                 ))
             else:
                 filters.append(MassEvaluationResult.execution_source == execution_source)
+        if global_score_min is not None:
+            filters.append(MassEvaluationResult.evaluacion_global.is_not(None))
+            filters.append(MassEvaluationResult.evaluacion_global >= global_score_min)
+        if global_score_max is not None:
+            filters.append(MassEvaluationResult.evaluacion_global.is_not(None))
+            filters.append(MassEvaluationResult.evaluacion_global <= global_score_max)
             
         if filters:
             stmt = stmt.where(and_(*filters))

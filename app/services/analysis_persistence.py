@@ -159,12 +159,10 @@ async def save_analysis(
         db.add(analysis)
         await db.flush()  # get analysis_id without committing
 
-        # ── 2. Upsert bm_call_analysis_current ────────────────────────────
-        await _upsert_current(db, analysis, call_metadata)
-
-        # ── 3. Insert bm_analysis_results ─────────────────────────────────
+        # ── 2. Insert bm_analysis_results ─────────────────────────────────
         prompt_id = prompt_metadata.get("prompt_id")
         matched_typology = None
+        results_list = []
         if prompt_id:
             from app.models.prompts import Prompt
             from app.models.services import Service
@@ -229,7 +227,15 @@ async def save_analysis(
                     matched_typology,
                 )
 
-            await _insert_results(db, analysis, clean_result, prompt_id, matched_typology=matched_typology)
+            results_list = await _insert_results(db, analysis, clean_result, prompt_id, matched_typology=matched_typology)
+
+        # ── 3. Calculate Global Score and Persist/Sync ───────────────────
+        from app.utils.scores import calculate_score_from_criterion_results
+        calculated_score = calculate_score_from_criterion_results(results_list)
+        analysis.evaluacion_global = Decimal(str(calculated_score)) if calculated_score is not None else None
+
+        # ── 4. Upsert bm_call_analysis_current ────────────────────────────
+        await _upsert_current(db, analysis, call_metadata)
 
         await db.commit()
         await db.refresh(analysis)
@@ -314,8 +320,8 @@ async def _insert_results(
     result_json: dict[str, Any],
     prompt_id: int,
     matched_typology: Any | None = None,
-) -> None:
-    """Insert per-criterion rows in bm_analysis_criterion_results."""
+) -> list[Any]:
+    """Insert per-criterion rows in bm_analysis_criterion_results and return them."""
     from app.models.analyses import AnalysisCriterionResult
     criteria: list[PromptCriterion] = await get_active_criteria(db, prompt_id)
     c_ids = [c.criterion_id for c in criteria]
@@ -331,6 +337,7 @@ async def _insert_results(
                 assoc_map[assoc.criterion_id] = set()
             assoc_map[assoc.criterion_id].add(assoc.typology_id)
 
+    rows = []
     for criterion in criteria:
         output_key = criterion.output_key
         feed_key = criterion.feed_key
@@ -403,4 +410,6 @@ async def _insert_results(
             row.service_id = matched_typology.service_id
             
         db.add(row)
+        rows.append(row)
+    return rows
 
