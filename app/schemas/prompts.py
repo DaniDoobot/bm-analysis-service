@@ -5,7 +5,30 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, model_validator
 
 
+# ── Owner and Access Schemas ───────────────────────────────────────────────
+
+class OwnerUserOut(BaseModel):
+    user_id: int
+    display_name: str | None = None
+    email: str | None = None
+
+
+class StructureAccessOut(BaseModel):
+    effective_permission: str
+    is_owner: bool
+    is_admin: bool
+    can_view: bool
+    can_use: bool
+    can_edit: bool
+    can_share: bool
+    can_delete: bool
+    can_transfer: bool
+    can_duplicate: bool
+    access_source: str
+
+
 # ── Prompt ────────────────────────────────────────────────────────────────────
+
 
 class PromptOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -36,6 +59,10 @@ class PromptWithCurrentVersion(PromptOut):
     version_label: str | None = None
     version_name: str | None = None
     prompt: str | None = None
+
+    # Permissions metadata
+    owner: OwnerUserOut | None = None
+    access: StructureAccessOut | None = None
 
     # Extra fields for maximum frontend compatibility:
     name: str | None = None
@@ -147,6 +174,10 @@ class PromptBaseStructureOut(BaseModel):
     service_key: str | None = None
     service_name: str | None = None
 
+    # Permissions metadata
+    owner: OwnerUserOut | None = None
+    access: StructureAccessOut | None = None
+
 
 class PromptBaseStructureDetailOut(PromptBaseStructureOut):
     base_prompt: str
@@ -163,6 +194,7 @@ class PromptBaseStructureCreate(BaseModel):
     created_by: str | None = None
     created_by_email: str | None = None
     service_id: int | None = None
+    owner_user_id: int | None = None
 
 
 class PromptBaseStructureUpdate(BaseModel):
@@ -184,6 +216,7 @@ class CreateFromBaseRequest(BaseModel):
     created_by_email: str | None = None
     copy_default_criteria: bool = True
     activate: bool = False
+    owner_user_id: int | None = None
 
 
 class CreateFromBaseResponse(BaseModel):

@@ -7,12 +7,14 @@ import secrets
 from datetime import datetime, timezone, timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select, func
+from fastapi import APIRouter, Depends, HTTPException, status, Query
+from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_db, get_current_user, require_admin
 from app.models.users import User
+from app.models.prompts import Prompt, PromptBaseStructure, StructurePermission
+from app.services.auth_service import log_audit
 from app.schemas.users import (
     UserOut,
     UserOutFull,
@@ -23,7 +25,89 @@ from app.schemas.users import (
 from app.utils.security import hash_password
 
 logger = logging.getLogger(__name__)
+
+
+async def handle_user_ownership_transfer(db: AsyncSession, user_id: int, transfer_owner_id: int | None, actor_user_id: int):
+    # Fetch owned base structures
+    base_res = await db.execute(select(PromptBaseStructure).where(PromptBaseStructure.owner_user_id == user_id))
+    owned_bases = base_res.scalars().all()
+
+    # Fetch owned specific structures
+    spec_res = await db.execute(select(Prompt).where(Prompt.owner_user_id == user_id))
+    owned_specifics = spec_res.scalars().all()
+
+    if owned_bases or owned_specifics:
+        if not transfer_owner_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El usuario es propietario de una o más estructuras. Debes especificar un nuevo propietario (transfer_owner_id) para transferir los recursos antes de la desactivación."
+            )
+        
+        # Validate new owner
+        stmt_u = select(User).where(User.user_id == transfer_owner_id)
+        res_u = await db.execute(stmt_u)
+        new_owner = res_u.scalars().first()
+        
+        if not new_owner:
+            raise HTTPException(status_code=400, detail="Nuevo propietario no encontrado.")
+        if not new_owner.is_active:
+            raise HTTPException(status_code=400, detail="El nuevo propietario debe estar activo.")
+        if new_owner.role == "agent":
+            raise HTTPException(status_code=400, detail="El nuevo propietario no puede ser un agente.")
+            
+        # Transfer bases
+        for b in owned_bases:
+            old_owner = b.owner_user_id
+            b.owner_user_id = transfer_owner_id
+            db.add(b)
+            # Remove redundant manual permission
+            await db.execute(delete(StructurePermission).where(
+                StructurePermission.structure_type == "base",
+                StructurePermission.structure_id == b.id,
+                StructurePermission.user_id == transfer_owner_id
+            ))
+            # Log audit
+            await log_audit(db, actor_user_id, "transfer", "base", b.id, affected_user_id=transfer_owner_id, details={"previous_owner_id": old_owner})
+
+        # Transfer specifics
+        for s in owned_specifics:
+            old_owner = s.owner_user_id
+            s.owner_user_id = transfer_owner_id
+            db.add(s)
+            # Remove redundant manual permission
+            await db.execute(delete(StructurePermission).where(
+                StructurePermission.structure_type == "specific",
+                StructurePermission.structure_id == s.prompt_id,
+                StructurePermission.user_id == transfer_owner_id
+            ))
+            # Log audit
+            await log_audit(db, actor_user_id, "transfer", "specific", s.prompt_id, affected_user_id=transfer_owner_id, details={"previous_owner_id": old_owner})
+            
+        await db.commit()
 router = APIRouter(prefix="/bm/users", tags=["User Management"])
+
+
+@router.get("/sharing/eligible-users")
+async def list_eligible_users(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    if getattr(current_user, "role", "agent").lower() == "agent":
+        raise HTTPException(status_code=403, detail="Los agentes no tienen acceso a las estructuras.")
+
+    stmt = select(User).where(User.is_active == True, User.role != "agent")
+    res = await db.execute(stmt)
+    users = res.scalars().all()
+    
+    return [
+        {
+            "user_id": u.user_id,
+            "username": u.username,
+            "email": u.email,
+            "role": u.role
+        }
+        for u in users
+    ]
 
 
 def _user_to_full(u: User) -> dict:
@@ -180,6 +264,7 @@ async def update_user(
     body: UserUpdatePayload,
     admin: Annotated[User, Depends(require_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    transfer_owner_id: Annotated[int | None, Query(description="ID of the new owner to transfer structures to if deactivating")] = None,
 ):
     """
     Update email, username, role, is_active, hubspot_owner_id, or agent_initials.
@@ -207,6 +292,8 @@ async def update_user(
     if body.role is not None:
         user.role = body.role
     if body.is_active is not None:
+        if body.is_active is False and user.is_active is True:
+            await handle_user_ownership_transfer(db, user_id, transfer_owner_id, admin.user_id)
         user.is_active = body.is_active
     if body.hubspot_owner_id is not None:
         user.hubspot_owner_id = body.hubspot_owner_id
@@ -262,6 +349,7 @@ async def deactivate_user(
     user_id: int,
     admin: Annotated[User, Depends(require_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    transfer_owner_id: Annotated[int | None, Query(description="ID of the new owner to transfer structures to")] = None,
 ):
     """
     Soft-delete: set is_active=False. Does NOT physically delete the user.
@@ -279,6 +367,10 @@ async def deactivate_user(
     user = res.scalars().first()
     if not user:
         raise HTTPException(status_code=404, detail=f"Usuario {user_id} no encontrado.")
+
+    # Check for owned structures and handle transfer
+    if user.is_active:
+        await handle_user_ownership_transfer(db, user_id, transfer_owner_id, admin.user_id)
 
     user.is_active = False
     await db.commit()

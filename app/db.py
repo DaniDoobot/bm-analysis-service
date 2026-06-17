@@ -44,6 +44,17 @@ def _get_engine():
             "DATABASE_URL is not configured. "
             "Set DATABASE_URL in your .env file or environment."
         )
+    
+    # Safety check: Block connections to production host or DB name unless ALLOW_PRODUCTION_TESTS=true
+    import os
+    is_prod = "91.98.230.119" in async_url or "n8n" in async_url
+    allow_prod = os.environ.get("ALLOW_PRODUCTION_TESTS", "false").lower() == "true"
+    if is_prod and not allow_prod:
+        raise RuntimeError(
+            f"CRITICAL SAFETY VIOLATION: Attempted to connect to production database: '{async_url}'. "
+            "Execution is blocked for safety. Set ALLOW_PRODUCTION_TESTS=true in env to override."
+        )
+
     return create_async_engine(
         async_url,
         echo=False,

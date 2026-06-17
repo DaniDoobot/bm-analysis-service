@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     # ── Password Reveal Flag ──────────────────────────────────────────────────
     allow_password_reveal: bool = True
 
+    # ── Structure Permissions Flag ────────────────────────────────────────────
+    enable_structure_permissions: bool = False
+
     # ── CORS ──────────────────────────────────────────────────────────────────
     cors_origins: str = "*"
 

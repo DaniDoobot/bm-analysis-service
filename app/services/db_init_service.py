@@ -269,6 +269,9 @@ async def init_db():
                 else:
                     logger.info("Column '%s' already exists on 'bm_prompts' table.", col_name)
 
+        # 1.5.b Structure ownership columns and tables are managed via manual SQL migrations.
+        # Startup dynamic alterations for permissions have been removed to prevent DDL executions in runtime.
+
         # 1.6. Ensure service and typology columns exist on other tables dynamically and non-destructively
         async with engine.begin() as conn:
             # 1.6.1 bm_prompt_base_structures

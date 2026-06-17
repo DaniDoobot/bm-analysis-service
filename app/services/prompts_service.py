@@ -328,6 +328,7 @@ async def list_prompts(
             "service_id": p.service_id,
             "service_key": p.service.service_key if p.service else None,
             "service_name": p.service.service_name if p.service else None,
+            "owner_user_id": p.owner_user_id,
 
             # Aliases for frontend compatibility
             "name": p.prompt_name,
@@ -405,6 +406,7 @@ async def get_active_prompt(db: AsyncSession, prompt_type: str) -> dict | None:
         "service_id": p.service_id,
         "service_key": p.service.service_key if p.service else None,
         "service_name": p.service.service_name if p.service else None,
+        "owner_user_id": p.owner_user_id,
 
         # Aliases for frontend compatibility
         "name": p.prompt_name,
@@ -586,6 +588,7 @@ async def duplicate_prompt(
     description: str | None = None,
     created_by: str | None = None,
     created_by_email: str | None = None,
+    owner_user_id: int | None = None,
 ) -> dict:
     """
     Creates a fully independent copy of a prompt with its current content and active criteria.
@@ -616,6 +619,7 @@ async def duplicate_prompt(
         base_structure_key=src_prompt.base_structure_key,
         base_structure_name=src_prompt.base_structure_name,
         service_id=src_prompt.service_id,
+        owner_user_id=owner_user_id,
     )
     db.add(new_prompt)
     await db.flush()
@@ -767,6 +771,7 @@ async def create_base_structure(db: AsyncSession, body: PromptBaseStructureCreat
         created_by=body.created_by,
         created_by_email=body.created_by_email,
         service_id=body.service_id,
+        owner_user_id=body.owner_user_id,
     )
     db.add(new_struct)
     await db.commit()
@@ -876,6 +881,7 @@ async def create_prompt_from_base(db: AsyncSession, body: CreateFromBaseRequest)
         base_structure_key=struct.structure_key,
         base_structure_name=struct.structure_name,
         service_id=struct.service_id,
+        owner_user_id=body.owner_user_id,
     )
     db.add(new_prompt)
     await db.flush()
