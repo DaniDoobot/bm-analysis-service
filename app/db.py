@@ -35,6 +35,25 @@ def _make_async_url(raw_url: str) -> str:
     return url
 
 
+def assert_not_production_db_for_tests() -> None:
+    """
+    Blocks execution if the database URL points to the production database.
+    Can be bypassed if ALLOW_PRODUCTION_TESTS=true is set in the environment.
+    """
+    import os
+    from app.config import get_settings
+    settings = get_settings()
+    raw_url = settings.database_url or ""
+    
+    is_prod = "91.98.230.119" in raw_url or "n8n" in raw_url
+    allow_prod = os.environ.get("ALLOW_PRODUCTION_TESTS", "false").lower() == "true"
+    if is_prod and not allow_prod:
+        raise RuntimeError(
+            f"CRITICAL SAFETY VIOLATION: Test or diagnostic script attempted to connect to the production database: '{raw_url}'. "
+            "Execution is blocked for safety. Set ALLOW_PRODUCTION_TESTS=true in env to override."
+        )
+
+
 @lru_cache(maxsize=1)
 def _get_engine():
     settings = get_settings()
@@ -45,15 +64,14 @@ def _get_engine():
             "Set DATABASE_URL in your .env file or environment."
         )
     
-    # Safety check: Block connections to production host or DB name unless ALLOW_PRODUCTION_TESTS=true
+    # Run safety check only under test environment conditions
     import os
-    is_prod = "91.98.230.119" in async_url or "n8n" in async_url
-    allow_prod = os.environ.get("ALLOW_PRODUCTION_TESTS", "false").lower() == "true"
-    if is_prod and not allow_prod:
-        raise RuntimeError(
-            f"CRITICAL SAFETY VIOLATION: Attempted to connect to production database: '{async_url}'. "
-            "Execution is blocked for safety. Set ALLOW_PRODUCTION_TESTS=true in env to override."
-        )
+    is_test_env = (
+        os.environ.get("APP_ENV") == "test"
+        or "PYTEST_CURRENT_TEST" in os.environ
+    )
+    if is_test_env:
+        assert_not_production_db_for_tests()
 
     return create_async_engine(
         async_url,

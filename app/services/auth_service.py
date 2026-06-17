@@ -48,6 +48,12 @@ async def get_effective_structure_permission(
     Dynamically resolve structure permissions for a user based on role, ownership,
     manual sharing, and inheritance (for base structures).
     """
+    # Normalize structure type
+    if structure_type == "prompt":
+        structure_type = "specific"
+    elif structure_type == "prompt-base-structure":
+        structure_type = "base"
+
     # 1. Normalize roles. Exclude agents completely.
     user_role = getattr(user, "role", "agent").lower()
     
@@ -70,49 +76,9 @@ async def get_effective_structure_permission(
             "access_source": "none"
         }
     
-    settings = get_settings()
-    if not settings.enable_structure_permissions:
-        # When permissions feature flag is disabled, non-agents have full rights
-        is_admin = user_role in ("admin", "administrador")
-        return {
-            "is_admin": is_admin,
-            "is_owner": not is_admin,
-            "manual_permission": "none",
-            "inherited_permission": "none",
-            "effective_permission": "admin" if is_admin else "owner",
-            "can_view": True,
-            "can_use": True,
-            "can_edit": True,
-            "can_share": True,
-            "can_delete": is_admin,
-            "can_transfer": is_admin,
-            "can_duplicate": True,
-            "can_archive": True,
-            "can_restore": True,
-            "access_source": "admin" if is_admin else "owner"
-        }
-
     is_admin = user_role in ("admin", "administrador")
-    if is_admin:
-        return {
-            "is_admin": True,
-            "is_owner": False,
-            "manual_permission": "none",
-            "inherited_permission": "none",
-            "effective_permission": "admin",
-            "can_view": True,
-            "can_use": True,
-            "can_edit": True,
-            "can_share": True,
-            "can_delete": True,
-            "can_transfer": True,
-            "can_duplicate": True,
-            "can_archive": True,
-            "can_restore": True,
-            "access_source": "admin"
-        }
 
-    # 2. Check Ownership and existence
+    # 2. Check Ownership and existence (ALWAYS done regardless of feature flag)
     is_owner = False
     if structure_type == "base":
         stmt = select(PromptBaseStructure).where(PromptBaseStructure.id == structure_id)
@@ -132,6 +98,50 @@ async def get_effective_structure_permission(
         owner_id = obj.owner_user_id
         if owner_id == user.user_id:
             is_owner = True
+
+    settings = get_settings()
+    if not settings.enable_structure_permissions:
+        # When permissions feature flag is disabled:
+        # Non-agents have virtual rights to view, use, edit, duplicate.
+        # But sharing and archiving/restoring are strictly restricted to actual owner or admin.
+        # Transfer ownership and delete are strictly admin-only.
+        can_share_archive_restore = is_admin or is_owner
+        return {
+            "is_admin": is_admin,
+            "is_owner": is_owner,
+            "manual_permission": "none",
+            "inherited_permission": "none",
+            "effective_permission": "admin" if is_admin else ("owner" if is_owner else "edit"),
+            "can_view": True,
+            "can_use": True,
+            "can_edit": True,
+            "can_share": can_share_archive_restore,
+            "can_delete": is_admin,
+            "can_transfer": is_admin,
+            "can_duplicate": True,
+            "can_archive": can_share_archive_restore,
+            "can_restore": can_share_archive_restore,
+            "access_source": "admin" if is_admin else ("owner" if is_owner else "virtual_fallback")
+        }
+
+    if is_admin:
+        return {
+            "is_admin": True,
+            "is_owner": False,
+            "manual_permission": "none",
+            "inherited_permission": "none",
+            "effective_permission": "admin",
+            "can_view": True,
+            "can_use": True,
+            "can_edit": True,
+            "can_share": True,
+            "can_delete": True,
+            "can_transfer": True,
+            "can_duplicate": True,
+            "can_archive": True,
+            "can_restore": True,
+            "access_source": "admin"
+        }
 
     if is_owner:
         return {
