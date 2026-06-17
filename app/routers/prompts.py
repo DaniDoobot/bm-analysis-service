@@ -34,6 +34,11 @@ from app.schemas.prompts import (
     PromptBaseStructureUpdate,
     CreateFromBaseRequest,
     CreateFromBaseResponse,
+    StructureType,
+    StructurePermissionOut,
+    PermissionActionResponse,
+    GrantPermissionRequest,
+    TransferOwnershipRequest,
 )
 from app.services import prompts_service
 
@@ -542,22 +547,14 @@ async def delete_prompt(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-class GrantPermissionRequest(BaseModel):
-    user_id: int
-    permission_level: str
-
-
-class TransferOwnershipRequest(BaseModel):
-    new_owner_user_id: int
-
-
-@router.get("/{structure_type}s/{id}/permissions")
+@router.get("/{structure_type}s/{id}/permissions", response_model=list[StructurePermissionOut])
 async def get_structure_permissions(
-    structure_type: str,
+    structure_type: StructureType,
     id: int,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ):
+    structure_type = structure_type.value
     if structure_type == "prompt":
         structure_type = "specific"
     elif structure_type == "prompt-base-structure":
@@ -599,14 +596,15 @@ async def get_structure_permissions(
 
 
 
-@router.post("/{structure_type}s/{id}/permissions")
+@router.post("/{structure_type}s/{id}/permissions", response_model=PermissionActionResponse)
 async def grant_structure_permission(
-    structure_type: str,
+    structure_type: StructureType,
     id: int,
     body: GrantPermissionRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ):
+    structure_type = structure_type.value
     if structure_type == "prompt":
         structure_type = "specific"
     elif structure_type == "prompt-base-structure":
@@ -692,14 +690,15 @@ async def grant_structure_permission(
     return {"ok": True, "message": "Permiso actualizado con éxito."}
 
 
-@router.delete("/{structure_type}s/{id}/permissions/{user_id}")
+@router.delete("/{structure_type}s/{id}/permissions/{user_id}", response_model=PermissionActionResponse)
 async def revoke_structure_permission(
-    structure_type: str,
+    structure_type: StructureType,
     id: int,
     user_id: int,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ):
+    structure_type = structure_type.value
     if structure_type == "prompt":
         structure_type = "specific"
     elif structure_type == "prompt-base-structure":
@@ -745,14 +744,15 @@ async def revoke_structure_permission(
     return {"ok": True, "message": "Permiso revocado con éxito."}
 
 
-@router.post("/{structure_type}s/{id}/transfer-ownership")
+@router.post("/{structure_type}s/{id}/transfer-ownership", response_model=PermissionActionResponse)
 async def transfer_structure_ownership(
-    structure_type: str,
+    structure_type: StructureType,
     id: int,
     body: TransferOwnershipRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_admin)],
 ):
+    structure_type = structure_type.value
     if structure_type == "prompt":
         structure_type = "specific"
     elif structure_type == "prompt-base-structure":

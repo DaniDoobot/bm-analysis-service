@@ -5,7 +5,14 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, model_validator
 
 
-# ── Owner and Access Schemas ───────────────────────────────────────────────
+from enum import Enum
+
+class StructureType(str, Enum):
+    prompt = "prompt"
+    prompt_base_structure = "prompt-base-structure"
+    base = "base"
+    specific = "specific"
+
 
 class OwnerUserOut(BaseModel):
     user_id: int
@@ -25,6 +32,10 @@ class StructureAccessOut(BaseModel):
     can_transfer: bool
     can_duplicate: bool
     access_source: str
+    manual_permission: str
+    inherited_permission: str
+    can_archive: bool
+    can_restore: bool
 
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
@@ -228,4 +239,31 @@ class CreateFromBaseResponse(BaseModel):
     prompt: str | None = None
     criteria_count: int
     service_id: int | None = None
+
+
+# ── Structure Sharing / Permissions ─────────────────────────────────────────
+
+class StructurePermissionOut(BaseModel):
+    permission_id: int
+    user_id: int
+    username: str
+    email: str
+    permission_level: str
+    granted_by_user_id: int | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class PermissionActionResponse(BaseModel):
+    ok: bool
+    message: str
+
+
+class GrantPermissionRequest(BaseModel):
+    user_id: int
+    permission_level: str
+
+
+class TransferOwnershipRequest(BaseModel):
+    new_owner_user_id: int
 

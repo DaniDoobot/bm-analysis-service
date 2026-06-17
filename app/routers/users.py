@@ -21,6 +21,7 @@ from app.schemas.users import (
     UserCreatePayload,
     UserUpdatePayload,
     UserAdminResetPasswordPayload,
+    EligibleUserOut,
 )
 from app.utils.security import hash_password
 
@@ -87,7 +88,7 @@ async def handle_user_ownership_transfer(db: AsyncSession, user_id: int, transfe
 router = APIRouter(prefix="/bm/users", tags=["User Management"])
 
 
-@router.get("/sharing/eligible-users")
+@router.get("/sharing/eligible-users", response_model=list[EligibleUserOut])
 async def list_eligible_users(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],

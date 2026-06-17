@@ -140,4 +140,13 @@ class ResetPasswordPayload(BaseModel):
     new_password: str
 
 
+# ── Sharing / Permissions Eligible Users ───────────────────────────────────
+
+class EligibleUserOut(BaseModel):
+    user_id: int
+    username: str
+    email: str
+    role: str
+
+
 
