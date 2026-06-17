@@ -1,11 +1,13 @@
 """API router for automated mass evaluations."""
 from datetime import datetime
-from typing import Any
+from typing import Any, Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import get_db
+from app.dependencies import get_db, get_current_user
+from app.models.users import User
+from app.utils.hubspot_owners import resolve_owner_id_by_email
 from app.schemas.mass_evaluations import (
     MassEvaluationJobCreate,
     MassEvaluationJobManualRunRequest,
@@ -19,6 +21,7 @@ from app.schemas.mass_evaluations import (
     MassAnalysisAutomationUpdate,
     MassAnalysisAutomationResponse,
     MassAnalysisAutomationRunResponse,
+    PagedMassEvaluationResultResponse,
 )
 from app.services.mass_evaluation_service import MassEvaluationService
 
@@ -232,8 +235,115 @@ async def cancel_run(
 
 # ── Results Endpoints ─────────────────────────────────────────────────────────
 
+def resolve_agent_owner_id(user: User) -> str | None:
+    if user.hubspot_owner_id:
+        return user.hubspot_owner_id
+    return resolve_owner_id_by_email(user.email)
+
+
+@router.get("/me/analysis-results", response_model=PagedMassEvaluationResultResponse)
+async def get_my_analysis_results(
+    current_user: Annotated[User, Depends(get_current_user)],
+    run_id: int | None = Query(None),
+    job_id: int | None = Query(None),
+    agent_owner_id: str | None = Query(None, description="For backwards compatibility, ignored for agents"),
+    call_id: str | None = Query(None),
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    execution_source: str | None = Query(None, description="on_demand | automation"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    global_score_min: float | None = Query(None, ge=0.0, le=10.0),
+    global_score_max: float | None = Query(None, ge=0.0, le=10.0),
+    service_id: int | None = Query(None, description="Filter by service ID"),
+    service_key: str | None = Query(None, description="Filter by service key"),
+    typology_key: str | None = Query(None, description="Filter by typology key"),
+    db: AsyncSession = Depends(get_db)
+):
+    """List detailed mass analysis call results for the logged-in agent with filters."""
+    normalized_role = (current_user.role or "").strip().lower()
+    is_admin = normalized_role in {"admin", "administrador"}
+    is_agent = normalized_role in {"agent", "agente"}
+
+    if not is_admin and not is_agent:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para este rol."
+        )
+
+    if is_admin:
+        effective_owner_id = agent_owner_id or resolve_agent_owner_id(current_user)
+    else: # is_agent
+        effective_owner_id = resolve_agent_owner_id(current_user)
+        if not effective_owner_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No hay agente asociado a este usuario."
+            )
+
+    if global_score_min is not None and global_score_max is not None:
+        if global_score_min > global_score_max:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="global_score_min cannot be greater than global_score_max",
+            )
+
+    # 1. Get total count for metadata
+    total = await MassEvaluationService.count_results(
+        db,
+        run_id=run_id,
+        job_id=job_id,
+        agent_owner_id=effective_owner_id,
+        call_id=call_id,
+        date_from=date_from,
+        date_to=date_to,
+        execution_source=execution_source,
+        global_score_min=global_score_min,
+        global_score_max=global_score_max,
+        service_id=service_id,
+        service_key=service_key,
+        typology_key=typology_key,
+    )
+
+    # 2. Retrieve items page
+    from app.utils.visual_formatters import build_items_visual
+    results = await MassEvaluationService.list_results(
+        db,
+        run_id=run_id,
+        job_id=job_id,
+        agent_owner_id=effective_owner_id,
+        call_id=call_id,
+        date_from=date_from,
+        date_to=date_to,
+        execution_source=execution_source,
+        limit=limit,
+        global_score_min=global_score_min,
+        global_score_max=global_score_max,
+        service_id=service_id,
+        service_key=service_key,
+        typology_key=typology_key,
+        offset=offset,
+    )
+    
+    items_out = []
+    for r in results:
+        d = MassEvaluationResultResponse.model_validate(r)
+        d.items_visual = build_items_visual(r.items_json)
+        if d.execution_source is None:
+            d.execution_source = "on_demand"
+        items_out.append(d)
+
+    return PagedMassEvaluationResultResponse(
+        items=items_out,
+        total=total,
+        limit=limit,
+        offset=offset
+    )
+
+
 @router.get("/mass-evaluation-results", response_model=list[MassEvaluationResultResponse])
 async def list_results(
+    current_user: Annotated[User, Depends(get_current_user)],
     run_id: int | None = Query(None),
     job_id: int | None = Query(None),
     agent_owner_id: str | None = Query(None),
@@ -244,9 +354,31 @@ async def list_results(
     limit: int = Query(100, ge=1, le=1000),
     global_score_min: float | None = Query(None, ge=0.0, le=10.0),
     global_score_max: float | None = Query(None, ge=0.0, le=10.0),
+    service_id: int | None = Query(None, description="Filter by service ID"),
+    service_key: str | None = Query(None, description="Filter by service key"),
+    typology_key: str | None = Query(None, description="Filter by typology key"),
     db: AsyncSession = Depends(get_db)
 ):
     """List detailed mass analysis call results with advanced filtering options."""
+    normalized_role = (current_user.role or "").strip().lower()
+    is_admin = normalized_role in {"admin", "administrador"}
+    is_agent = normalized_role in {"agent", "agente"}
+
+    if not is_admin and not is_agent:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para este rol."
+        )
+
+    if not is_admin: # is_agent
+        resolved_id = resolve_agent_owner_id(current_user)
+        if not resolved_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No hay agente asociado a este usuario."
+            )
+        agent_owner_id = resolved_id
+
     if global_score_min is not None and global_score_max is not None:
         if global_score_min > global_score_max:
             raise HTTPException(
@@ -266,7 +398,10 @@ async def list_results(
         execution_source=execution_source,
         limit=limit,
         global_score_min=global_score_min,
-        global_score_max=global_score_max
+        global_score_max=global_score_max,
+        service_id=service_id,
+        service_key=service_key,
+        typology_key=typology_key,
     )
     
     out = []
@@ -280,9 +415,11 @@ async def list_results(
     return out
 
 
+
 @router.get("/mass-evaluation-results/{mass_analysis_id}", response_model=MassEvaluationResultResponse)
 async def get_result(
     mass_analysis_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
     db: AsyncSession = Depends(get_db)
 ):
     """Retrieve full analysis result and normalized prompt snapshot elements of a call."""
@@ -293,11 +430,31 @@ async def get_result(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Mass analysis result ID {mass_analysis_id} not found."
         )
+
+    normalized_role = (current_user.role or "").strip().lower()
+    is_admin = normalized_role in {"admin", "administrador"}
+    is_agent = normalized_role in {"agent", "agente"}
+
+    if not is_admin and not is_agent:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para este rol."
+        )
+
+    if not is_admin: # is_agent
+        resolved_id = resolve_agent_owner_id(current_user)
+        if not resolved_id or result.hubspot_owner_id != resolved_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes permiso para ver este análisis."
+            )
+
     d = MassEvaluationResultResponse.model_validate(result)
     d.items_visual = build_items_visual(result.items_json)
     if d.execution_source is None:
         d.execution_source = "on_demand"
     return d
+
 
 
 @router.post("/admin/backfill-mass-criterion-typologies", status_code=status.HTTP_200_OK)

@@ -368,6 +368,13 @@ def get_avg_score_mass(rows: list, key: str) -> "float | None":
     return to_float(round(sum(scores) / len(scores), 1)) if scores else None
 
 
+def get_avg_score_and_count_mass(rows: list, key: str) -> tuple[float | None, int]:
+    """Compute average score and count of non-null evaluations for a key across MassEvaluationResult rows."""
+    scores = [s for r in rows if (s := extract_score_from_mass(r.result_json, r.items_json, key)) is not None]
+    avg = to_float(round(sum(scores) / len(scores), 1)) if scores else None
+    return avg, len(scores)
+
+
 def extract_objection_items(result: Any) -> list[str]:
     items = []
     if not result or not isinstance(result, dict):
@@ -955,12 +962,23 @@ async def get_agent_evolution(
     first_ts = _effective_ts(rows[0]) if rows else None
     last_ts = _effective_ts(rows[-1]) if rows else None
 
-    avg_eval = to_float(get_avg_score_mass(rows, "evaluacion_global"))
-    avg_sent = to_float(get_avg_score_mass(rows, "sentiment"))
-    avg_emp  = to_float(get_avg_score_mass(rows, "empatia"))
-    avg_cla  = to_float(get_avg_score_mass(rows, "claridad"))
-    avg_sim  = to_float(get_avg_score_mass(rows, "simpatia"))
-    avg_pro  = to_float(get_avg_score_mass(rows, "procedimiento"))
+    avg_eval, count_eval = get_avg_score_and_count_mass(rows, "evaluacion_global")
+    avg_eval = to_float(avg_eval)
+    
+    avg_sent, count_sent = get_avg_score_and_count_mass(rows, "sentiment")
+    avg_sent = to_float(avg_sent)
+    
+    avg_emp, count_emp  = get_avg_score_and_count_mass(rows, "empatia")
+    avg_emp  = to_float(avg_emp)
+    
+    avg_cla, count_cla  = get_avg_score_and_count_mass(rows, "claridad")
+    avg_cla  = to_float(avg_cla)
+    
+    avg_sim, count_sim  = get_avg_score_and_count_mass(rows, "simpatia")
+    avg_sim  = to_float(avg_sim)
+    
+    avg_pro, count_pro  = get_avg_score_and_count_mass(rows, "procedimiento")
+    avg_pro  = to_float(avg_pro)
 
     # tipo_llamada lives inside result_json
     tipo_counts: dict[str, int] = {}
@@ -1018,15 +1036,29 @@ async def get_agent_evolution(
         br = buckets_map[b_key]
         b_tipo = sum(1 for r in br if r.result_json and isinstance(r.result_json, dict) and r.result_json.get("tipo_llamada"))
         b_citas = sum(1 for r in br if r.result_json and isinstance(r.result_json, dict) and r.result_json.get("tipo_llamada") == "cita")
+        
+        avg_eg, count_eg = get_avg_score_and_count_mass(br, "evaluacion_global")
+        avg_se, count_se = get_avg_score_and_count_mass(br, "sentiment")
+        avg_em, count_em = get_avg_score_and_count_mass(br, "empatia")
+        avg_cl, count_cl = get_avg_score_and_count_mass(br, "claridad")
+        avg_si, count_si = get_avg_score_and_count_mass(br, "simpatia")
+        avg_pr, count_pr = get_avg_score_and_count_mass(br, "procedimiento")
+        
         timeline.append({
             "bucket": b_key,
             "total_analyses": to_float(len(br)),
-            "avg_evaluacion_global": to_float(get_avg_score_mass(br, "evaluacion_global")),
-            "avg_sentiment": to_float(get_avg_score_mass(br, "sentiment")),
-            "avg_empatia": to_float(get_avg_score_mass(br, "empatia")),
-            "avg_claridad": to_float(get_avg_score_mass(br, "claridad")),
-            "avg_simpatia": to_float(get_avg_score_mass(br, "simpatia")),
-            "avg_procedimiento": to_float(get_avg_score_mass(br, "procedimiento")),
+            "avg_evaluacion_global": to_float(avg_eg) if avg_eg is not None else None,
+            "avg_evaluacion_global_count": count_eg,
+            "avg_sentiment": to_float(avg_se) if avg_se is not None else None,
+            "avg_sentiment_count": count_se,
+            "avg_empatia": to_float(avg_em) if avg_em is not None else None,
+            "avg_empatia_count": count_em,
+            "avg_claridad": to_float(avg_cl) if avg_cl is not None else None,
+            "avg_claridad_count": count_cl,
+            "avg_simpatia": to_float(avg_si) if avg_si is not None else None,
+            "avg_simpatia_count": count_si,
+            "avg_procedimiento": to_float(avg_pr) if avg_pr is not None else None,
+            "avg_procedimiento_count": count_pr,
             "cita_rate": to_float(round((b_citas / b_tipo) * 100)) if b_tipo > 0 else 0.0,
             "total_objeciones": to_float(sum(1 for r in br if _has_objections(r.result_json))),
         })
@@ -1036,8 +1068,8 @@ async def get_agent_evolution(
     if total_analyses >= 2:
         mid = total_analyses // 2
         for key, name in CRITERIA_NAMES.items():
-            fa = get_avg_score_mass(rows[:mid], key)
-            la = get_avg_score_mass(rows[mid:], key)
+            fa, fa_count = get_avg_score_and_count_mass(rows[:mid], key)
+            la, la_count = get_avg_score_and_count_mass(rows[mid:], key)
             if fa is not None and la is not None:
                 fa_val = to_float(fa)
                 la_val = to_float(la)
@@ -1046,7 +1078,9 @@ async def get_agent_evolution(
                     "criterion_key": key,
                     "criterion_name": name,
                     "first_avg": fa_val,
+                    "first_avg_count": fa_count,
                     "last_avg": la_val,
+                    "last_avg_count": la_count,
                     "delta": cd,
                     "direction": "up" if cd > 0.1 else ("down" if cd < -0.1 else "stable"),
                 })
@@ -1056,9 +1090,14 @@ async def get_agent_evolution(
     for key, name in CRITERIA_NAMES.items():
         if key in ["evaluacion_global", "sentiment"]:
             continue
-        av = get_avg_score_mass(rows, key)
+        av, av_count = get_avg_score_and_count_mass(rows, key)
         if av is not None:
-            criteria_scores.append({"criterion_key": key, "criterion_name": name, "avg_score": to_float(av)})
+            criteria_scores.append({
+                "criterion_key": key,
+                "criterion_name": name,
+                "avg_score": to_float(av),
+                "analysis_count": av_count
+            })
 
     strengths  = sorted(criteria_scores, key=lambda x: x["avg_score"], reverse=True)[:5]
     weaknesses = sorted(criteria_scores, key=lambda x: x["avg_score"])[:5]
@@ -1105,12 +1144,18 @@ async def get_agent_evolution(
             "first_analysis_at": first_ts.isoformat() if first_ts else None,
             "last_analysis_at": last_ts.isoformat() if last_ts else None,
             "avg_evaluacion_global": avg_eval,
+            "avg_evaluacion_global_count": count_eval,
             "avg_sentiment": avg_sent,
+            "avg_sentiment_count": count_sent,
             "cita_rate": cita_rate,
             "avg_empatia": avg_emp,
+            "avg_empatia_count": count_emp,
             "avg_claridad": avg_cla,
+            "avg_claridad_count": count_cla,
             "avg_simpatia": avg_sim,
+            "avg_simpatia_count": count_sim,
             "avg_procedimiento": avg_pro,
+            "avg_procedimiento_count": count_pro,
             "total_objeciones": total_objs,
         },
         "trend": {

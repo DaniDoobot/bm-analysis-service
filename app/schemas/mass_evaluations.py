@@ -460,3 +460,11 @@ class MassAnalysisAutomationRunResponse(BaseModel):
     class Config:
         from_attributes = True
 
+
+class PagedMassEvaluationResultResponse(BaseModel):
+    items: list[MassEvaluationResultResponse]
+    total: int
+    limit: int
+    offset: int
+
+

@@ -1160,6 +1160,10 @@ class MassEvaluationService:
         limit: int = 100,
         global_score_min: float | None = None,
         global_score_max: float | None = None,
+        service_id: int | None = None,
+        service_key: str | None = None,
+        typology_key: str | None = None,
+        offset: int | None = None,
     ) -> list[MassEvaluationResult]:
         stmt = select(MassEvaluationResult)
         filters = []
@@ -1189,13 +1193,81 @@ class MassEvaluationService:
         if global_score_max is not None:
             filters.append(MassEvaluationResult.evaluacion_global.is_not(None))
             filters.append(MassEvaluationResult.evaluacion_global <= global_score_max)
+        if service_id is not None:
+            filters.append(MassEvaluationResult.service_id == service_id)
+        if service_key is not None:
+            filters.append(MassEvaluationResult.service_key == service_key)
+        if typology_key is not None:
+            filters.append(MassEvaluationResult.typology_key == typology_key)
             
         if filters:
             stmt = stmt.where(and_(*filters))
             
         stmt = stmt.order_by(desc(MassEvaluationResult.mass_analysis_id)).limit(limit)
+        if offset is not None:
+            stmt = stmt.offset(offset)
+            
         res = await db.execute(stmt)
         return list(res.scalars().all())
+
+    @staticmethod
+    async def count_results(
+        db: AsyncSession,
+        run_id: int | None = None,
+        job_id: int | None = None,
+        agent_owner_id: str | None = None,
+        call_id: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+        execution_source: str | None = None,
+        global_score_min: float | None = None,
+        global_score_max: float | None = None,
+        service_id: int | None = None,
+        service_key: str | None = None,
+        typology_key: str | None = None,
+    ) -> int:
+        from sqlalchemy import func
+        stmt = select(func.count(MassEvaluationResult.mass_analysis_id))
+        filters = []
+        if run_id is not None:
+            filters.append(MassEvaluationResult.run_id == run_id)
+        if job_id is not None:
+            filters.append(MassEvaluationResult.job_id == job_id)
+        if agent_owner_id is not None:
+            filters.append(MassEvaluationResult.hubspot_owner_id == agent_owner_id)
+        if call_id is not None:
+            filters.append(MassEvaluationResult.call_id == call_id)
+        if date_from is not None:
+            filters.append(MassEvaluationResult.call_timestamp >= date_from)
+        if date_to is not None:
+            filters.append(MassEvaluationResult.call_timestamp <= date_to)
+        if execution_source is not None:
+            if execution_source == "on_demand":
+                filters.append(or_(
+                    MassEvaluationResult.execution_source == "on_demand",
+                    MassEvaluationResult.execution_source.is_(None)
+                ))
+            else:
+                filters.append(MassEvaluationResult.execution_source == execution_source)
+        if global_score_min is not None:
+            filters.append(MassEvaluationResult.evaluacion_global.is_not(None))
+            filters.append(MassEvaluationResult.evaluacion_global >= global_score_min)
+        if global_score_max is not None:
+            filters.append(MassEvaluationResult.evaluacion_global.is_not(None))
+            filters.append(MassEvaluationResult.evaluacion_global <= global_score_max)
+        if service_id is not None:
+            filters.append(MassEvaluationResult.service_id == service_id)
+        if service_key is not None:
+            filters.append(MassEvaluationResult.service_key == service_key)
+        if typology_key is not None:
+            filters.append(MassEvaluationResult.typology_key == typology_key)
+            
+        if filters:
+            stmt = stmt.where(and_(*filters))
+            
+        res = await db.execute(stmt)
+        return res.scalar() or 0
+
 
     @staticmethod
     async def get_result(db: AsyncSession, mass_analysis_id: int) -> MassEvaluationResult | None:

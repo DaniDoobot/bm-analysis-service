@@ -7,7 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import get_db
+from app.dependencies import get_db, get_current_user
+from app.models.users import User
 from app.services.dashboard_service import (
     get_dashboard_summary,
     get_agents_list,
@@ -16,7 +17,7 @@ from app.services.dashboard_service import (
     get_mass_result_detail,
     get_agents_comparison,
 )
-from app.schemas.dashboard import AgentComparisonResponse
+from app.schemas.dashboard import AgentComparisonResponse, AgentEvolutionResponse
 from app.utils.hubspot_owners import resolve_owner_id_by_email, resolve_owner_name
 
 logger = logging.getLogger(__name__)
@@ -115,9 +116,16 @@ async def list_agents(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/agents/{hubspot_owner_id}/evolution")
+def resolve_agent_owner_id(user: User) -> str | None:
+    if user.hubspot_owner_id:
+        return user.hubspot_owner_id
+    return resolve_owner_id_by_email(user.email)
+
+
+@router.get("/agents/{hubspot_owner_id}/evolution", response_model=AgentEvolutionResponse)
 async def agent_evolution(
     hubspot_owner_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
     type: Annotated[str, Query(description="audio | text")] = "audio",
     period: Annotated[str, Query(description="24h | 7d | 30d | 90d | all")] = "30d",
@@ -132,6 +140,24 @@ async def agent_evolution(
     Get chronological performance, trends, strengths, weaknesses,
     and evolution timelines for a specific agent.
     """
+    normalized_role = (current_user.role or "").strip().lower()
+    is_admin = normalized_role in {"admin", "administrador"}
+    is_agent = normalized_role in {"agent", "agente"}
+
+    if not is_admin and not is_agent:
+        raise HTTPException(
+            status_code=403,
+            detail="No autorizado para este rol."
+        )
+
+    if not is_admin: # is_agent
+        resolved_id = resolve_agent_owner_id(current_user)
+        if not resolved_id or resolved_id != hubspot_owner_id:
+            raise HTTPException(
+                status_code=403,
+                detail="No tienes permiso para consultar la evolución de este agente."
+            )
+            
     try:
         data = await get_agent_evolution(
             db,
@@ -185,27 +211,50 @@ async def objections_breakdown(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/me/evolution")
+@router.get("/me/evolution", response_model=AgentEvolutionResponse)
 async def get_my_evolution(
-    email: Annotated[str, Query(description="Email of logged-in agent")],
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    email: Annotated[str | None, Query(description="For backwards compatibility, ignored for agents")] = None,
     type: Annotated[str, Query(description="audio | text")] = "audio",
-    period: Annotated[str, Query(description="7d | 30d | 90d | all")] = "30d",
-    bucket: Annotated[str | None, Query(description="day | week")] = None,
+    period: Annotated[str, Query(description="24h | 7d | 30d | 90d | all")] = "30d",
+    bucket: Annotated[str | None, Query(description="hour | day | week")] = None,
+    prompt_version_id: Annotated[int | None, Query(description="Filter by prompt version")] = None,
+    service_id: Annotated[int | None, Query(description="Filter by service ID")] = None,
+    service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
+    date_from: Annotated[str | None, Query(description="Custom start date (ISO or YYYY-MM-DD)")] = None,
+    date_to: Annotated[str | None, Query(description="Custom end date (ISO or YYYY-MM-DD)")] = None,
 ):
     """
     Get chronological performance evolution metrics specifically for the logged-in agent.
     """
-    owner_id = resolve_owner_id_by_email(email)
-    if not owner_id:
-        return JSONResponse(
+    normalized_role = (current_user.role or "").strip().lower()
+    is_admin = normalized_role in {"admin", "administrador"}
+    is_agent = normalized_role in {"agent", "agente"}
+
+    if not is_admin and not is_agent:
+        raise HTTPException(
             status_code=403,
-            content={
-                "ok": False,
-                "status": "forbidden",
-                "error_message": "No hay agente asociado a este usuario."
-            }
+            detail="No autorizado para este rol."
         )
+
+    if is_admin:
+        if email:
+            owner_id = resolve_owner_id_by_email(email)
+        else:
+            owner_id = resolve_agent_owner_id(current_user)
+        if not owner_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Debes especificar un agente válido (vía email u owner_id asignado)."
+            )
+    else: # is_agent
+        owner_id = resolve_agent_owner_id(current_user)
+        if not owner_id:
+            raise HTTPException(
+                status_code=403,
+                detail="No hay agente asociado a este usuario."
+            )
 
     try:
         data = await get_agent_evolution(
@@ -214,6 +263,11 @@ async def get_my_evolution(
             analysis_type=type,
             period=period,
             bucket_param=bucket,
+            prompt_version_id=prompt_version_id,
+            service_id=service_id,
+            service_key=service_key,
+            date_from=date_from,
+            date_to=date_to,
         )
         return data
     except Exception as e:
@@ -223,29 +277,46 @@ async def get_my_evolution(
 
 @router.get("/me/agent")
 async def get_my_agent_details(
-    email: Annotated[str, Query(description="Email of logged-in agent")],
+    current_user: Annotated[User, Depends(get_current_user)],
+    email: Annotated[str | None, Query(description="For backwards compatibility, ignored for agents")] = None,
 ):
     """
-    Verify and retrieve details of the agent associated with the provided email.
+    Verify and retrieve details of the agent associated with the logged-in user.
     """
-    owner_id = resolve_owner_id_by_email(email)
+    normalized_role = (current_user.role or "").strip().lower()
+    is_admin = normalized_role in {"admin", "administrador"}
+    is_agent = normalized_role in {"agent", "agente"}
+
+    if not is_admin and not is_agent:
+        raise HTTPException(
+            status_code=403,
+            detail="No autorizado para este rol."
+        )
+
+    if is_admin and email:
+        owner_id = resolve_owner_id_by_email(email)
+    else: # is_agent
+        owner_id = resolve_agent_owner_id(current_user)
+        
     if not owner_id:
         return JSONResponse(
             status_code=404,
             content={
                 "ok": False,
                 "status": "not_found",
-                "error_message": "No hay agente asociado a este email."
+                "error_message": "No hay agente asociado a este usuario."
             }
         )
 
     agent_name = resolve_owner_name(owner_id) or owner_id
+    effective_email = email if (is_admin and email) else current_user.email
     return {
         "ok": True,
-        "email": email.strip().lower(),
+        "email": effective_email.strip().lower(),
         "hubspot_owner_id": owner_id,
         "agent_name": agent_name
     }
+
 
 
 @router.get("/dashboard/latest-analyses/{identifier}")
