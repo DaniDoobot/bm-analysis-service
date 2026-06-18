@@ -427,6 +427,24 @@ async def init_db():
                     )
                     logger.info("Column 'execution_source' added successfully to '%s'.", table_name)
 
+            # Check for heartbeat_at in bm_mass_evaluation_runs
+            res_heartbeat = await conn.execute(
+                text("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.columns 
+                        WHERE table_schema = 'public' 
+                          AND table_name = 'bm_mass_evaluation_runs' 
+                          AND column_name = 'heartbeat_at'
+                    );
+                """)
+            )
+            if not res_heartbeat.scalar():
+                logger.info("Adding column 'heartbeat_at' to 'bm_mass_evaluation_runs' table...")
+                await conn.execute(
+                    text("ALTER TABLE bm_mass_evaluation_runs ADD COLUMN heartbeat_at TIMESTAMPTZ NULL;")
+                )
+                logger.info("Column 'heartbeat_at' added successfully to 'bm_mass_evaluation_runs'.")
+
             # 1.6.7 bm_mass_analysis_automations — job_id support column
             res = await conn.execute(
                 text("""

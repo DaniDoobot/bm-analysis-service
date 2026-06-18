@@ -111,6 +111,7 @@ class MassEvaluationRun(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     run_summary: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), server_default=func.now())
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Relationships
     job = relationship("MassEvaluationJob", back_populates="runs")

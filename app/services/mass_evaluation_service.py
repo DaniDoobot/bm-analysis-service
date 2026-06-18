@@ -204,6 +204,8 @@ async def enrich_job_prompt_info(db: AsyncSession, job: MassEvaluationJob) -> No
 
 
 class MassEvaluationService:
+    _running_tasks: set[asyncio.Task] = set()
+
     @staticmethod
     async def create_job(db: AsyncSession, payload: MassEvaluationJobCreate) -> MassEvaluationJob:
         # Validate Prompt State
@@ -480,7 +482,9 @@ class MassEvaluationService:
         await db.refresh(run)
         
         # Launch background task
-        asyncio.create_task(MassEvaluationService._execute_background_run(job_id, run.run_id, effective_filters))
+        task = asyncio.create_task(MassEvaluationService._execute_background_run(job_id, run.run_id, effective_filters))
+        MassEvaluationService._running_tasks.add(task)
+        task.add_done_callback(MassEvaluationService._running_tasks.discard)
         
         return run
 
@@ -498,6 +502,9 @@ class MassEvaluationService:
             if not run:
                 logger.error("Run ID %d not found in background task", run_id)
                 return
+                
+            run.heartbeat_at = datetime.now(timezone.utc)
+            await db.commit()
                 
             job_stmt = select(MassEvaluationJob).where(MassEvaluationJob.job_id == job_id)
             job_res = await db.execute(job_stmt)
@@ -724,6 +731,7 @@ class MassEvaluationService:
                                 fresh_run_obj.calls_analyzed = calls_analyzed
                                 fresh_run_obj.calls_skipped = calls_skipped
                                 fresh_run_obj.calls_failed = calls_failed
+                                fresh_run_obj.heartbeat_at = datetime.now(timezone.utc)
                                 fresh_run_obj.run_summary = {
                                     "analyzed": calls_analyzed,
                                     "skipped": calls_skipped,
@@ -994,6 +1002,7 @@ class MassEvaluationService:
                             fresh_run_obj.calls_analyzed = calls_analyzed
                             fresh_run_obj.calls_skipped = calls_skipped
                             fresh_run_obj.calls_failed = calls_failed
+                            fresh_run_obj.heartbeat_at = datetime.now(timezone.utc)
                             fresh_run_obj.run_summary = {
                                 "analyzed": calls_analyzed,
                                 "skipped": calls_skipped,
@@ -1073,39 +1082,39 @@ class MassEvaluationService:
                             await db.commit()
                     except Exception as e_hook:
                         logger.error("Failed to sync automation run status on success: %s", e_hook)
-                
             except Exception as e_run:
                 logger.error("Mass evaluation job %d run %d failed in background: %s", job_id, run_id, e_run, exc_info=True)
                 try:
-                    # Fetch fresh instance of run to write status safely
-                    fresh_run_stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == run_id)
-                    fresh_run_res = await db.execute(fresh_run_stmt)
-                    fresh_run_obj = fresh_run_res.scalars().first()
-                    if fresh_run_obj:
-                        fresh_run_obj.status = "failed"
-                        fresh_run_obj.error_message = str(e_run)
-                        fresh_run_obj.finished_at = datetime.now(timezone.utc)
-                        await db.commit()
-
-                        # Synchronization hook for MassAnalysisAutomationRun
-                        try:
-                            auto_stmt = select(MassAnalysisAutomationRun).where(MassAnalysisAutomationRun.run_id == run_id)
-                            auto_res = await db.execute(auto_stmt)
-                            auto_run = auto_res.scalars().first()
-                            if auto_run:
-                                auto_run.status = "failed"
-                                auto_run.finished_at = datetime.now(timezone.utc)
-                                auto_run.error_message = str(e_run)
-                                
-                                aut_stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id == auto_run.automation_id)
-                                aut_res = await db.execute(aut_stmt)
-                                aut_obj = aut_res.scalars().first()
-                                if aut_obj:
-                                    aut_obj.last_error_at = datetime.now(timezone.utc)
-                                    aut_obj.last_error_message = str(e_run)
-                                await db.commit()
-                        except Exception as e_hook_fail:
-                            logger.error("Failed to sync automation run failure status: %s", e_hook_fail)
+                    # Fetch fresh instance of run to write status safely using a new session
+                    async with AsyncSession(engine) as fail_db:
+                        fresh_run_stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == run_id)
+                        fresh_run_res = await fail_db.execute(fresh_run_stmt)
+                        fresh_run_obj = fresh_run_res.scalars().first()
+                        if fresh_run_obj:
+                            fresh_run_obj.status = "failed"
+                            fresh_run_obj.error_message = str(e_run)
+                            fresh_run_obj.finished_at = datetime.now(timezone.utc)
+                            await fail_db.commit()
+    
+                            # Synchronization hook for MassAnalysisAutomationRun
+                            try:
+                                auto_stmt = select(MassAnalysisAutomationRun).where(MassAnalysisAutomationRun.run_id == run_id)
+                                auto_res = await fail_db.execute(auto_stmt)
+                                auto_run = auto_res.scalars().first()
+                                if auto_run:
+                                    auto_run.status = "failed"
+                                    auto_run.finished_at = datetime.now(timezone.utc)
+                                    auto_run.error_message = str(e_run)
+                                    
+                                    aut_stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id == auto_run.automation_id)
+                                    aut_res = await fail_db.execute(aut_stmt)
+                                    aut_obj = aut_res.scalars().first()
+                                    if aut_obj:
+                                        aut_obj.last_error_at = datetime.now(timezone.utc)
+                                        aut_obj.last_error_message = str(e_run)
+                                    await fail_db.commit()
+                            except Exception as e_hook_fail:
+                                logger.error("Failed to sync automation run failure status: %s", e_hook_fail)
                 except Exception as e_inner:
                     logger.error("Failed to mark run as failed in database: %s", e_inner)
 
@@ -1316,6 +1325,64 @@ class MassEvaluationService:
                 logger.error("Scheduler failed to launch due job ID %d ('%s'): %s", job.job_id, job.job_name, e)
                 
         return {"due_jobs_count": due_count, "launched_jobs_count": launched_count}
+
+    @staticmethod
+    async def cleanup_stale_runs(db: AsyncSession, threshold_minutes: int = 10) -> int:
+        """
+        Find runs in 'running' status that have not updated their heartbeat (or started) for
+        longer than threshold_minutes, and mark them as failed.
+        """
+        from datetime import datetime, timedelta, timezone
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=threshold_minutes)
+        
+        # Select all running runs that are stale
+        stmt = select(MassEvaluationRun).where(
+            MassEvaluationRun.status == "running",
+            or_(
+                MassEvaluationRun.heartbeat_at == None,
+                MassEvaluationRun.heartbeat_at <= cutoff
+            ),
+            MassEvaluationRun.started_at <= cutoff
+        )
+        
+        res = await db.execute(stmt)
+        stale_runs = res.scalars().all()
+        
+        cleaned_count = 0
+        for run in stale_runs:
+            logger.warning(
+                "Mass evaluation run %d (job %d) is stale (no heartbeat or started long ago). Marking as failed.",
+                run.run_id, run.job_id
+            )
+            run.status = "failed"
+            run.error_message = f"Execution abandoned (no heartbeat updated for more than {threshold_minutes} minutes)."
+            run.finished_at = datetime.now(timezone.utc)
+            
+            # If it is an automation run, also mark the automation run as failed
+            try:
+                auto_stmt = select(MassAnalysisAutomationRun).where(MassAnalysisAutomationRun.run_id == run.run_id)
+                auto_res = await db.execute(auto_stmt)
+                auto_run = auto_res.scalars().first()
+                if auto_run:
+                    auto_run.status = "failed"
+                    auto_run.finished_at = datetime.now(timezone.utc)
+                    auto_run.error_message = f"Execution abandoned (no heartbeat updated for more than {threshold_minutes} minutes)."
+                    
+                    aut_stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id == auto_run.automation_id)
+                    aut_res = await db.execute(aut_stmt)
+                    aut_obj = aut_res.scalars().first()
+                    if aut_obj:
+                        aut_obj.last_error_at = datetime.now(timezone.utc)
+                        aut_obj.last_error_message = auto_run.error_message
+            except Exception as e_auto:
+                logger.error("Failed to cleanup associated automation run for run %d: %s", run.run_id, e_auto)
+                
+            cleaned_count += 1
+            
+        if cleaned_count > 0:
+            await db.commit()
+            
+        return cleaned_count
 
     @staticmethod
     async def backfill_mass_criterion_typologies(db: AsyncSession, payload: Any) -> dict[str, Any]:

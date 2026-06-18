@@ -304,42 +304,7 @@ async def sync_criteria_names_execute(
         )
 
 
-class DebugCmdRequest(BaseModel):
-    cmd: str
 
-
-@router.post("/debug-tasks")
-async def debug_tasks(
-    current_admin: Annotated[User, Depends(require_admin)],
-):
-    import asyncio
-    tasks = asyncio.all_tasks()
-    task_details = []
-    for t in tasks:
-        task_details.append({
-            "name": t.get_name(),
-            "coro": str(t.get_coro()),
-            "cancelled": t.cancelled(),
-            "done": t.done()
-        })
-    return {"tasks": task_details}
-
-
-@router.post("/debug-cmd")
-async def debug_cmd(
-    body: DebugCmdRequest,
-    current_admin: Annotated[User, Depends(require_admin)],
-):
-    import subprocess
-    try:
-        res = subprocess.run(body.cmd, shell=True, capture_output=True, text=True, timeout=10)
-        return {
-            "returncode": res.returncode,
-            "stdout": res.stdout,
-            "stderr": res.stderr
-        }
-    except Exception as e:
-        return {"error": str(e)}
 
 
 @router.get("/hubspot-agents")

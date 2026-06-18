@@ -114,6 +114,8 @@ async def start_mass_evaluations_scheduler():
     while True:
         try:
             async with AsyncSession(engine) as db:
+                # Cleanup stale/abandoned runs first to release any concurrent locks
+                await MassEvaluationService.cleanup_stale_runs(db)
                 await MassEvaluationService.run_due_jobs(db)
             await asyncio.sleep(60)
         except asyncio.CancelledError:
