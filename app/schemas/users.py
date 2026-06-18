@@ -1,6 +1,32 @@
 """Pydantic schemas for User profile and auth payloads."""
-from typing import Optional
-from pydantic import BaseModel, field_validator, model_validator
+from typing import Optional, Any
+from pydantic import BaseModel, field_validator, model_validator, Field, AliasChoices
+
+
+def normalize_name_val(v):
+    if v is None:
+        return None
+    if isinstance(v, str):
+        v_clean = v.strip()
+        if v_clean == "":
+            return None
+        return v_clean
+    return v
+
+
+def check_name_conflict(data: Any) -> Any:
+    if isinstance(data, dict):
+        has_name = "name" in data
+        has_fullname = "full_name" in data
+        if has_name and has_fullname:
+            val_name = data["name"]
+            val_fullname = data["full_name"]
+            if normalize_name_val(val_name) != normalize_name_val(val_fullname):
+                raise ValueError("Los campos name y full_name contienen valores diferentes.")
+            else:
+                data = dict(data)
+                data.pop("full_name", None)
+    return data
 
 
 class UserBase(BaseModel):
@@ -62,15 +88,27 @@ class BootstrapPayload(BaseModel):
 
 class UserCreatePayload(BaseModel):
     """Payload for admin creating a new user."""
+    model_config = {"extra": "forbid"}
+
     email: str
     username: Optional[str] = None       # default: email.split("@")[0]
-    name: Optional[str] = None
+    name: Optional[str] = Field(default=None, validation_alias=AliasChoices("name", "full_name"))
     password: Optional[str] = None
     role: str = "agente"
     is_active: bool = True
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None
     must_reset_password: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_conflict(cls, data: Any) -> Any:
+        return check_name_conflict(data)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def clean_name(cls, v):
+        return normalize_name_val(v)
 
     @field_validator("hubspot_owner_id", mode="before")
     @classmethod
@@ -101,14 +139,26 @@ class UserCreatePayload(BaseModel):
 
 class UserUpdatePayload(BaseModel):
     """Payload for admin updating an existing user (all fields optional)."""
+    model_config = {"extra": "forbid"}
+
     email: Optional[str] = None
     username: Optional[str] = None
-    name: Optional[str] = None
+    name: Optional[str] = Field(default=None, validation_alias=AliasChoices("name", "full_name"))
     role: Optional[str] = None
     is_active: Optional[bool] = None
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None
     must_reset_password: Optional[bool] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_conflict(cls, data: Any) -> Any:
+        return check_name_conflict(data)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def clean_name(cls, v):
+        return normalize_name_val(v)
 
     @field_validator("hubspot_owner_id", mode="before")
     @classmethod
@@ -131,6 +181,7 @@ class UserUpdatePayload(BaseModel):
         if v not in allowed:
             raise ValueError(f"Rol invalido '{v}'. Permitidos: {allowed}")
         return v
+
 
 
 class UserAdminResetPasswordPayload(BaseModel):

@@ -349,6 +349,7 @@ async def create_user(
     new_user = User(
         username=username,
         email=body.email,
+        name=body.name,
         role=body.role,
         is_active=body.is_active,
         hubspot_owner_id=clean_hs_id,
@@ -481,11 +482,11 @@ async def update_user(
             changes["username"] = {"old": user.username, "new": username_clean}
             user.username = username_clean
 
-    if body.name is not None:
-        name_clean = body.name.strip()
-        if name_clean != user.name:
-            changes["name"] = {"old": user.name, "new": name_clean}
-            user.name = name_clean
+    if "name" in body.model_fields_set:
+        new_name = body.name
+        if new_name != user.name:
+            changes["name"] = {"old": user.name, "new": new_name}
+            user.name = new_name
 
     if body.role is not None and body.role != user.role:
         changes["role"] = {"old": user.role, "new": body.role}
