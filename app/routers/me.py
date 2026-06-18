@@ -206,34 +206,140 @@ async def reset_password(
 ):
     """
     Submit a password reset token to set a new password.
+    Supports both legacy User.reset_token and the new hashed PasswordResetToken.
     Clears must_reset_password flag and updates password_set_at.
     """
-    stmt = select(User).where(User.reset_token == payload.token)
-    res = await db.execute(stmt)
-    user = res.scalars().first()
+    import hashlib
     
-    if not user:
+    token = payload.token.strip()
+    
+    # 1. Try legacy User.reset_token first
+    stmt_legacy = select(User).where(User.reset_token == token)
+    res_legacy = await db.execute(stmt_legacy)
+    user = res_legacy.scalars().first()
+    
+    if user:
+        if not user.reset_token_expires_at or user.reset_token_expires_at < datetime.now(timezone.utc):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El token de restablecimiento ha expirado."
+            )
+        if not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El usuario asociado a este token está inactivo."
+            )
+            
+        user.password_hash = hash_password(payload.new_password)
+        user.password_plain_dev = None
+        user.must_reset_password = False
+        user.password_set_at = datetime.now(timezone.utc)
+        user.reset_token = None
+        user.reset_token_expires_at = None
+        
+        # Also revoke any tokens in PasswordResetToken for this user to be clean
+        stmt_other = select(PasswordResetToken).where(
+            PasswordResetToken.user_id == user.user_id,
+            PasswordResetToken.used_at == None,
+            PasswordResetToken.revoked_at == None
+        )
+        res_other = await db.execute(stmt_other)
+        other_tokens = res_other.scalars().all()
+        for ot in other_tokens:
+            ot.revoked_at = datetime.now(timezone.utc)
+            db.add(ot)
+            
+        db.add(user)
+        await db.commit()
+        logger.info("Successfully reset password for user %s via legacy token.", user.email)
+        return {
+            "ok": True,
+            "message": "Contraseña restablecida correctamente."
+        }
+        
+    # 2. Try hashed PasswordResetToken table
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    stmt_new = select(PasswordResetToken, User).join(
+        User, PasswordResetToken.user_id == User.user_id
+    ).where(PasswordResetToken.token_hash == token_hash)
+    
+    res_new = await db.execute(stmt_new)
+    row = res_new.first()
+    
+    if not row:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Token de restablecimiento inválido o expirado."
         )
         
-    if not user.reset_token_expires_at or user.reset_token_expires_at < datetime.now(timezone.utc):
+    token_record, user = row
+    
+    if token_record.used_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El token de restablecimiento ya ha sido utilizado."
+        )
+        
+    if token_record.revoked_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El token de restablecimiento ha sido revocado."
+        )
+        
+    if token_record.expires_at < datetime.now(timezone.utc):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="El token de restablecimiento ha expirado."
         )
         
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El usuario asociado a este token está inactivo."
+        )
+        
+    # Transactional update
+    now = datetime.now(timezone.utc)
+    
     user.password_hash = hash_password(payload.new_password)
     user.password_plain_dev = None
     user.must_reset_password = False
-    user.password_set_at = datetime.now(timezone.utc)
-    user.reset_token = None
-    user.reset_token_expires_at = None
+    user.password_set_at = now
+    db.add(user)
+    
+    token_record.used_at = now
+    db.add(token_record)
+    
+    # Revoke all other active reset tokens for this user
+    stmt_other = select(PasswordResetToken).where(
+        PasswordResetToken.user_id == user.user_id,
+        PasswordResetToken.id != token_record.id,
+        PasswordResetToken.used_at == None,
+        PasswordResetToken.revoked_at == None
+    )
+    res_other = await db.execute(stmt_other)
+    other_tokens = res_other.scalars().all()
+    for ot in other_tokens:
+        ot.revoked_at = now
+        db.add(ot)
+        
+    # Log Audit
+    admin_id = token_record.created_by_admin_id or user.user_id
+    audit = UserAudit(
+        admin_user_id=admin_id,
+        target_user_id=user.user_id,
+        action="password_reset_completed",
+        changes_json={
+            "description": "Restablecimiento de contraseña completado mediante enlace administrativo.",
+            "token_created_by_admin_id": token_record.created_by_admin_id,
+            "token_expires_at": token_record.expires_at.isoformat(),
+            "result": "success"
+        }
+    )
+    db.add(audit)
     
     await db.commit()
-    
-    logger.info("Successfully reset password for user %s via token.", user.email)
+    logger.info("Successfully reset password for user %s via administrative setup token.", user.email)
     return {
         "ok": True,
         "message": "Contraseña restablecida correctamente."

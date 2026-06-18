@@ -31,6 +31,8 @@ from app.schemas.users import (
     UserAdminResetPasswordPayload,
     AdminPasswordResetPayload,
     EligibleUserOut,
+    PasswordSetupLinkResponse,
+    UserPasswordSetupMode,
 )
 from app.utils.security import hash_password
 
@@ -335,16 +337,37 @@ async def create_user(
             detail=f"Ya existe un usuario con username '{username}'.",
         )
 
+    # Determine must_reset_password behavior based on password_setup and body.must_reset_password
+    must_reset_password = body.must_reset_password
+    if body.password_setup in {UserPasswordSetupMode.invite_link, UserPasswordSetupMode.temporary_password}:
+        must_reset_password = True
+
     token = None
-    if body.must_reset_password:
-        token = secrets.token_urlsafe(32)
-        expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
-        # Generate a secure placeholder hash since password_hash cannot be NULL
+    expires_at = None
+    pass_hash = None
+
+    if body.password_setup == UserPasswordSetupMode.invite_link:
+        # Generate a secure placeholder hash, but do NOT automatically generate a token yet
         temp_pass = secrets.token_urlsafe(32)
         pass_hash = hash_password(temp_pass)
+    elif body.password_setup == UserPasswordSetupMode.temporary_password:
+        # If password is provided, use it; otherwise generate a random temporary password
+        if body.password:
+            pass_hash = hash_password(body.password)
+        else:
+            temp_pass = secrets.token_urlsafe(12)
+            pass_hash = hash_password(temp_pass)
+        token = secrets.token_urlsafe(32)
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
     else:
-        pass_hash = hash_password(body.password)
-        expires_at = None
+        # Backward compatibility mode
+        if must_reset_password:
+            token = secrets.token_urlsafe(32)
+            expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+            temp_pass = secrets.token_urlsafe(32)
+            pass_hash = hash_password(temp_pass)
+        else:
+            pass_hash = hash_password(body.password)
 
     new_user = User(
         username=username,
@@ -356,7 +379,7 @@ async def create_user(
         agent_initials=body.agent_initials,
         password_hash=pass_hash,
         password_plain_dev=None,
-        must_reset_password=body.must_reset_password,
+        must_reset_password=must_reset_password,
         reset_token=token,
         reset_token_expires_at=expires_at,
     )
@@ -367,11 +390,11 @@ async def create_user(
     logger.info("Admin %s CREATED user %s (id=%s)", admin.email, new_user.email, new_user.user_id)
     
     resp = {"ok": True, "action": "created", "user": _user_to_full(new_user)}
-    if body.must_reset_password:
+    if token:
         from app.config import get_settings
         settings = get_settings()
         resp["reset_token"] = token
-        resp["reset_url"] = f"{settings.frontend_public_url}/reset-password?token={token}"
+        resp["reset_url"] = f"{settings.frontend_public_url.rstrip('/')}/reset-password?token={token}"
     return resp
 
 
@@ -792,4 +815,100 @@ async def generate_password_reset_link(
         "expires_at": expires_at.isoformat(),
         "reset_url": reset_url
     }
+
+
+@router.post(
+    "/{user_id}/password-setup-link",
+    response_model=PasswordSetupLinkResponse,
+    responses={
+        200: {"description": "Enlace de restablecimiento generado con éxito"},
+        401: {"description": "No autenticado"},
+        403: {"description": "No autorizado (requiere rol de administrador)"},
+        404: {"description": "Usuario no encontrado"},
+        409: {"description": "Conflicto o usuario inactivo"},
+        422: {"description": "Error de validación"}
+    }
+)
+async def generate_password_setup_link(
+    user_id: int,
+    admin: Annotated[User, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)]
+):
+    """
+    Generate a secure password setup/reset link for a user.
+    Only accessible to administrators.
+    Invalidates any active reset tokens for this user.
+    """
+    import hashlib
+    
+    # 1. Fetch user and verify active
+    stmt = select(User).where(User.user_id == user_id)
+    res = await db.execute(stmt)
+    user = res.scalars().first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Usuario {user_id} no encontrado."
+        )
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No se puede generar un enlace para un usuario inactivo."
+        )
+        
+    # 2. Invalidate previous active tokens
+    stmt_tokens = select(PasswordResetToken).where(
+        PasswordResetToken.user_id == user_id,
+        PasswordResetToken.used_at == None,
+        PasswordResetToken.revoked_at == None,
+        PasswordResetToken.expires_at > datetime.now(timezone.utc)
+    )
+    active_tokens = (await db.execute(stmt_tokens)).scalars().all()
+    for t in active_tokens:
+        t.revoked_at = datetime.now(timezone.utc)
+        db.add(t)
+        
+    # 3. Generate secure token
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+    
+    # 4. Save token to db
+    new_token_record = PasswordResetToken(
+        user_id=user_id,
+        token_hash=token_hash,
+        expires_at=expires_at,
+        created_by_admin_id=admin.user_id
+    )
+    db.add(new_token_record)
+    
+    # 5. Force must_reset_password = True on user
+    user.must_reset_password = True
+    db.add(user)
+    
+    # 6. Log audit
+    audit = UserAudit(
+        admin_user_id=admin.user_id,
+        target_user_id=user_id,
+        action="password_reset_link_created",
+        changes_json={
+            "description": "Enlace de configuración de contraseña administrativa generado.",
+            "expires_at": expires_at.isoformat()
+        }
+    )
+    db.add(audit)
+    
+    await db.commit()
+    
+    # 7. Get settings and build URL
+    from app.config import get_settings
+    settings = get_settings()
+    url = f"{settings.frontend_public_url.rstrip('/')}/reset-password?token={token}"
+    
+    logger.info("Admin %s generated password setup link for user %s (id=%s)", admin.email, user.email, user_id)
+    
+    return PasswordSetupLinkResponse(
+        url=url,
+        expires_at=expires_at
+    )
 

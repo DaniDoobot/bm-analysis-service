@@ -86,6 +86,17 @@ class BootstrapPayload(BaseModel):
 
 # ── Admin CRUD ────────────────────────────────────────────────────────────────
 
+from enum import Enum
+from datetime import datetime
+
+class UserPasswordSetupMode(str, Enum):
+    invite_link = "invite_link"
+    temporary_password = "temporary_password"
+
+class PasswordSetupLinkResponse(BaseModel):
+    url: str
+    expires_at: datetime
+
 class UserCreatePayload(BaseModel):
     """Payload for admin creating a new user."""
     model_config = {"extra": "forbid"}
@@ -99,6 +110,7 @@ class UserCreatePayload(BaseModel):
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None
     must_reset_password: bool = False
+    password_setup: Optional[UserPasswordSetupMode] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -132,8 +144,16 @@ class UserCreatePayload(BaseModel):
 
     @model_validator(mode="after")
     def validate_password_requirement(self) -> "UserCreatePayload":
-        if not self.must_reset_password and not self.password:
-            raise ValueError("Se requiere 'password' cuando 'must_reset_password' es False.")
+        is_invite = (self.password_setup == UserPasswordSetupMode.invite_link)
+        is_temp = (self.password_setup == UserPasswordSetupMode.temporary_password)
+        
+        if is_invite or is_temp:
+            # Under explicit password_setup modes, password is not strictly required during creation
+            pass
+        else:
+            # Backward compatibility
+            if not self.must_reset_password and not self.password:
+                raise ValueError("Se requiere 'password' cuando 'must_reset_password' es False.")
         return self
 
 
