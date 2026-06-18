@@ -3,6 +3,7 @@ import logging
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_engine, Base
+import app.models
 from app.models.prompts import PromptBaseStructure, PromptVersion, Prompt
 from app.models.services import Service
 from app.models.typologies import Typology

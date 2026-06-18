@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_db, get_current_user
-from app.models.users import User
+from app.models.users import User, PasswordResetToken, UserAudit
 from app.schemas.users import (
     UserOut,
     LoginPayload,
@@ -18,6 +18,7 @@ from app.schemas.users import (
     MePasswordUpdatePayload,
     RequestPasswordResetPayload,
     ResetPasswordPayload,
+    PasswordResetConfirmPayload,
 )
 from app.utils.security import (
     verify_password,
@@ -188,12 +189,13 @@ async def request_password_reset(
     
     logger.info("Generated reset token for user: %s", user.email)
     
+    settings = get_settings()
     # We return the token and url in the JSON so that Lovable/developers can access it manually.
     return {
         "ok": True,
         "message": msg,
         "reset_token": token,
-        "reset_url": f"https://speechbm.doobot.ai/reset-password?token={token}"
+        "reset_url": f"{settings.frontend_public_url}/reset-password?token={token}"
     }
 
 
@@ -232,6 +234,181 @@ async def reset_password(
     await db.commit()
     
     logger.info("Successfully reset password for user %s via token.", user.email)
+    return {
+        "ok": True,
+        "message": "Contraseña restablecida correctamente."
+    }
+
+
+@router.get("/auth/password-reset/validate")
+async def validate_password_reset_token(
+    token: str = Query(...),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Validate a password reset token.
+    Checks if token exists (via SHA256 hash), is not used, is not revoked,
+    has not expired, and the corresponding user is active.
+    Returns basic metadata.
+    """
+    import hashlib
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    
+    stmt = select(PasswordResetToken, User).join(
+        User, PasswordResetToken.user_id == User.user_id
+    ).where(PasswordResetToken.token_hash == token_hash)
+    
+    res = await db.execute(stmt)
+    row = res.first()
+    
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Token de restablecimiento inválido o inexistente."
+        )
+        
+    token_record, user = row
+    
+    if token_record.used_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El token de restablecimiento ya ha sido utilizado."
+        )
+        
+    if token_record.revoked_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El token de restablecimiento ha sido revocado."
+        )
+        
+    if token_record.expires_at < datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El token de restablecimiento ha expirado."
+        )
+        
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El usuario asociado a este token está inactivo."
+        )
+        
+    return {
+        "valid": True,
+        "expires_at": token_record.expires_at.isoformat(),
+        "user_display": user.name or user.username
+    }
+
+
+@router.post("/auth/password-reset/confirm")
+async def confirm_password_reset(
+    payload: PasswordResetConfirmPayload,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Confirm password reset and set a new password.
+    Updates the password hash, marks the token as used, clears must_reset_password,
+    and invalidates any other active tokens for the user, all in a single transaction.
+    """
+    import hashlib
+    
+    if payload.new_password != payload.confirm_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La nueva contraseña y su confirmación no coinciden."
+        )
+        
+    if len(payload.new_password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La nueva contraseña debe tener al menos 8 caracteres."
+        )
+        
+    token_hash = hashlib.sha256(payload.token.encode("utf-8")).hexdigest()
+    
+    # We query the token and user in a transaction
+    stmt = select(PasswordResetToken, User).join(
+        User, PasswordResetToken.user_id == User.user_id
+    ).where(PasswordResetToken.token_hash == token_hash)
+    
+    res = await db.execute(stmt)
+    row = res.first()
+    
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Token de restablecimiento inválido o inexistente."
+        )
+        
+    token_record, user = row
+    
+    if token_record.used_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El token de restablecimiento ya ha sido utilizado."
+        )
+        
+    if token_record.revoked_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El token de restablecimiento ha sido revocado."
+        )
+        
+    if token_record.expires_at < datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El token de restablecimiento ha expirado."
+        )
+        
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El usuario asociado a este token está inactivo."
+        )
+        
+    # Transactional update
+    now = datetime.now(timezone.utc)
+    
+    user.password_hash = hash_password(payload.new_password)
+    user.password_plain_dev = None
+    user.must_reset_password = False
+    user.password_set_at = now
+    db.add(user)
+    
+    token_record.used_at = now
+    db.add(token_record)
+    
+    # Revoke all other active reset tokens for this user
+    stmt_other = select(PasswordResetToken).where(
+        PasswordResetToken.user_id == user.user_id,
+        PasswordResetToken.id != token_record.id,
+        PasswordResetToken.used_at == None,
+        PasswordResetToken.revoked_at == None
+    )
+    res_other = await db.execute(stmt_other)
+    other_tokens = res_other.scalars().all()
+    for ot in other_tokens:
+        ot.revoked_at = now
+        db.add(ot)
+        
+    # Log Audit
+    admin_id = token_record.created_by_admin_id or user.user_id
+    audit = UserAudit(
+        admin_user_id=admin_id,
+        target_user_id=user.user_id,
+        action="password_reset_completed",
+        changes_json={
+            "description": "Restablecimiento de contraseña completado mediante enlace.",
+            "token_created_by_admin_id": token_record.created_by_admin_id,
+            "token_expires_at": token_record.expires_at.isoformat(),
+            "result": "success"
+        }
+    )
+    db.add(audit)
+    
+    await db.commit()
+    
+    logger.info("User %s successfully reset password via secure token.", user.email)
     return {
         "ok": True,
         "message": "Contraseña restablecida correctamente."

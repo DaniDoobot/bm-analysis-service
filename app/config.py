@@ -18,6 +18,7 @@ class Settings(BaseSettings):
 
     # ── Database ──────────────────────────────────────────────────────────────
     database_url: str = ""
+    frontend_public_url: str = "https://speechbm.doobot.ai"
 
     # ── Azure OpenAI ──────────────────────────────────────────────────────────
     azure_openai_api_version: str = "2025-01-01-preview"

@@ -243,4 +243,11 @@ class EligibleUserOut(BaseModel):
     role: str
 
 
+class PasswordResetConfirmPayload(BaseModel):
+    token: str
+    new_password: str
+    confirm_password: str
+
+
+
 

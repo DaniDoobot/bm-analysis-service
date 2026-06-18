@@ -12,7 +12,7 @@ from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_db, get_current_user, require_admin
-from app.models.users import User, UserAudit
+from app.models.users import User, UserAudit, PasswordResetToken
 from app.models.prompts import Prompt, PromptBaseStructure, StructurePermission
 from app.models.personalized_training import (
     TrainingAgentSetting,
@@ -368,8 +368,10 @@ async def create_user(
     
     resp = {"ok": True, "action": "created", "user": _user_to_full(new_user)}
     if body.must_reset_password:
+        from app.config import get_settings
+        settings = get_settings()
         resp["reset_token"] = token
-        resp["reset_url"] = f"https://speechbm.doobot.ai/reset-password?token={token}"
+        resp["reset_url"] = f"{settings.frontend_public_url}/reset-password?token={token}"
     return resp
 
 
@@ -702,8 +704,92 @@ async def force_password_reset(
     await db.commit()
     
     logger.info("Admin %s FORCED password reset for user %s (id=%s)", admin.email, user.email, user.user_id)
+    from app.config import get_settings
+    settings = get_settings()
     return {
         "ok": True,
         "reset_token": token,
-        "reset_url": f"https://speechbm.doobot.ai/reset-password?token={token}"
+        "reset_url": f"{settings.frontend_public_url}/reset-password?token={token}"
     }
+
+
+@router.post("/{user_id}/password-reset-link")
+async def generate_password_reset_link(
+    user_id: int,
+    admin: Annotated[User, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)]
+):
+    """
+    Generate a secure password reset link for a user.
+    Only accessible to administrators.
+    Invalidates any active tokens for this user.
+    """
+    import hashlib
+    
+    # 1. Fetch user and verify active
+    stmt = select(User).where(User.user_id == user_id)
+    res = await db.execute(stmt)
+    user = res.scalars().first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Usuario {user_id} no encontrado.")
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No se puede generar un enlace para un usuario inactivo.")
+        
+    # 2. Invalidate previous active tokens
+    stmt_tokens = select(PasswordResetToken).where(
+        PasswordResetToken.user_id == user_id,
+        PasswordResetToken.used_at == None,
+        PasswordResetToken.revoked_at == None,
+        PasswordResetToken.expires_at > datetime.now(timezone.utc)
+    )
+    active_tokens = (await db.execute(stmt_tokens)).scalars().all()
+    for t in active_tokens:
+        t.revoked_at = datetime.now(timezone.utc)
+        db.add(t)
+        
+    # 3. Generate token
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+    
+    # 4. Save new token
+    new_token_record = PasswordResetToken(
+        user_id=user_id,
+        token_hash=token_hash,
+        expires_at=expires_at,
+        created_by_admin_id=admin.user_id
+    )
+    db.add(new_token_record)
+    
+    # 5. Set user must_reset_password = True
+    user.must_reset_password = True
+    db.add(user)
+    
+    # 6. Log audit
+    audit = UserAudit(
+        admin_user_id=admin.user_id,
+        target_user_id=user_id,
+        action="password_reset_link_created",
+        changes_json={
+            "description": "Enlace de restablecimiento de contraseña generado.",
+            "expires_at": expires_at.isoformat()
+        }
+    )
+    db.add(audit)
+    
+    await db.commit()
+    
+    # 7. Get settings and return URL
+    from app.config import get_settings
+    settings = get_settings()
+    reset_url = f"{settings.frontend_public_url}/reset-password?token={token}"
+    
+    logger.info("Admin %s generated password reset link for user %s", admin.email, user.email)
+    
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "expires_at": expires_at.isoformat(),
+        "reset_url": reset_url
+    }
+

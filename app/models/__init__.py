@@ -6,7 +6,7 @@ from app.models.prompts import Prompt, PromptVersion, PromptBaseStructure, Struc
 from app.models.mass_evaluations import MassEvaluationJob, MassEvaluationRun, MassEvaluationResult, MassEvaluationCriterionResult
 from app.models.services import Service
 from app.models.typologies import Typology
-from app.models.users import User, UserAudit
+from app.models.users import User, UserAudit, PasswordResetToken
 from app.models.personalized_training import (
     TrainingAgentSetting,
     TrainingRun,
@@ -41,6 +41,7 @@ __all__ = [
     "Typology",
     "User",
     "UserAudit",
+    "PasswordResetToken",
     "TrainingAgentSetting",
     "TrainingRun",
     "TrainingAgentReport",
