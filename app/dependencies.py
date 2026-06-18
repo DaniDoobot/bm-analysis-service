@@ -57,6 +57,11 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Usuario inactivo."
         )
+    if "email" in payload and payload["email"].strip().lower() != user.email.lower():
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="La sesión ha expirado porque se ha cambiado el correo electrónico."
+        )
     return user
 
 

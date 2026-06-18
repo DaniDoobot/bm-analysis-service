@@ -110,6 +110,43 @@ async def init_db():
             await conn.run_sync(Base.metadata.create_all)
             logger.info("Database tables initialized successfully.")
 
+        # Early dynamic column migration for bm_users to avoid ProgrammingError on User model queries
+        async with engine.begin() as conn:
+            for col_name, col_type in [
+                ("name", "TEXT NULL"),
+                ("hubspot_owner_id", "TEXT NULL"),
+                ("agent_initials", "TEXT NULL"),
+                ("must_reset_password", "BOOLEAN DEFAULT FALSE NOT NULL"),
+                ("password_set_at", "TIMESTAMPTZ NULL"),
+                ("reset_token", "TEXT NULL"),
+                ("reset_token_expires_at", "TIMESTAMPTZ NULL"),
+                ("last_login_at", "TIMESTAMPTZ NULL"),
+            ]:
+                res = await conn.execute(
+                    text(f"""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.columns 
+                            WHERE table_schema = 'public' 
+                              AND table_name = 'bm_users' 
+                              AND column_name = '{col_name}'
+                        );
+                    """)
+                )
+                col_exists = res.scalar()
+                if not col_exists:
+                    logger.info("Adding column '%s' to 'bm_users' table...", col_name)
+                    await conn.execute(
+                        text(f"ALTER TABLE bm_users ADD COLUMN {col_name} {col_type};")
+                    )
+                    if col_name == "hubspot_owner_id":
+                        try:
+                            await conn.execute(text("ALTER TABLE bm_users ADD CONSTRAINT uq_bm_users_hubspot_owner_id UNIQUE (hubspot_owner_id);"))
+                        except Exception as e_uq:
+                            logger.warning("Could not add unique constraint to hubspot_owner_id: %s", e_uq)
+                    logger.info("Column '%s' added successfully to 'bm_users'.", col_name)
+                else:
+                    logger.info("Column '%s' already exists on 'bm_users' table.", col_name)
+
         # 1.2. Seed default developer user if bm_users is empty
         from app.models.users import User
         from app.utils.security import hash_password
@@ -143,6 +180,33 @@ async def init_db():
                 logger.info("Cleared all plain-text dev passwords from bm_users successfully.")
             except Exception as e:
                 logger.error("Failed to clear plain-text dev passwords: %s", e)
+
+        # 1.2.b-2 Ensure partial unique index on bm_users (hubspot_owner_id) WHERE hubspot_owner_id IS NOT NULL
+        async with AsyncSession(engine) as session:
+            try:
+                res_dups = await session.execute(text("""
+                    SELECT hubspot_owner_id, COUNT(*), ARRAY_AGG(user_id) as user_ids, ARRAY_AGG(email) as emails
+                    FROM bm_users
+                    WHERE hubspot_owner_id IS NOT NULL
+                    GROUP BY hubspot_owner_id
+                    HAVING COUNT(*) > 1;
+                """))
+                dups = res_dups.all()
+                if dups:
+                    logger.warning("DUPLICATE HUBSPOT OWNER IDS FOUND IN bm_users! Partial unique index cannot be created:")
+                    for row in dups:
+                        logger.warning("  hubspot_owner_id: '%s', count: %s, user_ids: %s, emails: %s", row[0], row[1], row[2], row[3])
+                else:
+                    logger.info("No duplicate hubspot_owner_id values found in bm_users. Applying uniqueness index...")
+                    async with engine.begin() as conn:
+                        await conn.execute(text("""
+                            CREATE UNIQUE INDEX IF NOT EXISTS uq_idx_bm_users_hubspot_owner_id 
+                            ON bm_users (hubspot_owner_id) 
+                            WHERE hubspot_owner_id IS NOT NULL;
+                        """))
+                    logger.info("Unique index uq_idx_bm_users_hubspot_owner_id ensured successfully.")
+            except Exception as e:
+                logger.error("Failed to check or apply hubspot_owner_id uniqueness migration: %s", e)
 
         # 1.2.c Early dynamic column migration for bm_training_agent_settings (required before query/seeding)
         async with engine.begin() as conn:
@@ -206,41 +270,7 @@ async def init_db():
             except Exception as e:
                 logger.error("Failed to seed default training agents: %s", e)
 
-        # 1.4. Ensure columns exist on bm_users table dynamically and non-destructively
-        async with engine.begin() as conn:
-            for col_name, col_type in [
-                ("hubspot_owner_id", "TEXT NULL"),
-                ("agent_initials", "TEXT NULL"),
-                ("must_reset_password", "BOOLEAN DEFAULT FALSE NOT NULL"),
-                ("password_set_at", "TIMESTAMPTZ NULL"),
-                ("reset_token", "TEXT NULL"),
-                ("reset_token_expires_at", "TIMESTAMPTZ NULL"),
-                ("last_login_at", "TIMESTAMPTZ NULL"),
-            ]:
-                res = await conn.execute(
-                    text(f"""
-                        SELECT EXISTS (
-                            SELECT FROM information_schema.columns 
-                            WHERE table_schema = 'public' 
-                              AND table_name = 'bm_users' 
-                              AND column_name = '{col_name}'
-                        );
-                    """)
-                )
-                col_exists = res.scalar()
-                if not col_exists:
-                    logger.info("Adding column '%s' to 'bm_users' table...", col_name)
-                    await conn.execute(
-                        text(f"ALTER TABLE bm_users ADD COLUMN {col_name} {col_type};")
-                    )
-                    if col_name == "hubspot_owner_id":
-                        try:
-                            await conn.execute(text("ALTER TABLE bm_users ADD CONSTRAINT uq_bm_users_hubspot_owner_id UNIQUE (hubspot_owner_id);"))
-                        except Exception as e_uq:
-                            logger.warning("Could not add unique constraint to hubspot_owner_id: %s", e_uq)
-                    logger.info("Column '%s' added successfully to 'bm_users'.", col_name)
-                else:
-                    logger.info("Column '%s' already exists on 'bm_users' table.", col_name)
+        # 1.4. (bm_users columns ensured early in init_db)
 
         # 1.5. Ensure columns exist on bm_prompts table dynamically and non-destructively
         async with engine.begin() as conn:

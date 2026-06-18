@@ -56,6 +56,13 @@ class GeneralObjectiveDetail(BaseModel):
     rationale: str
     expected_behavior: str
     success_indicators: List[str]
+    status: Optional[str] = None
+    is_evaluated: Optional[bool] = False
+    score: Optional[float] = None
+    base_score: Optional[float] = None
+    improvement_delta: Optional[float] = None
+    justification: Optional[str] = None
+    evaluated_at: Optional[datetime] = None
 
 
 class SpecificObjectiveDetail(BaseModel):
@@ -64,6 +71,13 @@ class SpecificObjectiveDetail(BaseModel):
     related_criteria: List[str]
     specific_behavior_to_improve: str
     success_indicators: List[str]
+    status: Optional[str] = None
+    is_evaluated: Optional[bool] = False
+    score: Optional[float] = None
+    base_score: Optional[float] = None
+    improvement_delta: Optional[float] = None
+    justification: Optional[str] = None
+    evaluated_at: Optional[datetime] = None
 
 
 # ── Simulation Prompts & Completion Schemas ──────────────────────────────────
@@ -105,6 +119,9 @@ class CompletionStatusOut(BaseModel):
     evaluation_id: Optional[int] = None
     call_session_id: Optional[int] = None
     title: Optional[str] = None
+    strengths: Optional[List[str]] = None
+    weaknesses: Optional[List[str]] = None
+    result_json: Optional[dict[str, Any]] = None
     created_at: datetime
 
     class Config:

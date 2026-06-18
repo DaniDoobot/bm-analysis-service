@@ -439,6 +439,324 @@ class PersonalizedTrainingService:
         }
 
     @staticmethod
+    def _extract_objective_evaluations(r: TrainingAgentReport) -> List[dict]:
+        if not r or not r.final_report_json or not isinstance(r.final_report_json, dict):
+            return []
+        for key in ["objectives_status", "objectives", "objectives_evaluations", "evaluations_objectives"]:
+            val = r.final_report_json.get(key)
+            if isinstance(val, list):
+                return val
+        return []
+
+    @staticmethod
+    def _extract_simulation_evaluation(c: TrainingCompletionStatus) -> Optional[Any]:
+        if not c:
+            return None
+        if hasattr(c, "evaluation") and c.evaluation is not None:
+            return c.evaluation
+        if isinstance(c, dict):
+            return c.get("evaluation") or c.get("result_json")
+        return None
+
+    @staticmethod
+    def _match_objective(obj_item: dict, obj_evals: List[dict], obj_type: str = None) -> Optional[dict]:
+        if not obj_item or not obj_evals:
+            return None
+
+        # Priority 1: Persistent identifier (objective_id, id)
+        for p_key in ["objective_id", "id"]:
+            obj_id = obj_item.get(p_key)
+            if obj_id is not None:
+                for ev in obj_evals:
+                    if ev.get(p_key) == obj_id:
+                        return ev
+
+        # Priority 2: Functional key or code (key, code, functional_id)
+        for f_key in ["key", "code", "functional_id"]:
+            obj_code = obj_item.get(f_key)
+            if obj_code is not None:
+                for ev in obj_evals:
+                    if ev.get(f_key) == obj_code:
+                        return ev
+
+        import re
+        import unicodedata
+
+        def normalize_text(text: str) -> str:
+            if not text:
+                return ""
+            text = str(text).lower()
+            text = "".join(
+                c for c in unicodedata.normalize('NFKD', text)
+                if not unicodedata.combining(c)
+            )
+            text = re.sub(r'[^\w\s]', '', text)
+            text = re.sub(r'^(objetivo\s+(general|especifico|específico)\s*\d*\s*:*|objetivo\s*\d*\s*:*)', '', text)
+            return "".join(text.split())
+
+        title_target = normalize_text(obj_item.get("title") or obj_item.get("titulo"))
+        desc_target = normalize_text(obj_item.get("description") or obj_item.get("descripcion"))
+
+        def get_norm_type(t):
+            if not t:
+                return ""
+            t_str = str(t).lower()
+            if "general" in t_str:
+                return "general"
+            if "especif" in t_str or "específ" in t_str:
+                return "specific"
+            return t_str
+
+        target_type = get_norm_type(obj_type or obj_item.get("type") or obj_item.get("tipo"))
+
+        def type_matches(ev):
+            ev_type = get_norm_type(ev.get("type") or ev.get("tipo"))
+            if not target_type or not ev_type:
+                return True
+            return target_type == ev_type
+
+        # Priority 3: Objective type + normalized title
+        if title_target and target_type:
+            for ev in obj_evals:
+                ev_title = normalize_text(ev.get("title") or ev.get("titulo"))
+                if ev_title == title_target and type_matches(ev):
+                    return ev
+
+        # Priority 4: Objective type + normalized description
+        if desc_target and target_type:
+            for ev in obj_evals:
+                ev_desc = normalize_text(ev.get("description") or ev.get("descripcion"))
+                if ev_desc == desc_target and type_matches(ev):
+                    return ev
+
+        # Priority 5: Normalized title
+        if title_target:
+            for ev in obj_evals:
+                ev_title = normalize_text(ev.get("title") or ev.get("titulo"))
+                if ev_title == title_target:
+                    return ev
+
+        # Priority 6: Normalized description
+        if desc_target:
+            for ev in obj_evals:
+                ev_desc = normalize_text(ev.get("description") or ev.get("descripcion"))
+                if ev_desc == desc_target:
+                    return ev
+
+        return None
+
+    @staticmethod
+    def _match_objectives_list(objectives_list: List[dict], obj_evals: List[dict], obj_type: str) -> List[Optional[dict]]:
+        if not objectives_list:
+            return []
+        matched_results = [None] * len(objectives_list)
+        used_eval_indices = set()
+
+        for i, obj in enumerate(objectives_list):
+            ev = PersonalizedTrainingService._match_objective(obj, obj_evals, obj_type)
+            if ev in obj_evals:
+                idx = obj_evals.index(ev)
+                matched_results[i] = ev
+                used_eval_indices.add(idx)
+
+        def get_norm_type(t):
+            if not t:
+                return ""
+            t_str = str(t).lower()
+            if "general" in t_str:
+                return "general"
+            if "especif" in t_str or "específ" in t_str:
+                return "specific"
+            return t_str
+
+        type_evals_with_indices = [
+            (idx, ev) for idx, ev in enumerate(obj_evals)
+            if get_norm_type(ev.get("type") or ev.get("tipo")) == obj_type
+        ]
+
+        if len(objectives_list) == len(type_evals_with_indices):
+            for i, obj in enumerate(objectives_list):
+                if matched_results[i] is None:
+                    idx, ev = type_evals_with_indices[i]
+                    if idx not in used_eval_indices:
+                        matched_results[i] = ev
+                        used_eval_indices.add(idx)
+
+        return matched_results
+
+    @staticmethod
+    def _extract_strengths_weaknesses(res_json: dict) -> tuple[List[str], List[str]]:
+        strengths = []
+        weaknesses = []
+        
+        if not res_json or not isinstance(res_json, dict):
+            return strengths, weaknesses
+            
+        inner_res = res_json.get("result_json") if isinstance(res_json, dict) else None
+        
+        search_dicts = []
+        if isinstance(inner_res, dict):
+            search_dicts.append(inner_res)
+        if isinstance(res_json, dict):
+            search_dicts.append(res_json)
+            
+        for d in search_dicts:
+            for key in ["objectives_met", "objetivos_cumplidos", "strengths", "fortalezas", "puntos_fuertes"]:
+                if key in d and isinstance(d[key], list):
+                    strengths = [str(x) for x in d[key]]
+                    break
+            if strengths:
+                break
+                
+        for d in search_dicts:
+            for key in ["areas_for_improvement", "objetivos_no_cumplidos", "weaknesses", "areas_mejora", "weakness", "areas_de_mejora", "debilidades"]:
+                if key in d and isinstance(d[key], list):
+                    weaknesses = [str(x) for x in d[key]]
+                    break
+            if weaknesses:
+                break
+                
+        if not strengths or not weaknesses:
+            criteria_dict = {}
+            if isinstance(inner_res, dict):
+                criteria_dict = inner_res
+            else:
+                criteria_dict = {k: v for k, v in res_json.items() if k not in ["score", "feedback", "transcription", "is_valid_roleplay", "result_json"]}
+                
+            fallback_strengths = []
+            fallback_weaknesses = []
+            
+            prettify_map = {
+                "agendar_cita": "Agendar cita",
+                "manejo_objeciones": "Manejo de objeciones",
+                "objetivos_cumplidos": "Objetivos cumplidos",
+                "claridad_comunicacion": "Claridad de comunicación",
+                "explicacion_servicios": "Explicación de servicios",
+                "empathy_shown": "Empatía",
+                "objectives_met": "Objetivos cumplidos",
+                "call_flow_followed": "Flujo de llamada",
+                "information_gathered": "Recopilación de información",
+                "next_steps_explained": "Explicación de siguientes pasos"
+            }
+            
+            for k, v in criteria_dict.items():
+                if isinstance(v, bool):
+                    label = prettify_map.get(k, k.replace("_", " ").capitalize())
+                    if v:
+                        fallback_strengths.append(label)
+                    else:
+                        fallback_weaknesses.append(label)
+                elif isinstance(v, str) and v.lower() in ["true", "yes", "completed"]:
+                    label = prettify_map.get(k, k.replace("_", " ").capitalize())
+                    fallback_strengths.append(label)
+                elif isinstance(v, str) and v.lower() in ["false", "no", "failed"]:
+                    label = prettify_map.get(k, k.replace("_", " ").capitalize())
+                    fallback_weaknesses.append(label)
+                    
+            if not strengths:
+                strengths = fallback_strengths
+            if not weaknesses:
+                weaknesses = fallback_weaknesses
+                
+        return strengths, weaknesses
+
+    @staticmethod
+    def _build_simulation_slots(prompts: list, completions: list) -> list:
+        slots = []
+        if not prompts:
+            return slots
+            
+        used_completion_ids = set()
+        
+        for p in prompts:
+            matched_c = None
+            
+            # Priority 1: Match by simulation_prompt_id
+            for c in completions:
+                if c.completion_id not in used_completion_ids:
+                    c_prompt_id = getattr(c, "simulation_prompt_id", None)
+                    if c_prompt_id is not None and c_prompt_id == p.simulation_prompt_id:
+                        matched_c = c
+                        break
+                        
+            # Priority 2: ID equivalent
+            if not matched_c:
+                for c in completions:
+                    if c.completion_id not in used_completion_ids:
+                        c_prompt = getattr(c, "prompt", None)
+                        if c_prompt is not None and getattr(c_prompt, "simulation_prompt_id", None) == p.simulation_prompt_id:
+                            matched_c = c
+                            break
+                        c_session = getattr(c, "call_session", None)
+                        if c_session is not None and getattr(c_session, "conversation_id", None) == p.simulation_prompt_id:
+                            matched_c = c
+                            break
+                        c_eval = getattr(c, "evaluation", None)
+                        if c_eval is not None and getattr(c_eval, "conversation_id", None) == p.simulation_prompt_id:
+                            matched_c = c
+                            break
+
+            # Priority 3: prompt_number normalized to integer
+            if not matched_c:
+                for c in completions:
+                    if c.completion_id not in used_completion_ids:
+                        c_num = None
+                        c_prompt = getattr(c, "prompt", None)
+                        if c_prompt is not None:
+                            c_num = getattr(c_prompt, "prompt_number", None)
+                        if c_num is None:
+                            c_num = getattr(c, "prompt_number", None)
+                        
+                        if c_num is not None:
+                            try:
+                                if int(c_num) == int(p.prompt_number):
+                                    matched_c = c
+                                    break
+                            except (ValueError, TypeError):
+                                pass
+
+            # Priority 4: Persistent relation
+            if not matched_c:
+                for c in completions:
+                    if c.completion_id not in used_completion_ids:
+                        if getattr(c, "prompt", None) is p or getattr(p, "completion_status", None) is c:
+                            matched_c = c
+                            break
+
+            if matched_c:
+                used_completion_ids.add(matched_c.completion_id)
+                slot = PersonalizedTrainingService._map_completion_to_dict(matched_c)
+                slot["prompt_number"] = p.prompt_number
+                slot["title"] = p.title or slot.get("title") or f"Simulación {p.prompt_number}"
+            else:
+                slot = {
+                    "completion_id": -p.simulation_prompt_id,
+                    "training_report_id": p.training_report_id,
+                    "simulation_prompt_id": p.simulation_prompt_id,
+                    "hubspot_owner_id": p.hubspot_owner_id,
+                    "status": "pending",
+                    "completed_at": None,
+                    "training_call_id": None,
+                    "training_phone_number": None,
+                    "notes": None,
+                    "score": None,
+                    "prompt_number": p.prompt_number,
+                    "feedback": None,
+                    "criteria": None,
+                    "transcription_turns": None,
+                    "evaluation_id": None,
+                    "call_session_id": None,
+                    "title": p.title or f"Simulación {p.prompt_number}",
+                    "strengths": None,
+                    "weaknesses": None,
+                    "result_json": None,
+                    "created_at": p.created_at,
+                }
+            slots.append(slot)
+            
+        return slots
+
+    @staticmethod
     def _map_completion_to_dict(c: TrainingCompletionStatus) -> Optional[dict]:
         if not c:
             return None
@@ -449,33 +767,45 @@ class PersonalizedTrainingService:
         feedback = None
         criteria = None
         transcription_turns = None
+        strengths = None
+        weaknesses = None
+        result_json_extracted = None
         
         # Safely extract from loaded relationships
         try:
-            if hasattr(c, "prompt") and c.prompt is not None:
-                prompt_number = c.prompt.prompt_number
-                title = c.prompt.title
+            c_prompt = getattr(c, "prompt", None)
+            if c_prompt is not None:
+                prompt_number = getattr(c_prompt, "prompt_number", None)
+                title = getattr(c_prompt, "title", None)
         except Exception:
             pass
             
+        evaluation = None
         try:
-            if hasattr(c, "evaluation") and c.evaluation is not None:
-                score = float(c.evaluation.score) if c.evaluation.score is not None else None
-                feedback = c.evaluation.feedback
+            evaluation = PersonalizedTrainingService._extract_simulation_evaluation(c)
+            if evaluation is not None:
+                score = float(getattr(evaluation, "score", None)) if getattr(evaluation, "score", None) is not None else None
+                feedback = getattr(evaluation, "feedback", None)
+                result_json_extracted = getattr(evaluation, "result_json", None)
                 
                 # Extract criteria
-                if c.evaluation.result_json:
-                    raw = c.evaluation.result_json
+                if result_json_extracted:
+                    raw = result_json_extracted
                     inner = raw.get("result_json") if isinstance(raw, dict) else None
                     if isinstance(inner, dict):
                         criteria = inner
                     elif isinstance(raw, dict):
                         criteria = {k: v for k, v in raw.items() if isinstance(v, bool)}
                 
+                # Extract strengths & weaknesses from evaluation result_json
+                if result_json_extracted:
+                    strengths, weaknesses = PersonalizedTrainingService._extract_strengths_weaknesses(result_json_extracted)
+
                 # Extract transcription turns mapped to agente/paciente
-                if c.evaluation.transcription:
+                transcription = getattr(evaluation, "transcription", None)
+                if transcription:
                     turns = []
-                    for line in c.evaluation.transcription.split("\n"):
+                    for line in transcription.split("\n"):
                         line = line.strip()
                         if not line:
                             continue
@@ -489,26 +819,43 @@ class PersonalizedTrainingService:
         except Exception:
             pass
 
+        # Handle dictionary or ORM access defensively
+        def get_val(obj, key, default=None):
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+
+        status_val = get_val(c, "status", "pending")
+        # Ensure status is normalized
+        if (evaluation is not None) or (result_json_extracted is not None) or status_val == "completed":
+            status_val = "completed"
+        else:
+            status_val = "pending"
+
         return {
-            "completion_id": c.completion_id,
-            "training_report_id": c.training_report_id,
-            "simulation_prompt_id": c.simulation_prompt_id,
-            "hubspot_owner_id": c.hubspot_owner_id,
-            "status": c.status or "pending",
-            "completed_at": c.completed_at,
-            "evaluation_id": c.evaluation_id,
-            "call_session_id": c.call_session_id,
-            "training_call_id": c.training_call_id,
-            "training_phone_number": c.training_phone_number,
-            "notes": c.notes,
+            "completion_id": get_val(c, "completion_id", 0),
+            "training_report_id": get_val(c, "training_report_id", 0),
+            "simulation_prompt_id": get_val(c, "simulation_prompt_id", 0),
+            "hubspot_owner_id": get_val(c, "hubspot_owner_id", ""),
+            "status": status_val,
+            "completed_at": get_val(c, "completed_at"),
+            "evaluation_id": get_val(c, "evaluation_id"),
+            "call_session_id": get_val(c, "call_session_id"),
+            "training_call_id": get_val(c, "training_call_id"),
+            "training_phone_number": get_val(c, "training_phone_number"),
+            "notes": get_val(c, "notes"),
             "score": score,
-            "prompt_number": prompt_number,
-            "title": title,
+            "prompt_number": prompt_number or get_val(c, "prompt_number"),
+            "title": title or get_val(c, "title"),
             "feedback": feedback,
             "criteria": criteria,
             "transcription_turns": transcription_turns,
-            "created_at": c.created_at,
+            "strengths": strengths,
+            "weaknesses": weaknesses,
+            "result_json": result_json_extracted,
+            "created_at": get_val(c, "created_at", datetime.now(timezone.utc)),
         }
+
 
     @staticmethod
     def _map_report_to_dict(r: TrainingAgentReport, prompts: list = None, completions: list = None) -> Optional[dict]:
@@ -522,6 +869,33 @@ class PersonalizedTrainingService:
             except Exception:
                 pass
                 
+        final_report = r.final_report_json
+        if final_report and isinstance(final_report, dict):
+            final_report = dict(final_report)
+            obj_status = final_report.get("objectives_status")
+            if isinstance(obj_status, list):
+                new_obj_status = []
+                for obj in obj_status:
+                    if isinstance(obj, dict):
+                        obj_copy = dict(obj)
+                        raw_status = str(obj_copy.get("status") or "").lower()
+                        if "no" in raw_status:
+                            obj_copy["status"] = "NO SUPERADO"
+                        else:
+                            obj_copy["status"] = "SUPERADO"
+                        new_obj_status.append(obj_copy)
+                final_report["objectives_status"] = new_obj_status
+
+        # Override summary_general with summary_final if completed
+        summary_general = r.summary_general
+        if r.status == "completed" and isinstance(final_report, dict):
+            summary_final = final_report.get("summary_final")
+            if summary_final:
+                summary_general = summary_final
+
+        # Extract objective evaluations list using the helper
+        obj_evals = PersonalizedTrainingService._extract_objective_evaluations(r)
+
         # Defensive JSONB lists normalizations
         strengths = r.strengths_json
         normalized_strengths = []
@@ -574,26 +948,56 @@ class PersonalizedTrainingService:
                         "metric_or_pattern": ""
                     })
 
+        # Process general objectives using match helper
         gen_objectives = r.general_objectives_json
         normalized_gen = []
         if isinstance(gen_objectives, list):
-            for item in gen_objectives:
+            matched_evals = PersonalizedTrainingService._match_objectives_list(gen_objectives, obj_evals, "general")
+            for i, item in enumerate(gen_objectives):
                 if isinstance(item, dict):
                     indicators = item.get("success_indicators") or item.get("indicadores_exito") or []
                     if not isinstance(indicators, list):
                         indicators = [str(indicators)]
-                    normalized_gen.append({
-                        "title": str(item.get("title") or item.get("titulo") or "Objetivo General"),
+                    
+                    title = str(item.get("title") or item.get("titulo") or "Objetivo General")
+                    eval_info = matched_evals[i]
+                    
+                    obj_dict = {
+                        "title": title,
                         "description": str(item.get("description") or item.get("descripcion") or ""),
                         "rationale": str(item.get("rationale") or item.get("justificacion") or ""),
                         "expected_behavior": str(item.get("expected_behavior") or item.get("comportamiento_esperado") or ""),
-                        "success_indicators": [str(x) for x in indicators]
-                    })
+                        "success_indicators": [str(x) for x in indicators],
+                        "status": None,
+                        "is_evaluated": False,
+                        "score": None,
+                        "base_score": None,
+                        "improvement_delta": None,
+                        "justification": None,
+                        "evaluated_at": None,
+                    }
+                    
+                    if eval_info:
+                        raw_status = str(eval_info.get("status") or "").upper()
+                        if "NO" in raw_status:
+                            obj_dict["status"] = "NO SUPERADO"
+                        else:
+                            obj_dict["status"] = "SUPERADO"
+                        obj_dict["is_evaluated"] = True
+                        obj_dict["score"] = float(eval_info["score"]) if eval_info.get("score") is not None else None
+                        obj_dict["base_score"] = float(eval_info["base_score"]) if eval_info.get("base_score") is not None else None
+                        obj_dict["improvement_delta"] = float(eval_info["improvement_delta"]) if eval_info.get("improvement_delta") is not None else None
+                        obj_dict["justification"] = eval_info.get("justification") or eval_info.get("rationale")
+                        obj_dict["evaluated_at"] = r.generated_at or r.updated_at
+                    
+                    normalized_gen.append(obj_dict)
 
+        # Process specific objectives using match helper
         spec_objectives = r.specific_objectives_json
         normalized_spec = []
         if isinstance(spec_objectives, list):
-            for item in spec_objectives:
+            matched_evals = PersonalizedTrainingService._match_objectives_list(spec_objectives, obj_evals, "specific")
+            for i, item in enumerate(spec_objectives):
                 if isinstance(item, dict):
                     criteria = item.get("related_criteria") or item.get("criterios_relacionados") or []
                     if not isinstance(criteria, list):
@@ -601,39 +1005,55 @@ class PersonalizedTrainingService:
                     indicators = item.get("success_indicators") or item.get("indicadores_exito") or []
                     if not isinstance(indicators, list):
                         indicators = [str(indicators)]
-                    normalized_spec.append({
-                        "title": str(item.get("title") or item.get("titulo") or "Objetivo Específico"),
+                    
+                    title = str(item.get("title") or item.get("titulo") or "Objetivo Específico")
+                    eval_info = matched_evals[i]
+                    
+                    obj_dict = {
+                        "title": title,
                         "description": str(item.get("description") or item.get("descripcion") or ""),
                         "related_criteria": [str(x) for x in criteria],
                         "specific_behavior_to_improve": str(item.get("specific_behavior_to_improve") or item.get("comportamiento_especifico") or ""),
-                        "success_indicators": [str(x) for x in indicators]
-                    })
-            
-        # Calculate progress completion metrics
-        progress_completed = 0
-        progress_percentage = Decimal("0.0")
-        if completions:
-            completed_count = sum(1 for c in completions if (c.status == "completed" if hasattr(c, "status") else c.get("status") == "completed"))
-            progress_completed = completed_count
-            progress_percentage = Decimal(str(completed_count / 4.0 * 100.0)).quantize(Decimal("0.01"))
-
-        # Normalize final_report_json for Lovable frontend compatibility
-        final_report = r.final_report_json
-        if final_report and isinstance(final_report, dict):
-            final_report = dict(final_report)
-            obj_status = final_report.get("objectives_status")
-            if isinstance(obj_status, list):
-                new_obj_status = []
-                for obj in obj_status:
-                    if isinstance(obj, dict):
-                        obj_copy = dict(obj)
-                        raw_status = str(obj_copy.get("status") or "").lower()
-                        if "no" in raw_status:
-                            obj_copy["status"] = "NO SUPERADO"
+                        "success_indicators": [str(x) for x in indicators],
+                        "status": None,
+                        "is_evaluated": False,
+                        "score": None,
+                        "base_score": None,
+                        "improvement_delta": None,
+                        "justification": None,
+                        "evaluated_at": None,
+                    }
+                    
+                    if eval_info:
+                        raw_status = str(eval_info.get("status") or "").upper()
+                        if "NO" in raw_status:
+                            obj_dict["status"] = "NO SUPERADO"
                         else:
-                            obj_copy["status"] = "SUPERADO"
-                        new_obj_status.append(obj_copy)
-                final_report["objectives_status"] = new_obj_status
+                            obj_dict["status"] = "SUPERADO"
+                        obj_dict["is_evaluated"] = True
+                        obj_dict["score"] = float(eval_info["score"]) if eval_info.get("score") is not None else None
+                        obj_dict["base_score"] = float(eval_info["base_score"]) if eval_info.get("base_score") is not None else None
+                        obj_dict["improvement_delta"] = float(eval_info["improvement_delta"]) if eval_info.get("improvement_delta") is not None else None
+                        obj_dict["justification"] = eval_info.get("justification") or eval_info.get("rationale")
+                        obj_dict["evaluated_at"] = r.generated_at or r.updated_at
+                    
+                    normalized_spec.append(obj_dict)
+
+        # Build simulation slots
+        simulation_slots = []
+        if prompts is not None:
+            simulation_slots = PersonalizedTrainingService._build_simulation_slots(prompts, completions or [])
+
+        # Calculate progress completion metrics based on simulation slots
+        progress_total = len(prompts) if prompts is not None else 4
+        progress_completed = 0
+        for slot in simulation_slots:
+            if slot["status"] == "completed":
+                progress_completed += 1
+                
+        progress_percentage = Decimal("0.0")
+        if progress_total > 0:
+            progress_percentage = Decimal(str(progress_completed / float(progress_total) * 100.0)).quantize(Decimal("0.01"))
 
         mapped = {
             "training_report_id": r.training_report_id,
@@ -648,7 +1068,7 @@ class PersonalizedTrainingService:
             "evaluations_count": r.evaluations_count or 0,
             "calls_count": r.calls_count or 0,
             "avg_evaluacion_global": avg_score,
-            "summary_general": r.summary_general,
+            "summary_general": summary_general,
             "strengths_json": normalized_strengths,
             "weaknesses_json": normalized_weaknesses,
             "notable_data_json": normalized_notable,
@@ -660,7 +1080,7 @@ class PersonalizedTrainingService:
             "generated_at": r.generated_at,
             "error_message": r.error_message,
             "progress_completed": progress_completed,
-            "progress_total": 4,
+            "progress_total": progress_total,
             "progress_percentage": progress_percentage,
             "final_report_json": final_report,
         }
@@ -670,16 +1090,8 @@ class PersonalizedTrainingService:
         else:
             mapped["prompts"] = []
 
-        # Key is 'simulations' (matches Lovable frontend contract)
-        # Each slot links to a prompt via simulation_prompt_id,
-        # and to an evaluation via evaluation_id (may be null if pending)
-        if completions is not None:
-            mapped["simulations"] = [PersonalizedTrainingService._map_completion_to_dict(c) for c in completions]
-            # Keep legacy key for backwards compat
-            mapped["completion_statuses"] = mapped["simulations"]
-        else:
-            mapped["simulations"] = []
-            mapped["completion_statuses"] = []
+        mapped["simulations"] = simulation_slots
+        mapped["completion_statuses"] = simulation_slots
 
         return mapped
 
@@ -727,11 +1139,9 @@ class PersonalizedTrainingService:
             res_comp = await db.execute(stmt_comp)
             completions = list(res_comp.scalars().all())
 
-            completed_count = sum(1 for c in completions if c.status == "completed")
-            progress_completed = completed_count
-            progress_percentage = Decimal(str(completed_count / 4.0 * 100.0)).quantize(Decimal("0.01"))
-
             current_report_data = PersonalizedTrainingService._map_report_to_dict(report, prompts, completions)
+            progress_completed = current_report_data.get("progress_completed", 0) if current_report_data else 0
+            progress_percentage = current_report_data.get("progress_percentage", Decimal("0.0")) if current_report_data else Decimal("0.0")
 
         # Fetch historical reports (excluding current report or just listing all)
         stmt_hist = select(TrainingAgentReport).where(

@@ -1,9 +1,9 @@
 import logging
 import secrets
 from datetime import datetime, timezone, timedelta
-from typing import Annotated
+from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +25,9 @@ from app.utils.security import (
     create_access_token,
 )
 from app.config import get_settings
+from app.schemas.personalized_training import TrainingAgentReportOut
+from app.services.personalized_training_service import PersonalizedTrainingService
+
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/bm", tags=["User Profile & Auth"])
@@ -85,7 +88,7 @@ async def login(
     await db.commit()
 
     # Generate Bearer Token
-    token_data = {"user_id": user.user_id, "username": user.username}
+    token_data = {"user_id": user.user_id, "username": user.username, "email": user.email}
     token = create_access_token(token_data)
     
     return {
@@ -134,7 +137,7 @@ async def bootstrap_first_admin(
     await db.commit()
     await db.refresh(admin)
 
-    token_data = {"user_id": admin.user_id, "username": admin.username}
+    token_data = {"user_id": admin.user_id, "username": admin.username, "email": admin.email}
     token = create_access_token(token_data)
 
     logger.info("BOOTSTRAP: created first admin %s (id=%s)", admin.email, admin.user_id)
@@ -319,6 +322,19 @@ async def update_my_profile(
     db: Annotated[AsyncSession, Depends(get_db)]
 ):
     """Update username and/or email, requiring password confirmation."""
+    # Check if they try to change their hubspot_owner_id
+    if current_user.role in ["agent", "agente"]:
+        clean_payload_hs = payload.hubspot_owner_id
+        if clean_payload_hs is not None:
+            clean_payload_hs = str(clean_payload_hs).strip()
+            if clean_payload_hs == "":
+                clean_payload_hs = None
+        if clean_payload_hs != current_user.hubspot_owner_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No está permitido modificar tu propio HubSpot Owner ID."
+            )
+
     # 1. Verify current password
     if not verify_password(payload.current_password, current_user.password_hash):
         raise HTTPException(
@@ -354,3 +370,48 @@ async def update_my_profile(
     await db.commit()
     await db.refresh(current_user)
     return current_user
+
+
+@router.get("/me/analysis-results", response_model=TrainingAgentReportOut)
+async def get_my_analysis_results(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    training_report_id: Optional[int] = Query(None, description="ID of a specific historical report. If not provided, returns the current active report.")
+):
+    """Retrieve training report details for the authenticated agent."""
+    is_admin = current_user.role in ["admin", "administrador"]
+        
+    if training_report_id is not None:
+        report_details = await PersonalizedTrainingService.get_report_by_id(db, report_id=training_report_id)
+        if not report_details:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Informe de entrenamiento ID {training_report_id} no encontrado."
+            )
+        # Ownership check
+        if not is_admin and report_details["hubspot_owner_id"] != current_user.hubspot_owner_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes permisos para ver el informe de entrenamiento de otro agente."
+            )
+        report_data = report_details
+    else:
+        if not current_user.hubspot_owner_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Tu cuenta de usuario no está asociada a ningún HubSpot Owner ID de agente."
+            )
+        detail = await PersonalizedTrainingService.get_agent_detail(db, hubspot_owner_id=current_user.hubspot_owner_id)
+        if not detail or not detail.get("current_report"):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No se encontró ningún informe de entrenamiento actual disponible para tu usuario."
+            )
+        report_data = detail["current_report"]
+        
+    # Sanitize prompt instructions for non-admin agents
+    if current_user.role not in ["admin", "administrador"]:
+        from app.routers.personalized_training import sanitize_report_for_agent
+        report_data = sanitize_report_for_agent(report_data)
+        
+    return report_data

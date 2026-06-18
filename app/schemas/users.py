@@ -6,6 +6,7 @@ from pydantic import BaseModel, field_validator, model_validator
 class UserBase(BaseModel):
     username: str
     email: str
+    name: Optional[str] = None
     role: str = "agente"
     is_active: bool = True
     hubspot_owner_id: Optional[str] = None
@@ -63,12 +64,25 @@ class UserCreatePayload(BaseModel):
     """Payload for admin creating a new user."""
     email: str
     username: Optional[str] = None       # default: email.split("@")[0]
+    name: Optional[str] = None
     password: Optional[str] = None
     role: str = "agente"
     is_active: bool = True
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None
     must_reset_password: bool = False
+
+    @field_validator("hubspot_owner_id", mode="before")
+    @classmethod
+    def clean_hubspot_owner_id(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, str):
+            v_clean = v.strip()
+            if v_clean == "":
+                return None
+            return v_clean
+        return str(v).strip()
 
     @field_validator("role")
     @classmethod
@@ -89,11 +103,24 @@ class UserUpdatePayload(BaseModel):
     """Payload for admin updating an existing user (all fields optional)."""
     email: Optional[str] = None
     username: Optional[str] = None
+    name: Optional[str] = None
     role: Optional[str] = None
     is_active: Optional[bool] = None
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None
     must_reset_password: Optional[bool] = None
+
+    @field_validator("hubspot_owner_id", mode="before")
+    @classmethod
+    def clean_hubspot_owner_id(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, str):
+            v_clean = v.strip()
+            if v_clean == "":
+                return None
+            return v_clean
+        return str(v).strip()
 
     @field_validator("role")
     @classmethod
@@ -111,6 +138,10 @@ class UserAdminResetPasswordPayload(BaseModel):
     new_password: str
 
 
+class AdminPasswordResetPayload(BaseModel):
+    temp_password: Optional[str] = None
+
+
 # ── Self-service (me) ─────────────────────────────────────────────────────────
 
 class MeUpdatePayload(BaseModel):
@@ -119,6 +150,18 @@ class MeUpdatePayload(BaseModel):
     email: Optional[str] = None
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None
+
+    @field_validator("hubspot_owner_id", mode="before")
+    @classmethod
+    def clean_hubspot_owner_id(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, str):
+            v_clean = v.strip()
+            if v_clean == "":
+                return None
+            return v_clean
+        return str(v).strip()
 
 
 class MePasswordUpdatePayload(BaseModel):

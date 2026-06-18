@@ -9,8 +9,18 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from fastapi import Query
+from sqlalchemy import select
 from app.dependencies import get_db, require_admin
 from app.models.users import User
+from app.models.personalized_training import (
+    TrainingAgentSetting,
+    TrainingAgentReport,
+    TrainingCallSession,
+    TrainingCallEvaluation,
+)
+from app.models.mass_evaluations import MassEvaluationResult
+from app.models.analyses import Analysis
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/bm/admin", tags=["Admin"])
@@ -292,4 +302,105 @@ async def sync_criteria_names_execute(
             status_code=500,
             detail="No se ha podido ejecutar la sincronización de nombres."
         )
+
+
+@router.get("/hubspot-agents")
+async def list_hubspot_agents(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_admin: Annotated[User, Depends(require_admin)],
+    available_only: bool = Query(False, description="Si es true, devuelve únicamente los agentes no asignados a un usuario")
+):
+    """
+    Get a list of all known HubSpot agents and check if they have an associated system user.
+    """
+    # 1. Fetch settings
+    res_settings = await db.execute(select(TrainingAgentSetting.hubspot_owner_id, TrainingAgentSetting.agent_name))
+    settings = res_settings.all()
+    
+    # 2. Fetch reports
+    res_reports = await db.execute(select(TrainingAgentReport.hubspot_owner_id, TrainingAgentReport.agent_name))
+    reports = res_reports.all()
+    
+    # 3. Fetch mass evaluations
+    res_mass = await db.execute(select(MassEvaluationResult.hubspot_owner_id, MassEvaluationResult.agent_name))
+    mass = res_mass.all()
+    
+    # 4. Fetch analyses
+    res_analyses = await db.execute(select(Analysis.hubspot_owner_id, Analysis.agente_telefonico))
+    analyses = res_analyses.all()
+    
+    # 5. Fetch call sessions
+    res_sessions = await db.execute(select(TrainingCallSession.agent_id).distinct())
+    sessions = res_sessions.scalars().all()
+    
+    # 6. Fetch call evaluations
+    res_evals = await db.execute(select(TrainingCallEvaluation.agent_id).distinct())
+    evals = res_evals.scalars().all()
+    
+    # 7. Fetch all users
+    res_users = await db.execute(select(User.hubspot_owner_id, User.user_id, User.email, User.username))
+    users = res_users.all()
+    
+    agents_dict = {}
+    
+    def add_agent(owner_id, name=None, email=None):
+        if not owner_id:
+            return
+        owner_id = str(owner_id).strip()
+        if not owner_id or owner_id.lower() == "none":
+            return
+        if owner_id not in agents_dict:
+            agents_dict[owner_id] = {
+                "hubspot_owner_id": owner_id,
+                "agent_name": None,
+                "agent_email": None,
+                "assigned": False,
+                "assigned_user_id": None,
+                "assigned_user_email": None
+            }
+        entry = agents_dict[owner_id]
+        if name and not entry["agent_name"]:
+            entry["agent_name"] = name.strip()
+        if email and not entry["agent_email"]:
+            entry["agent_email"] = email.strip()
+
+    # Process all sources
+    for oid, name in settings:
+        add_agent(oid, name=name)
+    for oid, name in reports:
+        add_agent(oid, name=name)
+    for oid, name in mass:
+        add_agent(oid, name=name, email=None)
+    for oid, name in analyses:
+        add_agent(oid, name=name)
+    for oid in sessions:
+        add_agent(oid)
+    for oid in evals:
+        add_agent(oid)
+
+    # Process users mappings
+    for oid, uid, email, username in users:
+        if oid:
+            oid_str = str(oid).strip()
+            add_agent(oid_str, name=username, email=email)
+            entry = agents_dict[oid_str]
+            entry["assigned"] = True
+            entry["assigned_user_id"] = uid
+            entry["assigned_user_email"] = email
+
+    # Convert to list
+    agents_list = list(agents_dict.values())
+
+    # Filter by available_only
+    if available_only:
+        agents_list = [a for a in agents_list if not a["assigned"]]
+
+    # Sort by agent_name
+    def get_sort_key(agent):
+        name = agent["agent_name"]
+        return (name.lower() if name else "", agent["hubspot_owner_id"])
+
+    agents_list.sort(key=get_sort_key)
+    
+    return agents_list
 
