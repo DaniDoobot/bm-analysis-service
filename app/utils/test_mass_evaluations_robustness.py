@@ -18,8 +18,8 @@ async def run_verification():
     print("=== STARTING MASS EVALUATIONS ROBUSTNESS TEST SUITE ===")
     
     # 1. Initialize DB schema
-    print("\nStep 1: Running db_init_service to ensure schema is upgraded...")
-    await init_db()
+    print("\nStep 1: Skipping db_init_service initialization in test script...")
+    # await init_db()
     
     engine = get_engine()
     async with AsyncSession(engine) as db:

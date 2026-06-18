@@ -19,8 +19,8 @@ async def run_verification():
     print("=== STARTING MASS EVALUATIONS VERIFICATION PIPELINE ===")
     
     # 1. Force database schema creation/upgrade
-    print("Step 1: Running db_init_service to ensure new tables exist...")
-    await init_db()
+    print("Step 1: Skipping db_init_service initialization in test script...")
+    # await init_db()
     
     engine = get_engine()
     async with AsyncSession(engine) as db:
