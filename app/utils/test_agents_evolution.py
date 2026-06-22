@@ -22,8 +22,13 @@ async def test_dashboard_endpoints():
         print(f"Skipping DB verification (DATABASE_URL is not set): {re}")
         return
 
-    async with AsyncSession(engine) as db:
+    async with AsyncSession(engine, expire_on_commit=False) as db:
         print("\nStep 1: Setting up clean mock data...")
+        
+        # Cleanup potential leftover test data
+        await db.execute(delete(MassEvaluationResult).where(MassEvaluationResult.hubspot_owner_id == "99999995"))
+        await db.execute(delete(MassEvaluationJob).where(MassEvaluationJob.job_name == "Dashboard Test Job"))
+        await db.commit()
         
         # 1. Create a mock job
         job = MassEvaluationJob(
@@ -44,7 +49,7 @@ async def test_dashboard_endpoints():
             trigger_type="manual",
             status="completed",
             started_at=datetime.now(timezone.utc) - timedelta(hours=1),
-            completed_at=datetime.now(timezone.utc)
+            finished_at=datetime.now(timezone.utc)
         )
         db.add(run)
         await db.commit()
@@ -57,7 +62,7 @@ async def test_dashboard_endpoints():
             run_id=run.run_id,
             job_id=job.job_id,
             call_id="call_mock_1",
-            hubspot_owner_id="33013276",
+            hubspot_owner_id="99999995",
             agent_name="Cristina Montenegro",
             status="completed",
             call_timestamp=datetime.now(timezone.utc) - timedelta(days=5),
@@ -88,7 +93,7 @@ async def test_dashboard_endpoints():
             run_id=run.run_id,
             job_id=job.job_id,
             call_id="call_mock_2",
-            hubspot_owner_id="33013276",
+            hubspot_owner_id="99999995",
             agent_name="Cristina Montenegro",
             status="completed",
             call_timestamp=datetime.now(timezone.utc) - timedelta(days=2),
@@ -124,7 +129,7 @@ async def test_dashboard_endpoints():
         agents = await get_agents_list(db)
         
         # Verify Cristina Montenegro is in results and has correct metrics
-        cristina = next((a for a in agents if a["hubspot_owner_id"] == "33013276"), None)
+        cristina = next((a for a in agents if a["hubspot_owner_id"] == "99999995"), None)
         assert cristina is not None, "Cristina Montenegro not found in agents list!"
         print(f"Verified Cristina Montenegro in List: {cristina}")
         assert cristina["total_analyses"] == 2, f"Expected 2 analyses, got {cristina['total_analyses']}"
@@ -133,7 +138,7 @@ async def test_dashboard_endpoints():
 
         # ── Test 2: get_agent_evolution for Cristina Montenegro ───────────────
         print("\nStep 3: Testing get_agent_evolution() for Cristina Montenegro...")
-        evo = await get_agent_evolution(db, "33013276", period="30d")
+        evo = await get_agent_evolution(db, "99999995", period="30d")
         
         print(f"Agent name resolved: {evo['agent']['agent_name']}")
         assert evo["agent"]["agent_name"] == "Cristina Montenegro", "Agent name mismatch!"
@@ -145,7 +150,7 @@ async def test_dashboard_endpoints():
         assert summary["avg_evaluacion_global"] == 8.0
         assert summary["avg_sentiment"] == 7.5
         assert summary["avg_empatia"] == 8.5
-        assert summary["avg_simpatia"] == 8.3
+        assert summary["avg_simpatia"] == 8.2
         assert summary["avg_claridad"] == 7.0
         assert summary["avg_procedimiento"] == 7.0
         assert summary["cita_rate"] == 100

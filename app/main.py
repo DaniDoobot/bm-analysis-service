@@ -12,6 +12,7 @@ from app.config import get_settings
 from app.routers import (
     admin,
     analyses,
+    analytics,
     audio_analysis,
     criteria,
     dashboard,
@@ -80,6 +81,7 @@ async def generic_exception_handler(request: Request, exc: Exception):
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(health.router)
 app.include_router(admin.router)
+app.include_router(analytics.router)
 app.include_router(prompts.router)
 app.include_router(criteria.router)
 app.include_router(drafts.router)
