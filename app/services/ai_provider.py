@@ -43,15 +43,15 @@ class AIProvider(abc.ABC):
 
 class GeminiProvider(AIProvider):
     def __init__(self):
-        # Configure the Google Generative AI SDK
         try:
-            import google.generativeai as genai
+            from google import genai
+            from google.genai import types
             if not settings.gemini_api_key:
                 raise ValueError("GEMINI_API_KEY is not configured.")
-            genai.configure(api_key=settings.gemini_api_key)
-            self._genai = genai
+            self._client = genai.Client(api_key=settings.gemini_api_key)
+            self._types = types
         except ImportError:
-            raise RuntimeError("google-generativeai package not installed")
+            raise RuntimeError("google-genai package not installed")
 
     async def complete_text(
         self,
@@ -62,7 +62,6 @@ class GeminiProvider(AIProvider):
     ) -> str:
         model_name = model or settings.gemini_report_model
         
-        # System instructions and contents mapping
         system_instruction = None
         gemini_contents = []
         
@@ -77,30 +76,37 @@ class GeminiProvider(AIProvider):
                 else:
                     system_instruction = content
             elif role == "user":
-                gemini_contents.append({"role": "user", "parts": [content]})
+                gemini_contents.append(
+                    self._types.Content(
+                        role="user",
+                        parts=[self._types.Part.from_text(text=content)]
+                    )
+                )
             elif role in ["assistant", "model"]:
-                gemini_contents.append({"role": "model", "parts": [content]})
+                gemini_contents.append(
+                    self._types.Content(
+                        role="model",
+                        parts=[self._types.Part.from_text(text=content)]
+                    )
+                )
         
-        config = {
+        config_args = {
             "temperature": temperature,
+            "system_instruction": system_instruction,
         }
         if response_format == "json_object":
-            config["response_mime_type"] = "application/json"
+            config_args["response_mime_type"] = "application/json"
             
         if settings.gemini_max_output_tokens:
-            config["max_output_tokens"] = settings.gemini_max_output_tokens
+            config_args["max_output_tokens"] = settings.gemini_max_output_tokens
 
-        logger.info("Calling Gemini complete_text: model=%s, temp=%.2f, json=%s", model_name, temperature, response_format)
+        logger.info("Calling Gemini complete_text (google-genai): model=%s, temp=%.2f, json=%s", model_name, temperature, response_format)
         t_start = time.perf_counter()
         
-        generative_model = self._genai.GenerativeModel(
-            model_name=model_name,
-            system_instruction=system_instruction
-        )
-        
-        response = await generative_model.generate_content_async(
+        response = await self._client.aio.models.generate_content(
+            model=model_name,
             contents=gemini_contents,
-            generation_config=config
+            config=self._types.GenerateContentConfig(**config_args)
         )
         duration = time.perf_counter() - t_start
         logger.info("Gemini complete_text completed in %.2f s", duration)
@@ -127,34 +133,31 @@ class GeminiProvider(AIProvider):
 
         mime_type = "audio/mp3" if audio_format.lower() in ["mp3", "mpeg"] else f"audio/{audio_format.lower()}"
         
-        audio_part = {
-            "mime_type": mime_type,
-            "data": audio_bytes
-        }
+        audio_part = self._types.Part.from_bytes(
+            data=audio_bytes,
+            mime_type=mime_type
+        )
         
         contents = [
             prompt_text,
             audio_part
         ]
         
-        config = {
+        config_args = {
             "temperature": settings.gemini_temperature,
-            "response_mime_type": "application/json"
+            "response_mime_type": "application/json",
+            "system_instruction": system_prompt
         }
         if settings.gemini_max_output_tokens:
-            config["max_output_tokens"] = settings.gemini_max_output_tokens
+            config_args["max_output_tokens"] = settings.gemini_max_output_tokens
 
-        logger.info("Calling Gemini analyze_audio_bytes: model=%s, format=%s, size=%.2f MB", model_name, audio_format, len(audio_bytes)/(1024*1024))
+        logger.info("Calling Gemini analyze_audio_bytes (google-genai): model=%s, format=%s, size=%.2f MB", model_name, audio_format, len(audio_bytes)/(1024*1024))
         t_start = time.perf_counter()
         
-        generative_model = self._genai.GenerativeModel(
-            model_name=model_name,
-            system_instruction=system_prompt
-        )
-        
-        response = await generative_model.generate_content_async(
+        response = await self._client.aio.models.generate_content(
+            model=model_name,
             contents=contents,
-            generation_config=config
+            config=self._types.GenerateContentConfig(**config_args)
         )
         
         duration = time.perf_counter() - t_start
@@ -174,10 +177,10 @@ class GeminiProvider(AIProvider):
             
         mime_type = "audio/mp3" if audio_format.lower() in ["mp3", "mpeg"] else f"audio/{audio_format.lower()}"
         
-        audio_part = {
-            "mime_type": mime_type,
-            "data": audio_bytes
-        }
+        audio_part = self._types.Part.from_bytes(
+            data=audio_bytes,
+            mime_type=mime_type
+        )
         
         system_prompt = (
             "Eres un transcriptor experto. Tu única tarea es transcribir el audio completo de forma exacta, "
@@ -190,16 +193,17 @@ class GeminiProvider(AIProvider):
             audio_part
         ]
         
-        logger.info("Calling Gemini transcribe_audio: model=%s, size=%.2f MB", model_name, len(audio_bytes)/(1024*1024))
+        config_args = {
+            "system_instruction": system_prompt
+        }
+        
+        logger.info("Calling Gemini transcribe_audio (google-genai): model=%s, size=%.2f MB", model_name, len(audio_bytes)/(1024*1024))
         t_start = time.perf_counter()
         
-        generative_model = self._genai.GenerativeModel(
-            model_name=model_name,
-            system_instruction=system_prompt
-        )
-        
-        response = await generative_model.generate_content_async(
-            contents=contents
+        response = await self._client.aio.models.generate_content(
+            model=model_name,
+            contents=contents,
+            config=self._types.GenerateContentConfig(**config_args)
         )
         
         duration = time.perf_counter() - t_start
