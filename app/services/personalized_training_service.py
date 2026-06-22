@@ -2904,7 +2904,7 @@ class PersonalizedTrainingService:
                 rep_status = rep.status
                 rep_error = rep.error_message
                 
-                if rep_status == "completed":
+                if rep_status in ["completed", "in_progress"]:
                     completed += 1
                 elif rep_status == "skipped":
                     skipped += 1
