@@ -453,8 +453,8 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
                 "prompt_version_id": resolved_version_id,
             },
             model_metadata={
-                "model_provider": "azure_openai",
-                "model_name": "gpt-audio-1.5",  # We log this explicitly as per request, could also import from config
+                "model_provider": (from_settings := lambda: __import__("app.config", fromlist=["get_settings"]).get_settings())().ai_provider,
+                "model_name": from_settings().gemini_analysis_model if from_settings().ai_provider == "gemini" else "gpt-audio-1.5",
             },
             result_json=parsed,
             payload={

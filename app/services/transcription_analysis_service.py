@@ -377,8 +377,8 @@ async def analyze_transcription_pipeline(
                 "prompt_version_id": resolved_version_id,
             },
             model_metadata={
-                "model_provider": "azure_openai",
-                "model_name": settings.azure_openai_text_deployment,
+                "model_provider": settings.ai_provider,
+                "model_name": settings.gemini_analysis_model if settings.ai_provider == "gemini" else settings.azure_openai_text_deployment,
             },
             result_json=parsed,
             payload={
