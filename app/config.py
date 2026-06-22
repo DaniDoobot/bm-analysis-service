@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     azure_openai_api_version: str = "2025-01-01-preview"
     gemini_api_key: str = ""
     gemini_model: str = "models/gemini-3.1-flash-live-preview"
-    gemini_analysis_model: str = "gemini-3.5-flash"
+    gemini_analysis_model: str = "gemini-3.1-flash-lite"
     gemini_report_model: str = "gemini-3.5-flash"
     gemini_temperature: float = 0.2
     gemini_max_output_tokens: int | None = None

@@ -130,7 +130,18 @@ async def test_cycle_status_logic():
         assert detail is not None
         assert detail.get("current_report") is not None
         assert detail["current_report"]["status"] == "in_progress"
-        print("[OK] Cycle successfully visible and retrieved.")
+        
+        # Verify get_agent_overview populated stats correctly for in_progress cycle
+        print("Verifying agent overview returns cycle stats...")
+        overview = await PersonalizedTrainingService.get_agent_overview(db)
+        agent_item = next((item for item in overview if item["hubspot_owner_id"] == hubspot_owner_id), None)
+        assert agent_item is not None, f"Agent {hubspot_owner_id} not found in overview"
+        print(f"Overview stats for agent: status={agent_item.get('status')}, current_report_id={agent_item.get('current_report_id')}, prompts_count={agent_item.get('simulation_prompts_count')}, objectives_count={agent_item.get('objectives_count')}")
+        assert agent_item.get("current_report_id") is not None
+        assert agent_item.get("status") == "in_progress"
+        assert agent_item.get("simulation_prompts_count") == 4
+        assert agent_item.get("objectives_count") == 6
+        print("[OK] Cycle successfully visible and retrieved with correct stats.")
 
         # -------------------------------------------------------------
         # TEST 3: Idempotency / No duplicates on retry

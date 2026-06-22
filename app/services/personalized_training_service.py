@@ -355,9 +355,17 @@ class PersonalizedTrainingService:
                 item["last_generated_at"] = report.generated_at or report.created_at
                 item["error_message"] = report.error_message
 
-                if report.status == "completed":
-                    item["objectives_count"] = 6  # 3 general + 3 specific
-                    item["simulation_prompts_count"] = 4
+                if report.status in ["completed", "in_progress", "running"]:
+                    g_count = len(report.general_objectives_json) if report.general_objectives_json else 0
+                    s_count = len(report.specific_objectives_json) if report.specific_objectives_json else 0
+                    item["objectives_count"] = g_count + s_count
+                    
+                    # Fetch simulation prompts count dynamically
+                    stmt_prompts = select(func.count(TrainingSimulationPrompt.simulation_prompt_id)).where(
+                        TrainingSimulationPrompt.training_report_id == report.training_report_id
+                    )
+                    res_prompts = await db.execute(stmt_prompts)
+                    item["simulation_prompts_count"] = res_prompts.scalar() or 0
                     
                     # Fetch completion progress
                     stmt_comp = select(func.count(TrainingCompletionStatus.completion_id)).where(
