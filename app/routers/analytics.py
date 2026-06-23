@@ -1,5 +1,6 @@
 """API Router for Analytics v2."""
 import logging
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
@@ -10,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.dependencies import get_db, require_admin
 from app.models.users import User
 from app.models.mass_evaluations import MassEvaluationResult, MassEvaluationCriterionResult
+from app.models.analyses import AnalysisCriterionResult
 from app.schemas.analytics import (
     AnalyticsItem,
     AgentInfo,
@@ -24,7 +26,7 @@ from app.utils.hubspot_owners import resolve_owner_name
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/bm", tags=["Analytics V2"])
 
-METRICS_CATALOG = [
+BASE_METRICS = [
     {"key": "evaluacion_global", "label": "Evaluación global", "type": "score", "order": 10, "default_selected": True},
     {"key": "empatia", "label": "Empatía", "type": "score", "order": 20, "default_selected": True},
     {"key": "claridad", "label": "Claridad", "type": "score", "order": 30, "default_selected": True},
@@ -33,14 +35,122 @@ METRICS_CATALOG = [
     {"key": "cierre_cita", "label": "Cierre de cita", "type": "percentage", "order": 60, "default_selected": False},
 ]
 
-KEY_ALIASES = {
-    "evaluacion_global": ["evaluacion_global", "global_score", "puntuacion_global"],
-    "empatia": ["empatia"],
-    "claridad": ["claridad"],
-    "simpatia": ["simpatia", "tono_simpatia", "prueba_simpatia"],
-    "procedimiento": ["procedimiento", "adherencia_procedimiento"],
-    "cierre_cita": ["cierre_cita", "cita_resultado", "cita", "cierre"]
+KNOWN_CRITERIA_FALLBACK = [
+    {"key": "saludo_inicio", "label": "Saludo de Inicio", "type": "score"},
+    {"key": "n3_preguntas", "label": "N3 Preguntas", "type": "score"},
+    {"key": "uso_preguntas", "label": "Uso de Preguntas", "type": "score"},
+    {"key": "despedida_refuerzo", "label": "Despedida con Refuerzo", "type": "score"},
+    {"key": "gestion_objeciones", "label": "Gestión de Objeciones", "type": "score"},
+    {"key": "uso_nombre_paciente", "label": "Uso del Nombre del Paciente", "type": "score"},
+    {"key": "explicaciones_medicas", "label": "Explicaciones Médicas", "type": "score"},
+    {"key": "claridad_explicacion_economica", "label": "Claridad Explicación Económica", "type": "score"},
+]
+
+KNOWN_LABELS = {
+    "evaluacion_global": "Evaluación global",
+    "empatia": "Empatía",
+    "claridad": "Claridad",
+    "simpatia": "Simpatía",
+    "procedimiento": "Procedimiento",
+    "cierre_cita": "Cierre de cita",
+    "saludo_inicio": "Saludo de Inicio",
+    "n3_preguntas": "N3 Preguntas",
+    "despedida_refuerzo": "Despedida con Refuerzo",
+    "gestion_objeciones": "Gestión de Objeciones",
+    "uso_nombre_paciente": "Uso del Nombre del Paciente",
+    "uso_preguntas": "Uso de Preguntas",
+    "explicaciones_medicas": "Explicaciones Médicas",
+    "claridad_explicacion_economica": "Claridad Explicación Económica",
 }
+
+def normalize_key(raw_key: str) -> str:
+    if not raw_key:
+        return ""
+    # Normalize unicode to decompose accents/tildes
+    s = unicodedata.normalize("NFKD", raw_key).encode("ascii", "ignore").decode("utf-8")
+    s = s.lower().strip().replace(" ", "_").replace("-", "_")
+    s = "".join([c for c in s if c.isalnum() or c == "_"])
+    
+    # Standard stable key mappings to resolve aliases
+    special_mappings = {
+        "despedida_con_refuerzo": "despedida_refuerzo",
+        "global_score": "evaluacion_global",
+        "puntuacion_global": "evaluacion_global",
+        "tono_simpatia": "simpatia",
+        "prueba_simpatia": "simpatia",
+        "adherencia_procedimiento": "procedimiento",
+        "cita_resultado": "cierre_cita",
+        "cita": "cierre_cita",
+        "cierre": "cierre_cita",
+        "reformulacion_patologia": "reformula_patologia",
+    }
+    return special_mappings.get(s, s)
+
+async def get_all_metrics(db: AsyncSession) -> list[dict]:
+    metrics = list(BASE_METRICS)
+    existing_keys = {m["key"] for m in metrics}
+    
+    try:
+        stmt1 = select(
+            MassEvaluationCriterionResult.criterion_key,
+            func.max(MassEvaluationCriterionResult.criterion_name).label("name"),
+            func.max(MassEvaluationCriterionResult.criterion_type).label("type")
+        ).where(MassEvaluationCriterionResult.criterion_key != None).group_by(MassEvaluationCriterionResult.criterion_key)
+        res1 = await db.execute(stmt1)
+        rows1 = res1.all()
+    except Exception as e:
+        logger.warning(f"Error querying MassEvaluationCriterionResult for catalog: {e}")
+        rows1 = []
+        
+    try:
+        stmt2 = select(
+            AnalysisCriterionResult.criterion_key,
+            func.max(AnalysisCriterionResult.criterion_name).label("name"),
+            func.max(AnalysisCriterionResult.criterion_type).label("type")
+        ).where(AnalysisCriterionResult.criterion_key != None).group_by(AnalysisCriterionResult.criterion_key)
+        res2 = await db.execute(stmt2)
+        rows2 = res2.all()
+    except Exception as e:
+        logger.warning(f"Error querying AnalysisCriterionResult for catalog: {e}")
+        rows2 = []
+        
+    discovered = {}
+    for row in rows1 + rows2:
+        key = row[0]
+        name = row[1]
+        c_type = row[2]
+        norm = normalize_key(key)
+        if not norm or norm in existing_keys:
+            continue
+        if norm not in discovered:
+            discovered[norm] = {"name": name or key, "type": c_type}
+            
+    for fallback in KNOWN_CRITERIA_FALLBACK:
+        k = fallback["key"]
+        if k not in existing_keys and k not in discovered:
+            discovered[k] = {"name": fallback["label"], "type": fallback["type"]}
+            
+    order = 70
+    for key, info in sorted(discovered.items(), key=lambda x: x[0]):
+        t = "score"
+        c_type = info["type"] or ""
+        if key == "cierre_cita" or "percent" in c_type.lower() or "percentage" in c_type.lower():
+            t = "percentage"
+            
+        label = KNOWN_LABELS.get(key, info["name"])
+        if label == label.lower():
+            label = label.replace("_", " ").title()
+            
+        metrics.append({
+            "key": key,
+            "label": label,
+            "type": t,
+            "order": order,
+            "default_selected": False
+        })
+        order += 10
+        
+    return metrics
 
 def parse_list_param(values: list[str] | None) -> list[str]:
     if not values:
@@ -64,8 +174,6 @@ def _effective_ts(row: Any) -> datetime | None:
 
 def extract_metric_value(r: MassEvaluationResult, criteria: list[MassEvaluationCriterionResult], key: str) -> float | None:
     """Extract metric value cleanly handling score vs percentage and aliases."""
-    aliases = KEY_ALIASES.get(key, [key])
-    
     if key == "evaluacion_global":
         val = r.evaluacion_global
         if val is None:
@@ -73,7 +181,7 @@ def extract_metric_value(r: MassEvaluationResult, criteria: list[MassEvaluationC
         return float(val) if val is not None else None
 
     # Find matching criterion in database rows if available
-    match_row = next((c for c in criteria if c.criterion_key in aliases), None)
+    match_row = next((c for c in criteria if normalize_key(c.criterion_key) == key), None)
     if match_row is not None:
         if key == "cierre_cita":
             if match_row.boolean_value is not None:
@@ -90,11 +198,12 @@ def extract_metric_value(r: MassEvaluationResult, criteria: list[MassEvaluationC
             if match_row.percentage_value is not None:
                 return float(match_row.percentage_value) / 10.0  # Normalize percentage to 0-10 score if needed
 
-    # Fallback to result_json or items_json
+    # Fallback to result_json
     rj = r.result_json or {}
-    for alias in aliases:
+    matching_rj_key = next((k for k in rj.keys() if normalize_key(k) == key), None)
+    if matching_rj_key is not None:
+        val = rj.get(matching_rj_key)
         if key == "cierre_cita":
-            val = rj.get(alias)
             if val is not None:
                 if isinstance(val, bool):
                     return 100.0 if val else 0.0
@@ -107,10 +216,55 @@ def extract_metric_value(r: MassEvaluationResult, criteria: list[MassEvaluationC
                     if cleaned in ["no", "false", "0"]:
                         return 0.0
         else:
-            val = extract_score_from_mass(r.result_json, r.items_json, alias)
-            if val is not None:
+            if isinstance(val, bool):
+                return 10.0 if val else 0.0
+            if isinstance(val, (int, float)):
                 return float(val)
-                
+            if isinstance(val, str):
+                try:
+                    return float(val)
+                except ValueError:
+                    cleaned = val.strip().lower()
+                    if cleaned in ["si", "sí"]:
+                        return 10.0
+                    if cleaned == "no":
+                        return 0.0
+
+    # Fallback to items_json
+    items_list = r.items_json if isinstance(r.items_json, list) else []
+    for item in items_list:
+        if not isinstance(item, dict):
+            continue
+        item_key = item.get("key") or item.get("criterion_key") or item.get("output_key")
+        if item_key and normalize_key(item_key) == key:
+            v = item.get("value") or item.get("score") or item.get("valor")
+            if v is not None:
+                if key == "cierre_cita":
+                    if isinstance(v, bool):
+                        return 100.0 if v else 0.0
+                    elif isinstance(v, (int, float)):
+                        return float(v) if v > 1.0 else float(v) * 100.0
+                    elif isinstance(v, str):
+                        cleaned = v.strip().lower()
+                        if cleaned in ["si", "sí", "true", "1"]:
+                            return 100.0
+                        if cleaned in ["no", "false", "0"]:
+                            return 0.0
+                else:
+                    if isinstance(v, bool):
+                        return 10.0 if v else 0.0
+                    if isinstance(v, (int, float)):
+                        return float(v)
+                    if isinstance(v, str):
+                        try:
+                            return float(v)
+                        except ValueError:
+                            cleaned = v.strip().lower()
+                            if cleaned in ["si", "sí"]:
+                                return 10.0
+                            if cleaned == "no":
+                                return 0.0
+
     return None
 
 
@@ -124,10 +278,11 @@ def extract_metric_value(r: MassEvaluationResult, criteria: list[MassEvaluationC
     }
 )
 async def get_analytics_items(
-    current_user: Annotated[User, Depends(require_admin)]
+    current_user: Annotated[User, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)]
 ):
     """Retrieve the catalogue of compared metrics available in Analytics v2."""
-    return METRICS_CATALOG
+    return await get_all_metrics(db)
 
 
 @router.get(
@@ -219,11 +374,12 @@ async def get_agents_comparison(
         ]
 
         # 5. Filter items catalogue
+        all_metrics = await get_all_metrics(db)
         keys_to_use = parse_list_param(item_keys) + parse_list_param(item_keys_bracket)
         if keys_to_use:
-            items_to_use = [item for item in METRICS_CATALOG if item["key"] in keys_to_use]
+            items_to_use = [item for item in all_metrics if item["key"] in keys_to_use]
         else:
-            items_to_use = METRICS_CATALOG
+            items_to_use = all_metrics
 
         items_list = [AnalyticsItem(**item) for item in items_to_use]
 
@@ -357,11 +513,12 @@ async def get_items_evolution(
             buckets_map.setdefault(b_key, []).append(r)
 
         # 5. Filter items catalogue
+        all_metrics = await get_all_metrics(db)
         keys_to_use = parse_list_param(item_keys) + parse_list_param(item_keys_bracket)
         if keys_to_use:
-            items_to_use = [item for item in METRICS_CATALOG if item["key"] in keys_to_use]
+            items_to_use = [item for item in all_metrics if item["key"] in keys_to_use]
         else:
-            items_to_use = METRICS_CATALOG
+            items_to_use = all_metrics
 
         # 6. Construct timeline points per item series
         series_list = []
