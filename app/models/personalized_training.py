@@ -86,7 +86,7 @@ class TrainingAgentReport(Base):
     period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     
-    status: Mapped[str] = mapped_column(Text, default="pending", server_default="'pending'", nullable=False)  # pending, running, completed, skipped, failed
+    status: Mapped[str] = mapped_column(Text, default="pending", server_default="'pending'", nullable=False)  # pending, running, pending_approval, in_progress, completed, skipped, failed, superseded, archived, finalization_failed
     skipped_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     
     evaluations_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
@@ -112,6 +112,8 @@ class TrainingAgentReport(Base):
         DateTime(timezone=True), default=func.now(), onupdate=func.now(), server_default=func.now()
     )
     generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_by_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     run = relationship("TrainingRun", back_populates="reports")

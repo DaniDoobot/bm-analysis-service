@@ -156,6 +156,8 @@ class TrainingAgentReportBase(BaseModel):
     is_current: bool
     created_at: datetime
     generated_at: Optional[datetime] = None
+    approved_at: Optional[datetime] = None
+    approved_by_user_id: Optional[int] = None
     error_message: Optional[str] = None
 
     # Cycle progress fields
@@ -341,6 +343,31 @@ class CyclesTeamSummaryResponse(BaseModel):
     agents_declining: int
     pending_cycles: int
     pending_simulations: int
+    pending_approval_cycles: int = 0
     priority_agents: List[PriorityAgentItem]
     recurring_patterns: List[RecurringPatternItem]
     cycle_evolution: List[CycleEvolutionItem]
+
+
+# ── Approval Flow Schemas ─────────────────────────────────────────────────────
+
+class UpdateCycleObjectivesPayload(BaseModel):
+    """Payload para editar objetivos de un ciclo en estado pending_approval."""
+    general_objectives_json: Optional[List[dict]] = Field(
+        default=None,
+        description="Lista de objetivos generales actualizados. Si es None, no se modifica."
+    )
+    specific_objectives_json: Optional[List[dict]] = Field(
+        default=None,
+        description="Lista de objetivos específicos actualizados. Si es None, no se modifica."
+    )
+
+
+class ApproveCycleResponse(BaseModel):
+    """Respuesta al aprobar un ciclo de entrenamiento."""
+    training_report_id: int
+    status: str
+    approved_at: datetime
+    approved_by_user_id: int
+    prompts_generated: int
+    message: str

@@ -21,6 +21,8 @@ from app.schemas.personalized_training import (
     TrainingSchedulerSettingOut,
     TrainingSchedulerSettingPatch,
     CyclesTeamSummaryResponse,
+    UpdateCycleObjectivesPayload,
+    ApproveCycleResponse,
 )
 from app.services.personalized_training_service import PersonalizedTrainingService
 
@@ -209,10 +211,16 @@ async def get_agent_detail_admin(
     include_archived: bool = Query(False),
     db: AsyncSession = Depends(get_db)
 ):
-    """Full detail of an agent's training, objectives, prompts, history and progress (Admin only)."""
+    """Full detail of an agent's training, objectives, prompts, history and progress (Admin only).
+    Includes cycles in pending_approval status so admins can review and edit before approving.
+    """
     enforce_admin_role(current_user)
     try:
-        detail = await PersonalizedTrainingService.get_agent_detail(db, hubspot_owner_id=hubspot_owner_id, include_archived=include_archived)
+        detail = await PersonalizedTrainingService.get_agent_detail(
+            db, hubspot_owner_id=hubspot_owner_id,
+            include_archived=include_archived,
+            include_pending_approval=True  # Admins see pending_approval cycles
+        )
         if not detail:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -405,6 +413,98 @@ async def archive_training_report(
             detail=f"Informe de entrenamiento ID {training_report_id} no encontrado."
         )
     return report
+
+
+@router.patch("/admin/reports/{training_report_id}/objectives", response_model=TrainingAgentReportOut)
+async def update_cycle_objectives(
+    training_report_id: int,
+    payload: UpdateCycleObjectivesPayload,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: AsyncSession = Depends(get_db)
+):
+    """Edit general and/or specific objectives of a training cycle in 'pending_approval' status (Admin only).
+    
+    Validates that specific objectives are qualitative and do not contain percentage-based phrasing.
+    Only cycles in 'pending_approval' status can be edited.
+    """
+    enforce_admin_role(current_user)
+    try:
+        report = await PersonalizedTrainingService.update_cycle_objectives(
+            db=db,
+            report_id=training_report_id,
+            general_objectives_json=payload.general_objectives_json,
+            specific_objectives_json=payload.specific_objectives_json,
+        )
+        report_dict = await PersonalizedTrainingService.get_report_by_id(db, report_id=training_report_id)
+        if not report_dict:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Informe no encontrado tras actualizar.")
+        return report_dict
+    except ValueError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to update objectives for report %d: %s", training_report_id, e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al actualizar los objetivos: {str(e)}"
+        )
+
+
+@router.post("/admin/reports/{training_report_id}/approve", response_model=ApproveCycleResponse)
+async def approve_training_cycle(
+    training_report_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: AsyncSession = Depends(get_db)
+):
+    """Approve a training cycle in 'pending_approval' status (Admin only).
+    
+    This endpoint:
+    - Validates objectives are qualitative (no percentages).
+    - Generates the 4 simulation prompts and completion status records.
+    - Deactivates any previous in_progress cycle for the same agent.
+    - Transitions the cycle to 'in_progress', making it visible to the agent.
+    
+    Idempotent: re-approving an already in_progress cycle returns the current state.
+    """
+    enforce_admin_role(current_user)
+    try:
+        report = await PersonalizedTrainingService.approve_training_cycle(
+            db=db,
+            report_id=training_report_id,
+            approved_by_user_id=current_user.user_id,
+        )
+        # Count prompts created
+        from sqlalchemy import func as sqlfunc
+        from app.models.personalized_training import TrainingSimulationPrompt
+        stmt_count = select(sqlfunc.count()).where(
+            TrainingSimulationPrompt.training_report_id == training_report_id
+        )
+        res_count = await db.execute(stmt_count)
+        prompts_count = res_count.scalar() or 0
+
+        return ApproveCycleResponse(
+            training_report_id=report.training_report_id,
+            status=report.status,
+            approved_at=report.approved_at,
+            approved_by_user_id=report.approved_by_user_id,
+            prompts_generated=prompts_count,
+            message=(
+                f"Ciclo ID {training_report_id} aprobado correctamente. "
+                f"{prompts_count} prompts de simulación generados. "
+                f"El ciclo es ahora visible para el agente."
+            )
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to approve cycle %d: %s", training_report_id, e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al aprobar el ciclo: {str(e)}"
+        )
 
 
 @router.delete("/admin/reports/{training_report_id}/hard-delete")

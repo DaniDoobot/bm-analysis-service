@@ -1104,8 +1104,13 @@ class PersonalizedTrainingService:
         return mapped
 
     @staticmethod
-    async def get_agent_detail(db: AsyncSession, hubspot_owner_id: str, include_archived: bool = False) -> Optional[dict]:
-        """Returns detailed personalized training information for a specific agent."""
+    async def get_agent_detail(db: AsyncSession, hubspot_owner_id: str, include_archived: bool = False, include_pending_approval: bool = False) -> Optional[dict]:
+        """Returns detailed personalized training information for a specific agent.
+        
+        Args:
+            include_pending_approval: If True, includes cycles in pending_approval status
+                                      in current_report. Set to True for admin endpoints.
+        """
         stmt_set = select(TrainingAgentSetting).where(TrainingAgentSetting.hubspot_owner_id == hubspot_owner_id)
         res_set = await db.execute(stmt_set)
         setting = res_set.scalars().first()
@@ -1113,12 +1118,18 @@ class PersonalizedTrainingService:
         if not setting:
             return None
 
-        # Fetch current report
+        # Fetch current report.
+        # IMPORTANT: Cycles in 'pending_approval' status are intentionally excluded here by default.
+        # They are visible to admins via /admin/agents/{id} but NOT to agents until approved.
+        excluded_statuses = ["archived"]
+        if not include_pending_approval:
+            excluded_statuses.append("pending_approval")
+        
         stmt_rep = select(TrainingAgentReport).where(
             and_(
                 TrainingAgentReport.hubspot_owner_id == hubspot_owner_id,
                 TrainingAgentReport.is_current == True,
-                TrainingAgentReport.status != "archived"
+                TrainingAgentReport.status.notin_(excluded_statuses)
             )
         ).order_by(desc(TrainingAgentReport.training_report_id))
         res_rep = await db.execute(stmt_rep)
@@ -1229,6 +1240,7 @@ class PersonalizedTrainingService:
         total_cycles = 0
         completed_cycles_total = 0
         running_cycles_total = 0
+        total_pending_approval_cycles = 0
 
         for s in all_settings:
             # Get all reports for this agent (excluding archived) ordered by period start desc
@@ -1243,7 +1255,7 @@ class PersonalizedTrainingService:
 
             # Skip agents with no valid reports at all (they have no data to show)
             # Skipped and failed reports do not count as valid/active training cycles
-            valid_reps = [r for r in reps if r.status in ["completed", "pending", "running", "in_progress", "finalization_failed"]]
+            valid_reps = [r for r in reps if r.status in ["completed", "pending", "running", "in_progress", "finalization_failed", "pending_approval"]]
             if not valid_reps:
                 continue
 
@@ -1254,6 +1266,7 @@ class PersonalizedTrainingService:
             total_cycles += len(valid_reps)
             completed_cycles_total += sum(1 for r in valid_reps if r.status == "completed")
             running_cycles_total += sum(1 for r in valid_reps if r.status in ["running", "in_progress"])
+            total_pending_approval_cycles += sum(1 for r in valid_reps if r.status == "pending_approval")
             
             # Find the latest and second latest completed (non-archived/non-superseded) reports
             completed_reps = [r for r in reps if r.status == "completed"]
@@ -1853,6 +1866,7 @@ class PersonalizedTrainingService:
             "agents_declining": agents_declining,
             "pending_cycles": total_pending_cycles,
             "pending_simulations": total_pending_simulations,
+            "pending_approval_cycles": total_pending_approval_cycles,
             "priority_agents": priority_agents,
             "recurring_patterns": recurring_patterns,
             "cycle_evolution": cycle_evolution
@@ -2073,8 +2087,11 @@ class PersonalizedTrainingService:
         force_regenerate: bool = False
     ) -> TrainingAgentReport:
         """
-        Aggregates data, generates reports using AI, saves report, 6 objectives,
-        and 4 simulation prompts to DB. Idempotent by period/agent.
+        Aggregates data, generates report using AI, and saves report with objectives
+        to DB. Ends with status 'pending_approval' — simulation prompts and completion
+        statuses are NOT created here; they are created only when an admin approves
+        the cycle via approve_training_cycle().
+        Idempotent by period/agent.
         """
         logger.info("[training] start generate agent")
         
@@ -2107,6 +2124,11 @@ class PersonalizedTrainingService:
 
         if existing_report and not force_regenerate:
             logger.info("Report already exists for agent %s in period %s to %s. Returning existing.", hubspot_owner_id, period_start, period_end)
+            return existing_report
+
+        # Check if there's already a pending_approval report for this period (idempotency)
+        if existing_report and existing_report.status == "pending_approval" and not force_regenerate:
+            logger.info("Report in pending_approval already exists for agent %s. Returning existing.", hubspot_owner_id)
             return existing_report
 
         # Create base report in database as 'running'
@@ -2678,9 +2700,10 @@ class PersonalizedTrainingService:
                 })
             normalized_notable = normalized_notable[:3]
 
-            # 6. Save report
+            # 6. Save report with status 'pending_approval'
+            # Prompts and completion_statuses are NOT created here — only upon admin approval.
             logger.info("[training] save_report_start")
-            new_report.status = "in_progress"
+            new_report.status = "pending_approval"
             new_report.evaluations_count = aggregates["evaluations_count"]
             new_report.calls_count = aggregates["calls_count"]
             new_report.avg_evaluacion_global = Decimal(str(avg_val_global)).quantize(Decimal("0.01")) if avg_val_global is not None else None
@@ -2694,101 +2717,35 @@ class PersonalizedTrainingService:
             new_report.generated_at = datetime.now(timezone.utc)
             new_report.error_message = None  # Clear any previous error
 
-            # 7. Add simulation prompts & completion status records
-            logger.info("[training] save_prompts_start")
-            for idx, p in enumerate(sim_prompts):
-                if not isinstance(p, dict):
-                    logger.error("Simulation prompt item is not a dictionary: %s", p)
-                    p = {
-                        "prompt_text": str(p),
-                        "title": f"Simulación de entrenamiento {idx + 1}",
-                        "scenario_type": "roleplay"
-                    }
-                
-                p_number = p.get("prompt_number") or p.get("numero") or (idx + 1)
-                try:
-                    p_number = int(p_number)
-                except (ValueError, TypeError):
-                    p_number = idx + 1
-                    
-                p_title = p.get("title") or p.get("titulo") or p.get("scenario") or f"Simulación de entrenamiento {idx + 1}"
-                p_scenario = p.get("scenario_type") or p.get("scenario") or p.get("tipo_escenario") or "roleplay"
-                p_text = p.get("prompt_text") or p.get("prompt") or p.get("text") or p.get("texto")
-                if not p_text:
-                    for k in ["prompt_text", "prompt", "text", "texto", "bot_prompt"]:
-                        if p.get(k):
-                            p_text = p.get(k)
-                            break
-                p_focus = p.get("objective_focus") or p.get("enfoque_objetivo") or p.get("objectives") or []
-                if not isinstance(p_focus, list):
-                    p_focus = [str(p_focus)]
-                
-                linked_gen = p.get("linked_general_objectives") or []
-                if not isinstance(linked_gen, list):
-                    linked_gen = [str(linked_gen)]
-                    
-                linked_spec = p.get("linked_specific_objectives") or []
-                if not isinstance(linked_spec, list):
-                    linked_spec = [str(linked_spec)]
-                    
-                obj_summary = p.get("objective_summary") or p.get("resumen_objetivo")
-                exp_behavior = p.get("expected_behavior") or p.get("conducta_esperada")
-                
-                combined_focus = {
-                    "focus": p_focus,
-                    "linked_general_objectives": linked_gen,
-                    "linked_specific_objectives": linked_spec,
-                    "objective_summary": obj_summary,
-                    "expected_behavior": exp_behavior
-                }
+            # Store generated sim_prompts in final_report_json so approve_training_cycle can use them.
+            # final_report_json is repurposed here as a staging area for pre-approval data.
+            new_report.final_report_json = {
+                "pending_sim_prompts": sim_prompts if isinstance(sim_prompts, list) else [],
+                "generated_at": datetime.now(timezone.utc).isoformat()
+            }
 
-                if not p_text:
-                    raise ValueError(f"Falta el campo requerido 'prompt_text' para la simulación {idx + 1}")
-
-                new_prompt = TrainingSimulationPrompt(
-                    training_report_id=new_report.training_report_id,
-                    hubspot_owner_id=hubspot_owner_id,
-                    prompt_number=p_number,
-                    title=str(p_title),
-                    scenario_type=str(p_scenario),
-                    objective_focus_json=combined_focus,
-                    prompt_text=str(p_text)
-                )
-                db.add(new_prompt)
-                await db.flush()
-
-                # 8. Create completion statuses
-                logger.info("[training] save_completion_status_start")
-                comp_status = TrainingCompletionStatus(
-                    training_report_id=new_report.training_report_id,
-                    simulation_prompt_id=new_prompt.simulation_prompt_id,
-                    hubspot_owner_id=hubspot_owner_id,
-                    status="pending"
-                )
-                db.add(comp_status)
+            # NOTE: TrainingSimulationPrompt and TrainingCompletionStatus are intentionally NOT created here.
+            # They will be generated by approve_training_cycle() when an admin approves this cycle.
 
             # 9. Deactivate previous reports for this agent
-            if existing_report_id:
-                stmt_old = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == existing_report_id)
-                res_old = await db.execute(stmt_old)
-                old_rep = res_old.scalars().first()
-                if old_rep:
-                    old_rep.is_current = False
-                    old_rep.status = "superseded"
-                    old_rep.superseded_by_report_id = new_report.training_report_id
+            # NOTE: We do NOT deactivate previous in_progress cycles when generating a new pending_approval.
+            # The admin will confirm the deactivation at approval time.
+            # We DO deactivate previous pending_approval reports for the same agent to avoid duplicates.
 
-            stmt_deact = select(TrainingAgentReport).where(
+            # Deactivate any previous pending_approval reports (but NOT in_progress ones)
+            stmt_deact_pending = select(TrainingAgentReport).where(
                 and_(
                     TrainingAgentReport.hubspot_owner_id == hubspot_owner_id,
                     TrainingAgentReport.training_report_id != new_report.training_report_id,
-                    TrainingAgentReport.is_current == True
+                    TrainingAgentReport.status == "pending_approval"
                 )
             )
-            res_deact = await db.execute(stmt_deact)
-            deacts = res_deact.scalars().all()
-            for d_rep in deacts:
-                d_rep.is_current = False
-                d_rep.superseded_by_report_id = new_report.training_report_id
+            res_deact_pending = await db.execute(stmt_deact_pending)
+            old_pending = res_deact_pending.scalars().all()
+            for old_p in old_pending:
+                old_p.is_current = False
+                old_p.status = "superseded"
+                old_p.superseded_by_report_id = new_report.training_report_id
 
             # 10. Commit
             logger.info("[training] commit_ok")
@@ -2853,6 +2810,271 @@ class PersonalizedTrainingService:
                 await db.rollback()
             
             raise ex
+
+    # ── Approval Flow Methods ─────────────────────────────────────────────────
+
+    @staticmethod
+    def validate_specific_objectives(objectives: list) -> list[str]:
+        """
+        Validates that specific objectives do not contain percentage-based or
+        KPI-based phrasing. Returns a list of validation error strings (empty if valid).
+        """
+        FORBIDDEN_PATTERNS = [
+            "%", "por ciento", "porcentaje",
+            "en el 9", "en el 8", "en el 7",  # catches "en el 90%", "en el 85%", etc.
+            "al menos el ", "al menos un ",
+            "mínimo del ", "mínimo de un ",
+            "tasa de ", "ratio de ",
+        ]
+        errors = []
+        for idx, obj in enumerate(objectives):
+            if not isinstance(obj, dict):
+                continue
+            # Check fields most likely to contain percentages
+            fields_to_check = [
+                obj.get("specific_behavior_to_improve", ""),
+                obj.get("description", ""),
+                *[str(s) for s in (obj.get("success_indicators") or [])],
+            ]
+            for field_text in fields_to_check:
+                field_lower = field_text.lower()
+                for pattern in FORBIDDEN_PATTERNS:
+                    if pattern in field_lower:
+                        errors.append(
+                            f"Objetivo específico #{idx + 1} ('{obj.get('title', 'Sin título')}'): "
+                            f"contiene phrasing prohibido basado en porcentajes o KPIs numéricos "
+                            f"(patrón detectado: '{pattern}'). Los objetivos deben ser cualitativos y observables."
+                        )
+                        break  # One error per objective, move to next
+        return errors
+
+    @staticmethod
+    async def update_cycle_objectives(
+        db: AsyncSession,
+        report_id: int,
+        general_objectives_json: Optional[list] = None,
+        specific_objectives_json: Optional[list] = None,
+    ) -> TrainingAgentReport:
+        """
+        Allows admin to edit objectives of a cycle in 'pending_approval' status.
+        Validates that specific objectives are qualitative (no percentages).
+        Raises ValueError if validation fails.
+        """
+        stmt = select(TrainingAgentReport).where(
+            TrainingAgentReport.training_report_id == report_id
+        )
+        res = await db.execute(stmt)
+        report = res.scalars().first()
+
+        if not report:
+            raise ValueError(f"Ciclo de entrenamiento ID {report_id} no encontrado.")
+
+        if report.status != "pending_approval":
+            raise ValueError(
+                f"Solo se pueden editar objetivos de ciclos en estado 'pending_approval'. "
+                f"El ciclo actual está en estado '{report.status}'."
+            )
+
+        # Validate specific objectives if provided
+        if specific_objectives_json is not None:
+            validation_errors = PersonalizedTrainingService.validate_specific_objectives(specific_objectives_json)
+            if validation_errors:
+                raise ValueError(
+                    "Los objetivos específicos contienen phrasing no permitido:\n" +
+                    "\n".join(validation_errors)
+                )
+            report.specific_objectives_json = specific_objectives_json
+
+        if general_objectives_json is not None:
+            report.general_objectives_json = general_objectives_json
+
+        await db.commit()
+        await db.refresh(report)
+        logger.info("[training] objectives updated for report_id=%d", report_id)
+        return report
+
+    @staticmethod
+    async def approve_training_cycle(
+        db: AsyncSession,
+        report_id: int,
+        approved_by_user_id: int,
+    ) -> TrainingAgentReport:
+        """
+        Approves a training cycle that is in 'pending_approval' status.
+        This method:
+        1. Validates the cycle exists and is in pending_approval status.
+        2. Validates specific objectives (no percentages).
+        3. Generates TrainingSimulationPrompt records from the staged sim_prompts.
+        4. Generates TrainingCompletionStatus records for each prompt.
+        5. Deactivates any previous in_progress cycle for the same agent.
+        6. Transitions the report status to 'in_progress'.
+        7. Clears the pending_sim_prompts from final_report_json.
+        Idempotent: re-approving an already in_progress cycle is a no-op.
+        """
+        stmt = select(TrainingAgentReport).where(
+            TrainingAgentReport.training_report_id == report_id
+        )
+        res = await db.execute(stmt)
+        report = res.scalars().first()
+
+        if not report:
+            raise ValueError(f"Ciclo de entrenamiento ID {report_id} no encontrado.")
+
+        # Idempotency guard
+        if report.status == "in_progress":
+            logger.info("[training] approve_cycle: cycle %d already in_progress, skipping.", report_id)
+            return report
+
+        if report.status != "pending_approval":
+            raise ValueError(
+                f"Solo se pueden aprobar ciclos en estado 'pending_approval'. "
+                f"El ciclo actual está en estado '{report.status}'."
+            )
+
+        # Validate specific objectives before approving
+        spec_objs = report.specific_objectives_json or []
+        if spec_objs:
+            validation_errors = PersonalizedTrainingService.validate_specific_objectives(spec_objs)
+            if validation_errors:
+                raise ValueError(
+                    "No se puede aprobar el ciclo. Los objetivos específicos contienen "
+                    "phrasing no permitido (porcentajes o KPIs numéricos):\n" +
+                    "\n".join(validation_errors)
+                )
+
+        # Retrieve staged sim_prompts from final_report_json
+        staged_data = report.final_report_json or {}
+        sim_prompts = staged_data.get("pending_sim_prompts", [])
+
+        if not sim_prompts or not isinstance(sim_prompts, list) or len(sim_prompts) == 0:
+            raise ValueError(
+                f"El ciclo ID {report_id} no tiene prompts de simulación generados. "
+                "Regenera el ciclo para obtener los prompts."
+            )
+
+        # Check if prompts already exist (extra idempotency guard)
+        stmt_check = select(TrainingSimulationPrompt).where(
+            TrainingSimulationPrompt.training_report_id == report_id
+        )
+        res_check = await db.execute(stmt_check)
+        existing_prompts = res_check.scalars().all()
+        if existing_prompts:
+            # Prompts already created — just transition status if needed
+            logger.warning("[training] approve_cycle: prompts already exist for report %d, updating status only.", report_id)
+            report.status = "in_progress"
+            report.approved_at = datetime.now(timezone.utc)
+            report.approved_by_user_id = approved_by_user_id
+            await db.commit()
+            await db.refresh(report)
+            return report
+
+        # Create simulation prompts and completion statuses
+        logger.info("[training] approve_cycle: creating %d prompts for report %d", len(sim_prompts), report_id)
+        for idx, p in enumerate(sim_prompts):
+            if not isinstance(p, dict):
+                logger.error("Simulation prompt item is not a dictionary: %s", p)
+                p = {
+                    "prompt_text": str(p),
+                    "title": f"Simulación de entrenamiento {idx + 1}",
+                    "scenario_type": "roleplay"
+                }
+
+            p_number = p.get("prompt_number") or p.get("numero") or (idx + 1)
+            try:
+                p_number = int(p_number)
+            except (ValueError, TypeError):
+                p_number = idx + 1
+
+            p_title = p.get("title") or p.get("titulo") or p.get("scenario") or f"Simulación de entrenamiento {idx + 1}"
+            p_scenario = p.get("scenario_type") or p.get("scenario") or p.get("tipo_escenario") or "roleplay"
+            p_text = p.get("prompt_text") or p.get("prompt") or p.get("text") or p.get("texto")
+            if not p_text:
+                for k in ["prompt_text", "prompt", "text", "texto", "bot_prompt"]:
+                    if p.get(k):
+                        p_text = p.get(k)
+                        break
+
+            if not p_text:
+                raise ValueError(f"Falta el campo requerido 'prompt_text' para la simulación {idx + 1}")
+
+            p_focus = p.get("objective_focus") or p.get("enfoque_objetivo") or p.get("objectives") or []
+            if not isinstance(p_focus, list):
+                p_focus = [str(p_focus)]
+
+            linked_gen = p.get("linked_general_objectives") or []
+            if not isinstance(linked_gen, list):
+                linked_gen = [str(linked_gen)]
+
+            linked_spec = p.get("linked_specific_objectives") or []
+            if not isinstance(linked_spec, list):
+                linked_spec = [str(linked_spec)]
+
+            obj_summary = p.get("objective_summary") or p.get("resumen_objetivo")
+            exp_behavior = p.get("expected_behavior") or p.get("conducta_esperada")
+
+            combined_focus = {
+                "focus": p_focus,
+                "linked_general_objectives": linked_gen,
+                "linked_specific_objectives": linked_spec,
+                "objective_summary": obj_summary,
+                "expected_behavior": exp_behavior
+            }
+
+            new_prompt = TrainingSimulationPrompt(
+                training_report_id=report.training_report_id,
+                hubspot_owner_id=report.hubspot_owner_id,
+                prompt_number=p_number,
+                title=str(p_title),
+                scenario_type=str(p_scenario),
+                objective_focus_json=combined_focus,
+                prompt_text=str(p_text)
+            )
+            db.add(new_prompt)
+            await db.flush()
+
+            comp_status = TrainingCompletionStatus(
+                training_report_id=report.training_report_id,
+                simulation_prompt_id=new_prompt.simulation_prompt_id,
+                hubspot_owner_id=report.hubspot_owner_id,
+                status="pending"
+            )
+            db.add(comp_status)
+
+        # Deactivate previous in_progress or pending_approval cycles for this agent
+        stmt_deact = select(TrainingAgentReport).where(
+            and_(
+                TrainingAgentReport.hubspot_owner_id == report.hubspot_owner_id,
+                TrainingAgentReport.training_report_id != report.training_report_id,
+                TrainingAgentReport.is_current == True,
+                TrainingAgentReport.status.in_(["in_progress", "pending_approval", "running"])
+            )
+        )
+        res_deact = await db.execute(stmt_deact)
+        old_reports = res_deact.scalars().all()
+        for old_rep in old_reports:
+            old_rep.is_current = False
+            old_rep.status = "superseded"
+            old_rep.superseded_by_report_id = report.training_report_id
+            logger.info("[training] approve_cycle: superseded report_id=%d for agent %s", old_rep.training_report_id, report.hubspot_owner_id)
+
+        # Transition to in_progress
+        report.status = "in_progress"
+        report.approved_at = datetime.now(timezone.utc)
+        report.approved_by_user_id = approved_by_user_id
+        report.is_current = True
+
+        # Clear pending sim_prompts from final_report_json (approved, no longer staging)
+        report.final_report_json = {
+            **(staged_data or {}),
+            "pending_sim_prompts": None,  # Cleared — prompts now in bm_training_simulation_prompts
+            "approved_at": datetime.now(timezone.utc).isoformat(),
+            "approved_by_user_id": approved_by_user_id
+        }
+
+        await db.commit()
+        await db.refresh(report)
+        logger.info("[training] approve_cycle: cycle %d approved and set to in_progress.", report_id)
+        return report
 
     @staticmethod
     async def run_personalized_training_pass(
@@ -2936,7 +3158,7 @@ class PersonalizedTrainingService:
                 rep_status = rep.status
                 rep_error = rep.error_message
                 
-                if rep_status in ["completed", "in_progress"]:
+                if rep_status in ["completed", "in_progress", "pending_approval"]:
                     completed += 1
                 elif rep_status == "skipped":
                     skipped += 1
