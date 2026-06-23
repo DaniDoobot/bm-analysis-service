@@ -93,6 +93,7 @@ async def test_cycle_status_logic():
         print("\nTest 1: Generation returns pending_approval status...")
         run_id = None
         run2_id = None
+        run_3_id = None
         run_failed_id = None
         with patch("app.services.personalized_training_service.complete_text", new_callable=AsyncMock) as mock_complete, \
              patch.object(PersonalizedTrainingService, "aggregate_agent_evaluations", new_callable=AsyncMock) as mock_aggregate:
@@ -334,6 +335,75 @@ async def test_cycle_status_logic():
         print("[OK] Re-approval is idempotent - no duplicate prompts.")
 
         # -------------------------------------------------------------
+        # TEST 9: Coexistence of multiple active (in_progress) cycles for the same agent
+        # -------------------------------------------------------------
+        print("\nTest 9: Testing coexistence of multiple active (in_progress) cycles...")
+        p_start_2 = p_start + timedelta(days=30)
+        p_end_2 = p_end + timedelta(days=30)
+        
+        with patch("app.services.personalized_training_service.complete_text", new_callable=AsyncMock) as mock_complete_2, \
+             patch.object(PersonalizedTrainingService, "aggregate_agent_evaluations", new_callable=AsyncMock) as mock_aggregate_2:
+            mock_complete_2.return_value = MOCK_AI_RESPONSE
+            mock_aggregate_2.return_value = {
+                "evaluations_count": 3,
+                "calls_count": 3,
+                "avg_evaluacion_global": 9.0,
+                "criteria_averages": {},
+                "tipologia_distribution": {},
+                "critical_feedbacks": [],
+                "cierre_cita_rate": 95.0
+            }
+            run_3 = await PersonalizedTrainingService.run_personalized_training_pass(
+                db=db,
+                hubspot_owner_ids=[hubspot_owner_id],
+                period_start=p_start_2,
+                period_end=p_end_2,
+                force_regenerate=True
+            )
+            run_3_id = run_3.training_run_id
+            
+        # Get the report created for run_3
+        stmt_rep_3 = select(TrainingAgentReport).where(
+            TrainingAgentReport.training_run_id == run_3_id
+        )
+        res_rep_3 = await db.execute(stmt_rep_3)
+        report_3 = res_rep_3.scalars().first()
+        assert report_3 is not None
+        assert report_3.status == "pending_approval"
+        
+        # Now approve report_3 (cycle 2)
+        with patch("app.services.personalized_training_service.complete_text", new_callable=AsyncMock) as mock_approve_3:
+            mock_approve_3.return_value = MOCK_APPROVAL_PROMPTS_RESPONSE
+            approved_report_3 = await PersonalizedTrainingService.approve_training_cycle(
+                db=db,
+                report_id=report_3.training_report_id,
+                approved_by_user_id=1
+            )
+        assert approved_report_3.status == "in_progress"
+        
+        # Verify both cycles are in_progress and is_current = True
+        stmt_rep_1_after = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == report_id)
+        res_rep_1_after = await db.execute(stmt_rep_1_after)
+        rep_1_after = res_rep_1_after.scalars().first()
+        
+        assert rep_1_after.status == "in_progress", f"First cycle should remain in_progress, got {rep_1_after.status}"
+        assert rep_1_after.is_current == True, f"First cycle is_current should remain True, got {rep_1_after.is_current}"
+        
+        # Verify both are returned in agent's history and admin's details
+        detail_agent_coexist = await PersonalizedTrainingService.get_agent_detail(db, hubspot_owner_id=hubspot_owner_id)
+        history_reports = detail_agent_coexist["history"]
+        
+        # Both should exist in history (history lists all cycles except archived)
+        history_ids = [r["training_report_id"] for r in history_reports]
+        assert report_id in history_ids, "First cycle should still be in history"
+        assert report_3.training_report_id in history_ids, "Second cycle should be in history"
+        
+        # Count in_progress cycles in history
+        in_progress_history = [r for r in history_reports if r["status"] == "in_progress"]
+        assert len(in_progress_history) == 2, f"Expected 2 in_progress cycles in history, got {len(in_progress_history)}"
+        print("[OK] Multiple active (in_progress) cycles coexist without automatic deactivation.")
+
+        # -------------------------------------------------------------
         # TEST 8: Failure marks status as failed
         # -------------------------------------------------------------
         print("\nTest 8: Simulating critical failure (should mark status as failed)...")
@@ -368,7 +438,7 @@ async def test_cycle_status_logic():
         # Clean up test data
         print("\nCleaning up test data...")
         await db.execute(delete(TrainingAgentReport).where(TrainingAgentReport.hubspot_owner_id == hubspot_owner_id))
-        run_ids = [rid for rid in [run_id, run2_id, run_failed_id] if rid is not None]
+        run_ids = [rid for rid in [run_id, run2_id, run_3_id, run_failed_id] if rid is not None]
         if run_ids:
             await db.execute(delete(TrainingRun).where(TrainingRun.training_run_id.in_(run_ids)))
         await db.commit()

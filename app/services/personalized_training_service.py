@@ -3085,22 +3085,11 @@ class PersonalizedTrainingService:
             )
             db.add(comp_status)
 
-        # ── Step 3: Deactivate previous in_progress or pending_approval cycles for this agent ───
-        stmt_deact = select(TrainingAgentReport).where(
-            and_(
-                TrainingAgentReport.hubspot_owner_id == report.hubspot_owner_id,
-                TrainingAgentReport.training_report_id != report.training_report_id,
-                TrainingAgentReport.is_current == True,
-                TrainingAgentReport.status.in_(["in_progress", "pending_approval", "running"])
-            )
-        )
-        res_deact = await db.execute(stmt_deact)
-        old_reports = res_deact.scalars().all()
-        for old_rep in old_reports:
-            old_rep.is_current = False
-            old_rep.status = "superseded"
-            old_rep.superseded_by_report_id = report.training_report_id
-            logger.info("[training] approve_cycle: superseded report_id=%d for agent %s", old_rep.training_report_id, report.hubspot_owner_id)
+        # ── Step 3: Deactivate previous cycles (DISABLED) ───────────────────────────────────────
+        # As per the new business rule, approving a new cycle does NOT deactivate, supersede,
+        # or change is_current on previous cycles. Multiple active cycles are allowed to coexist.
+        logger.info("[training] approve_cycle: not deactivating previous cycles for agent %s (multiple active cycles allowed)", report.hubspot_owner_id)
+
 
         # ── Step 4: Transition to in_progress ───────────────────────────────────────────────────
         report.status = "in_progress"
