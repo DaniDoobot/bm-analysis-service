@@ -28,3 +28,8 @@ criteria_full.json
 generated_prompt*.txt
 
 test_permissions.db
+
+# Temporary scratch scripts and backups
+scratch/
+backups/
+*.log
