@@ -24,6 +24,8 @@ from app.models.personalized_training import TrainingAgentSetting, TrainingAgent
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 
+# Mock response for generate_report_for_agent phase
+# NOTE: Does NOT include 'simulation_prompts' — generation phase no longer requests them.
 MOCK_AI_RESPONSE = """{
     "summary_general": "El agente necesita mejorar su consistencia en el saludo.",
     "strengths": [
@@ -33,7 +35,7 @@ MOCK_AI_RESPONSE = """{
         {"title": "Cierre Incompleto", "description": "No verifica si hay dudas.", "evidence": "Cuelga rápido."}
     ],
     "notable_data": [
-        {"title": "Tasa de Cierre", "description": "Buen promedio.", "metric_or_pattern": "85%"}
+        {"title": "Tasa de Cierre", "description": "Buen promedio.", "metric_or_pattern": "Estable"}
     ],
     "evolution_summary": "Línea base inicial.",
     "general_objectives": [
@@ -44,15 +46,19 @@ MOCK_AI_RESPONSE = """{
             "title": "Manejo de Objeciones",
             "description": "Responder de forma empática.",
             "related_criteria": ["protocolo_general"],
-            "specific_behavior_to_improve": "Usar frases empáticas.",
+            "specific_behavior_to_improve": "Usar frases empáticas al responder objeciones del paciente.",
             "success_indicators": ["Disminución del tono defensivo"]
         }
-    ],
+    ]
+}"""
+
+# Mock response for approve_training_cycle Gemini call
+MOCK_APPROVAL_PROMPTS_RESPONSE = """{
     "simulation_prompts": [
-        {"prompt_number": 1, "title": "Sim 1", "scenario_type": "roleplay", "prompt_text": "Prompt 1"},
-        {"prompt_number": 2, "title": "Sim 2", "scenario_type": "roleplay", "prompt_text": "Prompt 2"},
-        {"prompt_number": 3, "title": "Sim 3", "scenario_type": "roleplay", "prompt_text": "Prompt 3"},
-        {"prompt_number": 4, "title": "Sim 4", "scenario_type": "roleplay", "prompt_text": "Prompt 4"}
+        {"prompt_number": 1, "title": "Sim Objeciones 1", "scenario_type": "roleplay", "prompt_text": "Prompt de objeciones 1 vinculado a objetivo: Manejo de Objeciones"},
+        {"prompt_number": 2, "title": "Sim Objeciones 2", "scenario_type": "roleplay", "prompt_text": "Prompt de objeciones 2"},
+        {"prompt_number": 3, "title": "Sim Cierre 3", "scenario_type": "roleplay", "prompt_text": "Prompt de cierre 3"},
+        {"prompt_number": 4, "title": "Sim Avanzado 4", "scenario_type": "roleplay", "prompt_text": "Prompt avanzado 4"}
     ]
 }"""
 
@@ -137,6 +143,13 @@ async def test_cycle_status_logic():
             prompts = res_prompts.scalars().all()
             assert len(prompts) == 0, f"Expected 0 prompts before approval, got {len(prompts)}"
             print("[OK] No prompts created before approval.")
+
+            # Verify final_report_json does NOT have 'pending_sim_prompts'
+            final_json = report.final_report_json or {}
+            assert "pending_sim_prompts" not in final_json, (
+                f"'pending_sim_prompts' must NOT be present in final_report_json during pending_approval. Got: {list(final_json.keys())}"
+            )
+            print(f"[OK] final_report_json has no pending_sim_prompts (keys: {list(final_json.keys()) if final_json else 'null'}).")
             
             report_id = report.training_report_id
 
@@ -165,14 +178,68 @@ async def test_cycle_status_logic():
         print("[OK] Admin can see pending_approval cycle.")
 
         # -------------------------------------------------------------
-        # TEST 4: Approve cycle - generates prompts and moves to in_progress
+        # TEST 4a: If Gemini fails at approval time, cycle stays pending_approval
         # -------------------------------------------------------------
-        print("\nTest 4: Approving cycle...")
-        approved_report = await PersonalizedTrainingService.approve_training_cycle(
+        print("\nTest 4a: If Gemini fails at approval, cycle stays pending_approval...")
+        with patch("app.services.personalized_training_service.complete_text", new_callable=AsyncMock) as mock_approve_fail:
+            mock_approve_fail.side_effect = Exception("Gemini timeout")
+            try:
+                await PersonalizedTrainingService.approve_training_cycle(
+                    db=db,
+                    report_id=report_id,
+                    approved_by_user_id=1
+                )
+                assert False, "Expected ValueError to be raised"
+            except ValueError as ve:
+                assert "pending_approval" in str(ve), f"Error message should mention pending_approval: {ve}"
+                print(f"[OK] Approval failed gracefully: {ve}")
+
+        # Verify cycle is still pending_approval after failed approval
+        from app.models.personalized_training import TrainingSimulationPrompt, TrainingCompletionStatus
+        stmt_still_pending = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == report_id)
+        res_still_pending = await db.execute(stmt_still_pending)
+        still_pending = res_still_pending.scalars().first()
+        assert still_pending.status == "pending_approval", f"Cycle should remain pending_approval after failed approval, got {still_pending.status}"
+        stmt_no_prompts = select(TrainingSimulationPrompt).where(TrainingSimulationPrompt.training_report_id == report_id)
+        res_no_prompts = await db.execute(stmt_no_prompts)
+        no_prompts = res_no_prompts.scalars().all()
+        assert len(no_prompts) == 0, f"No prompts should be created when approval fails. Got {len(no_prompts)}"
+        print("[OK] Cycle stays pending_approval and has 0 prompts after failed approval.")
+
+        # -------------------------------------------------------------
+        # TEST 4b: Edit objectives before approval (simulate admin edit)
+        # -------------------------------------------------------------
+        print("\nTest 4b: Edit objectives before approval...")
+        edited_specific_objectives = [
+            {
+                "title": "Manejo de Objeciones EDITADO",
+                "description": "Responder con mayor empatía y escucha activa.",
+                "related_criteria": ["protocolo_general"],
+                "specific_behavior_to_improve": "Reformular primero la preocupación del paciente antes de proponer soluciones.",
+                "success_indicators": ["Reducción del tono tenso del paciente"],
+                "status": "no_superado",
+                "is_carried_over": False
+            }
+        ]
+        updated_report = await PersonalizedTrainingService.update_cycle_objectives(
             db=db,
             report_id=report_id,
-            approved_by_user_id=1  # Fake admin user_id for test
+            specific_objectives_json=edited_specific_objectives
         )
+        assert updated_report.specific_objectives_json[0]["title"] == "Manejo de Objeciones EDITADO"
+        print("[OK] Objectives edited successfully.")
+
+        # -------------------------------------------------------------
+        # TEST 4c: Approve cycle — Gemini generates prompts using EDITED objectives
+        # -------------------------------------------------------------
+        print("\nTest 4c: Approving cycle with edited objectives (Gemini generates prompts)...")
+        with patch("app.services.personalized_training_service.complete_text", new_callable=AsyncMock) as mock_approve_ok:
+            mock_approve_ok.return_value = MOCK_APPROVAL_PROMPTS_RESPONSE
+            approved_report = await PersonalizedTrainingService.approve_training_cycle(
+                db=db,
+                report_id=report_id,
+                approved_by_user_id=1  # Fake admin user_id for test
+            )
         print(f"Approved report status: {approved_report.status}")
         assert approved_report.status == "in_progress", f"Expected 'in_progress', got '{approved_report.status}'"
         assert approved_report.approved_at is not None
@@ -186,6 +253,11 @@ async def test_cycle_status_logic():
         res_prompts = await db.execute(stmt_prompts)
         prompts = res_prompts.scalars().all()
         assert len(prompts) == 4, f"Expected 4 prompts after approval, got {len(prompts)}"
+        
+        # Verify prompts reference the edited objective title (via mock response)
+        first_prompt_title = prompts[0].title
+        assert "Objeciones" in first_prompt_title, f"Prompts should reflect the objectives being trained. Got: {first_prompt_title}"
+        print(f"[OK] Prompts reference trained objectives (first title: '{first_prompt_title}').")
         
         stmt_comp = select(TrainingCompletionStatus).where(
             TrainingCompletionStatus.training_report_id == report_id
@@ -243,7 +315,7 @@ async def test_cycle_status_logic():
         print("[OK] Idempotency verified - no duplicate reports.")
 
         # -------------------------------------------------------------
-        # TEST 7: Re-approving an in_progress cycle is a no-op
+        # TEST 7: Re-approving an in_progress cycle is a no-op (idempotent)
         # -------------------------------------------------------------
         print("\nTest 7: Re-approving an already in_progress cycle (should be no-op)...")
         re_approved = await PersonalizedTrainingService.approve_training_cycle(
