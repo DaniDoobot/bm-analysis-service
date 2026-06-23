@@ -186,10 +186,17 @@ async def startup_event():
     from app.routers.health import get_version
     commit_ver = get_version()
     logger.info("bm-analysis-service starting up (commit: %s)", commit_ver)
-    logger.info("AI provider: azure_openai")
-    logger.info("Azure text configured: %s", "yes" if settings.azure_openai_text_endpoint and settings.azure_openai_text_deployment else "no")
-    logger.info("Azure audio configured: %s", "yes" if settings.azure_openai_audio_endpoint and settings.azure_openai_audio_deployment else "no")
-    logger.info("Azure transcription configured: %s", "yes" if settings.azure_openai_transcription_endpoint and settings.azure_openai_transcription_deployment else "no")
+    import os
+    logger.info("AI provider: %s", settings.ai_provider)
+    logger.info("AI_PROVIDER in os.environ: %s", "yes" if "AI_PROVIDER" in os.environ else "no")
+    if settings.ai_provider == "gemini":
+        logger.info("Gemini analysis model: %s", settings.gemini_analysis_model)
+        logger.info("Gemini report model: %s", settings.gemini_report_model)
+        logger.info("Gemini API key configured: %s", "yes" if settings.gemini_api_key else "no")
+    else:
+        logger.info("Azure text configured: %s", "yes" if settings.azure_openai_text_endpoint and settings.azure_openai_text_deployment else "no")
+        logger.info("Azure audio configured: %s", "yes" if settings.azure_openai_audio_endpoint and settings.azure_openai_audio_deployment else "no")
+        logger.info("Azure transcription configured: %s", "yes" if settings.azure_openai_transcription_endpoint and settings.azure_openai_transcription_deployment else "no")
     logger.info("CORS origins: %s", settings.allowed_origins)
     if not settings.database_url:
         logger.warning("DATABASE_URL is not set!")
