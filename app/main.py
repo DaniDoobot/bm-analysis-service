@@ -29,6 +29,8 @@ from app.routers import (
     users,
     personalized_training,
     training_voice,
+    analytics,
+    base_structures,
 )
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -98,6 +100,9 @@ app.include_router(me.router)
 app.include_router(users.router)
 app.include_router(personalized_training.router)
 app.include_router(training_voice.router)
+app.include_router(analytics.router)
+app.include_router(base_structures.router)
+
 
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────

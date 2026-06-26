@@ -350,11 +350,12 @@ async def main():
     # Attempt live connection if database URL is configured
     engine = None
     try:
+        from sqlalchemy import text
         from app.db import get_engine
         engine = get_engine()
         # Test connection quickly
         async with engine.connect() as conn:
-            await conn.execute("SELECT 1")
+            await conn.execute(text("SELECT 1"))
         logger.info("Active database connection detected. Running full integration workflow...")
         
         # Run real integration workflow (from original file)
@@ -391,6 +392,13 @@ async def main():
             db.add(t_refund)
             await db.flush()
 
+            from sqlalchemy import select
+            from app.models.users import User
+            user_stmt = select(User).limit(1)
+            user_res = await db.execute(user_stmt)
+            first_user = user_res.scalars().first()
+            owner_id = first_user.user_id if first_user else 1
+
             test_structure = PromptBaseStructure(
                 structure_key="test_billing_structure",
                 structure_name="Test Billing Base Structure",
@@ -398,7 +406,8 @@ async def main():
                 prompt_type="text",
                 base_prompt="### BASE PROMPT COMERCIAL\nAnaliza la llamada.",
                 is_active=True,
-                service_id=test_service.service_id
+                service_id=test_service.service_id,
+                owner_user_id=owner_id
             )
             db.add(test_structure)
             await db.flush()
@@ -411,7 +420,8 @@ async def main():
                 base_structure_id=test_structure.id,
                 base_structure_key=test_structure.structure_key,
                 base_structure_name=test_structure.structure_name,
-                service_id=test_service.service_id
+                service_id=test_service.service_id,
+                owner_user_id=owner_id
             )
             db.add(test_prompt)
             await db.flush()

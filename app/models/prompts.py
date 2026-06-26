@@ -126,5 +126,28 @@ class StructurePermissionAudit(Base):
     )
 
 
+class BaseStructureTypology(Base):
+    __tablename__ = "bm_base_structure_typologies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    base_structure_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("bm_prompt_base_structures.id", ondelete="CASCADE"), nullable=False
+    )
+    typology_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("bm_typologies.typology_id", ondelete="CASCADE"), nullable=False
+    )
+    created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("base_structure_id", "typology_id", name="uq_base_structure_typology"),
+    )
+
+
+
 
 

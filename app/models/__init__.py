@@ -2,7 +2,7 @@
 from app.models.analyses import Analysis, AnalysisResult, CallAnalysisCurrent, AnalysisCriterionResult
 from app.models.criteria import PromptCriterion, PromptCriterionTypology, CriteriaSyncLog
 from app.models.drafts import PromptDraft
-from app.models.prompts import Prompt, PromptVersion, PromptBaseStructure, StructurePermission, StructurePermissionAudit
+from app.models.prompts import Prompt, PromptVersion, PromptBaseStructure, StructurePermission, StructurePermissionAudit, BaseStructureTypology
 from app.models.mass_evaluations import MassEvaluationJob, MassEvaluationRun, MassEvaluationResult, MassEvaluationCriterionResult
 from app.models.services import Service
 from app.models.typologies import Typology
@@ -23,6 +23,8 @@ __all__ = [
     "Prompt",
     "PromptVersion",
     "PromptBaseStructure",
+    "BaseStructureTypology",
+
     "StructurePermission",
     "StructurePermissionAudit",
     "PromptCriterion",

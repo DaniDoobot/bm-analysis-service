@@ -38,19 +38,38 @@ def _make_async_url(raw_url: str) -> str:
 def assert_not_production_db_for_tests() -> None:
     """
     Blocks execution if the database URL points to the production database.
-    Can be bypassed if ALLOW_PRODUCTION_TESTS=true is set in the environment.
+    Can be bypassed ONLY if ALLOW_DESTRUCTIVE_TESTS=true is set in the environment.
     """
     import os
     from app.config import get_settings
     settings = get_settings()
     raw_url = settings.database_url or ""
     
-    is_prod = "91.98.230.119" in raw_url or "n8n" in raw_url
-    allow_prod = os.environ.get("ALLOW_PRODUCTION_TESTS", "false").lower() == "true"
-    if is_prod and not allow_prod:
+    is_prod = "91.98.230.119" in raw_url or "/n8n" in raw_url
+    allow_destructive = os.environ.get("ALLOW_DESTRUCTIVE_TESTS", "false").lower() == "true"
+    
+    if is_prod and not allow_destructive:
         raise RuntimeError(
-            f"CRITICAL SAFETY VIOLATION: Test or diagnostic script attempted to connect to the production database: '{raw_url}'. "
-            "Execution is blocked for safety. Set ALLOW_PRODUCTION_TESTS=true in env to override."
+            "\n"
+            "===============================================================================\n"
+            "   CRITICAL SAFETY VIOLATION: ATTEMPTED TO RUN TESTS AGAINST PRODUCTION DATABASE\n"
+            "===============================================================================\n"
+            f"The database URL points to production: '{raw_url}'\n"
+            "Execution has been blocked to prevent data loss.\n"
+            "If you absolutely must run tests/cleanup against this database, you must set:\n"
+            "   ALLOW_DESTRUCTIVE_TESTS=true\n"
+            "in your environment or .env file.\n"
+            "==============================================================================="
+        )
+    elif is_prod and allow_destructive:
+        logger.warning(
+            "\n"
+            "===============================================================================\n"
+            "   WARNING: RUNNING TESTS AGAINST PRODUCTION DATABASE (BYPASS ENABLED)\n"
+            "===============================================================================\n"
+            f"Connecting to production database: '{raw_url}'\n"
+            "ALLOW_DESTRUCTIVE_TESTS=true is active. Destructive operations may occur!\n"
+            "==============================================================================="
         )
 
 

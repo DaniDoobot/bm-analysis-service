@@ -36,3 +36,24 @@ class CriterionTypologyAssociation(BaseModel):
     typology_key: str
     typology_name: str
     is_associated: bool
+
+
+class TypologyCreateFlex(BaseModel):
+    service_id: int | None = None
+    typology_key: str | None = None
+    typology_name: str | None = None
+    
+    # Flex fields
+    name: str | None = None
+    service: str | None = None
+    description: str | None = None
+    sort_order: int = 100
+    is_active: bool = True
+
+
+class TypologyCreateResponse(BaseModel):
+    id: int
+    name: str
+    service: str
+    associated_base_structures_count: int
+

@@ -267,3 +267,38 @@ class GrantPermissionRequest(BaseModel):
 class TransferOwnershipRequest(BaseModel):
     new_owner_user_id: int
 
+
+class TypologyItem(BaseModel):
+    id: int
+    key: str
+    name: str
+    service: str
+    typology_key: str
+    service_id: int
+    service_key: str
+    is_active: bool
+    description: str | None = None
+
+
+class BaseStructureWithTypologies(BaseModel):
+    id: int
+    name: str
+    structure_key: str
+    service: str | None = None
+    description: str | None = None
+    is_active: bool
+    associated_typologies: list[TypologyItem] = []
+    available_typologies: list[TypologyItem] = []
+
+
+class UpdateTypologiesRequest(BaseModel):
+    typology_ids: list[int]
+
+
+class PromptBaseStructureNestedDetailOut(BaseModel):
+    structure: PromptBaseStructureDetailOut
+    associated_typologies: list[TypologyItem] = []
+    available_typologies: list[TypologyItem] = []
+
+
+

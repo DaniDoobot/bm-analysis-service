@@ -409,10 +409,51 @@ async def main():
     if not args.dry_run and not args.execute:
         args.dry_run = True
         
-    if args.execute:
-        if not args.confirm or args.confirm != CONFIRMATION_STRING:
-            print(f"ERROR: Execution requires confirmation string: --confirm {CONFIRMATION_STRING}")
-            sys.exit(1)
+    settings = get_settings()
+    db_url = settings.database_url or ""
+    
+    # Parse DB url to print host and db name
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(db_url)
+        db_host = parsed.hostname
+        db_name = parsed.path.lstrip('/')
+    except Exception:
+        db_host = "Unknown"
+        db_name = "Unknown"
+        
+    print("===============================================================================")
+    print(f"DATABASE HOST: {db_host}")
+    print(f"DATABASE NAME: {db_name}")
+    print(f"RUN MODE:      {'EXECUTE' if args.execute else 'DRY RUN'}")
+    print("===============================================================================")
+    
+    is_prod = "91.98.230.119" in db_url or "/n8n" in db_url
+    
+    if is_prod:
+        print("!!! WARNING: CONNECTION POINTS TO PRODUCTION DATABASE !!!")
+        allow_destructive = os.environ.get("ALLOW_DESTRUCTIVE_TESTS", "false").lower() == "true"
+        if not allow_destructive:
+            print("CRITICAL SAFETY VIOLATION: Connection to production database detected and ALLOW_DESTRUCTIVE_TESTS=true is not set.")
+            print("Execution has been blocked to prevent data loss. Aborting.")
+            sys.exit(3)
+            
+        if args.execute:
+            if not args.confirm or args.confirm != CONFIRMATION_STRING:
+                print(f"CRITICAL: Execution on production requires confirmation string: --confirm {CONFIRMATION_STRING}")
+                sys.exit(1)
+                
+            # Require manual text confirmation
+            print("\nWARNING: You are about to execute a DESTRUCTIVE script on the PRODUCTION database.")
+            confirm_input = input("To proceed, type the database name 'n8n': ")
+            if confirm_input != "n8n":
+                print("Manual confirmation failed. Aborting.")
+                sys.exit(4)
+    else:
+        if args.execute:
+            if not args.confirm or args.confirm != CONFIRMATION_STRING:
+                print(f"ERROR: Execution requires confirmation string: --confirm {CONFIRMATION_STRING}")
+                sys.exit(1)
             
     engine = get_engine()
     

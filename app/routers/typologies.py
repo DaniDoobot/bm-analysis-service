@@ -1,17 +1,26 @@
 """FastAPI router for Typologies."""
 import logging
+import unicodedata
+import re
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_db
 from app.models.typologies import Typology
 from app.models.services import Service
 from app.models.criteria import PromptCriterionTypology
-from app.schemas.typologies import TypologyCreate, TypologyOut, TypologyUpdate
+from app.models.prompts import PromptBaseStructure, BaseStructureTypology
+from app.schemas.typologies import TypologyCreate, TypologyOut, TypologyUpdate, TypologyCreateFlex, TypologyCreateResponse
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/bm/typologies", tags=["Typologies"])
+
+
+def slugify(text: str) -> str:
+    text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
+    text = re.sub(r'[^\w\s-]', '', text).strip().lower()
+    return re.sub(r'[-\s]+', '_', text)
 
 
 @router.get("", response_model=list[TypologyOut])
@@ -45,22 +54,52 @@ async def get_typology(typology_id: int, db: AsyncSession = Depends(get_db)):
     return typology
 
 
-@router.post("", response_model=TypologyOut, status_code=status.HTTP_201_CREATED)
-async def create_typology(payload: TypologyCreate, db: AsyncSession = Depends(get_db)):
-    """Create a new typology. Verifies service exists and key is unique or restores soft-deleted one."""
-    # Verify service exists
-    s_stmt = select(Service).where(Service.service_id == payload.service_id)
+@router.post("", response_model=TypologyCreateResponse, status_code=status.HTTP_201_CREATED)
+async def create_typology(payload: TypologyCreateFlex, db: AsyncSession = Depends(get_db)):
+    """Create a new typology. Supports flex inputs and auto-associates with active same-service base structures."""
+    # Resolve service_id & service name
+    service_id = payload.service_id
+    service_name = payload.service
+
+    if service_id is not None:
+        s_stmt = select(Service).where(Service.service_id == service_id)
+    elif service_name is not None:
+        s_stmt = select(Service).where(
+            (func.lower(Service.service_key) == service_name.lower()) |
+            (func.lower(Service.service_name) == service_name.lower())
+        )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Debe especificar service o service_id."
+        )
+
     s_res = await db.execute(s_stmt)
-    if not s_res.scalars().first():
+    service_obj = s_res.scalars().first()
+    if not service_obj:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Servicio con ID {payload.service_id} no existe."
+            detail="El servicio especificado no existe."
         )
+
+    service_id = service_obj.service_id
+    service_name = service_obj.service_name
+
+    # Resolve typology_name
+    typology_name = payload.typology_name or payload.name
+    if not typology_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Debe especificar typology_name o name."
+        )
+
+    # Resolve key
+    typology_key = payload.typology_key or slugify(typology_name)
 
     # Verify if a typology with the same key already exists within the service
     t_stmt = select(Typology).where(
-        Typology.service_id == payload.service_id,
-        Typology.typology_key == payload.typology_key
+        Typology.service_id == service_id,
+        Typology.typology_key == typology_key
     )
     t_res = await db.execute(t_stmt)
     existing_typology = t_res.scalars().first()
@@ -68,35 +107,84 @@ async def create_typology(payload: TypologyCreate, db: AsyncSession = Depends(ge
     if existing_typology:
         if not existing_typology.is_active:
             # RESTORE IT logically and update its fields to keep DB constraint clean
-            logger.info("Restoring soft-deleted/inactive typology (ID: %d, key: '%s') with new parameters.", existing_typology.typology_id, payload.typology_key)
+            logger.info("Restoring soft-deleted/inactive typology (ID: %d, key: '%s') with new parameters.", existing_typology.typology_id, typology_key)
             existing_typology.is_active = True
-            existing_typology.typology_name = payload.typology_name
+            existing_typology.typology_name = typology_name
             if payload.description is not None:
                 existing_typology.description = payload.description
             if payload.sort_order is not None:
                 existing_typology.sort_order = payload.sort_order
             
+            typology = existing_typology
             await db.commit()
-            await db.refresh(existing_typology)
-            return existing_typology
+            await db.refresh(typology)
         else:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Ya existe una tipología activa con la clave '{payload.typology_key}' en el servicio {payload.service_id}."
+                detail=f"Ya existe una tipología activa con la clave '{typology_key}' en el servicio {service_id}."
             )
+    else:
+        typology = Typology(
+            service_id=service_id,
+            typology_key=typology_key,
+            typology_name=typology_name,
+            description=payload.description,
+            sort_order=payload.sort_order,
+            is_active=payload.is_active
+        )
+        db.add(typology)
+        await db.commit()
+        await db.refresh(typology)
 
-    typology = Typology(
-        service_id=payload.service_id,
-        typology_key=payload.typology_key,
-        typology_name=payload.typology_name,
-        description=payload.description,
-        sort_order=payload.sort_order,
-        is_active=payload.is_active
+    structs_stmt = select(PromptBaseStructure).where(
+        PromptBaseStructure.service_id == service_id,
+        PromptBaseStructure.is_active == True
     )
-    db.add(typology)
-    await db.commit()
-    await db.refresh(typology)
-    return typology
+    structs_res = await db.execute(structs_stmt)
+    active_structs = structs_res.scalars().all()
+
+    if not active_structs:
+        logger.info(
+            "No active base structures found for service_id %d. Typology %d (%s) created without auto-associations.",
+            service_id,
+            typology.typology_id,
+            typology.typology_key
+        )
+
+    associated_count = 0
+    for struct in active_structs:
+        # Check if association already exists
+        check_stmt = select(BaseStructureTypology).where(
+            BaseStructureTypology.base_structure_id == struct.id,
+            BaseStructureTypology.typology_id == typology.typology_id
+        )
+        check_res = await db.execute(check_stmt)
+        if not check_res.scalars().first():
+            db.add(
+                BaseStructureTypology(
+                    base_structure_id=struct.id,
+                    typology_id=typology.typology_id
+                )
+            )
+            associated_count += 1
+
+    if associated_count > 0:
+        await db.commit()
+
+    # Query total associated count
+    count_stmt = select(func.count(BaseStructureTypology.id)).where(
+        BaseStructureTypology.typology_id == typology.typology_id
+    )
+    count_res = await db.execute(count_stmt)
+    total_associated = count_res.scalar() or 0
+
+    return TypologyCreateResponse(
+        id=typology.typology_id,
+        name=typology.typology_name,
+        service=service_name,
+        associated_base_structures_count=total_associated
+    )
+
 
 
 @router.put("/{typology_id}", response_model=TypologyOut)

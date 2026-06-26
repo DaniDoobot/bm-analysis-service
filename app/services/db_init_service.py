@@ -4,7 +4,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_engine, Base
 import app.models
-from app.models.prompts import PromptBaseStructure, PromptVersion, Prompt
+from app.models.prompts import PromptBaseStructure, PromptVersion, Prompt, BaseStructureTypology
 from app.models.services import Service
 from app.models.typologies import Typology
 from app.models.criteria import PromptCriterion, PromptCriterionTypology
@@ -1414,6 +1414,17 @@ async def init_db():
                     boston_audio_struct["base_prompt"] = FALLBACK_BOSTON_PROMPT
                 logger.warning("Error fetching active prompt version 1 for seeding: %s. Using default fallback.", e)
 
+            # Query an admin or any user to act as owner_user_id for default base structures
+            user_stmt = select(User).where(User.role == "admin").limit(1)
+            user_res = await db.execute(user_stmt)
+            default_owner = user_res.scalars().first()
+            if not default_owner:
+                # fallback to any user
+                user_stmt = select(User).limit(1)
+                user_res = await db.execute(user_stmt)
+                default_owner = user_res.scalars().first()
+            default_owner_id = default_owner.user_id if default_owner else None
+
             # Insert default records if structure_key doesn't exist
             for struct_data in DEFAULT_STRUCTURES:
                 key = struct_data["structure_key"]
@@ -1450,7 +1461,8 @@ async def init_db():
                         default_criteria=struct_data["default_criteria"],
                         is_active=struct_data["is_active"],
                         created_by="system",
-                        created_by_email="system@doobot.ai"
+                        created_by_email="system@doobot.ai",
+                        owner_user_id=default_owner_id
                     )
                     db.add(new_struct)
                     logger.info("Inserting default structure base: %s", key)
@@ -1534,6 +1546,50 @@ async def init_db():
                             logger.info("Unsetting is_current for duplicate version ID %d", other_v.id)
             except Exception as e_dup:
                 logger.error("Error cleaning up duplicate prompt versions: %s", e_dup)
+
+            # Backfill base structures typologies from existing PromptCriterionTypology
+            logger.info("Migrating existing typology associations to bm_base_structure_typologies...")
+            try:
+                stmt_mig = select(
+                    Prompt.base_structure_id,
+                    PromptCriterionTypology.typology_id
+                ).join(
+                    PromptCriterion, PromptCriterionTypology.criterion_id == PromptCriterion.criterion_id
+                ).join(
+                    Prompt, PromptCriterion.prompt_id == Prompt.prompt_id
+                ).join(
+                    Typology, PromptCriterionTypology.typology_id == Typology.typology_id
+                ).where(
+                    Prompt.base_structure_id.is_not(None),
+                    Prompt.service_id == Typology.service_id  # Enforce same service constraint
+                ).distinct()
+                
+                res_mig = await db.execute(stmt_mig)
+                mig_rows = res_mig.all()
+                
+                migrated_count = 0
+                for base_id, typo_id in mig_rows:
+                    # Check if association already exists
+                    stmt_check = select(BaseStructureTypology).where(
+                        BaseStructureTypology.base_structure_id == base_id,
+                        BaseStructureTypology.typology_id == typo_id
+                    )
+                    res_check = await db.execute(stmt_check)
+                    if not res_check.scalars().first():
+                        db.add(
+                            BaseStructureTypology(
+                                base_structure_id=base_id,
+                                typology_id=typo_id
+                            )
+                        )
+                        migrated_count += 1
+                        
+                if migrated_count > 0:
+                    logger.info("Successfully migrated %d associations to bm_base_structure_typologies.", migrated_count)
+                else:
+                    logger.info("No new associations to migrate to bm_base_structure_typologies.")
+            except Exception as e_mig:
+                logger.error("Failed to migrate base structure typology associations: %s", e_mig)
 
             await db.commit()
             logger.info("db_init_service initialization completed successfully.")

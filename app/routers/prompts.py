@@ -4,6 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_db, get_current_user, require_admin
@@ -20,8 +21,8 @@ from app.services.auth_service import (
     require_structure_restore,
     log_audit,
 )
-from sqlalchemy import select
-from app.models.prompts import StructurePermission
+from app.models.prompts import StructurePermission, PromptBaseStructure, BaseStructureTypology
+from app.models.typologies import Typology
 from app.schemas.prompts import (
     ActivateVersionRequest,
     ActivePromptOut,
@@ -30,6 +31,7 @@ from app.schemas.prompts import (
     SavePromptRequest,
     PromptBaseStructureOut,
     PromptBaseStructureDetailOut,
+    PromptBaseStructureNestedDetailOut,
     PromptBaseStructureCreate,
     PromptBaseStructureUpdate,
     CreateFromBaseRequest,
@@ -39,6 +41,7 @@ from app.schemas.prompts import (
     PermissionActionResponse,
     GrantPermissionRequest,
     TransferOwnershipRequest,
+    TypologyItem,
 )
 from app.services import prompts_service
 
@@ -277,21 +280,98 @@ async def list_prompt_base_structures(
     return enriched_structures
 
 
-@router.get("/prompt-base-structures/{id}", response_model=PromptBaseStructureDetailOut, dependencies=[require_structure_view("base")])
+async def _get_base_structure_nested_dict(
+    db: AsyncSession,
+    struct: PromptBaseStructure,
+    current_user: User
+) -> dict:
+    """Helper to fetch and format the nested detail response for a base structure."""
+    # 1. Enrich base structure
+    s_dict = _base_structure_detail_out(struct)
+    enriched_structure = await _enrich_structure_response(
+        db, current_user, "base", struct.id, struct.owner_user_id, s_dict
+    )
+
+    service_name = struct.service.service_name if struct.service else "Desconocido"
+    service_key = struct.service.service_key if struct.service else "Desconocido"
+
+    associated_typologies = []
+    available_typologies = []
+
+    if struct.service_id:
+        # 2. Get associated typologies
+        assoc_stmt = select(Typology).join(
+            BaseStructureTypology, BaseStructureTypology.typology_id == Typology.typology_id
+        ).where(
+            BaseStructureTypology.base_structure_id == struct.id
+        )
+        assoc_res = await db.execute(assoc_stmt)
+        assoc_list = list(assoc_res.scalars().all())
+
+        # Format associated typologies
+        for t in assoc_list:
+            associated_typologies.append(
+                TypologyItem(
+                    id=t.typology_id,
+                    key=t.typology_key,
+                    name=t.typology_name,
+                    service=service_name,
+                    typology_key=t.typology_key,
+                    service_id=t.service_id,
+                    service_key=service_key,
+                    is_active=t.is_active,
+                    description=t.description
+                )
+            )
+
+        # 3. Get all active typologies for the service
+        all_typo_stmt = select(Typology).where(
+            Typology.service_id == struct.service_id,
+            Typology.is_active == True
+        )
+        all_typo_res = await db.execute(all_typo_stmt)
+        all_typos = all_typo_res.scalars().all()
+
+        assoc_ids = {t.typology_id for t in assoc_list}
+
+        # Format available typologies
+        for t in all_typos:
+            if t.typology_id not in assoc_ids:
+                available_typologies.append(
+                    TypologyItem(
+                        id=t.typology_id,
+                        key=t.typology_key,
+                        name=t.typology_name,
+                        service=service_name,
+                        typology_key=t.typology_key,
+                        service_id=t.service_id,
+                        service_key=service_key,
+                        is_active=t.is_active,
+                        description=t.description
+                    )
+                )
+
+    return {
+        "structure": enriched_structure,
+        "associated_typologies": associated_typologies,
+        "available_typologies": available_typologies
+    }
+
+
+@router.get("/prompt-base-structures/{id}", response_model=PromptBaseStructureNestedDetailOut, dependencies=[require_structure_view("base")])
 async def get_prompt_base_structure(
     id: int,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ):
-    """Return detailed base structure by ID."""
+    """Return detailed base structure by ID including associated and available typologies."""
     if getattr(current_user, "role", "agent").lower() == "agent":
         raise HTTPException(status_code=403, detail="Los agentes no tienen acceso a las estructuras.")
     struct = await prompts_service.get_base_structure(db, structure_id=id)
     if not struct:
         raise HTTPException(status_code=404, detail=f"Base structure {id} not found.")
     
-    s_dict = _base_structure_detail_out(struct)
-    return await _enrich_structure_response(db, current_user, "base", struct.id, struct.owner_user_id, s_dict)
+    return await _get_base_structure_nested_dict(db, struct, current_user)
 
 
 @router.post("/prompt-base-structures", response_model=PromptBaseStructureDetailOut)
