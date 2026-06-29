@@ -199,10 +199,13 @@ async def analyze_transcription_pipeline(
     ]
 
     try:
+        model_to_use = None
+        if (settings.ai_provider or "").lower() in ["azure", "azure_openai", "openai"]:
+            model_to_use = settings.azure_openai_text_deployment
         raw_response = await openai_service.complete_text(
             messages=messages,
             response_format="json_object",
-            model=settings.azure_openai_text_deployment,
+            model=model_to_use,
         )
     except Exception as e:
         logger.error("Error calling Azure OpenAI: %s", e, exc_info=True)
