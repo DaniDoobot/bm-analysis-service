@@ -15,6 +15,30 @@ from app.utils.hubspot_owners import resolve_owner_name, resolve_agent_display
 logger = logging.getLogger(__name__)
 
 
+from datetime import datetime
+
+def parse_date_bound(date_str: str | None, is_end_of_day: bool = False) -> datetime | None:
+    if not date_str:
+        return None
+    date_str = date_str.strip()
+    is_date_only = len(date_str) == 10 and "-" in date_str and ":" not in date_str
+    parsed = None
+    try:
+        parsed = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+    except ValueError:
+        for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                parsed = datetime.strptime(date_str, fmt)
+                break
+            except ValueError:
+                continue
+    if parsed:
+        if is_date_only and is_end_of_day:
+            parsed = parsed.replace(hour=23, minute=59, second=59, microsecond=999999)
+        return parsed
+    return None
+
+
 async def list_analyses(
     db: AsyncSession,
     analysis_type: str | None = None,
@@ -46,16 +70,15 @@ async def list_analyses(
         query = query.where(CallAnalysisCurrent.tipo_llamada == tipo_llamada)
     if prompt_id is not None:
         query = query.where(CallAnalysisCurrent.prompt_id == prompt_id)
-    if date_from:
-        try:
-            query = query.where(CallAnalysisCurrent.updated_at >= date_from)
-        except Exception:
-            logger.warning("Invalid date_from value: %s — skipping filter", date_from)
-    if date_to:
-        try:
-            query = query.where(CallAnalysisCurrent.updated_at <= date_to)
-        except Exception:
-            logger.warning("Invalid date_to value: %s — skipping filter", date_to)
+    
+    parsed_date_from = parse_date_bound(date_from, is_end_of_day=False)
+    if parsed_date_from:
+        query = query.where(CallAnalysisCurrent.updated_at >= parsed_date_from)
+        
+    parsed_date_to = parse_date_bound(date_to, is_end_of_day=True)
+    if parsed_date_to:
+        query = query.where(CallAnalysisCurrent.updated_at <= parsed_date_to)
+
     if global_score_min is not None:
         query = query.where(CallAnalysisCurrent.evaluacion_global.is_not(None))
         query = query.where(CallAnalysisCurrent.evaluacion_global >= global_score_min)
@@ -102,16 +125,13 @@ async def list_analyses_history(
         query = query.where(Analysis.tipo_llamada == tipo_llamada)
     if prompt_id is not None:
         query = query.where(Analysis.prompt_id == prompt_id)
-    if date_from:
-        try:
-            query = query.where(Analysis.created_at >= date_from)
-        except Exception:
-            logger.warning("Invalid date_from value: %s — skipping filter", date_from)
-    if date_to:
-        try:
-            query = query.where(Analysis.created_at <= date_to)
-        except Exception:
-            logger.warning("Invalid date_to value: %s — skipping filter", date_to)
+    parsed_date_from = parse_date_bound(date_from, is_end_of_day=False)
+    if parsed_date_from:
+        query = query.where(Analysis.created_at >= parsed_date_from)
+        
+    parsed_date_to = parse_date_bound(date_to, is_end_of_day=True)
+    if parsed_date_to:
+        query = query.where(Analysis.created_at <= parsed_date_to)
     if global_score_min is not None:
         query = query.where(Analysis.evaluacion_global.is_not(None))
         query = query.where(Analysis.evaluacion_global >= global_score_min)
