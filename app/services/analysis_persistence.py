@@ -87,6 +87,46 @@ def safe_parse_number(value: Any) -> Decimal | None:
     return None
 
 
+def normalize_tipo_llamada(val: Any) -> str | None:
+    """
+    Robustly normalize a raw typology key from the LLM or criteria outputs.
+    Supports capitalization, accents, whitespace, and common synonyms.
+    Returns the normalized key mapping or the cleaned key if no mapping is found.
+    """
+    if val is None:
+        return None
+    val_str = str(val).strip().lower()
+    if not val_str:
+        return None
+    
+    # Remove accents / diacritics
+    import unicodedata
+    val_str = "".join(
+        c for c in unicodedata.normalize("NFD", val_str)
+        if unicodedata.category(c) != "Mn"
+    )
+    
+    # Check for specific variations and synonyms
+    if any(x in val_str for x in ["confirm", "confir"]):
+        return "confirmacion"
+    if any(x in val_str for x in ["reprogram", "reagend", "cambi"]):
+        return "reagendo"
+    if any(x in val_str for x in ["cancel", "anul"]):
+        return "cancelacion"
+    if any(x in val_str for x in ["falta", "no show", "noshow", "ausencia", "no asist"]):
+        return "falta"
+    if any(x in val_str for x in ["transfer", "traspas", "deriv"]):
+        return "transferencia"
+    if any(x in val_str for x in ["intento", "contacto", "no disponible"]):
+        return "intento_contacto"
+    if "cita" in val_str:
+        return "cita"
+    if any(x in val_str for x in ["otro", "general", "preci"]):
+        return "otros"
+        
+    return val_str
+
+
 async def save_analysis(
     db: AsyncSession,
     *,
@@ -224,7 +264,8 @@ async def save_analysis(
                         detected_typology_key_raw = v
                         break
 
-            detected_typology_key = str(detected_typology_key_raw).strip().lower() if detected_typology_key_raw else None
+            # Apply robust normalization helper
+            detected_typology_key = normalize_tipo_llamada(detected_typology_key_raw)
             matched_typology = None
             if detected_typology_key:
                 if detected_typology_key in typology_by_key:

@@ -58,8 +58,19 @@ def sanitize_legacy_typologies_block(prompt_text: str, active_typologies: list[A
 
     dynamic_section = (
         "### DEFINICIÓN DE TIPOS DE LLAMADA\n"
-        "El analizador clasifica cada llamada en un único tipo_llamada. Los tipos permitidos son estrictamente:\n" +
+        "El analizador clasifica cada llamada en un único tipo_llamada. Debes evaluar y elegir estrictamente una de las claves permitidas. Devuelve tipo_llamada usando la clave exacta de la tipología (no el nombre visible). Está expresamente prohibido inventar tipologías.\n\n"
+        "Tipos permitidos:\n" +
         "\n".join(bullet_lines) + "\n\n"
+        "### PRIORIDADES EN CASO DE CONFLICTO\n"
+        "Si una llamada cumple con características de múltiples tipologías o hay dudas sobre cuál elegir, aplica estrictamente este orden de prioridad decreciente (de mayor a menor importancia):\n"
+        "1. transferencia: si la llamada la gestionan dos agentes debido a un traspaso/derivación.\n"
+        "2. intento_contacto: si no llega a mantenerse una conversación útil por falta de disponibilidad del paciente (ej. está ocupado, pide que le llamen después, etc.).\n"
+        "3. falta: si la llamada deriva de una no asistencia/ausencia previa a una cita agendada.\n"
+        "4. reagendo: si se reprograma o cambia de fecha/hora una cita médica que ya existía.\n"
+        "5. cancelacion: si se anula definitivamente una cita agendada sin acordar una nueva fecha.\n"
+        "6. confirmacion: si el paciente únicamente confirma su asistencia a una cita agendada (sin reprogramar).\n"
+        "7. cita: si se crea o agenda una cita médica nueva por primera vez.\n"
+        "8. otros: si no encaja en ninguna de las tipologías anteriores.\n\n"
     )
 
     # 1. Regex to find markdown headers related to call types/typologies
