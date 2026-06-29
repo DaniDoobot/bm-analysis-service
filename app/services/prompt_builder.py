@@ -52,9 +52,31 @@ def sanitize_legacy_typologies_block(prompt_text: str, active_typologies: list[A
 
     # Build the new dynamic typologies section
     bullet_lines = []
+    active_keys = set()
     for t in active_typologies:
-        desc = getattr(t, "description", None) or f"Llamada clasificada como {getattr(t, 'typology_name', t.typology_key)}."
-        bullet_lines.append(f"- {t.typology_key}: {desc}")
+        t_key = getattr(t, "typology_key", None) or getattr(t, "key", None)
+        if t_key:
+            active_keys.add(t_key)
+            desc = getattr(t, "description", None) or f"Llamada clasificada como {getattr(t, 'typology_name', t_key)}."
+            bullet_lines.append(f"- {t_key}: {desc}")
+
+    # Build priorities dynamically based on active typologies
+    priority_order = ["transferencia", "intento_contacto", "falta", "reagendo", "cancelacion", "confirmacion", "cita", "otros"]
+    active_priorities = [pk for pk in priority_order if pk in active_keys]
+    priority_descriptions = {
+        "transferencia": "si la llamada la gestionan dos agentes debido a un traspaso/derivación.",
+        "intento_contacto": "si no llega a mantenerse una conversación útil por falta de disponibilidad del paciente (ej. está ocupado, pide que le llamen después, etc.).",
+        "falta": "si la llamada deriva de una no asistencia/ausencia previa a una cita agendada.",
+        "reagendo": "si se reprograma o cambia de fecha/hora una cita médica que ya existía.",
+        "cancelacion": "si se anula definitivamente una cita agendada sin acordar una nueva fecha.",
+        "confirmacion": "si el paciente únicamente confirma su asistencia a una cita agendada (sin reprogramar).",
+        "cita": "si se crea o agenda una cita médica nueva por primera vez.",
+        "otros": "si no encaja en ninguna de las tipologías anteriores."
+    }
+    priority_lines = []
+    for idx, pk in enumerate(active_priorities, 1):
+        desc = priority_descriptions.get(pk, "si aplica esta tipología.")
+        priority_lines.append(f"{idx}. {pk}: {desc}")
 
     dynamic_section = (
         "### DEFINICIÓN DE TIPOS DE LLAMADA\n"
@@ -62,21 +84,14 @@ def sanitize_legacy_typologies_block(prompt_text: str, active_typologies: list[A
         "Tipos permitidos:\n" +
         "\n".join(bullet_lines) + "\n\n"
         "### PRIORIDADES EN CASO DE CONFLICTO\n"
-        "Si una llamada cumple con características de múltiples tipologías o hay dudas sobre cuál elegir, aplica estrictamente este orden de prioridad decreciente (de mayor a menor importancia):\n"
-        "1. transferencia: si la llamada la gestionan dos agentes debido a un traspaso/derivación.\n"
-        "2. intento_contacto: si no llega a mantenerse una conversación útil por falta de disponibilidad del paciente (ej. está ocupado, pide que le llamen después, etc.).\n"
-        "3. falta: si la llamada deriva de una no asistencia/ausencia previa a una cita agendada.\n"
-        "4. reagendo: si se reprograma o cambia de fecha/hora una cita médica que ya existía.\n"
-        "5. cancelacion: si se anula definitivamente una cita agendada sin acordar una nueva fecha.\n"
-        "6. confirmacion: si el paciente únicamente confirma su asistencia a una cita agendada (sin reprogramar).\n"
-        "7. cita: si se crea o agenda una cita médica nueva por primera vez.\n"
-        "8. otros: si no encaja en ninguna de las tipologías anteriores.\n\n"
+        "Si una llamada cumple con características de múltiples tipologías o hay dudas sobre cuál elegir, aplica estrictamente este orden de prioridad decreciente (de mayor a menor importancia):\n" +
+        "\n".join(priority_lines) + "\n\n"
     )
 
     # 1. Regex to find markdown headers related to call types/typologies
     import re
     header_pattern = re.compile(
-        r"(?im)^(#+\s*(?:tipos?\s+de\s+llamada|definición\s+de\s+tipos?|clasificación\s+de\s+llamadas|tipologías\s+del\s+servicio).*?)$"
+        r"(?im)^(#+\s*(?:tipos?\s+de\s+llamada|definici[oó]n\s+de\s+tipos?(?:\s+de\s+llamada)?(?:\s*\(tipo_llamada\))?|clasificaci[oó]n\s+de\s+llamadas?|tipolog[ií]as?(?:\s+del\s+servicio)?).*?)$"
     )
 
     match = header_pattern.search(prompt_text)

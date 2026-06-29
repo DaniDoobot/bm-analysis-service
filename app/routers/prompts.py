@@ -354,6 +354,13 @@ async def _get_base_structure_nested_dict(
                     )
                 )
 
+    # Sanitize base_prompt dynamically on read/preview using only active associated typologies
+    from app.services.prompt_builder import sanitize_legacy_typologies_block
+    if enriched_structure.get("base_prompt"):
+        enriched_structure["base_prompt"] = sanitize_legacy_typologies_block(
+            enriched_structure["base_prompt"], associated_typologies
+        )
+
     return {
         "structure": enriched_structure,
         "associated_typologies": associated_typologies,

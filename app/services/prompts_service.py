@@ -311,7 +311,9 @@ async def list_prompts(
         current = await _get_current_version(db, p.prompt_id)
         
         prompt_text = current.prompt if current else None
-        if not prompt_text and p.prompt_id:
+        if prompt_text:
+            prompt_text = await sanitize_prompt_text_for_preview(db, p.prompt_id, prompt_text)
+        elif p.prompt_id:
             prompt_text = await build_fallback_prompt_from_criteria(db, p.prompt_id)
 
         # Check for active draft in bm_prompt_drafts
@@ -462,7 +464,9 @@ async def list_versions(
     out = []
     for v in versions:
         prompt_text = v.prompt
-        if not prompt_text and v.prompt_id:
+        if prompt_text and v.prompt_id:
+            prompt_text = await sanitize_prompt_text_for_preview(db, v.prompt_id, prompt_text)
+        elif not prompt_text and v.prompt_id:
             prompt_text = await build_fallback_prompt_from_criteria(db, v.prompt_id)
 
         out.append({
@@ -1179,4 +1183,45 @@ async def validate_prompt_sync(db: AsyncSession, prompt_id: int) -> dict:
         "missing_in_output_format": missing_in_output_format,
         "orphan_keys_removed": []
     }
+
+
+async def sanitize_prompt_text_for_preview(db: AsyncSession, prompt_id: int, prompt_text: str) -> str:
+    """Dynamically resolves and sanitizes a prompt's typology block on read/preview without altering DB state."""
+    if not prompt_text:
+        return ""
+    from app.models.prompts import Prompt, BaseStructureTypology
+    from app.models.typologies import Typology
+    from sqlalchemy import select
+    from app.services.prompt_builder import sanitize_legacy_typologies_block
+    
+    p_stmt = select(Prompt).where(Prompt.prompt_id == prompt_id)
+    p_res = await db.execute(p_stmt)
+    p = p_res.scalars().first()
+    
+    base_structure_id = p.base_structure_id if p else None
+    service_id = p.service_id if p else None
+    
+    typologies = []
+    if base_structure_id:
+        t_stmt = (
+            select(Typology)
+            .join(BaseStructureTypology, BaseStructureTypology.typology_id == Typology.typology_id)
+            .where(
+                BaseStructureTypology.base_structure_id == base_structure_id,
+                Typology.is_active == True
+            )
+            .order_by(Typology.sort_order.asc(), Typology.typology_id.asc())
+        )
+        t_res = await db.execute(t_stmt)
+        typologies = t_res.scalars().all()
+        
+    if not typologies and service_id:
+        t_stmt = select(Typology).where(
+            Typology.service_id == service_id,
+            Typology.is_active == True
+        ).order_by(Typology.sort_order.asc(), Typology.typology_id.asc())
+        t_res = await db.execute(t_stmt)
+        typologies = t_res.scalars().all()
+        
+    return sanitize_legacy_typologies_block(prompt_text, typologies)
 

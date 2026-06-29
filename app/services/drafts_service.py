@@ -95,11 +95,18 @@ async def get_draft(
             await db.commit()
             return None
 
+    draft_data = draft.draft_data or {}
+    if "prompt" in draft_data and draft_data["prompt"]:
+        from app.services.prompts_service import sanitize_prompt_text_for_preview
+        draft_prompt_sanitized = await sanitize_prompt_text_for_preview(db, draft.prompt_id, draft_data["prompt"])
+        draft_data = dict(draft_data)
+        draft_data["prompt"] = draft_prompt_sanitized
+
     return {
         "draft_id": draft.draft_id,
         "prompt_id": draft.prompt_id,
         "draft_name": draft.draft_name,
-        "draft_data": draft.draft_data,
+        "draft_data": draft_data,
         "updated_by": draft.updated_by,
         "updated_by_email": draft.updated_by_email,
         "status": draft.status,
