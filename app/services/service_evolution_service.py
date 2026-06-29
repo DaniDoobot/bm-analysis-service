@@ -184,6 +184,25 @@ class ServiceEvolutionService:
         GET /bm/service-evolution
         Retrieves complete service evolution details with series, typologies, agents, and criteria ranking.
         """
+        _EG_EXPR = """
+            COALESCE(
+                NULLIF((r.result_json->>'evaluacion_global')::numeric, 0),
+                (
+                    SELECT AVG(sub.numeric_value)
+                    FROM bm_mass_evaluation_criterion_results sub
+                    WHERE sub.mass_analysis_id = r.mass_analysis_id
+                      AND sub.criterion_type = 'score_1_10'
+                      AND sub.is_applicable = true
+                      AND sub.numeric_value IS NOT NULL
+                      AND sub.criterion_key NOT IN (
+                          'hablando_agente', 'hablando_paciente',
+                          'palabras_minuto_agente', 'palabras_minuto_paciente',
+                          'velocidad_hablando_agente', 'velocidad_hablando_paciente',
+                          'meses_patologia', 'cuanto_tiempo', 'duracion_consulta'
+                      )
+                )
+            )
+        """
         parsed_date_from, parsed_date_to = parse_date_bounds(date_from, date_to)
         logger.info(
             "Service evolution query: service_id=%s, service_key=%s, granularity=%s, typology=%s, agent=%s, "
@@ -224,12 +243,9 @@ class ServiceEvolutionService:
             "agent_owner_id": agent_owner_id,
         }
 
-        score_min_scaled = avg_score_min
-        if score_min_scaled is not None and score_min_scaled > 10.0:
-            score_min_scaled = score_min_scaled / 10.0
-        score_max_scaled = avg_score_max
-        if score_max_scaled is not None and score_max_scaled > 10.0:
-            score_max_scaled = score_max_scaled / 10.0
+        # Official scale: 0-10 (matches DB storage). Legacy compat: if value > 10 assume 0-100 and divide.
+        score_min_scaled = (avg_score_min / 10.0 if avg_score_min > 10.0 else avg_score_min) if avg_score_min is not None else None
+        score_max_scaled = (avg_score_max / 10.0 if avg_score_max > 10.0 else avg_score_max) if avg_score_max is not None else None
 
         extra_sql = ""
         extra_sql_left_join = ""
@@ -258,25 +274,7 @@ class ServiceEvolutionService:
         # evaluacion_global fallback: if result_json has no 'evaluacion_global' key (analyses produced
         # with the dynamic-criteria system), compute it as the mean of all score_1_10 applicable
         # criterion_results, excluding non-qualitative keys (percentages, raw numbers, text, booleans).
-        _EG_EXPR = """
-            COALESCE(
-                NULLIF((r.result_json->>'evaluacion_global')::numeric, 0),
-                (
-                    SELECT AVG(sub.numeric_value)
-                    FROM bm_mass_evaluation_criterion_results sub
-                    WHERE sub.mass_analysis_id = r.mass_analysis_id
-                      AND sub.criterion_type = 'score_1_10'
-                      AND sub.is_applicable = true
-                      AND sub.numeric_value IS NOT NULL
-                      AND sub.criterion_key NOT IN (
-                          'hablando_agente', 'hablando_paciente',
-                          'palabras_minuto_agente', 'palabras_minuto_paciente',
-                          'velocidad_hablando_agente', 'velocidad_hablando_paciente',
-                          'meses_patologia', 'cuanto_tiempo', 'duracion_consulta'
-                      )
-                )
-            )
-        """
+
         summary_query = text(f"""
             SELECT 
                 COUNT(DISTINCT r.mass_analysis_id) AS total_calls,

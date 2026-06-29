@@ -519,12 +519,9 @@ async def get_dashboard_summary(
     if duration_max_seconds is not None:
         stmt = stmt.where(MassEvaluationResult.call_duration_seconds <= duration_max_seconds)
         
-    score_min_scaled = avg_score_min
-    if score_min_scaled is not None and score_min_scaled > 10.0:
-        score_min_scaled = score_min_scaled / 10.0
-    score_max_scaled = avg_score_max
-    if score_max_scaled is not None and score_max_scaled > 10.0:
-        score_max_scaled = score_max_scaled / 10.0
+    # Official scale: 0-10 (matches DB storage). Legacy compat: if value > 10 assume 0-100 and divide.
+    score_min_scaled = (avg_score_min / 10.0 if avg_score_min > 10.0 else avg_score_min) if avg_score_min is not None else None
+    score_max_scaled = (avg_score_max / 10.0 if avg_score_max > 10.0 else avg_score_max) if avg_score_max is not None else None
         
     if score_min_scaled is not None:
         stmt = stmt.where(MassEvaluationResult.evaluacion_global >= score_min_scaled)
@@ -975,12 +972,9 @@ async def get_agent_evolution(
     if duration_max_seconds is not None:
         stmt = stmt.where(MassEvaluationResult.call_duration_seconds <= duration_max_seconds)
         
-    score_min_scaled = avg_score_min
-    if score_min_scaled is not None and score_min_scaled > 10.0:
-        score_min_scaled = score_min_scaled / 10.0
-    score_max_scaled = avg_score_max
-    if score_max_scaled is not None and score_max_scaled > 10.0:
-        score_max_scaled = score_max_scaled / 10.0
+    # Official scale: 0-10 (matches DB storage). Legacy compat: if value > 10 assume 0-100 and divide.
+    score_min_scaled = (avg_score_min / 10.0 if avg_score_min > 10.0 else avg_score_min) if avg_score_min is not None else None
+    score_max_scaled = (avg_score_max / 10.0 if avg_score_max > 10.0 else avg_score_max) if avg_score_max is not None else None
         
     if score_min_scaled is not None:
         stmt = stmt.where(MassEvaluationResult.evaluacion_global >= score_min_scaled)
@@ -1274,12 +1268,9 @@ async def get_objections_breakdown(
     if duration_max_seconds is not None:
         stmt = stmt.where(MassEvaluationResult.call_duration_seconds <= duration_max_seconds)
         
-    score_min_scaled = avg_score_min
-    if score_min_scaled is not None and score_min_scaled > 10.0:
-        score_min_scaled = score_min_scaled / 10.0
-    score_max_scaled = avg_score_max
-    if score_max_scaled is not None and score_max_scaled > 10.0:
-        score_max_scaled = score_max_scaled / 10.0
+    # Official scale: 0-10 (matches DB storage). Legacy compat: if value > 10 assume 0-100 and divide.
+    score_min_scaled = (avg_score_min / 10.0 if avg_score_min > 10.0 else avg_score_min) if avg_score_min is not None else None
+    score_max_scaled = (avg_score_max / 10.0 if avg_score_max > 10.0 else avg_score_max) if avg_score_max is not None else None
         
     if score_min_scaled is not None:
         stmt = stmt.where(MassEvaluationResult.evaluacion_global >= score_min_scaled)
@@ -1637,12 +1628,9 @@ async def get_agents_comparison(
     if duration_max_seconds is not None:
         stmt = stmt.where(MassEvaluationResult.call_duration_seconds <= duration_max_seconds)
         
-    score_min_scaled = avg_score_min
-    if score_min_scaled is not None and score_min_scaled > 10.0:
-        score_min_scaled = score_min_scaled / 10.0
-    score_max_scaled = avg_score_max
-    if score_max_scaled is not None and score_max_scaled > 10.0:
-        score_max_scaled = score_max_scaled / 10.0
+    # Official scale: 0-10 (matches DB storage). Legacy compat: if value > 10 assume 0-100 and divide.
+    score_min_scaled = (avg_score_min / 10.0 if avg_score_min > 10.0 else avg_score_min) if avg_score_min is not None else None
+    score_max_scaled = (avg_score_max / 10.0 if avg_score_max > 10.0 else avg_score_max) if avg_score_max is not None else None
         
     if score_min_scaled is not None:
         stmt = stmt.where(MassEvaluationResult.evaluacion_global >= score_min_scaled)
