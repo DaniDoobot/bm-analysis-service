@@ -6,22 +6,31 @@ router = APIRouter(tags=["Health"])
 
 
 def get_version() -> str:
-    # Try reading app/version.txt (standard deployment)
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     version_file = os.path.join(base_dir, "app", "version.txt")
-    if os.path.exists(version_file):
-        try:
-            with open(version_file, "r") as f:
-                val = f.read().strip()
-                if val:
-                    return val
-        except Exception:
-            pass
 
-    # Fallback to local git
+    # Primary: read from git (always reflects the actually-deployed code)
     try:
-        commit = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.DEVNULL)
-        return commit.decode("utf-8").strip()
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.DEVNULL
+        ).decode("utf-8").strip()
+        if commit:
+            # Keep version.txt in sync so the file is always fresh
+            try:
+                with open(version_file, "w") as f:
+                    f.write(commit)
+            except Exception:
+                pass
+            return commit
+    except Exception:
+        pass
+
+    # Fallback: read from app/version.txt (written at build/deploy time)
+    try:
+        with open(version_file, "r") as f:
+            val = f.read().strip()
+            if val:
+                return val
     except Exception:
         pass
 

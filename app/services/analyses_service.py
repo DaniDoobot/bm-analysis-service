@@ -32,6 +32,10 @@ async def list_analyses(
     """List analyses from bm_call_analysis_current with optional filters."""
     query = select(CallAnalysisCurrent)
 
+    # Exclude test records from all listings and metrics
+    query = query.where(~CallAnalysisCurrent.call_id.like("TEST_%"))
+    query = query.where(CallAnalysisCurrent.hubspot_owner_id != "test_owner")
+
     if analysis_type:
         query = query.where(CallAnalysisCurrent.analysis_type == analysis_type)
     if call_id:
@@ -83,6 +87,10 @@ async def list_analyses_history(
 ) -> list[Analysis]:
     """List all historical analyses from bm_analyses (history) with optional filters."""
     query = select(Analysis)
+
+    # Exclude test records from all listings and metrics
+    query = query.where(~Analysis.call_id.like("TEST_%"))
+    query = query.where(Analysis.hubspot_owner_id != "test_owner")
 
     if analysis_type:
         query = query.where(Analysis.analysis_type == analysis_type)
