@@ -15,12 +15,6 @@ def get_version() -> str:
             ["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.DEVNULL
         ).decode("utf-8").strip()
         if commit:
-            # Keep version.txt in sync so the file is always fresh
-            try:
-                with open(version_file, "w") as f:
-                    f.write(commit)
-            except Exception:
-                pass
             return commit
     except Exception:
         pass
