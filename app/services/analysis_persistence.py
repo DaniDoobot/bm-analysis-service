@@ -164,68 +164,86 @@ async def save_analysis(
         matched_typology = None
         results_list = []
         if prompt_id:
-            from app.models.prompts import Prompt
+            from app.models.prompts import Prompt, BaseStructureTypology
             from app.models.services import Service
             from app.models.typologies import Typology
 
-            p_stmt = select(Prompt.service_id).where(Prompt.prompt_id == prompt_id)
+            p_stmt = select(Prompt.service_id, Prompt.base_structure_id).where(Prompt.prompt_id == prompt_id)
             p_res = await db.execute(p_stmt)
-            service_id = p_res.scalar()
+            p_row = p_res.fetchone()
+            service_id = p_row[0] if p_row else None
+            base_structure_id = p_row[1] if p_row else None
 
             if not service_id:
                 s_stmt = select(Service.service_id).where(Service.service_key == "front")
                 s_res = await db.execute(s_stmt)
                 service_id = s_res.scalar()
 
-            if service_id:
+            active_typologies = []
+            if base_structure_id:
+                # PRIMARY: load typologies associated to the base structure of the prompt
+                t_stmt = (
+                    select(Typology)
+                    .join(BaseStructureTypology, BaseStructureTypology.typology_id == Typology.typology_id)
+                    .where(
+                        BaseStructureTypology.base_structure_id == base_structure_id,
+                        Typology.is_active == True,
+                    )
+                )
+                t_res = await db.execute(t_stmt)
+                active_typologies = t_res.scalars().all()
+
+            if not active_typologies and service_id:
+                # FALLBACK: base structure has no associations → load all active for service
                 t_stmt = select(Typology).where(Typology.service_id == service_id, Typology.is_active == True)
                 t_res = await db.execute(t_stmt)
                 active_typologies = t_res.scalars().all()
-                typology_by_key = {t.typology_key: t for t in active_typologies}
 
-                # Fetch criteria early to support robust fallback typology matching
-                criteria = await get_active_criteria(db, prompt_id)
+            typology_by_key = {t.typology_key: t for t in active_typologies}
 
-                # 1. Try direct keys in clean_result
-                detected_typology_key_raw = clean_result.get("tipo_llamada")
-                
-                # 2. Fallback: find criterion with key 'tipo_llamada' and use its output_key to look up in clean_result
-                if not detected_typology_key_raw:
-                    for criterion in criteria:
-                        if criterion.criterion_key == "tipo_llamada":
-                            out_key = criterion.output_key
-                            if out_key and out_key in clean_result:
-                                detected_typology_key_raw = clean_result.get(out_key)
-                                break
-                                
-                # 3. Fallback: case-insensitive keys in clean_result containing 'tipo' and 'llamada'
-                if not detected_typology_key_raw:
-                    for k, v in clean_result.items():
-                        k_norm = k.lower().replace("_", "").replace("-", "").replace(" ", "")
-                        if "tipollamada" in k_norm:
-                            detected_typology_key_raw = v
+            # Fetch criteria early to support robust fallback typology matching
+            criteria = await get_active_criteria(db, prompt_id)
+
+            # 1. Try direct keys in clean_result
+            detected_typology_key_raw = clean_result.get("tipo_llamada")
+            
+            # 2. Fallback: find criterion with key 'tipo_llamada' and use its output_key to look up in clean_result
+            if not detected_typology_key_raw:
+                for criterion in criteria:
+                    if criterion.criterion_key == "tipo_llamada":
+                        out_key = criterion.output_key
+                        if out_key and out_key in clean_result:
+                            detected_typology_key_raw = clean_result.get(out_key)
+                            break
+                            
+            # 3. Fallback: case-insensitive keys in clean_result containing 'tipo' and 'llamada'
+            if not detected_typology_key_raw:
+                for k, v in clean_result.items():
+                    k_norm = k.lower().replace("_", "").replace("-", "").replace(" ", "")
+                    if "tipollamada" in k_norm:
+                        detected_typology_key_raw = v
+                        break
+
+            detected_typology_key = str(detected_typology_key_raw).strip().lower() if detected_typology_key_raw else None
+            matched_typology = None
+            if detected_typology_key:
+                if detected_typology_key in typology_by_key:
+                    matched_typology = typology_by_key[detected_typology_key]
+                else:
+                    for k, typ in typology_by_key.items():
+                        if k.lower().strip() == detected_typology_key:
+                            matched_typology = typ
                             break
 
-                detected_typology_key = str(detected_typology_key_raw).strip().lower() if detected_typology_key_raw else None
-                matched_typology = None
-                if detected_typology_key:
-                    if detected_typology_key in typology_by_key:
-                        matched_typology = typology_by_key[detected_typology_key]
-                    else:
-                        for k, typ in typology_by_key.items():
-                            if k.lower().strip() == detected_typology_key:
-                                matched_typology = typ
-                                break
-
-                logger.info(
-                    "Manual/historical typology resolution: call_id=%s service_id=%s detected_raw=%s detected_norm=%s typology_keys=%s matched=%s",
-                    call_id,
-                    service_id,
-                    detected_typology_key_raw,
-                    detected_typology_key,
-                    list(typology_by_key.keys()),
-                    matched_typology,
-                )
+            logger.info(
+                "Manual/historical typology resolution: call_id=%s service_id=%s detected_raw=%s detected_norm=%s typology_keys=%s matched=%s",
+                call_id,
+                service_id,
+                detected_typology_key_raw,
+                detected_typology_key,
+                list(typology_by_key.keys()),
+                matched_typology,
+            )
 
             results_list = await _insert_results(db, analysis, clean_result, prompt_id, matched_typology=matched_typology)
 

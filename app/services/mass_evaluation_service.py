@@ -559,11 +559,13 @@ class MassEvaluationService:
                 prompt_res = await db.execute(prompt_stmt)
                 prompt_obj = prompt_res.scalars().first()
                 service_id = prompt_obj.service_id if prompt_obj else None
+                base_structure_id = prompt_obj.base_structure_id if prompt_obj else None
 
                 # Fetch Service details
                 from app.models.services import Service
                 from app.models.typologies import Typology
                 from app.models.criteria import PromptCriterionTypology
+                from app.models.prompts import BaseStructureTypology
 
                 # Fallback to default service 'front'
                 if not service_id:
@@ -581,20 +583,34 @@ class MassEvaluationService:
                         service_key = service_obj.service_key
                         service_name = service_obj.service_name
 
-                # Fetch active typologies for the service
-                active_typologies = []
-                typology_by_key = {}
-                if service_id:
+                # Fetch active typologies — prioritize base_structure associations, fallback to service
+                typology_list = []
+                if base_structure_id:
+                    t_stmt = (
+                        select(Typology)
+                        .join(BaseStructureTypology, BaseStructureTypology.typology_id == Typology.typology_id)
+                        .where(
+                            BaseStructureTypology.base_structure_id == base_structure_id,
+                            Typology.is_active == True,
+                        )
+                    )
+                    t_res = await db.execute(t_stmt)
+                    typology_list = t_res.scalars().all()
+
+                if not typology_list and service_id:
+                    # FALLBACK: base structure has no associations → all active typologies of service
                     t_stmt = select(Typology).where(Typology.service_id == service_id, Typology.is_active == True)
                     t_res = await db.execute(t_stmt)
-                    typology_by_key = {
-                        t.typology_key: {
-                            "typology_id": t.typology_id,
-                            "typology_key": t.typology_key,
-                            "typology_name": t.typology_name
-                        } 
-                        for t in t_res.scalars().all()
+                    typology_list = t_res.scalars().all()
+
+                typology_by_key = {
+                    t.typology_key: {
+                        "typology_id": t.typology_id,
+                        "typology_key": t.typology_key,
+                        "typology_name": t.typology_name,
                     }
+                    for t in typology_list
+                }
 
                 # Fetch active criteria and item-typology associations
                 criteria_orm = await get_active_criteria(db, prompt_id)

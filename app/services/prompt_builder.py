@@ -286,9 +286,34 @@ async def build_prompt_with_ai(
 
     from app.models.typologies import Typology
     from app.models.criteria import PromptCriterionTypology
-    
+    from app.models.prompts import BaseStructureTypology
+
     typologies = []
-    if service_id:
+    if resolved_base_structure_id:
+        # PRIMARY: load typologies associated to this specific base structure
+        t_res = await db.execute(
+            select(Typology)
+            .join(BaseStructureTypology, BaseStructureTypology.typology_id == Typology.typology_id)
+            .where(
+                BaseStructureTypology.base_structure_id == resolved_base_structure_id,
+                Typology.is_active == True,
+            )
+            .order_by(Typology.sort_order.asc())
+        )
+        typologies = t_res.scalars().all()
+        logger.debug(
+            "Typologies loaded from base_structure_id=%s: %s",
+            resolved_base_structure_id,
+            [t.typology_key for t in typologies],
+        )
+
+    if not typologies and service_id:
+        # FALLBACK: no base structure or no associations → load all active typologies of the service
+        logger.debug(
+            "No typologies found for base_structure_id=%s; falling back to service_id=%s",
+            resolved_base_structure_id,
+            service_id,
+        )
         t_res = await db.execute(
             select(Typology)
             .where(Typology.service_id == service_id, Typology.is_active == True)
