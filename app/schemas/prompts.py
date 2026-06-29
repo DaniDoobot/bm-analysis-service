@@ -299,6 +299,7 @@ class PromptBaseStructureNestedDetailOut(BaseModel):
     structure: PromptBaseStructureDetailOut
     associated_typologies: list[TypologyItem] = []
     available_typologies: list[TypologyItem] = []
+    inactive_associated_typologies: list[TypologyItem] = []
 
 
 

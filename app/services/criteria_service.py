@@ -1012,7 +1012,7 @@ async def toggle_criterion(db: AsyncSession, criterion_id: int, is_active: bool)
 
 
 async def get_criterion_typologies(db: AsyncSession, criterion_id: int) -> list[CriterionTypologyAssociation]:
-    """Retrieve all active typologies for the criterion's service with association status."""
+    """Retrieve all active typologies for the criterion's base structure (or service) with association status."""
     # 1. Fetch criterion
     c_stmt = select(PromptCriterion).where(PromptCriterion.criterion_id == criterion_id)
     c_res = await db.execute(c_stmt)
@@ -1023,14 +1023,16 @@ async def get_criterion_typologies(db: AsyncSession, criterion_id: int) -> list[
             detail=f"Criterio con ID {criterion_id} no encontrado."
         )
 
-    # 2. Get prompt service
+    # 2. Get prompt service and base structure
     service_id = None
+    base_structure_id = None
     if criterion.prompt_id:
         p_stmt = select(Prompt).where(Prompt.prompt_id == criterion.prompt_id)
         p_res = await db.execute(p_stmt)
         prompt = p_res.scalars().first()
         if prompt:
             service_id = prompt.service_id
+            base_structure_id = prompt.base_structure_id
 
     # Fallback to 'front' service if not found
     if not service_id:
@@ -1042,10 +1044,29 @@ async def get_criterion_typologies(db: AsyncSession, criterion_id: int) -> list[
     if not service_id:
         return []
 
-    # 3. Retrieve all active typologies of this service
-    t_stmt = select(Typology).where(Typology.service_id == service_id, Typology.is_active == True).order_by(Typology.sort_order.asc())
-    t_res = await db.execute(t_stmt)
-    typologies = t_res.scalars().all()
+    # 3. Retrieve active typologies (base structure priority, fallback to service)
+    from app.models.prompts import BaseStructureTypology
+    typologies = []
+    if base_structure_id:
+        t_stmt = (
+            select(Typology)
+            .join(BaseStructureTypology, BaseStructureTypology.typology_id == Typology.typology_id)
+            .where(
+                BaseStructureTypology.base_structure_id == base_structure_id,
+                Typology.is_active == True
+            )
+            .order_by(Typology.sort_order.asc(), Typology.typology_id.asc())
+        )
+        t_res = await db.execute(t_stmt)
+        typologies = t_res.scalars().all()
+
+    if not typologies:
+        t_stmt = select(Typology).where(
+            Typology.service_id == service_id,
+            Typology.is_active == True
+        ).order_by(Typology.sort_order.asc(), Typology.typology_id.asc())
+        t_res = await db.execute(t_stmt)
+        typologies = t_res.scalars().all()
 
     # 4. Retrieve currently associated typologies
     assoc_stmt = select(PromptCriterionTypology.typology_id).where(PromptCriterionTypology.criterion_id == criterion_id)
@@ -1078,13 +1099,53 @@ async def update_criterion_typologies(db: AsyncSession, criterion_id: int, typol
             detail=f"Criterio con ID {criterion_id} no encontrado."
         )
 
-    # 2. In transaction: delete old associations and insert new ones
+    # 2. Resolve prompt service and base structure to validate typologies
+    service_id = None
+    base_structure_id = None
+    if criterion.prompt_id:
+        p_stmt = select(Prompt).where(Prompt.prompt_id == criterion.prompt_id)
+        p_res = await db.execute(p_stmt)
+        prompt = p_res.scalars().first()
+        if prompt:
+            service_id = prompt.service_id
+            base_structure_id = prompt.base_structure_id
+
+    # Fallback service if not found
+    if not service_id:
+        from app.models.services import Service
+        s_stmt = select(Service.service_id).where(Service.service_key == "front")
+        s_res = await db.execute(s_stmt)
+        service_id = s_res.scalar()
+
+    # Get allowed typologies
+    from app.models.prompts import BaseStructureTypology
+    allowed_ids = set()
+    if service_id:
+        if base_structure_id:
+            allowed_stmt = select(Typology.typology_id).join(
+                BaseStructureTypology, BaseStructureTypology.typology_id == Typology.typology_id
+            ).where(
+                BaseStructureTypology.base_structure_id == base_structure_id,
+                Typology.is_active == True
+            )
+        else:
+            allowed_stmt = select(Typology.typology_id).where(
+                Typology.service_id == service_id,
+                Typology.is_active == True
+            )
+        allowed_res = await db.execute(allowed_stmt)
+        allowed_ids = set(allowed_res.scalars().all())
+
+    # Filter incoming typology_ids to only keep valid ones
+    valid_typology_ids = [tid for tid in (typology_ids or []) if tid in allowed_ids]
+
+    # 3. In transaction: delete old associations and insert new ones
     await db.execute(
         delete(PromptCriterionTypology).where(PromptCriterionTypology.criterion_id == criterion_id)
     )
 
     # Adding new
-    for t_id in typology_ids:
+    for t_id in valid_typology_ids:
         new_assoc = PromptCriterionTypology(
             criterion_id=criterion_id,
             typology_id=t_id

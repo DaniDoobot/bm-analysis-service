@@ -125,9 +125,22 @@ async def sync_prompt_text_with_active_criteria(
         s_res = await db.execute(select(Service.service_id).where(Service.service_key == "front"))
         service_id = s_res.scalar()
 
-    # 2. Fetch active typologies
+    # 2. Fetch active typologies (base structure priority, fallback to service)
+    from app.models.prompts import BaseStructureTypology
     typologies = []
-    if service_id:
+    if p and p.base_structure_id:
+        t_res = await db.execute(
+            select(Typology)
+            .join(BaseStructureTypology, BaseStructureTypology.typology_id == Typology.typology_id)
+            .where(
+                BaseStructureTypology.base_structure_id == p.base_structure_id,
+                Typology.is_active == True
+            )
+            .order_by(Typology.sort_order.asc())
+        )
+        typologies = t_res.scalars().all()
+
+    if not typologies and service_id:
         t_res = await db.execute(
             select(Typology)
             .where(Typology.service_id == service_id, Typology.is_active == True)
@@ -155,6 +168,10 @@ async def sync_prompt_text_with_active_criteria(
 
     changed = False
     original_text = prompt_text
+
+    # Apply dynamic prompt sanitization for legacy/hardcoded typologies block
+    from app.services.prompt_builder import sanitize_legacy_typologies_block
+    prompt_text = sanitize_legacy_typologies_block(prompt_text, typologies)
 
     # Step 0: Deduplicate criteria blocks
     new_text = deduplicate_criteria_blocks(prompt_text)

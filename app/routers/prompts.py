@@ -297,6 +297,7 @@ async def _get_base_structure_nested_dict(
 
     associated_typologies = []
     available_typologies = []
+    inactive_associated_typologies = []
 
     if struct.service_id:
         # 2. Get associated typologies
@@ -310,19 +311,21 @@ async def _get_base_structure_nested_dict(
 
         # Format associated typologies
         for t in assoc_list:
-            associated_typologies.append(
-                TypologyItem(
-                    id=t.typology_id,
-                    key=t.typology_key,
-                    name=t.typology_name,
-                    service=service_name,
-                    typology_key=t.typology_key,
-                    service_id=t.service_id,
-                    service_key=service_key,
-                    is_active=t.is_active,
-                    description=t.description
-                )
+            item = TypologyItem(
+                id=t.typology_id,
+                key=t.typology_key,
+                name=t.typology_name,
+                service=service_name,
+                typology_key=t.typology_key,
+                service_id=t.service_id,
+                service_key=service_key,
+                is_active=t.is_active,
+                description=t.description
             )
+            if t.is_active:
+                associated_typologies.append(item)
+            else:
+                inactive_associated_typologies.append(item)
 
         # 3. Get all active typologies for the service
         all_typo_stmt = select(Typology).where(
@@ -354,7 +357,8 @@ async def _get_base_structure_nested_dict(
     return {
         "structure": enriched_structure,
         "associated_typologies": associated_typologies,
-        "available_typologies": available_typologies
+        "available_typologies": available_typologies,
+        "inactive_associated_typologies": inactive_associated_typologies
     }
 
 

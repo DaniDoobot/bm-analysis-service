@@ -338,11 +338,24 @@ async def build_prompt_with_ai(
     criterion_typologies_map = {c.criterion_id: [] for c in criteria}
     if criteria:
         criteria_ids = [c.criterion_id for c in criteria]
-        assoc_res = await db.execute(
-            select(PromptCriterionTypology.criterion_id, Typology.typology_key)
-            .join(Typology, PromptCriterionTypology.typology_id == Typology.typology_id)
-            .where(PromptCriterionTypology.criterion_id.in_(criteria_ids), Typology.is_active == True)
-        )
+        from app.models.prompts import BaseStructureTypology
+        if resolved_base_structure_id:
+            assoc_res = await db.execute(
+                select(PromptCriterionTypology.criterion_id, Typology.typology_key)
+                .join(Typology, PromptCriterionTypology.typology_id == Typology.typology_id)
+                .join(BaseStructureTypology, BaseStructureTypology.typology_id == Typology.typology_id)
+                .where(
+                    PromptCriterionTypology.criterion_id.in_(criteria_ids),
+                    Typology.is_active == True,
+                    BaseStructureTypology.base_structure_id == resolved_base_structure_id
+                )
+            )
+        else:
+            assoc_res = await db.execute(
+                select(PromptCriterionTypology.criterion_id, Typology.typology_key)
+                .join(Typology, PromptCriterionTypology.typology_id == Typology.typology_id)
+                .where(PromptCriterionTypology.criterion_id.in_(criteria_ids), Typology.is_active == True)
+            )
         for c_id, t_key in assoc_res.all():
             if c_id in criterion_typologies_map:
                 criterion_typologies_map[c_id].append(t_key)
