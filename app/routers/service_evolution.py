@@ -67,6 +67,11 @@ async def get_evolution(
     typology_key: str | None = Query(None, description="Filtrar por clave de tipología"),
     agent_owner_id: str | None = Query(None, description="Filtrar por ID de HubSpot del agente"),
     criteria: str | None = Query(None, description="Lista de criterion_key separados por comas a filtrar en el ranking"),
+    typology_ids: str | None = Query(None, description="Comma-separated typology IDs to filter"),
+    duration_min_seconds: int | None = Query(None, description="Min duration in seconds"),
+    duration_max_seconds: int | None = Query(None, description="Max duration in seconds"),
+    avg_score_min: float | None = Query(None, description="Min average score"),
+    avg_score_max: float | None = Query(None, description="Max average score"),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -81,6 +86,10 @@ async def get_evolution(
             detail=f"La granularidad '{granularity}' no es válida. Use: day | week | month"
         )
 
+    typo_ids = None
+    if typology_ids and typology_ids.strip():
+        typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
+
     try:
         return await ServiceEvolutionService.get_evolution(
             db,
@@ -92,6 +101,11 @@ async def get_evolution(
             typology_key=typology_key,
             agent_owner_id=agent_owner_id,
             criteria=criteria,
+            typology_ids=typo_ids,
+            duration_min_seconds=duration_min_seconds,
+            duration_max_seconds=duration_max_seconds,
+            avg_score_min=avg_score_min,
+            avg_score_max=avg_score_max,
         )
     except Exception as e:
         logger.error("Error generating service evolution: %s", e, exc_info=True)

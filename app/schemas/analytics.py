@@ -34,6 +34,7 @@ class EvolutionPoint(BaseModel):
     date: str = Field(..., description="Bucket date string (YYYY-MM-DD, YYYY-MM-DD HH:00, or YYYY-MM-DD for week start)")
     value: float | None = Field(..., description="Average metric value inside this bucket, or null if no data exists")
     count: int = Field(..., description="Count of non-null evaluations in this bucket")
+    analysis_count: int = Field(0, description="Count of non-null evaluations in this bucket (normalized for frontend)")
 
 
 class ItemEvolutionSeries(BaseModel):

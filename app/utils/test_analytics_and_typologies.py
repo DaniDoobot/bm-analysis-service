@@ -16,7 +16,7 @@ from sqlalchemy import select, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.main import app
-from app.db import get_engine
+from app.db import get_engine, enforce_destructive_safety
 from app.services.db_init_service import init_db
 from app.models.services import Service
 from app.models.typologies import Typology
@@ -30,6 +30,9 @@ from app.utils.security import create_access_token, hash_password
 
 async def test_analytics_and_typologies_workflow():
     print("=== INICIANDO PRUEBAS DE ANALÍTICAS Y TIPOLOGÍAS (20 ESCENARIOS) ===")
+    
+    # Unconditional safety enforcement for destructive tests
+    enforce_destructive_safety(is_test=True)
     
     # Ensure tables exist
     await init_db()

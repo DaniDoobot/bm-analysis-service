@@ -171,6 +171,7 @@ class AgentTimelinePoint(BaseModel):
     total_analyses: float
     avg_evaluacion_global: float | None = None
     avg_evaluacion_global_count: int = 0
+    analysis_count: int = 0
     avg_sentiment: float | None = None
     avg_sentiment_count: int = 0
     avg_empatia: float | None = None

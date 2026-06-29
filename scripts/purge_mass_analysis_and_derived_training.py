@@ -428,27 +428,18 @@ async def main():
     print(f"RUN MODE:      {'EXECUTE' if args.execute else 'DRY RUN'}")
     print("===============================================================================")
     
-    is_prod = "91.98.230.119" in db_url or "/n8n" in db_url
+    is_prod = (
+        "91.98.230.119" in db_url
+        or db_url.endswith("/n8n")
+        or "/n8n?" in db_url
+        or "speechbm.doobot.ai" in db_url.lower()
+        or ("prod" in db_url.lower() and "_test" not in db_url.lower() and "_dev" not in db_url.lower())
+    )
     
     if is_prod:
-        print("!!! WARNING: CONNECTION POINTS TO PRODUCTION DATABASE !!!")
-        allow_destructive = os.environ.get("ALLOW_DESTRUCTIVE_TESTS", "false").lower() == "true"
-        if not allow_destructive:
-            print("CRITICAL SAFETY VIOLATION: Connection to production database detected and ALLOW_DESTRUCTIVE_TESTS=true is not set.")
-            print("Execution has been blocked to prevent data loss. Aborting.")
-            sys.exit(3)
-            
-        if args.execute:
-            if not args.confirm or args.confirm != CONFIRMATION_STRING:
-                print(f"CRITICAL: Execution on production requires confirmation string: --confirm {CONFIRMATION_STRING}")
-                sys.exit(1)
-                
-            # Require manual text confirmation
-            print("\nWARNING: You are about to execute a DESTRUCTIVE script on the PRODUCTION database.")
-            confirm_input = input("To proceed, type the database name 'n8n': ")
-            if confirm_input != "n8n":
-                print("Manual confirmation failed. Aborting.")
-                sys.exit(4)
+        print("CRITICAL SAFETY VIOLATION: Execution on production database is strictly forbidden.")
+        print("Execution has been blocked to prevent data loss. Aborting.")
+        sys.exit(3)
     else:
         if args.execute:
             if not args.confirm or args.confirm != CONFIRMATION_STRING:

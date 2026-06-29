@@ -258,6 +258,9 @@ async def get_my_analysis_results(
     service_id: int | None = Query(None, description="Filter by service ID"),
     service_key: str | None = Query(None, description="Filter by service key"),
     typology_key: str | None = Query(None, description="Filter by typology key"),
+    typology_ids: str | None = Query(None, description="Comma-separated typology IDs to filter"),
+    duration_min_seconds: int | None = Query(None, description="Min duration in seconds"),
+    duration_max_seconds: int | None = Query(None, description="Max duration in seconds"),
     db: AsyncSession = Depends(get_db)
 ):
     """List detailed mass analysis call results for the logged-in agent with filters."""
@@ -289,6 +292,10 @@ async def get_my_analysis_results(
             )
 
     # 1. Get total count for metadata
+    typo_ids = None
+    if typology_ids and typology_ids.strip():
+        typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
+
     total = await MassEvaluationService.count_results(
         db,
         run_id=run_id,
@@ -303,6 +310,9 @@ async def get_my_analysis_results(
         service_id=service_id,
         service_key=service_key,
         typology_key=typology_key,
+        typology_ids=typo_ids,
+        duration_min_seconds=duration_min_seconds,
+        duration_max_seconds=duration_max_seconds,
     )
 
     # 2. Retrieve items page
@@ -323,6 +333,9 @@ async def get_my_analysis_results(
         service_key=service_key,
         typology_key=typology_key,
         offset=offset,
+        typology_ids=typo_ids,
+        duration_min_seconds=duration_min_seconds,
+        duration_max_seconds=duration_max_seconds,
     )
     
     items_out = []
@@ -357,6 +370,9 @@ async def list_results(
     service_id: int | None = Query(None, description="Filter by service ID"),
     service_key: str | None = Query(None, description="Filter by service key"),
     typology_key: str | None = Query(None, description="Filter by typology key"),
+    typology_ids: str | None = Query(None, description="Comma-separated typology IDs to filter"),
+    duration_min_seconds: int | None = Query(None, description="Min duration in seconds"),
+    duration_max_seconds: int | None = Query(None, description="Max duration in seconds"),
     db: AsyncSession = Depends(get_db)
 ):
     """List detailed mass analysis call results with advanced filtering options."""
@@ -387,6 +403,10 @@ async def list_results(
             )
 
     from app.utils.visual_formatters import build_items_visual
+    typo_ids = None
+    if typology_ids and typology_ids.strip():
+        typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
+
     results = await MassEvaluationService.list_results(
         db,
         run_id=run_id,
@@ -402,6 +422,9 @@ async def list_results(
         service_id=service_id,
         service_key=service_key,
         typology_key=typology_key,
+        typology_ids=typo_ids,
+        duration_min_seconds=duration_min_seconds,
+        duration_max_seconds=duration_max_seconds,
     )
     
     out = []

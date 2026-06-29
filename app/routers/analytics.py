@@ -306,6 +306,11 @@ async def get_agents_comparison(
     agent_owner_ids_bracket: Annotated[list[str] | None, Query(alias="agent_owner_ids[]", description="Filter agent owner IDs (array format)")] = None,
     item_keys: Annotated[list[str] | None, Query(description="Filter compared item keys")] = None,
     item_keys_bracket: Annotated[list[str] | None, Query(alias="item_keys[]", description="Filter compared item keys (array format)")] = None,
+    typology_ids: Annotated[str | None, Query(description="Comma-separated typology IDs")] = None,
+    duration_min_seconds: Annotated[int | None, Query(description="Min duration in seconds")] = None,
+    duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
+    avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
+    avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
 ):
     """
     Retrieve agents performance comparison breakdown.
@@ -335,6 +340,28 @@ async def get_agents_comparison(
             stmt = stmt.where(MassEvaluationResult.service_id == service_id)
         elif service_key is not None:
             stmt = stmt.where(MassEvaluationResult.service_key == service_key)
+
+        typo_ids = None
+        if typology_ids and typology_ids.strip():
+            typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
+        if typo_ids:
+            stmt = stmt.where(MassEvaluationResult.typology_id.in_(typo_ids))
+        if duration_min_seconds is not None:
+            stmt = stmt.where(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
+        if duration_max_seconds is not None:
+            stmt = stmt.where(MassEvaluationResult.call_duration_seconds <= duration_max_seconds)
+            
+        score_min_scaled = avg_score_min
+        if score_min_scaled is not None and score_min_scaled > 10.0:
+            score_min_scaled = score_min_scaled / 10.0
+        score_max_scaled = avg_score_max
+        if score_max_scaled is not None and score_max_scaled > 10.0:
+            score_max_scaled = score_max_scaled / 10.0
+            
+        if score_min_scaled is not None:
+            stmt = stmt.where(MassEvaluationResult.evaluacion_global >= score_min_scaled)
+        if score_max_scaled is not None:
+            stmt = stmt.where(MassEvaluationResult.evaluacion_global <= score_max_scaled)
 
         owner_ids = parse_list_param(agent_owner_ids) + parse_list_param(agent_owner_ids_bracket)
         if owner_ids:
@@ -446,6 +473,11 @@ async def get_items_evolution(
     item_keys: Annotated[list[str] | None, Query(description="Filter compared item keys")] = None,
     item_keys_bracket: Annotated[list[str] | None, Query(alias="item_keys[]", description="Filter compared item keys (array format)")] = None,
     bucket: Annotated[str | None, Query(description="Timeline grouping interval: hour | day | week")] = None,
+    typology_ids: Annotated[str | None, Query(description="Comma-separated typology IDs")] = None,
+    duration_min_seconds: Annotated[int | None, Query(description="Min duration in seconds")] = None,
+    duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
+    avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
+    avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
 ):
     """
     Retrieve chronological evolution timeline for chosen analytics metrics.
@@ -476,6 +508,28 @@ async def get_items_evolution(
             stmt = stmt.where(MassEvaluationResult.service_id == service_id)
         elif service_key is not None:
             stmt = stmt.where(MassEvaluationResult.service_key == service_key)
+
+        typo_ids = None
+        if typology_ids and typology_ids.strip():
+            typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
+        if typo_ids:
+            stmt = stmt.where(MassEvaluationResult.typology_id.in_(typo_ids))
+        if duration_min_seconds is not None:
+            stmt = stmt.where(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
+        if duration_max_seconds is not None:
+            stmt = stmt.where(MassEvaluationResult.call_duration_seconds <= duration_max_seconds)
+            
+        score_min_scaled = avg_score_min
+        if score_min_scaled is not None and score_min_scaled > 10.0:
+            score_min_scaled = score_min_scaled / 10.0
+        score_max_scaled = avg_score_max
+        if score_max_scaled is not None and score_max_scaled > 10.0:
+            score_max_scaled = score_max_scaled / 10.0
+            
+        if score_min_scaled is not None:
+            stmt = stmt.where(MassEvaluationResult.evaluacion_global >= score_min_scaled)
+        if score_max_scaled is not None:
+            stmt = stmt.where(MassEvaluationResult.evaluacion_global <= score_max_scaled)
 
         owner_ids = parse_list_param(agent_owner_ids) + parse_list_param(agent_owner_ids_bracket)
         if owner_ids:
@@ -545,7 +599,8 @@ async def get_items_evolution(
                     EvolutionPoint(
                         date=b_key,
                         value=value,
-                        count=count
+                        count=count,
+                        analysis_count=count
                     )
                 )
                 
@@ -564,4 +619,65 @@ async def get_items_evolution(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to load items evolution: {str(e)}"
+        )
+
+
+
+@router.get("/filter-options")
+async def get_filter_options(
+    service_id: Annotated[int | None, Query(description="Filter active typologies by service ID")] = None,
+    current_user: Annotated[User, Depends(require_admin)] = None,
+    db: Annotated[AsyncSession, Depends(get_db)] = None,
+):
+    """
+    Retrieve filter configuration options: active typologies, duration range, and score bounds.
+    """
+    try:
+        # 1. Fetch active typologies per service
+        typo_query = "SELECT t.typology_id, t.typology_key, t.typology_name, t.service_id, s.service_key FROM bm_typologies t JOIN bm_services s ON t.service_id = s.service_id WHERE t.is_active = true"
+        if service_id is not None:
+            typo_query += " AND t.service_id = :service_id"
+            typo_res = await db.execute(text(typo_query), {"service_id": service_id})
+        else:
+            typo_res = await db.execute(text(typo_query))
+            
+        typologies_list = []
+        for row in typo_res.fetchall():
+            typologies_list.append({
+                "id": row[0],
+                "typology_key": row[1],
+                "name": row[2],
+                "service_id": row[3],
+                "service_key": row[4]
+            })
+
+        # 2. Fetch min and max call duration
+        dur_res = await db.execute(text("SELECT MIN(call_duration_seconds), MAX(call_duration_seconds) FROM bm_mass_evaluation_results WHERE status = 'completed'"))
+        dur_row = dur_res.fetchone()
+        
+        min_seconds = 0
+        max_seconds = 1800
+        if dur_row:
+            if dur_row[0] is not None:
+                min_seconds = int(dur_row[0])
+            if dur_row[1] is not None:
+                max_seconds = int(dur_row[1])
+
+        return {
+            "typologies": typologies_list,
+            "duration": {
+                "min_seconds": min_seconds,
+                "max_seconds": max_seconds
+            },
+            "avg_score": {
+                "min": 0,
+                "max": 100,
+                "scale": "percentage"
+            }
+        }
+    except Exception as e:
+        logger.exception("Failed to retrieve filter options")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to load filter options: {str(e)}"
         )

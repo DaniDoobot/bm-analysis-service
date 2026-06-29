@@ -11,7 +11,7 @@ from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.main import app
-from app.db import get_engine
+from app.db import get_engine, enforce_destructive_safety
 from app.models.users import User
 from app.models.mass_evaluations import (
     MassEvaluationJob,
@@ -22,6 +22,7 @@ from app.models.mass_evaluations import (
 from app.utils.security import create_access_token, hash_password
 
 async def test_analytics_v2_workflow():
+    enforce_destructive_safety(is_test=True)
     engine = get_engine()
     async with AsyncSession(engine, expire_on_commit=False) as db:
         print("=== INICIANDO PRUEBAS INTEGRADAS DE ANALYTICS V2 ===")

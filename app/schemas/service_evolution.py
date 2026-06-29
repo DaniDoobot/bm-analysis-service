@@ -27,6 +27,7 @@ class ServiceEvolutionSeriesItem(BaseModel):
     service_id: int | None = None
     service_name: str | None = None
     total_calls: int
+    analysis_count: int = 0
     avg_evaluacion_global: float | None = None
     avg_sentiment: float | None = None
     avg_empatia: float | None = None

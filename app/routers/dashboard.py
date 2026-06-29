@@ -33,11 +33,19 @@ async def dashboard_summary(
     service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
     date_from: Annotated[str | None, Query(description="Custom start date (ISO or YYYY-MM-DD)")] = None,
     date_to: Annotated[str | None, Query(description="Custom end date (ISO or YYYY-MM-DD)")] = None,
+    typology_ids: Annotated[str | None, Query(description="Comma-separated typology IDs")] = None,
+    duration_min_seconds: Annotated[int | None, Query(description="Min duration in seconds")] = None,
+    duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
+    avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
+    avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
 ):
     """
     Get dashboard summary metrics including KPIs, evolution charts,
     agent rankings, and latest analyses.
     """
+    typo_ids = None
+    if typology_ids and typology_ids.strip():
+        typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
     try:
         data = await get_dashboard_summary(
             db,
@@ -47,6 +55,11 @@ async def dashboard_summary(
             service_key=service_key,
             date_from=date_from,
             date_to=date_to,
+            typology_ids=typo_ids,
+            duration_min_seconds=duration_min_seconds,
+            duration_max_seconds=duration_max_seconds,
+            avg_score_min=avg_score_min,
+            avg_score_max=avg_score_max,
         )
         return data
     except Exception as e:
@@ -67,6 +80,11 @@ async def agents_comparison(
     date_to: Annotated[str | None, Query(description="Custom end date (ISO or YYYY-MM-DD)")] = None,
     bucket: Annotated[str | None, Query(description="hour | day | week")] = None,
     metric_key: Annotated[str | None, Query(description="Selected metric key to compare")] = None,
+    typology_ids: Annotated[str | None, Query(description="Comma-separated typology IDs")] = None,
+    duration_min_seconds: Annotated[int | None, Query(description="Min duration in seconds")] = None,
+    duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
+    avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
+    avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
 ):
     """
     Get multi-agent comparison analytics for dashboard reporting.
@@ -75,6 +93,9 @@ async def agents_comparison(
     if hubspot_owner_ids and hubspot_owner_ids.strip():
         owner_ids = [oid.strip() for oid in hubspot_owner_ids.split(",") if oid.strip()]
         
+    typo_ids = None
+    if typology_ids and typology_ids.strip():
+        typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
     try:
         data = await get_agents_comparison(
             db,
@@ -88,6 +109,11 @@ async def agents_comparison(
             date_to=date_to,
             bucket=bucket,
             metric_key=metric_key,
+            typology_ids=typo_ids,
+            duration_min_seconds=duration_min_seconds,
+            duration_max_seconds=duration_max_seconds,
+            avg_score_min=avg_score_min,
+            avg_score_max=avg_score_max,
         )
         return data
     except Exception as e:
@@ -135,6 +161,11 @@ async def agent_evolution(
     service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
     date_from: Annotated[str | None, Query(description="Custom start date (ISO or YYYY-MM-DD)")] = None,
     date_to: Annotated[str | None, Query(description="Custom end date (ISO or YYYY-MM-DD)")] = None,
+    typology_ids: Annotated[str | None, Query(description="Comma-separated typology IDs")] = None,
+    duration_min_seconds: Annotated[int | None, Query(description="Min duration in seconds")] = None,
+    duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
+    avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
+    avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
 ):
     """
     Get chronological performance, trends, strengths, weaknesses,
@@ -159,6 +190,9 @@ async def agent_evolution(
             )
             
     try:
+        typo_ids = None
+        if typology_ids and typology_ids.strip():
+            typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
         data = await get_agent_evolution(
             db,
             hubspot_owner_id=hubspot_owner_id,
@@ -170,6 +204,11 @@ async def agent_evolution(
             service_key=service_key,
             date_from=date_from,
             date_to=date_to,
+            typology_ids=typo_ids,
+            duration_min_seconds=duration_min_seconds,
+            duration_max_seconds=duration_max_seconds,
+            avg_score_min=avg_score_min,
+            avg_score_max=avg_score_max,
         )
         return data
     except Exception as e:
@@ -188,11 +227,19 @@ async def objections_breakdown(
     service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
     date_from: Annotated[str | None, Query(description="Custom start date (ISO or YYYY-MM-DD)")] = None,
     date_to: Annotated[str | None, Query(description="Custom end date (ISO or YYYY-MM-DD)")] = None,
+    typology_ids: Annotated[str | None, Query(description="Comma-separated typology IDs")] = None,
+    duration_min_seconds: Annotated[int | None, Query(description="Min duration in seconds")] = None,
+    duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
+    avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
+    avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
 ):
     """
     Get categorized objection lists, agent-specific counts,
     and a chronological list of calls that raised objections.
     """
+    typo_ids = None
+    if typology_ids and typology_ids.strip():
+        typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
     try:
         data = await get_objections_breakdown(
             db,
@@ -204,6 +251,11 @@ async def objections_breakdown(
             service_key=service_key,
             date_from=date_from,
             date_to=date_to,
+            typology_ids=typo_ids,
+            duration_min_seconds=duration_min_seconds,
+            duration_max_seconds=duration_max_seconds,
+            avg_score_min=avg_score_min,
+            avg_score_max=avg_score_max,
         )
         return data
     except Exception as e:
@@ -224,6 +276,11 @@ async def get_my_evolution(
     service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
     date_from: Annotated[str | None, Query(description="Custom start date (ISO or YYYY-MM-DD)")] = None,
     date_to: Annotated[str | None, Query(description="Custom end date (ISO or YYYY-MM-DD)")] = None,
+    typology_ids: Annotated[str | None, Query(description="Comma-separated typology IDs")] = None,
+    duration_min_seconds: Annotated[int | None, Query(description="Min duration in seconds")] = None,
+    duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
+    avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
+    avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
 ):
     """
     Get chronological performance evolution metrics specifically for the logged-in agent.
@@ -257,6 +314,9 @@ async def get_my_evolution(
             )
 
     try:
+        typo_ids = None
+        if typology_ids and typology_ids.strip():
+            typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
         data = await get_agent_evolution(
             db,
             hubspot_owner_id=owner_id,
@@ -268,6 +328,11 @@ async def get_my_evolution(
             service_key=service_key,
             date_from=date_from,
             date_to=date_to,
+            typology_ids=typo_ids,
+            duration_min_seconds=duration_min_seconds,
+            duration_max_seconds=duration_max_seconds,
+            avg_score_min=avg_score_min,
+            avg_score_max=avg_score_max,
         )
         return data
     except Exception as e:

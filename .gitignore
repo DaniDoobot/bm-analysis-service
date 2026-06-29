@@ -33,3 +33,5 @@ test_permissions.db
 scratch/
 backups/
 *.log
+.env.test
+*.env.*

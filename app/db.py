@@ -35,42 +35,59 @@ def _make_async_url(raw_url: str) -> str:
     return url
 
 
-def assert_not_production_db_for_tests() -> None:
+def enforce_destructive_safety(is_test: bool = True) -> None:
     """
-    Blocks execution if the database URL points to the production database.
-    Can be bypassed ONLY if ALLOW_DESTRUCTIVE_TESTS=true is set in the environment.
+    Unconditionally blocks execution if the database URL points to the production database
+    (host '91.98.230.119', database name 'n8n', or containing production/prod tags).
+    If is_test is True, also enforces that the database name must contain '_test'.
     """
-    import os
     from app.config import get_settings
     settings = get_settings()
     raw_url = settings.database_url or ""
     
-    is_prod = "91.98.230.119" in raw_url or "/n8n" in raw_url
-    allow_destructive = os.environ.get("ALLOW_DESTRUCTIVE_TESTS", "false").lower() == "true"
+    url_lower = raw_url.lower()
+    db_name = raw_url.split("/")[-1].split("?")[0] if "/" in raw_url else ""
+    db_name_lower = db_name.lower()
     
-    if is_prod and not allow_destructive:
+    is_prod = (
+        "91.98.230.119" in raw_url
+        or db_name_lower == "n8n"
+        or "speechbm.doobot.ai" in url_lower
+        or ("prod" in url_lower and "_test" not in db_name_lower and "_dev" not in db_name_lower)
+    )
+    
+    if is_prod:
         raise RuntimeError(
             "\n"
             "===============================================================================\n"
-            "   CRITICAL SAFETY VIOLATION: ATTEMPTED TO RUN TESTS AGAINST PRODUCTION DATABASE\n"
+            "   CRITICAL SAFETY VIOLATION: OPERATION BLOCKED AGAINST PRODUCTION DATABASE\n"
             "===============================================================================\n"
             f"The database URL points to production: '{raw_url}'\n"
-            "Execution has been blocked to prevent data loss.\n"
-            "If you absolutely must run tests/cleanup against this database, you must set:\n"
-            "   ALLOW_DESTRUCTIVE_TESTS=true\n"
-            "in your environment or .env file.\n"
+            "Execution of tests, cleanups, or destructive scripts against production is FORBIDDEN.\n"
             "==============================================================================="
         )
-    elif is_prod and allow_destructive:
-        logger.warning(
-            "\n"
-            "===============================================================================\n"
-            "   WARNING: RUNNING TESTS AGAINST PRODUCTION DATABASE (BYPASS ENABLED)\n"
-            "===============================================================================\n"
-            f"Connecting to production database: '{raw_url}'\n"
-            "ALLOW_DESTRUCTIVE_TESTS=true is active. Destructive operations may occur!\n"
-            "==============================================================================="
-        )
+        
+    if is_test:
+        has_test_in_name = "_test" in db_name_lower
+        if not has_test_in_name:
+            raise RuntimeError(
+                "\n"
+                "===============================================================================\n"
+                "   CRITICAL SAFETY VIOLATION: DATABASE NAME DOES NOT CONTAIN '_test'\n"
+                "===============================================================================\n"
+                f"The database name '{db_name}' is not allowed for test execution / destructive work.\n"
+                "Tests and mock seeding require a database name containing '_test' (e.g. 'n8n_test').\n"
+                "==============================================================================="
+            )
+
+
+def assert_not_production_db_for_tests() -> None:
+    """
+    Blocks execution unconditionally if the database URL points to the production database
+    or if the database name does not contain '_test'.
+    """
+    enforce_destructive_safety(is_test=True)
+
 
 
 @lru_cache(maxsize=1)
@@ -85,12 +102,19 @@ def _get_engine():
     
     # Run safety check only under test environment conditions
     import os
+    import sys
+    
+    main_file = sys.argv[0].lower() if (sys.argv and sys.argv[0]) else ""
+    is_test_script = "test_" in main_file or "test.py" in main_file or "_test" in main_file
+    
     is_test_env = (
         os.environ.get("APP_ENV") == "test"
         or "PYTEST_CURRENT_TEST" in os.environ
+        or is_test_script
     )
     if is_test_env:
         assert_not_production_db_for_tests()
+
 
     return create_async_engine(
         async_url,

@@ -7,7 +7,7 @@ import json
 import pytest
 
 from app.main import app
-from app.db import get_engine, SessionLocal
+from app.db import get_engine, SessionLocal, enforce_destructive_safety
 from app.models.mass_evaluations import MassEvaluationJob, MassEvaluationRun, MassEvaluationResult
 from app.models.criteria import PromptCriterion, PromptCriterionTypology
 from app.models.prompts import Prompt
@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 @pytest.mark.asyncio
 async def test_cleanup_and_delete_criteria():
+    enforce_destructive_safety(is_test=True)
     engine = get_engine()
     
     # 1. Setup test data

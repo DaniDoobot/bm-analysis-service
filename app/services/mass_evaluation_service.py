@@ -1173,6 +1173,9 @@ class MassEvaluationService:
         service_key: str | None = None,
         typology_key: str | None = None,
         offset: int | None = None,
+        typology_ids: list[int] | None = None,
+        duration_min_seconds: int | None = None,
+        duration_max_seconds: int | None = None,
     ) -> list[MassEvaluationResult]:
         stmt = select(MassEvaluationResult)
         filters = []
@@ -1208,6 +1211,12 @@ class MassEvaluationService:
             filters.append(MassEvaluationResult.service_key == service_key)
         if typology_key is not None:
             filters.append(MassEvaluationResult.typology_key == typology_key)
+        if typology_ids:
+            filters.append(MassEvaluationResult.typology_id.in_(typology_ids))
+        if duration_min_seconds is not None:
+            filters.append(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
+        if duration_max_seconds is not None:
+            filters.append(MassEvaluationResult.call_duration_seconds <= duration_max_seconds)
             
         if filters:
             stmt = stmt.where(and_(*filters))
@@ -1234,6 +1243,9 @@ class MassEvaluationService:
         service_id: int | None = None,
         service_key: str | None = None,
         typology_key: str | None = None,
+        typology_ids: list[int] | None = None,
+        duration_min_seconds: int | None = None,
+        duration_max_seconds: int | None = None,
     ) -> int:
         from sqlalchemy import func
         stmt = select(func.count(MassEvaluationResult.mass_analysis_id))
@@ -1270,6 +1282,12 @@ class MassEvaluationService:
             filters.append(MassEvaluationResult.service_key == service_key)
         if typology_key is not None:
             filters.append(MassEvaluationResult.typology_key == typology_key)
+        if typology_ids:
+            filters.append(MassEvaluationResult.typology_id.in_(typology_ids))
+        if duration_min_seconds is not None:
+            filters.append(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
+        if duration_max_seconds is not None:
+            filters.append(MassEvaluationResult.call_duration_seconds <= duration_max_seconds)
             
         if filters:
             stmt = stmt.where(and_(*filters))

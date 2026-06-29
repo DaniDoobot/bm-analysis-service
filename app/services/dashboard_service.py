@@ -443,6 +443,11 @@ async def get_dashboard_summary(
     service_key: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    typology_ids: list[int] | None = None,
+    duration_min_seconds: int | None = None,
+    duration_max_seconds: int | None = None,
+    avg_score_min: float | None = None,
+    avg_score_max: float | None = None,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     
@@ -506,6 +511,25 @@ async def get_dashboard_summary(
         stmt = stmt.where(MassEvaluationResult.service_id == service_id)
     elif service_key is not None:
         stmt = stmt.where(MassEvaluationResult.service_key == service_key)
+
+    if typology_ids:
+        stmt = stmt.where(MassEvaluationResult.typology_id.in_(typology_ids))
+    if duration_min_seconds is not None:
+        stmt = stmt.where(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
+    if duration_max_seconds is not None:
+        stmt = stmt.where(MassEvaluationResult.call_duration_seconds <= duration_max_seconds)
+        
+    score_min_scaled = avg_score_min
+    if score_min_scaled is not None and score_min_scaled > 10.0:
+        score_min_scaled = score_min_scaled / 10.0
+    score_max_scaled = avg_score_max
+    if score_max_scaled is not None and score_max_scaled > 10.0:
+        score_max_scaled = score_max_scaled / 10.0
+        
+    if score_min_scaled is not None:
+        stmt = stmt.where(MassEvaluationResult.evaluacion_global >= score_min_scaled)
+    if score_max_scaled is not None:
+        stmt = stmt.where(MassEvaluationResult.evaluacion_global <= score_max_scaled)
 
     result = await db.execute(stmt)
     rows = list(result.scalars().all())
@@ -904,6 +928,11 @@ async def get_agent_evolution(
     service_key: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    typology_ids: list[int] | None = None,
+    duration_min_seconds: int | None = None,
+    duration_max_seconds: int | None = None,
+    avg_score_min: float | None = None,
+    avg_score_max: float | None = None,
 ) -> dict[str, Any]:
     """Evolution metrics from bm_mass_evaluation_results only."""
     from app.models.mass_evaluations import MassEvaluationResult
@@ -938,6 +967,25 @@ async def get_agent_evolution(
         stmt = stmt.where(MassEvaluationResult.service_key == service_key)
     if prompt_version_id is not None:
         stmt = stmt.where(MassEvaluationResult.prompt_version_id == prompt_version_id)
+
+    if typology_ids:
+        stmt = stmt.where(MassEvaluationResult.typology_id.in_(typology_ids))
+    if duration_min_seconds is not None:
+        stmt = stmt.where(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
+    if duration_max_seconds is not None:
+        stmt = stmt.where(MassEvaluationResult.call_duration_seconds <= duration_max_seconds)
+        
+    score_min_scaled = avg_score_min
+    if score_min_scaled is not None and score_min_scaled > 10.0:
+        score_min_scaled = score_min_scaled / 10.0
+    score_max_scaled = avg_score_max
+    if score_max_scaled is not None and score_max_scaled > 10.0:
+        score_max_scaled = score_max_scaled / 10.0
+        
+    if score_min_scaled is not None:
+        stmt = stmt.where(MassEvaluationResult.evaluacion_global >= score_min_scaled)
+    if score_max_scaled is not None:
+        stmt = stmt.where(MassEvaluationResult.evaluacion_global <= score_max_scaled)
 
     stmt = stmt.order_by(
         func.coalesce(
@@ -1049,6 +1097,7 @@ async def get_agent_evolution(
             "total_analyses": to_float(len(br)),
             "avg_evaluacion_global": to_float(avg_eg) if avg_eg is not None else None,
             "avg_evaluacion_global_count": count_eg,
+            "analysis_count": count_eg,
             "avg_sentiment": to_float(avg_se) if avg_se is not None else None,
             "avg_sentiment_count": count_se,
             "avg_empatia": to_float(avg_em) if avg_em is not None else None,
@@ -1184,6 +1233,11 @@ async def get_objections_breakdown(
     service_key: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    typology_ids: list[int] | None = None,
+    duration_min_seconds: int | None = None,
+    duration_max_seconds: int | None = None,
+    avg_score_min: float | None = None,
+    avg_score_max: float | None = None,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     
@@ -1212,6 +1266,25 @@ async def get_objections_breakdown(
         stmt = stmt.where(MassEvaluationResult.service_key == service_key)
     if agent_id:
         stmt = stmt.where(MassEvaluationResult.hubspot_owner_id == agent_id)
+
+    if typology_ids:
+        stmt = stmt.where(MassEvaluationResult.typology_id.in_(typology_ids))
+    if duration_min_seconds is not None:
+        stmt = stmt.where(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
+    if duration_max_seconds is not None:
+        stmt = stmt.where(MassEvaluationResult.call_duration_seconds <= duration_max_seconds)
+        
+    score_min_scaled = avg_score_min
+    if score_min_scaled is not None and score_min_scaled > 10.0:
+        score_min_scaled = score_min_scaled / 10.0
+    score_max_scaled = avg_score_max
+    if score_max_scaled is not None and score_max_scaled > 10.0:
+        score_max_scaled = score_max_scaled / 10.0
+        
+    if score_min_scaled is not None:
+        stmt = stmt.where(MassEvaluationResult.evaluacion_global >= score_min_scaled)
+    if score_max_scaled is not None:
+        stmt = stmt.where(MassEvaluationResult.evaluacion_global <= score_max_scaled)
         
     result = await db.execute(stmt)
     analyses = list(result.scalars().all())
@@ -1466,6 +1539,11 @@ async def get_agents_comparison(
     date_to: str | None = None,
     bucket: str | None = None,
     metric_key: str | None = None,
+    typology_ids: list[int] | None = None,
+    duration_min_seconds: int | None = None,
+    duration_max_seconds: int | None = None,
+    avg_score_min: float | None = None,
+    avg_score_max: float | None = None,
 ) -> dict[str, Any]:
     """Retrieve multi-agent comparison analytics using MassEvaluationResult."""
     now = datetime.now(timezone.utc)
@@ -1544,13 +1622,32 @@ async def get_agents_comparison(
     elif service_key is not None:
         stmt = stmt.where(MassEvaluationResult.service_key == service_key)
         
-    if typology_id is not None:
+    if typology_ids:
+        stmt = stmt.where(MassEvaluationResult.typology_id.in_(typology_ids))
+    elif typology_id is not None:
         stmt = stmt.where(MassEvaluationResult.typology_id == typology_id)
     elif typology_key is not None:
         stmt = stmt.where(MassEvaluationResult.typology_key == typology_key)
         
     if hubspot_owner_ids:
         stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(hubspot_owner_ids))
+
+    if duration_min_seconds is not None:
+        stmt = stmt.where(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
+    if duration_max_seconds is not None:
+        stmt = stmt.where(MassEvaluationResult.call_duration_seconds <= duration_max_seconds)
+        
+    score_min_scaled = avg_score_min
+    if score_min_scaled is not None and score_min_scaled > 10.0:
+        score_min_scaled = score_min_scaled / 10.0
+    score_max_scaled = avg_score_max
+    if score_max_scaled is not None and score_max_scaled > 10.0:
+        score_max_scaled = score_max_scaled / 10.0
+        
+    if score_min_scaled is not None:
+        stmt = stmt.where(MassEvaluationResult.evaluacion_global >= score_min_scaled)
+    if score_max_scaled is not None:
+        stmt = stmt.where(MassEvaluationResult.evaluacion_global <= score_max_scaled)
         
     # Order by call_timestamp ascending for chronological aggregations
     stmt = stmt.order_by(MassEvaluationResult.call_timestamp.asc())

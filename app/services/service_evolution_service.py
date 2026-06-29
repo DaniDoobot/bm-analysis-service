@@ -174,6 +174,11 @@ class ServiceEvolutionService:
         typology_key: str | None = None,
         agent_owner_id: str | None = None,
         criteria: str | None = None,
+        typology_ids: list[int] | None = None,
+        duration_min_seconds: int | None = None,
+        duration_max_seconds: int | None = None,
+        avg_score_min: float | None = None,
+        avg_score_max: float | None = None,
     ) -> ServiceEvolutionResponse:
         """
         GET /bm/service-evolution
@@ -219,6 +224,36 @@ class ServiceEvolutionService:
             "agent_owner_id": agent_owner_id,
         }
 
+        score_min_scaled = avg_score_min
+        if score_min_scaled is not None and score_min_scaled > 10.0:
+            score_min_scaled = score_min_scaled / 10.0
+        score_max_scaled = avg_score_max
+        if score_max_scaled is not None and score_max_scaled > 10.0:
+            score_max_scaled = score_max_scaled / 10.0
+
+        extra_sql = ""
+        extra_sql_left_join = ""
+        if typology_ids:
+            ids_str = ",".join(str(tid) for tid in typology_ids)
+            extra_sql += f" AND r.typology_id IN ({ids_str})"
+            extra_sql_left_join += f" AND r.typology_id IN ({ids_str})"
+        if duration_min_seconds is not None:
+            extra_sql += " AND r.call_duration_seconds >= :duration_min_seconds"
+            extra_sql_left_join += " AND r.call_duration_seconds >= :duration_min_seconds"
+            params["duration_min_seconds"] = duration_min_seconds
+        if duration_max_seconds is not None:
+            extra_sql += " AND r.call_duration_seconds <= :duration_max_seconds"
+            extra_sql_left_join += " AND r.call_duration_seconds <= :duration_max_seconds"
+            params["duration_max_seconds"] = duration_max_seconds
+        if score_min_scaled is not None:
+            extra_sql += f" AND ({_EG_EXPR}) >= :score_min_scaled"
+            extra_sql_left_join += f" AND ({_EG_EXPR}) >= :score_min_scaled"
+            params["score_min_scaled"] = score_min_scaled
+        if score_max_scaled is not None:
+            extra_sql += f" AND ({_EG_EXPR}) <= :score_max_scaled"
+            extra_sql_left_join += f" AND ({_EG_EXPR}) <= :score_max_scaled"
+            params["score_max_scaled"] = score_max_scaled
+
         # 2. Get Summary metrics
         # evaluacion_global fallback: if result_json has no 'evaluacion_global' key (analyses produced
         # with the dynamic-criteria system), compute it as the mean of all score_1_10 applicable
@@ -259,6 +294,7 @@ class ServiceEvolutionService:
               AND (CAST(:date_to AS timestamptz) IS NULL OR r.call_timestamp <= CAST(:date_to AS timestamptz))
               AND (CAST(:typology_key AS text) IS NULL OR r.typology_key = CAST(:typology_key AS text))
               AND (CAST(:agent_owner_id AS text) IS NULL OR r.hubspot_owner_id = CAST(:agent_owner_id AS text))
+              {extra_sql}
         """)
         sum_res = await db.execute(summary_query, params)
         sum_row = sum_res.fetchone()
@@ -285,7 +321,7 @@ class ServiceEvolutionService:
         # 3. Get Main Typology
         main_typo = None
         if total_calls > 0:
-            mt_query = text("""
+            mt_query = text(f"""
                 SELECT 
                     r.typology_name
                 FROM bm_mass_evaluation_results r
@@ -296,6 +332,7 @@ class ServiceEvolutionService:
                   AND (CAST(:date_to AS timestamptz) IS NULL OR r.call_timestamp <= CAST(:date_to AS timestamptz))
                   AND (CAST(:typology_key AS text) IS NULL OR r.typology_key = CAST(:typology_key AS text))
                   AND (CAST(:agent_owner_id AS text) IS NULL OR r.hubspot_owner_id = CAST(:agent_owner_id AS text))
+                  {extra_sql}
                 GROUP BY r.typology_name
                 ORDER BY COUNT(*) DESC
                 LIMIT 1;
@@ -356,6 +393,7 @@ class ServiceEvolutionService:
               AND (CAST(:date_to AS timestamptz) IS NULL OR r.call_timestamp <= CAST(:date_to AS timestamptz))
               AND (CAST(:typology_key AS text) IS NULL OR r.typology_key = CAST(:typology_key AS text))
               AND (CAST(:agent_owner_id AS text) IS NULL OR r.hubspot_owner_id = CAST(:agent_owner_id AS text))
+              {extra_sql}
             GROUP BY period, r.service_id, r.service_name
             ORDER BY period ASC, service_name ASC;
         """)
@@ -370,6 +408,7 @@ class ServiceEvolutionService:
                 service_id=row[1],
                 service_name=row[2],
                 total_calls=row[3],
+                analysis_count=row[3],
                 avg_evaluacion_global=float(row[4]) if row[4] is not None else None,
                 avg_sentiment=float(row[5]) if row[5] is not None else None,
                 avg_empatia=float(row[6]) if row[6] is not None else None,
@@ -401,6 +440,7 @@ class ServiceEvolutionService:
                 AND (CAST(:date_from AS timestamptz) IS NULL OR r.call_timestamp >= CAST(:date_from AS timestamptz))
                 AND (CAST(:date_to AS timestamptz) IS NULL OR r.call_timestamp <= CAST(:date_to AS timestamptz))
                 AND (CAST(:agent_owner_id AS text) IS NULL OR r.hubspot_owner_id = CAST(:agent_owner_id AS text))
+                {extra_sql_left_join}
             LEFT JOIN bm_mass_evaluation_criterion_results c 
                 ON r.mass_analysis_id = c.mass_analysis_id
             WHERE t.is_active = true
@@ -439,6 +479,7 @@ class ServiceEvolutionService:
                   AND (CAST(:date_from AS timestamptz) IS NULL OR r.call_timestamp >= CAST(:date_from AS timestamptz))
                   AND (CAST(:date_to AS timestamptz) IS NULL OR r.call_timestamp <= CAST(:date_to AS timestamptz))
                   AND (CAST(:agent_owner_id AS text) IS NULL OR r.hubspot_owner_id = CAST(:agent_owner_id AS text))
+                  {extra_sql}
                   AND (
                     r.typology_key IS NULL 
                     OR r.typology_key NOT IN (
@@ -480,6 +521,7 @@ class ServiceEvolutionService:
               AND (CAST(:date_to AS timestamptz) IS NULL OR r.call_timestamp <= CAST(:date_to AS timestamptz))
               AND (CAST(:typology_key AS text) IS NULL OR r.typology_key = CAST(:typology_key AS text))
               AND (CAST(:agent_owner_id AS text) IS NULL OR r.hubspot_owner_id = CAST(:agent_owner_id AS text))
+              {extra_sql}
             GROUP BY r.hubspot_owner_id, r.agent_name
             ORDER BY total_calls DESC;
         """)
@@ -497,7 +539,7 @@ class ServiceEvolutionService:
             ))
 
         # 7. Get Criteria Ranking
-        ranking_query = text("""
+        ranking_query = text(f"""
             SELECT 
                 c.criterion_key,
                 MAX(c.criterion_name) AS criterion_name,
@@ -514,6 +556,7 @@ class ServiceEvolutionService:
               AND (CAST(:date_to AS timestamptz) IS NULL OR r.call_timestamp <= CAST(:date_to AS timestamptz))
               AND (CAST(:typology_key AS text) IS NULL OR r.typology_key = CAST(:typology_key AS text))
               AND (CAST(:agent_owner_id AS text) IS NULL OR r.hubspot_owner_id = CAST(:agent_owner_id AS text))
+              {extra_sql}
             GROUP BY c.criterion_key
             ORDER BY avg_value DESC;
         """)

@@ -80,4 +80,20 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    import os
+    import sys
+    env_file = ".env"
+    
+    main_file = sys.argv[0].lower() if (sys.argv and sys.argv[0]) else ""
+    is_test_run = (
+        os.environ.get("APP_ENV") == "test"
+        or "PYTEST_CURRENT_TEST" in os.environ
+        or "test_" in main_file
+        or "test.py" in main_file
+    )
+    if is_test_run:
+        if os.path.exists(".env.test"):
+            env_file = ".env.test"
+            
+    return Settings(_env_file=env_file)
+

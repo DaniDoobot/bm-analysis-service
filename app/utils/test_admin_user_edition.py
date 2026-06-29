@@ -10,7 +10,7 @@ from sqlalchemy import select, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.main import app
-from app.db import get_engine
+from app.db import get_engine, enforce_destructive_safety
 from app.models.users import User, UserAudit
 from app.models.personalized_training import (
     TrainingAgentSetting,
@@ -19,6 +19,7 @@ from app.models.personalized_training import (
 from app.utils.security import create_access_token, hash_password, verify_password
 
 async def test_admin_user_edition_workflow():
+    enforce_destructive_safety(is_test=True)
     engine = get_engine()
     async with AsyncSession(engine, expire_on_commit=False) as db:
         print("=== INICIANDO PRUEBAS DE EDICIÓN ADMINISTRATIVA DE USUARIOS ===")
