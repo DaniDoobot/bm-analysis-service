@@ -745,38 +745,43 @@ class MassEvaluationService:
                     call_id = call["call_id"]
                     recording_url = call["recording_url"]
 
-                    # Delete any previous result for this job and call to allow overwrite
-                    await db.execute(delete(MassEvaluationResult).where(
-                        MassEvaluationResult.job_id == job_id,
-                        MassEvaluationResult.call_id == call_id
-                    ))
-                    await db.flush()
+                    # Pre-deletion by job_id + call_id is disabled.
+                    # We now perform a clean upsert based on call_id + prompt_id when saving results.
+                    pass
                     
                     if not recording_url:
                         # Skip
-                        res_row = MassEvaluationResult(
+                        res_row = await MassEvaluationService._upsert_mass_evaluation_result(
+                            db=db,
                             run_id=run_id,
                             job_id=job_id,
                             execution_source=execution_source,
                             call_id=call_id,
-                            hs_object_id=call["hs_object_id"],
-                            hubspot_owner_id=call["hubspot_owner_id"],
-                            call_timestamp=safe_parse_datetime(call["call_timestamp"]),
-                            call_duration_seconds=call["call_duration_seconds"],
-                            direction=call["direction"],
                             prompt_id=prompt_id,
-                            prompt_version_id=prompt_version_id,
-                            prompt_name=prompt_name,
-                            prompt_version_name=prompt_version_name,
-                            prompt_version_label=prompt_version_label,
-                            prompt_snapshot=prompt_snapshot,
-                            status="skipped",
-                            error_message="No recording URL present.",
-                            service_id=service_id,
-                            service_key=service_key,
-                            service_name=service_name
+                            defaults={
+                                "hs_object_id": call["hs_object_id"],
+                                "hubspot_owner_id": call["hubspot_owner_id"],
+                                "call_timestamp": safe_parse_datetime(call["call_timestamp"]),
+                                "call_duration_seconds": call["call_duration_seconds"],
+                                "direction": call["direction"],
+                                "prompt_version_id": prompt_version_id,
+                                "prompt_name": prompt_name,
+                                "prompt_version_name": prompt_version_name,
+                                "prompt_version_label": prompt_version_label,
+                                "prompt_snapshot": prompt_snapshot,
+                                "status": "skipped",
+                                "error_message": "No recording URL present.",
+                                "service_id": service_id,
+                                "service_key": service_key,
+                                "service_name": service_name,
+                                "result_json": None,
+                                "items_json": None,
+                                "evaluacion_global": None,
+                                "typology_id": None,
+                                "typology_key": None,
+                                "typology_name": None
+                            }
                         )
-                        db.add(res_row)
                         calls_skipped += 1
                         
                         # Incrementally update metrics in DB for polling
@@ -947,39 +952,41 @@ class MassEvaluationService:
                         eval_val = calculate_score_from_items(items)
                         eval_decimal = Decimal(str(eval_val)) if eval_val is not None else None
 
-                        # Persist Result
-                        res_row = MassEvaluationResult(
+                        # Persist Result via Upsert Helper
+                        res_row = await MassEvaluationService._upsert_mass_evaluation_result(
+                            db=db,
                             run_id=run_id,
                             job_id=job_id,
                             execution_source=execution_source,
                             call_id=call_id,
-                            hs_object_id=call["hs_object_id"],
-                            recording_url=recording_url,
-                            hubspot_owner_id=owner_id,
-                            agent_name=resolved_agent,
-                            call_timestamp=safe_parse_datetime(call["call_timestamp"]),
-                            call_duration_seconds=call["call_duration_seconds"],
-                            direction=call["direction"],
                             prompt_id=prompt_id,
-                            prompt_version_id=prompt_version_id,
-                            prompt_name=prompt_name,
-                            prompt_version_name=prompt_version_name,
-                            prompt_version_label=prompt_version_label,
-                            prompt_snapshot=prompt_snapshot,
-                            status="completed",
-                            result_json=clean_result,
-                            items_json=items,
-                            evaluacion_global=eval_decimal,
-                            hubspot_metadata=call,
-                            service_id=service_id,
-                            service_key=service_key,
-                            service_name=service_name,
-                            typology_id=typology_id,
-                            typology_key=typology_key,
-                            typology_name=typology_name
+                            defaults={
+                                "hs_object_id": call["hs_object_id"],
+                                "recording_url": recording_url,
+                                "hubspot_owner_id": owner_id,
+                                "agent_name": resolved_agent,
+                                "call_timestamp": safe_parse_datetime(call["call_timestamp"]),
+                                "call_duration_seconds": call["call_duration_seconds"],
+                                "direction": call["direction"],
+                                "prompt_version_id": prompt_version_id,
+                                "prompt_name": prompt_name,
+                                "prompt_version_name": prompt_version_name,
+                                "prompt_version_label": prompt_version_label,
+                                "prompt_snapshot": prompt_snapshot,
+                                "status": "completed",
+                                "result_json": clean_result,
+                                "items_json": items,
+                                "evaluacion_global": eval_decimal,
+                                "hubspot_metadata": call,
+                                "service_id": service_id,
+                                "service_key": service_key,
+                                "service_name": service_name,
+                                "typology_id": typology_id,
+                                "typology_key": typology_key,
+                                "typology_name": typology_name,
+                                "error_message": None
+                            }
                         )
-                        db.add(res_row)
-                        await db.flush()
 
                         # Persist normalized criteria
                         from app.models.mass_evaluations import MassEvaluationCriterionResult
@@ -1024,30 +1031,38 @@ class MassEvaluationService:
                             "Call %s failed in mass evaluation job %d: %s\nStacktrace:\n%s", 
                             call_id, job_id, e_call, traceback.format_exc()
                         )
-                        res_row = MassEvaluationResult(
+                        res_row = await MassEvaluationService._upsert_mass_evaluation_result(
+                            db=db,
                             run_id=run_id,
                             job_id=job_id,
                             execution_source=execution_source,
                             call_id=call_id,
-                            hs_object_id=call["hs_object_id"],
-                            recording_url=recording_url,
-                            hubspot_owner_id=call["hubspot_owner_id"],
-                            call_timestamp=safe_parse_datetime(call["call_timestamp"]),
-                            call_duration_seconds=call["call_duration_seconds"],
-                            direction=call["direction"],
                             prompt_id=prompt_id,
-                            prompt_version_id=prompt_version_id,
-                            prompt_name=prompt_name,
-                            prompt_version_name=prompt_version_name,
-                            prompt_version_label=prompt_version_label,
-                            prompt_snapshot=prompt_snapshot,
-                            status="failed",
-                            error_message=str(e_call),
-                            service_id=service_id,
-                            service_key=service_key,
-                            service_name=service_name
+                            defaults={
+                                "hs_object_id": call["hs_object_id"],
+                                "recording_url": recording_url,
+                                "hubspot_owner_id": call["hubspot_owner_id"],
+                                "call_timestamp": safe_parse_datetime(call["call_timestamp"]),
+                                "call_duration_seconds": call["call_duration_seconds"],
+                                "direction": call["direction"],
+                                "prompt_version_id": prompt_version_id,
+                                "prompt_name": prompt_name,
+                                "prompt_version_name": prompt_version_name,
+                                "prompt_version_label": prompt_version_label,
+                                "prompt_snapshot": prompt_snapshot,
+                                "status": "failed",
+                                "error_message": str(e_call),
+                                "service_id": service_id,
+                                "service_key": service_key,
+                                "service_name": service_name,
+                                "result_json": None,
+                                "items_json": None,
+                                "evaluacion_global": None,
+                                "typology_id": None,
+                                "typology_key": None,
+                                "typology_name": None
+                            }
                         )
-                        db.add(res_row)
                         calls_failed += 1
                         
                     # Incrementally update metrics in DB for polling
@@ -1358,6 +1373,78 @@ class MassEvaluationService:
         stmt = select(MassEvaluationResult).where(MassEvaluationResult.mass_analysis_id == mass_analysis_id)
         res = await db.execute(stmt)
         return res.scalars().first()
+
+    @staticmethod
+    async def _upsert_mass_evaluation_result(
+        db: AsyncSession,
+        run_id: int,
+        job_id: int,
+        execution_source: str,
+        call_id: str,
+        prompt_id: int,
+        defaults: dict[str, Any]
+    ) -> MassEvaluationResult:
+        """
+        Locates an existing mass evaluation result for the same call_id and prompt_id.
+        If found, clears its child criteria results, updates the record's fields (audit-aware),
+        and returns it. Otherwise, creates and returns a new record.
+        """
+        from app.models.mass_evaluations import MassEvaluationCriterionResult
+        
+        # 1. Search for existing record
+        stmt = select(MassEvaluationResult).where(
+            MassEvaluationResult.call_id == call_id,
+            MassEvaluationResult.prompt_id == prompt_id
+        )
+        res = await db.execute(stmt)
+        existing = res.scalars().first()
+        
+        now_utc = datetime.now(timezone.utc)
+        
+        if existing:
+            # Delete child criteria records first
+            await db.execute(
+                delete(MassEvaluationCriterionResult).where(
+                    MassEvaluationCriterionResult.mass_analysis_id == existing.mass_analysis_id
+                )
+            )
+            await db.flush()
+            
+            # Set source audit fields if not already populated
+            if existing.source_job_id is None:
+                existing.source_job_id = existing.job_id
+            if existing.source_run_id is None:
+                existing.source_run_id = existing.run_id
+                
+            # Update parent fields
+            existing.run_id = run_id
+            existing.job_id = job_id
+            existing.execution_source = execution_source
+            existing.last_evaluated_at = now_utc
+            existing.updated_at = now_utc
+            
+            for k, v in defaults.items():
+                setattr(existing, k, v)
+                
+            return existing
+        else:
+            # Create new row
+            new_row = MassEvaluationResult(
+                run_id=run_id,
+                job_id=job_id,
+                execution_source=execution_source,
+                call_id=call_id,
+                prompt_id=prompt_id,
+                source_job_id=job_id,
+                source_run_id=run_id,
+                last_evaluated_at=now_utc,
+                created_at=now_utc,
+                updated_at=now_utc,
+                **defaults
+            )
+            db.add(new_row)
+            await db.flush()
+            return new_row
 
     @staticmethod
     async def run_due_jobs(db: AsyncSession) -> dict[str, int]:

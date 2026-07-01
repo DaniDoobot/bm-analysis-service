@@ -166,6 +166,12 @@ class MassEvaluationResult(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), server_default=func.now())
 
+    # Audit / Overwrite details
+    last_evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_run_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     @property
     def global_score(self) -> float | None:
         return float(self.evaluacion_global) if self.evaluacion_global is not None else None
@@ -176,6 +182,7 @@ class MassEvaluationResult(Base):
 
     __table_args__ = (
         UniqueConstraint("run_id", "call_id", name="uq_mass_eval_run_call"),
+        UniqueConstraint("call_id", "prompt_id", name="uq_mass_eval_call_prompt"),
         Index("idx_mass_eval_results_run_id", "run_id"),
         Index("idx_mass_eval_results_job_id", "job_id"),
         Index("idx_mass_eval_results_call_id", "call_id"),
@@ -183,6 +190,7 @@ class MassEvaluationResult(Base):
         Index("idx_mass_eval_results_call_timestamp", "call_timestamp"),
         Index("idx_mass_eval_results_execution_source", "execution_source"),
     )
+
 
 
 class MassEvaluationCriterionResult(Base):
