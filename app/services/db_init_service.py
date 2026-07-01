@@ -366,45 +366,7 @@ async def init_db():
                     await conn.execute(text(f"ALTER TABLE bm_mass_evaluation_results ADD COLUMN {col_name} {col_type} NULL;"))
                     logger.info("Column '%s' added successfully to 'bm_mass_evaluation_results'.", col_name)
 
-            # Unique constraint on call_id + prompt_id for bm_mass_evaluation_results
-            res_constraint = await conn.execute(
-                text("""
-                    SELECT EXISTS (
-                        SELECT FROM information_schema.table_constraints
-                        WHERE table_schema = 'public'
-                          AND table_name = 'bm_mass_evaluation_results'
-                          AND constraint_name = 'uq_mass_eval_call_prompt'
-                    );
-                """)
-            )
-            if not res_constraint.scalar():
-                logger.info("Unique constraint 'uq_mass_eval_call_prompt' does not exist. Preparing to apply...")
-                try:
-                    # Clean duplicates first
-                    logger.info("Cleaning duplicate rows in 'bm_mass_evaluation_results' before applying unique constraint...")
-                    await conn.execute(
-                        text("""
-                            DELETE FROM bm_mass_evaluation_results
-                            WHERE mass_analysis_id IN (
-                                SELECT mass_analysis_id
-                                FROM (
-                                    SELECT mass_analysis_id,
-                                           ROW_NUMBER() OVER (PARTITION BY call_id, prompt_id ORDER BY mass_analysis_id DESC) as rn
-                                    FROM bm_mass_evaluation_results
-                                ) t
-                                WHERE t.rn > 1
-                            );
-                        """)
-                    )
-                    
-                    # Add constraint
-                    logger.info("Adding unique constraint 'uq_mass_eval_call_prompt' to 'bm_mass_evaluation_results'...")
-                    await conn.execute(
-                        text("ALTER TABLE bm_mass_evaluation_results ADD CONSTRAINT uq_mass_eval_call_prompt UNIQUE (call_id, prompt_id);")
-                    )
-                    logger.info("Unique constraint 'uq_mass_eval_call_prompt' successfully added.")
-                except Exception as e_constraint:
-                    logger.warning("Could not clean duplicates or add unique constraint 'uq_mass_eval_call_prompt': %s", e_constraint)
+
 
 
             # 1.6.4 bm_prompt_versions — archiving support columns
