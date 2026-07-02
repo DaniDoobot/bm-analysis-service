@@ -251,11 +251,82 @@ async def test_upsert_logic():
         assert criteria[1].numeric_value == Decimal("9.0")
         print("[OK] Upsert and replacement logic verified successfully.")
 
+        # -------------------------------------------------------------
+        # TEST 3: Overwrite protection (completed vs failed/skipped)
+        # -------------------------------------------------------------
+        print("\nTest 3: Protection of completed status against failed/skipped re-evaluations...")
+        
+        # Create dummy job & run 3
+        job3 = MassEvaluationJob(
+            job_name="Test Job 3 (Failed)",
+            execution_source="on_demand",
+            prompt_id=999
+        )
+        db.add(job3)
+        await db.flush()
+
+        run3 = MassEvaluationRun(
+            job_id=job3.job_id,
+            trigger_type="manual",
+            status="failed",
+            execution_source="on_demand"
+        )
+        db.add(run3)
+        await db.flush()
+
+        # Perform failed upsert on the same call_id and prompt_id
+        res3 = await MassEvaluationService._upsert_mass_evaluation_result(
+            db=db,
+            run_id=run3.run_id,
+            job_id=job3.job_id,
+            execution_source="on_demand",
+            call_id="call_test_upsert",
+            prompt_id=999,
+            defaults={
+                "hs_object_id": "123",
+                "recording_url": "http://test.url/2",
+                "hubspot_owner_id": "owner_1",
+                "agent_name": "Agent 1",
+                "call_timestamp": datetime.now(timezone.utc),
+                "call_duration_seconds": 150,
+                "direction": "inbound",
+                "prompt_snapshot": "Test Prompt Snapshot 2",
+                "status": "failed",
+                "result_json": None,
+                "items_json": None,
+                "evaluacion_global": None,
+                "service_id": 1,
+                "service_key": "front",
+                "error_message": "Some API Error"
+            }
+        )
+        await db.commit()
+
+        # Verify that the parent status remains 'completed' and global score is still 9.50
+        stmt_check_3 = select(MassEvaluationResult).where(MassEvaluationResult.call_id == "call_test_upsert")
+        res_check_3 = await db.execute(stmt_check_3)
+        results_3 = res_check_3.scalars().all()
+        assert len(results_3) == 1
+        res_row_3 = results_3[0]
+        
+        assert res_row_3.status == "completed", f"Status was changed to {res_row_3.status}! Expected: completed"
+        assert res_row_3.evaluacion_global == Decimal("9.50"), f"Score was cleared to {res_row_3.evaluacion_global}! Expected: 9.50"
+        
+        # Verify that criteria results were NOT deleted
+        stmt_crit_3 = select(MassEvaluationCriterionResult).where(
+            MassEvaluationCriterionResult.mass_analysis_id == original_mass_analysis_id
+        )
+        res_crit_3 = await db.execute(stmt_crit_3)
+        criteria_3 = res_crit_3.scalars().all()
+        assert len(criteria_3) == 2, f"Criteria rows were deleted! Got {len(criteria_3)}, Expected: 2"
+        
+        print("[OK] Protection logic verified successfully: completed status and criteria results were preserved.")
+
         # Cleanup
         print("\nCleaning up test data...")
         await db.execute(delete(MassEvaluationResult).where(MassEvaluationResult.call_id == "call_test_upsert"))
-        await db.execute(delete(MassEvaluationJob).where(MassEvaluationJob.job_id.in_([job1.job_id, job2.job_id])))
-        await db.execute(delete(MassEvaluationRun).where(MassEvaluationRun.run_id.in_([run1.run_id, run2.run_id])))
+        await db.execute(delete(MassEvaluationJob).where(MassEvaluationJob.job_id.in_([job1.job_id, job2.job_id, job3.job_id])))
+        await db.execute(delete(MassEvaluationRun).where(MassEvaluationRun.run_id.in_([run1.run_id, run2.run_id, run3.run_id])))
         await db.commit()
         print("=== TODAS LAS PRUEBAS DE UPSERT HAN PASADO CON EXITO ===")
 

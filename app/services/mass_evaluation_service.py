@@ -1402,6 +1402,16 @@ class MassEvaluationService:
         now_utc = datetime.now(timezone.utc)
         
         if existing:
+            new_status = defaults.get("status")
+            if existing.status == "completed" and new_status in ("failed", "skipped"):
+                logger.info(
+                    "[mass_eval_upsert] Preserving existing 'completed' result ID=%d for call_id=%s. "
+                    "Skipping overwrite with '%s' status.",
+                    existing.mass_analysis_id, call_id, new_status
+                )
+                existing.updated_at = now_utc
+                return existing
+
             # Delete child criteria records first
             await db.execute(
                 delete(MassEvaluationCriterionResult).where(

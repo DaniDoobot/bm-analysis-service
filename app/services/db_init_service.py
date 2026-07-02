@@ -346,10 +346,6 @@ async def init_db():
                 ("typology_key", "TEXT"),
                 ("typology_name", "TEXT"),
                 ("evaluacion_global", "NUMERIC(5, 2)"),
-                ("last_evaluated_at", "TIMESTAMPTZ"),
-                ("updated_at", "TIMESTAMPTZ"),
-                ("source_job_id", "INTEGER"),
-                ("source_run_id", "INTEGER"),
             ]:
                 res = await conn.execute(
                     text(f"""
