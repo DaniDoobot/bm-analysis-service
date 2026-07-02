@@ -10,6 +10,8 @@ class MassEvaluationJobCreate(BaseModel):
     is_active: bool = True
     prompt_id: int
     prompt_version_id: int | None = None
+    selection_mode: str = "filter"  # filter / manual_call_ids
+    call_ids: list[str] | None = None
 
     # Validation override flags
     allow_inactive_prompt: bool = False
@@ -181,6 +183,8 @@ class MassEvaluationJobResponse(BaseModel):
     prompt_name: str | None
     prompt_version_name: str | None
     prompt_version_label: str | None
+    selection_mode: str | None = None
+    call_ids: list[str] | None = None
 
     agent_owner_ids: list[str] | None
     agent_names: list[str] | None

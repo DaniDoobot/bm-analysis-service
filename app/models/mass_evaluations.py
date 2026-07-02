@@ -57,6 +57,9 @@ class MassEvaluationJob(Base):
     only_with_recording: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     max_calls: Mapped[int] = mapped_column(Integer, default=100, server_default="100")
 
+    selection_mode: Mapped[str] = mapped_column(Text, default="filter", server_default="'filter'")
+    call_ids: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+
     # Scheduling
     schedule_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     schedule_type: Mapped[str | None] = mapped_column(Text, nullable=True)  # manual, daily, weekly, monthly, cron
@@ -182,7 +185,7 @@ class MassEvaluationResult(Base):
 
     __table_args__ = (
         UniqueConstraint("run_id", "call_id", name="uq_mass_eval_run_call"),
-        UniqueConstraint("call_id", "prompt_id", name="uq_mass_eval_call_prompt"),
+        UniqueConstraint("call_id", name="uq_mass_eval_call_id"),
         Index("idx_mass_eval_results_run_id", "run_id"),
         Index("idx_mass_eval_results_job_id", "job_id"),
         Index("idx_mass_eval_results_call_id", "call_id"),

@@ -48,10 +48,10 @@ async def test_upsert_logic():
             print("Failed to remove old test DB file:", e)
             
     # 1. Initialize DB to ensure columns and unique constraints are created
-    # Remove uq_mass_eval_call_prompt constraint from metadata for SQLite testing of duplicates
+    # Remove uq_mass_eval_call_id constraint from metadata for SQLite testing of duplicates
     constraints_to_remove = [
         c for c in MassEvaluationResult.__table__.constraints
-        if getattr(c, "name", None) == "uq_mass_eval_call_prompt"
+        if getattr(c, "name", None) == "uq_mass_eval_call_id"
     ]
     for c in constraints_to_remove:
         MassEvaluationResult.__table__.constraints.remove(c)
@@ -144,11 +144,69 @@ async def test_upsert_logic():
         original_mass_analysis_id = res_row.mass_analysis_id
         print(f"[OK] First evaluation inserted successfully. mass_analysis_id={original_mass_analysis_id}")
 
+        # Create dummy job & run 1.1 (same prompt_id = 999)
+        job1_1 = MassEvaluationJob(
+            job_name="Test Job 1.1",
+            execution_source="on_demand",
+            prompt_id=999
+        )
+        db.add(job1_1)
+        await db.flush()
+
+        run1_1 = MassEvaluationRun(
+            job_id=job1_1.job_id,
+            trigger_type="manual",
+            status="completed",
+            execution_source="on_demand"
+        )
+        db.add(run1_1)
+        await db.flush()
+
+        print("\nTest 2.0: Second evaluation with same prompt_id (upsert / overwrite)...")
+        res1_1 = await MassEvaluationService._upsert_mass_evaluation_result(
+            db=db,
+            run_id=run1_1.run_id,
+            job_id=job1_1.job_id,
+            execution_source="on_demand",
+            call_id="call_test_upsert",
+            prompt_id=999,
+            defaults={
+                "hs_object_id": "123",
+                "recording_url": "http://test.url/same",
+                "hubspot_owner_id": "owner_1",
+                "agent_name": "Agent 1",
+                "call_timestamp": datetime.now(timezone.utc),
+                "call_duration_seconds": 150,
+                "direction": "inbound",
+                "prompt_version_id": 1,
+                "prompt_name": "Test Prompt",
+                "prompt_version_name": "v1",
+                "prompt_version_label": "v1.0",
+                "prompt_snapshot": "Test Prompt Snapshot",
+                "status": "completed",
+                "result_json": {"score": 9.0},
+                "items_json": [{"criterion_key": "empatia", "name": "Empatía", "type": "number", "numeric_value": 9.0}],
+                "evaluacion_global": Decimal("9.00"),
+                "service_id": 1,
+                "service_key": "front"
+            }
+        )
+        await db.commit()
+
+        # Verify Test 2.0
+        stmt_check_1_1 = select(MassEvaluationResult).where(MassEvaluationResult.call_id == "call_test_upsert")
+        res_check_1_1 = await db.execute(stmt_check_1_1)
+        results_1_1 = res_check_1_1.scalars().all()
+        assert len(results_1_1) == 1
+        assert results_1_1[0].prompt_id == 999
+        assert results_1_1[0].evaluacion_global == Decimal("9.00")
+        print("[OK] Second evaluation with same prompt_id verified successfully.")
+
         # Create dummy job & run 2
         job2 = MassEvaluationJob(
             job_name="Test Job 2",
             execution_source="on_demand",
-            prompt_id=999
+            prompt_id=555
         )
         db.add(job2)
         await db.flush()
@@ -162,14 +220,14 @@ async def test_upsert_logic():
         db.add(run2)
         await db.flush()
 
-        print("\nTest 2: Second evaluation (upsert / overwrite)...")
+        print("\nTest 2.1: Third evaluation with different prompt_id (upsert / overwrite)...")
         res2 = await MassEvaluationService._upsert_mass_evaluation_result(
             db=db,
             run_id=run2.run_id,
             job_id=job2.job_id,
             execution_source="on_demand",
             call_id="call_test_upsert",
-            prompt_id=999,
+            prompt_id=555,
             defaults={
                 "hs_object_id": "123",
                 "recording_url": "http://test.url/2",
@@ -233,6 +291,7 @@ async def test_upsert_logic():
         assert res_row_2.mass_analysis_id == original_mass_analysis_id, f"mass_analysis_id changed! {res_row_2.mass_analysis_id} vs {original_mass_analysis_id}"
         
         # 3. Fields updated
+        assert res_row_2.prompt_id == 555, f"Expected prompt_id 555, got {res_row_2.prompt_id}"
         assert res_row_2.evaluacion_global == Decimal("9.50"), f"Expected global score 9.50, got {res_row_2.evaluacion_global}"
         assert res_row_2.recording_url == "http://test.url/2"
         
@@ -319,6 +378,7 @@ async def test_upsert_logic():
         
         assert res_row_3.status == "completed", f"Status was changed to {res_row_3.status}! Expected: completed"
         assert res_row_3.evaluacion_global == Decimal("9.50"), f"Score was cleared to {res_row_3.evaluacion_global}! Expected: 9.50"
+        assert res_row_3.prompt_id == 555, f"Expected prompt_id to remain 555, got {res_row_3.prompt_id}"
         
         # Verify that criteria results were NOT deleted
         stmt_crit_3 = select(MassEvaluationCriterionResult).where(
@@ -335,12 +395,12 @@ async def test_upsert_logic():
         # -------------------------------------------------------------
         print("\nTest 4: Upsert behavior with pre-existing duplicates...")
 
-        # 1. Create two pre-existing results for same call_id and prompt_id
+        # 1. Create two pre-existing results for same call_id and different prompt_ids
         # Result 1: Older row (mass_analysis_id will be lower)
         dup_job_old = MassEvaluationJob(
             job_name="Dup Job Old",
             execution_source="on_demand",
-            prompt_id=888
+            prompt_id=111
         )
         db.add(dup_job_old)
         await db.flush()
@@ -359,7 +419,7 @@ async def test_upsert_logic():
             job_id=dup_job_old.job_id,
             execution_source="on_demand",
             call_id="call_dup_preexisting",
-            prompt_id=888,
+            prompt_id=111,
             status="completed",
             evaluacion_global=Decimal("7.00"),
             recording_url="http://test.url/old",
@@ -379,7 +439,7 @@ async def test_upsert_logic():
         dup_job_new = MassEvaluationJob(
             job_name="Dup Job New",
             execution_source="on_demand",
-            prompt_id=888
+            prompt_id=222
         )
         db.add(dup_job_new)
         await db.flush()
@@ -398,7 +458,7 @@ async def test_upsert_logic():
             job_id=dup_job_new.job_id,
             execution_source="on_demand",
             call_id="call_dup_preexisting",
-            prompt_id=888,
+            prompt_id=222,
             status="completed",
             evaluacion_global=Decimal("8.00"),
             recording_url="http://test.url/new",
@@ -421,7 +481,7 @@ async def test_upsert_logic():
             job_id=dup_job_new.job_id,
             execution_source="on_demand",
             call_id="call_dup_preexisting",
-            prompt_id=888,
+            prompt_id=222,
             criterion_key="empatia",
             criterion_name="Empatía",
             criterion_type="number",
@@ -505,23 +565,25 @@ async def test_upsert_logic():
         final_results = res_final_check.scalars().all()
         assert len(final_results) == 2, f"Expected exactly 2 duplicate rows, got {len(final_results)}"
         
-        # - The newer row was updated to 9.00
+        # - The newer row was updated to 9.00 and its prompt_id to 888
         assert final_results[1].mass_analysis_id == new_id, "The updated row ID changed!"
         assert final_results[1].evaluacion_global == Decimal("9.00"), f"Expected 9.00, got {final_results[1].evaluacion_global}"
         assert final_results[1].recording_url == "http://test.url/upserted"
+        assert final_results[1].prompt_id == 888, f"Expected prompt_id 888, got {final_results[1].prompt_id}"
 
-        # - The older row (old_id) is completely untouched (score remains 7.00)
+        # - The older row (old_id) is completely untouched (score remains 7.00, prompt_id remains 111)
         assert final_results[0].mass_analysis_id == old_id
         assert final_results[0].evaluacion_global == Decimal("7.00"), f"Older row was modified! Score: {final_results[0].evaluacion_global}"
         assert final_results[0].recording_url == "http://test.url/old"
+        assert final_results[0].prompt_id == 111, f"Expected older row prompt_id 111, got {final_results[0].prompt_id}"
 
         print("[OK] Duplicate safety logic verified: updated the most recent duplicate while leaving older ones untouched.")
 
         # Cleanup
         print("\nCleaning up test data...")
         await db.execute(delete(MassEvaluationResult).where(MassEvaluationResult.call_id.in_(["call_test_upsert", "call_dup_preexisting"])))
-        await db.execute(delete(MassEvaluationJob).where(MassEvaluationJob.job_id.in_([job1.job_id, job2.job_id, job3.job_id, dup_job_old.job_id, dup_job_new.job_id, dup_job_upsert.job_id])))
-        await db.execute(delete(MassEvaluationRun).where(MassEvaluationRun.run_id.in_([run1.run_id, run2.run_id, run3.run_id, dup_run_old.run_id, dup_run_new.run_id, dup_run_upsert.run_id])))
+        await db.execute(delete(MassEvaluationJob).where(MassEvaluationJob.job_id.in_([job1.job_id, job1_1.job_id, job2.job_id, job3.job_id, dup_job_old.job_id, dup_job_new.job_id, dup_job_upsert.job_id])))
+        await db.execute(delete(MassEvaluationRun).where(MassEvaluationRun.run_id.in_([run1.run_id, run1_1.run_id, run2.run_id, run3.run_id, dup_run_old.run_id, dup_run_new.run_id, dup_run_upsert.run_id])))
         await db.commit()
         print("=== TODAS LAS PRUEBAS DE UPSERT HAN PASADO CON EXITO ===")
 

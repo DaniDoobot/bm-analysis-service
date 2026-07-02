@@ -275,6 +275,26 @@ class MassEvaluationService:
                 f"El job de análisis masivo usará la versión publicada en producción (current_version_id), NO el borrador activo de trabajo."
             )
 
+        # Validate selection mode and call_ids
+        if payload.selection_mode == "manual_call_ids":
+            if not payload.call_ids:
+                raise ValueError("Debe proporcionar al menos un ID de llamada para la selección manual.")
+            
+            seen = set()
+            cleaned_ids = []
+            for cid in payload.call_ids:
+                trimmed = str(cid).strip()
+                if not trimmed:
+                    continue
+                if trimmed not in seen:
+                    seen.add(trimmed)
+                    cleaned_ids.append(trimmed)
+            
+            if len(cleaned_ids) > 200:
+                raise ValueError("El máximo permitido es de 200 IDs de llamada por job.")
+            
+            payload.call_ids = cleaned_ids
+
         # Remove override flags from payload before db insert
         job_data = payload.model_dump()
         job_data.pop("allow_inactive_prompt", None)
@@ -418,6 +438,39 @@ class MassEvaluationService:
         if not job:
             raise ValueError(f"Job ID {job_id} not found")
             
+        hs_service = HubSpotService()
+        
+        if job.selection_mode == "manual_call_ids":
+            calls = []
+            not_found_call_ids = []
+            call_ids_list = job.call_ids or []
+            for cid in call_ids_list:
+                try:
+                    call_meta = await hs_service.get_call(cid)
+                    calls.append({
+                        "call_id": cid,
+                        "recording_url": call_meta.get("recording_url"),
+                        "hubspot_owner_id": call_meta.get("hubspot_owner_id")
+                    })
+                except Exception:
+                    not_found_call_ids.append(cid)
+                    
+            found_ids = [c["call_id"] for c in calls]
+            return {
+                "job_id": job_id,
+                "calls_found": len(calls),
+                "effective_filters": {
+                    "selection_mode": "manual_call_ids",
+                    "call_ids": call_ids_list
+                },
+                "calls": calls,
+                "found_call_ids": found_ids,
+                "not_found_call_ids": not_found_call_ids,
+                "duplicate_input_call_ids": [],
+                "normalized_call_ids": call_ids_list
+            }
+            
+        # Normal filter selection mode
         date_from, date_to = resolve_date_filters(job, job.timezone)
         if override_date_from:
             date_from = override_date_from
@@ -440,7 +493,6 @@ class MassEvaluationService:
             "timezone": job.timezone,
         }
         
-        hs_service = HubSpotService()
         calls = await hs_service.search_calls_for_mass_evaluation(filters)
         
         return {
@@ -457,7 +509,11 @@ class MassEvaluationService:
                 "time_window_end": job.time_window_end.strftime("%H:%M:%S") if job.time_window_end else None,
                 "timezone": job.timezone,
             },
-            "calls": [{"call_id": c["call_id"], "recording_url": c["recording_url"], "hubspot_owner_id": c["hubspot_owner_id"]} for c in calls]
+            "calls": [{"call_id": c["call_id"], "recording_url": c["recording_url"], "hubspot_owner_id": c["hubspot_owner_id"]} for c in calls],
+            "found_call_ids": [c["call_id"] for c in calls],
+            "not_found_call_ids": [],
+            "duplicate_input_call_ids": [],
+            "normalized_call_ids": [c["call_id"] for c in calls]
         }
 
     @staticmethod
@@ -483,19 +539,26 @@ class MassEvaluationService:
             
         date_from, date_to = normalize_resolved_dates(date_from, date_to, job.timezone)
 
-        effective_filters = {
-            "date_from": date_from.isoformat() if date_from else None,
-            "date_to": date_to.isoformat() if date_to else None,
-            "agent_owner_ids": job.agent_owner_ids,
-            "duration_min_seconds": job.duration_min_seconds,
-            "duration_max_seconds": job.duration_max_seconds,
-            "direction": job.direction,
-            "only_with_recording": job.only_with_recording,
-            "max_calls": job.max_calls,
-            "time_window_start": job.time_window_start.strftime("%H:%M:%S") if job.time_window_start else None,
-            "time_window_end": job.time_window_end.strftime("%H:%M:%S") if job.time_window_end else None,
-            "timezone": job.timezone,
-        }
+        if job.selection_mode == "manual_call_ids":
+            effective_filters = {
+                "selection_mode": "manual_call_ids",
+                "call_ids": job.call_ids,
+                "max_calls": job.max_calls
+            }
+        else:
+            effective_filters = {
+                "date_from": date_from.isoformat() if date_from else None,
+                "date_to": date_to.isoformat() if date_to else None,
+                "agent_owner_ids": job.agent_owner_ids,
+                "duration_min_seconds": job.duration_min_seconds,
+                "duration_max_seconds": job.duration_max_seconds,
+                "direction": job.direction,
+                "only_with_recording": job.only_with_recording,
+                "max_calls": job.max_calls,
+                "time_window_start": job.time_window_start.strftime("%H:%M:%S") if job.time_window_start else None,
+                "time_window_end": job.time_window_end.strftime("%H:%M:%S") if job.time_window_end else None,
+                "timezone": job.timezone,
+            }
         
         # Update scheduling fields immediately to avoid duplicate scheduler triggers during background task startup
         job.last_run_at = datetime.now(timezone.utc)
@@ -679,28 +742,52 @@ class MassEvaluationService:
                 # 2. Query HubSpot
                 hs_service = HubSpotService()
                 
-                # Parse filter dates back to datetime
-                date_from_str = filters_payload.get("date_from")
-                date_to_str = filters_payload.get("date_to")
-                
-                date_from = safe_parse_datetime(date_from_str) if date_from_str else None
-                date_to = safe_parse_datetime(date_to_str) if date_to_str else None
-                
-                search_filters = {
-                    "date_from": date_from,
-                    "date_to": date_to,
-                    "agent_owner_ids": filters_payload.get("agent_owner_ids"),
-                    "duration_min_seconds": duration_min_seconds,
-                    "duration_max_seconds": duration_max_seconds,
-                    "direction": filters_payload.get("direction"),
-                    "only_with_recording": filters_payload.get("only_with_recording"),
-                    "max_calls": filters_payload.get("max_calls"),
-                    "time_window_start": filters_payload.get("time_window_start"),
-                    "time_window_end": filters_payload.get("time_window_end"),
-                    "timezone": timezone_name,
-                }
-                
-                calls = await hs_service.search_calls_for_mass_evaluation(search_filters)
+                not_found_call_ids = []
+                if filters_payload.get("selection_mode") == "manual_call_ids":
+                    calls = []
+                    call_ids_list = filters_payload.get("call_ids") or []
+                    for cid in call_ids_list:
+                        try:
+                            call_meta = await hs_service.get_call(cid)
+                            dur_ms = call_meta.get("call_duration")
+                            dur_sec = int(float(dur_ms) / 1000.0) if dur_ms else None
+                            
+                            calls.append({
+                                "call_id": cid,
+                                "hs_object_id": cid,
+                                "recording_url": call_meta.get("recording_url"),
+                                "hubspot_owner_id": call_meta.get("hubspot_owner_id"),
+                                "call_timestamp": call_meta.get("call_timestamp"),
+                                "call_duration_seconds": dur_sec,
+                                "direction": call_meta.get("call_direction") or "all",
+                                "status": call_meta.get("status")
+                            })
+                        except Exception as e_get:
+                            logger.warning("Manual call ID %s not found in HubSpot during run: %s", cid, e_get)
+                            not_found_call_ids.append(cid)
+                else:
+                    # Parse filter dates back to datetime
+                    date_from_str = filters_payload.get("date_from")
+                    date_to_str = filters_payload.get("date_to")
+                    
+                    date_from = safe_parse_datetime(date_from_str) if date_from_str else None
+                    date_to = safe_parse_datetime(date_to_str) if date_to_str else None
+                    
+                    search_filters = {
+                        "date_from": date_from,
+                        "date_to": date_to,
+                        "agent_owner_ids": filters_payload.get("agent_owner_ids"),
+                        "duration_min_seconds": duration_min_seconds,
+                        "duration_max_seconds": duration_max_seconds,
+                        "direction": filters_payload.get("direction"),
+                        "only_with_recording": filters_payload.get("only_with_recording"),
+                        "max_calls": filters_payload.get("max_calls"),
+                        "time_window_start": filters_payload.get("time_window_start"),
+                        "time_window_end": filters_payload.get("time_window_end"),
+                        "timezone": timezone_name,
+                    }
+                    
+                    calls = await hs_service.search_calls_for_mass_evaluation(search_filters)
                 run.calls_found = len(calls)
                 
                 # 3. Filter duplicates within the same execution and apply max_calls slicing
@@ -798,7 +885,8 @@ class MassEvaluationService:
                                     "analyzed": calls_analyzed,
                                     "skipped": calls_skipped,
                                     "failed": calls_failed,
-                                    "total": len(selected_calls)
+                                    "total": len(selected_calls),
+                                    "not_found_call_ids": not_found_call_ids
                                 }
                         except Exception as e_progress:
                             logger.warning("Failed to update progress in DB: %s", e_progress)
@@ -1079,7 +1167,8 @@ class MassEvaluationService:
                                 "analyzed": calls_analyzed,
                                 "skipped": calls_skipped,
                                 "failed": calls_failed,
-                                "total": len(selected_calls)
+                                "total": len(selected_calls),
+                                "not_found_call_ids": not_found_call_ids
                             }
                     except Exception as e_progress:
                         logger.warning("Failed to update progress in DB: %s", e_progress)
@@ -1115,7 +1204,8 @@ class MassEvaluationService:
                         "analyzed": calls_analyzed,
                         "skipped": calls_skipped,
                         "failed": calls_failed,
-                        "total": len(selected_calls)
+                        "total": len(selected_calls),
+                        "not_found_call_ids": not_found_call_ids
                     }
 
                 if fresh_job_obj:
@@ -1391,11 +1481,14 @@ class MassEvaluationService:
         """
         from app.models.mass_evaluations import MassEvaluationCriterionResult
         
-        # 1. Search for existing record (order by mass_analysis_id DESC to get the latest one first)
+        from sqlalchemy import case
+        # 1. Search for existing record (order by status='completed' first, then mass_analysis_id DESC to get the latest completed first)
         stmt = select(MassEvaluationResult).where(
-            MassEvaluationResult.call_id == call_id,
-            MassEvaluationResult.prompt_id == prompt_id
-        ).order_by(MassEvaluationResult.mass_analysis_id.desc())
+            MassEvaluationResult.call_id == call_id
+        ).order_by(
+            case((MassEvaluationResult.status == "completed", 0), else_=1),
+            MassEvaluationResult.mass_analysis_id.desc()
+        )
         res = await db.execute(stmt)
         existing = res.scalars().first()
         
@@ -1430,6 +1523,7 @@ class MassEvaluationService:
             existing.run_id = run_id
             existing.job_id = job_id
             existing.execution_source = execution_source
+            existing.prompt_id = prompt_id
             existing.last_evaluated_at = now_utc
             existing.updated_at = now_utc
             
