@@ -1391,11 +1391,11 @@ class MassEvaluationService:
         """
         from app.models.mass_evaluations import MassEvaluationCriterionResult
         
-        # 1. Search for existing record
+        # 1. Search for existing record (order by mass_analysis_id DESC to get the latest one first)
         stmt = select(MassEvaluationResult).where(
             MassEvaluationResult.call_id == call_id,
             MassEvaluationResult.prompt_id == prompt_id
-        )
+        ).order_by(MassEvaluationResult.mass_analysis_id.desc())
         res = await db.execute(stmt)
         existing = res.scalars().first()
         

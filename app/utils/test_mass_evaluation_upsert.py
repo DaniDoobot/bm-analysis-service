@@ -48,8 +48,16 @@ async def test_upsert_logic():
             print("Failed to remove old test DB file:", e)
             
     # 1. Initialize DB to ensure columns and unique constraints are created
+    # Remove uq_mass_eval_call_prompt constraint from metadata for SQLite testing of duplicates
+    constraints_to_remove = [
+        c for c in MassEvaluationResult.__table__.constraints
+        if getattr(c, "name", None) == "uq_mass_eval_call_prompt"
+    ]
+    for c in constraints_to_remove:
+        MassEvaluationResult.__table__.constraints.remove(c)
+
     engine = get_engine()
-    print("Initializing database schema on test SQLite database...")
+    print("Initializing database schema on test SQLite database (without unique constraint to allow duplicate testing)...")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     print("[OK] Schema initialization completed.")
@@ -322,11 +330,198 @@ async def test_upsert_logic():
         
         print("[OK] Protection logic verified successfully: completed status and criteria results were preserved.")
 
+        # -------------------------------------------------------------
+        # TEST 4: Upsert behavior with pre-existing duplicates
+        # -------------------------------------------------------------
+        print("\nTest 4: Upsert behavior with pre-existing duplicates...")
+
+        # 1. Create two pre-existing results for same call_id and prompt_id
+        # Result 1: Older row (mass_analysis_id will be lower)
+        dup_job_old = MassEvaluationJob(
+            job_name="Dup Job Old",
+            execution_source="on_demand",
+            prompt_id=888
+        )
+        db.add(dup_job_old)
+        await db.flush()
+
+        dup_run_old = MassEvaluationRun(
+            job_id=dup_job_old.job_id,
+            trigger_type="manual",
+            status="completed",
+            execution_source="on_demand"
+        )
+        db.add(dup_run_old)
+        await db.flush()
+
+        dup_res_old = MassEvaluationResult(
+            run_id=dup_run_old.run_id,
+            job_id=dup_job_old.job_id,
+            execution_source="on_demand",
+            call_id="call_dup_preexisting",
+            prompt_id=888,
+            status="completed",
+            evaluacion_global=Decimal("7.00"),
+            recording_url="http://test.url/old",
+            hs_object_id="dup_1",
+            hubspot_owner_id="owner_1",
+            call_timestamp=datetime.now(timezone.utc),
+            call_duration_seconds=100,
+            direction="inbound",
+            service_id=1,
+            service_key="front",
+            prompt_snapshot="Test Snapshot Old"
+        )
+        db.add(dup_res_old)
+        await db.flush()
+
+        # Result 2: Newer row (mass_analysis_id will be higher)
+        dup_job_new = MassEvaluationJob(
+            job_name="Dup Job New",
+            execution_source="on_demand",
+            prompt_id=888
+        )
+        db.add(dup_job_new)
+        await db.flush()
+
+        dup_run_new = MassEvaluationRun(
+            job_id=dup_job_new.job_id,
+            trigger_type="manual",
+            status="completed",
+            execution_source="on_demand"
+        )
+        db.add(dup_run_new)
+        await db.flush()
+
+        dup_res_new = MassEvaluationResult(
+            run_id=dup_run_new.run_id,
+            job_id=dup_job_new.job_id,
+            execution_source="on_demand",
+            call_id="call_dup_preexisting",
+            prompt_id=888,
+            status="completed",
+            evaluacion_global=Decimal("8.00"),
+            recording_url="http://test.url/new",
+            hs_object_id="dup_1",
+            hubspot_owner_id="owner_1",
+            call_timestamp=datetime.now(timezone.utc),
+            call_duration_seconds=110,
+            direction="inbound",
+            service_id=1,
+            service_key="front",
+            prompt_snapshot="Test Snapshot New"
+        )
+        db.add(dup_res_new)
+        await db.flush()
+
+        # Add criteria for the newer row
+        crit_dup_new = MassEvaluationCriterionResult(
+            mass_analysis_id=dup_res_new.mass_analysis_id,
+            run_id=dup_run_new.run_id,
+            job_id=dup_job_new.job_id,
+            execution_source="on_demand",
+            call_id="call_dup_preexisting",
+            prompt_id=888,
+            criterion_key="empatia",
+            criterion_name="Empatía",
+            criterion_type="number",
+            numeric_value=Decimal("8.0")
+        )
+        db.add(crit_dup_new)
+        await db.commit()
+
+        # Confirm we have exactly 2 rows for this call_id
+        stmt_dup_check = select(MassEvaluationResult).where(MassEvaluationResult.call_id == "call_dup_preexisting").order_by(MassEvaluationResult.mass_analysis_id.asc())
+        res_dup_check = await db.execute(stmt_dup_check)
+        dup_results = res_dup_check.scalars().all()
+        assert len(dup_results) == 2, f"Expected 2 duplicate rows, got {len(dup_results)}"
+        old_id = dup_results[0].mass_analysis_id
+        new_id = dup_results[1].mass_analysis_id
+        assert old_id < new_id
+
+        # 2. Perform a new completed upsert on the same call_id and prompt_id (888)
+        dup_job_upsert = MassEvaluationJob(
+            job_name="Dup Job Upsert",
+            execution_source="on_demand",
+            prompt_id=888
+        )
+        db.add(dup_job_upsert)
+        await db.flush()
+
+        dup_run_upsert = MassEvaluationRun(
+            job_id=dup_job_upsert.job_id,
+            trigger_type="manual",
+            status="completed",
+            execution_source="on_demand"
+        )
+        db.add(dup_run_upsert)
+        await db.flush()
+
+        res_upsert = await MassEvaluationService._upsert_mass_evaluation_result(
+            db=db,
+            run_id=dup_run_upsert.run_id,
+            job_id=dup_job_upsert.job_id,
+            execution_source="on_demand",
+            call_id="call_dup_preexisting",
+            prompt_id=888,
+            defaults={
+                "hs_object_id": "dup_1",
+                "recording_url": "http://test.url/upserted",
+                "hubspot_owner_id": "owner_1",
+                "agent_name": "Agent 1",
+                "call_timestamp": datetime.now(timezone.utc),
+                "call_duration_seconds": 120,
+                "direction": "inbound",
+                "prompt_snapshot": "Test Prompt Snapshot Upsert",
+                "status": "completed",
+                "result_json": {"score": 9.0},
+                "items_json": [{"criterion_key": "empatia", "name": "Empatía", "type": "number", "numeric_value": 9.0}],
+                "evaluacion_global": Decimal("9.00"),
+                "service_id": 1,
+                "service_key": "front"
+            }
+        )
+        
+        # Add new criteria
+        crit_upsert = MassEvaluationCriterionResult(
+            mass_analysis_id=res_upsert.mass_analysis_id,
+            run_id=dup_run_upsert.run_id,
+            job_id=dup_job_upsert.job_id,
+            execution_source="on_demand",
+            call_id="call_dup_preexisting",
+            prompt_id=888,
+            criterion_key="empatia",
+            criterion_name="Empatía",
+            criterion_type="number",
+            numeric_value=Decimal("9.0")
+        )
+        db.add(crit_upsert)
+        await db.commit()
+
+        # 3. Verify
+        # - Total row count remains exactly 2 (did not create a 3rd row)
+        stmt_final_check = select(MassEvaluationResult).where(MassEvaluationResult.call_id == "call_dup_preexisting").order_by(MassEvaluationResult.mass_analysis_id.asc())
+        res_final_check = await db.execute(stmt_final_check)
+        final_results = res_final_check.scalars().all()
+        assert len(final_results) == 2, f"Expected exactly 2 duplicate rows, got {len(final_results)}"
+        
+        # - The newer row was updated to 9.00
+        assert final_results[1].mass_analysis_id == new_id, "The updated row ID changed!"
+        assert final_results[1].evaluacion_global == Decimal("9.00"), f"Expected 9.00, got {final_results[1].evaluacion_global}"
+        assert final_results[1].recording_url == "http://test.url/upserted"
+
+        # - The older row (old_id) is completely untouched (score remains 7.00)
+        assert final_results[0].mass_analysis_id == old_id
+        assert final_results[0].evaluacion_global == Decimal("7.00"), f"Older row was modified! Score: {final_results[0].evaluacion_global}"
+        assert final_results[0].recording_url == "http://test.url/old"
+
+        print("[OK] Duplicate safety logic verified: updated the most recent duplicate while leaving older ones untouched.")
+
         # Cleanup
         print("\nCleaning up test data...")
-        await db.execute(delete(MassEvaluationResult).where(MassEvaluationResult.call_id == "call_test_upsert"))
-        await db.execute(delete(MassEvaluationJob).where(MassEvaluationJob.job_id.in_([job1.job_id, job2.job_id, job3.job_id])))
-        await db.execute(delete(MassEvaluationRun).where(MassEvaluationRun.run_id.in_([run1.run_id, run2.run_id, run3.run_id])))
+        await db.execute(delete(MassEvaluationResult).where(MassEvaluationResult.call_id.in_(["call_test_upsert", "call_dup_preexisting"])))
+        await db.execute(delete(MassEvaluationJob).where(MassEvaluationJob.job_id.in_([job1.job_id, job2.job_id, job3.job_id, dup_job_old.job_id, dup_job_new.job_id, dup_job_upsert.job_id])))
+        await db.execute(delete(MassEvaluationRun).where(MassEvaluationRun.run_id.in_([run1.run_id, run2.run_id, run3.run_id, dup_run_old.run_id, dup_run_new.run_id, dup_run_upsert.run_id])))
         await db.commit()
         print("=== TODAS LAS PRUEBAS DE UPSERT HAN PASADO CON EXITO ===")
 
