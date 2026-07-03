@@ -258,7 +258,10 @@ async def list_available_structures(
     db: AsyncSession = Depends(get_db),
 ):
     """List available Speech prompts/structures for a service."""
-    return await TrainerService.list_available_structures(db, service_id=service_id)
+    try:
+        return await TrainerService.list_available_structures(db, service_id=service_id)
+    except ValueError as ve:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(ve))
 
 
 # ── AI Prompt Generation Endpoints ────────────────────────────────────────────

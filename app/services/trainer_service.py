@@ -108,6 +108,12 @@ class TrainerService:
 
     @staticmethod
     async def list_available_structures(db: AsyncSession, service_id: int) -> List[Prompt]:
+        # Validate that service exists
+        stmt_srv = select(Service).where(Service.service_id == service_id)
+        res_srv = await db.execute(stmt_srv)
+        if not res_srv.scalars().first():
+            raise ValueError(f"El servicio con ID {service_id} no existe.")
+
         stmt = select(Prompt).where(
             and_(
                 Prompt.service_id == service_id,
