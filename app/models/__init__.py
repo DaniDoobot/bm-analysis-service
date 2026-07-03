@@ -18,6 +18,13 @@ from app.models.personalized_training import (
     TrainingEvaluationPrompt,
     TrainingCallEvaluation,
 )
+from app.models.trainer import (
+    TrainerEvaluationConfig,
+    TrainerSimulation,
+    TrainerSimulationVersion,
+    TrainerSession,
+    TrainerEvaluation,
+)
 
 __all__ = [
     "Prompt",
@@ -53,6 +60,11 @@ __all__ = [
     "TrainingCallSession",
     "TrainingEvaluationPrompt",
     "TrainingCallEvaluation",
+    "TrainerEvaluationConfig",
+    "TrainerSimulation",
+    "TrainerSimulationVersion",
+    "TrainerSession",
+    "TrainerEvaluation",
 ]
 
 

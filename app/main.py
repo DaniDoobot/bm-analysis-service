@@ -31,6 +31,8 @@ from app.routers import (
     training_voice,
     analytics,
     base_structures,
+    trainer,
+    trainer_voice,
 )
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -102,6 +104,8 @@ app.include_router(personalized_training.router)
 app.include_router(training_voice.router)
 app.include_router(analytics.router)
 app.include_router(base_structures.router)
+app.include_router(trainer.router)
+app.include_router(trainer_voice.router)
 
 
 
