@@ -2,6 +2,7 @@
 import logging
 from typing import Annotated, List, Optional
 from datetime import datetime
+from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
