@@ -1458,6 +1458,10 @@ async def twilio_media_stream(
             setting = res_set.scalars().first()
             agent_first_name = setting.agent_name.split()[0] if setting else "Agente"
             
+            # Query active cycles count to customize the transition greeting
+            active_cycles = await get_active_cycles_for_agent(db, sess.agent_id)
+            eligible_cycles_count = len(active_cycles)
+            
             instruction = prompt.prompt_text + "\n" + SPANISH_VOICE_RULES
             tools = [
                 {
@@ -1638,11 +1642,16 @@ async def twilio_media_stream(
                                 else:
                                     rem_text = f"te quedan {remaining_count} entrenamientos, así que vamos a ello."
                                     
+                                if eligible_cycles_count == 1:
+                                    greet_text = f"Perfecto {agent_first_name}. Solo tienes un ciclo activo, así que vamos con ese. {rem_text} Iniciamos la simulación número {prompt.prompt_number}. Prepárate."
+                                else:
+                                    greet_text = f"Perfecto {agent_first_name}, pues vamos con ese. {rem_text} Iniciamos la simulación número {prompt.prompt_number}. Prepárate."
+                                    
                                 greet_msg = {
                                     "clientContent": {
                                         "turns": [{
                                             "role": "user",
-                                            "parts": [{"text": f"Di exactamente: 'Perfecto {agent_first_name}, pues vamos con ese. {rem_text} Iniciamos la simulación número {prompt.prompt_number}. Prepárate.' y a continuación, sin pausar, inicia la conversación asumiendo tu personaje del roleplay."}]
+                                            "parts": [{"text": f"Di exactamente: '{greet_text}' y a continuación, sin pausar, inicia la conversación asumiendo tu personaje del roleplay."}]
                                         }],
                                         "turnComplete": True
                                     }

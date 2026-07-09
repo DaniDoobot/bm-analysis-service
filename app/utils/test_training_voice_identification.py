@@ -1,11 +1,13 @@
 import os
 import sys
+import json
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Force DATABASE_URL to a safe local SQLite DB before any app modules are loaded
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///training_voice_test.db"
+os.environ["GEMINI_API_KEY"] = "mock_key"
 
 # Safety Confirmation Check
 db_url = os.environ.get("DATABASE_URL", "")
@@ -29,6 +31,7 @@ from app.models.personalized_training import (
     TrainingAgentReport,
     TrainingSimulationPrompt,
     TrainingCompletionStatus,
+    TrainingCallSession,
 )
 from app.routers.training_voice import (
     normalize_training_code_input,
@@ -53,6 +56,10 @@ class TestTrainingVoiceIdentification(unittest.IsolatedAsyncioTestCase):
         assert "91.98.230.119" not in db_url_str, "CRITICAL: Database engine URL points to production host!"
         assert "speechbm_test" not in db_url_str or "sqlite" in db_url_str, "CRITICAL: Database engine points to production database speechbm_test!"
         
+        # Mock Gemini API key to avoid websocket early close in tests
+        from app.routers.training_voice import settings as voice_settings
+        voice_settings.gemini_api_key = "mock_key"
+
         # Clean old DB file if exists
         if os.path.exists("training_voice_test.db"):
             try:
@@ -62,6 +69,8 @@ class TestTrainingVoiceIdentification(unittest.IsolatedAsyncioTestCase):
 
         # Create all tables in SQLite
         async with engine.begin() as conn:
+            await conn.execute(text("PRAGMA journal_mode=WAL;"))
+            await conn.execute(text("PRAGMA busy_timeout=5000;"))
             await conn.run_sync(Base.metadata.drop_all)
             await conn.run_sync(Base.metadata.create_all)
             # Create the bm_training_call_attempts table manually (since it is not in metadata anymore)
@@ -88,7 +97,11 @@ class TestTrainingVoiceIdentification(unittest.IsolatedAsyncioTestCase):
             await db.commit()
 
     async def asyncTearDown(self):
+        import asyncio
+        # Give background tasks a brief moment to release DB connections after ws close
+        await asyncio.sleep(0.5)
         engine = get_engine()
+        await engine.dispose()
         # Clean up database
         if os.path.exists("training_voice_test.db"):
             try:
@@ -465,6 +478,232 @@ class TestTrainingVoiceIdentification(unittest.IsolatedAsyncioTestCase):
             # Successful verification clears attempts
             await handle_verify_agent_code("7777", "call_cleanup", mock_ws, 1)
             self.assertEqual(await get_attempts_count(db, "call_cleanup"), 0)
+
+    async def test_websocket_greeting_single_cycle(self):
+        """Verify WebSocket greeting for agent with 1 unique active cycle contains Option B confirmation."""
+        engine = get_engine()
+        async with AsyncSession(engine) as db:
+            report = TrainingAgentReport(
+                training_report_id=201,
+                hubspot_owner_id="7777",
+                agent_name="Cristina Montenegro",
+                agent_initials="CM",
+                status="in_progress",
+                period_start=datetime.now(timezone.utc),
+                period_end=datetime.now(timezone.utc),
+                is_current=True,
+            )
+            db.add(report)
+            prompt = TrainingSimulationPrompt(
+                simulation_prompt_id=501,
+                training_report_id=201,
+                hubspot_owner_id="7777",
+                prompt_number=1,
+                title="Simulacion 1",
+                scenario_type="roleplay",
+                prompt_text="Prompt voice bot",
+            )
+            db.add(prompt)
+            comp = TrainingCompletionStatus(
+                completion_id=601,
+                training_report_id=201,
+                simulation_prompt_id=501,
+                hubspot_owner_id="7777",
+                status="pending"
+            )
+            db.add(comp)
+            
+            session = TrainingCallSession(
+                session_id=1001,
+                call_sid="call_ws_test",
+                agent_id="7777",
+                cycle_id=201,
+                conversation_id=501,
+                status="in_progress"
+            )
+            db.add(session)
+            await db.commit()
+
+        from fastapi.testclient import TestClient
+        from app.main import app
+        import asyncio
+        import time
+        
+        mock_gemini_ws = AsyncMock()
+        mock_gemini_ws.send = AsyncMock()
+        
+        async def mock_async_iter(*args, **kwargs):
+            yield json.dumps({"setupComplete": {}})
+            await asyncio.sleep(2.0)
+            
+        mock_gemini_ws.__aiter__ = mock_async_iter
+        
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__.return_value = mock_gemini_ws
+        mock_connect.__aexit__.return_value = None
+        
+        with patch("websockets.connect", return_value=mock_connect):
+            client = TestClient(app)
+            with client.websocket_connect("/bm/training/voice/twilio/media-stream?session_id=1001") as websocket:
+                websocket.send_json({"event": "connected"})
+                websocket.send_json({
+                    "event": "start",
+                    "start": {
+                        "streamSid": "stream_123",
+                        "callSid": "call_ws_test",
+                        "customParameters": {
+                            "flow": "simulation",
+                            "session_id": "1001"
+                        }
+                    }
+                })
+                
+                # Give background thread time to run the WS loops
+                time.sleep(1.0)
+                
+                # Check call details in mock send
+                calls = mock_gemini_ws.send.call_args_list
+                greeting_sent = False
+                for c in calls:
+                    arg_str = c[0][0]
+                    if "clientContent" in arg_str:
+                        # Should contain name Cristina
+                        self.assertIn("Cristina", arg_str)
+                        # Should state that she only has one active cycle
+                        self.assertIn("Solo tienes un ciclo activo", arg_str)
+                        # Should NOT say "pues vamos con ese"
+                        self.assertNotIn("pues vamos con ese", arg_str)
+                        greeting_sent = True
+                self.assertTrue(greeting_sent)
+
+    async def test_websocket_greeting_multiple_cycles(self):
+        """Verify WebSocket greeting for agent with 2 active cycles uses the correct chose-cycle selection confirmation."""
+        engine = get_engine()
+        async with AsyncSession(engine) as db:
+            # Cycle 1
+            report1 = TrainingAgentReport(
+                training_report_id=201,
+                hubspot_owner_id="7777",
+                agent_name="Cristina Montenegro",
+                agent_initials="CM",
+                status="in_progress",
+                period_start=datetime.now(timezone.utc),
+                period_end=datetime.now(timezone.utc),
+                is_current=True,
+            )
+            db.add(report1)
+            prompt1 = TrainingSimulationPrompt(
+                simulation_prompt_id=501,
+                training_report_id=201,
+                hubspot_owner_id="7777",
+                prompt_number=1,
+                title="Simulacion 1",
+                scenario_type="roleplay",
+                prompt_text="Prompt voice bot",
+            )
+            db.add(prompt1)
+            comp1 = TrainingCompletionStatus(
+                completion_id=601,
+                training_report_id=201,
+                simulation_prompt_id=501,
+                hubspot_owner_id="7777",
+                status="pending"
+            )
+            db.add(comp1)
+            
+            # Cycle 2 (forces eligible_cycles_count = 2)
+            report2 = TrainingAgentReport(
+                training_report_id=202,
+                hubspot_owner_id="7777",
+                agent_name="Cristina Montenegro",
+                agent_initials="CM",
+                status="in_progress",
+                period_start=datetime.now(timezone.utc),
+                period_end=datetime.now(timezone.utc),
+                is_current=False,
+            )
+            db.add(report2)
+            prompt2 = TrainingSimulationPrompt(
+                simulation_prompt_id=502,
+                training_report_id=202,
+                hubspot_owner_id="7777",
+                prompt_number=1,
+                title="Simulacion 2",
+                scenario_type="roleplay",
+                prompt_text="Prompt voice bot 2",
+            )
+            db.add(prompt2)
+            comp2 = TrainingCompletionStatus(
+                completion_id=602,
+                training_report_id=202,
+                simulation_prompt_id=502,
+                hubspot_owner_id="7777",
+                status="pending"
+            )
+            db.add(comp2)
+            
+            session = TrainingCallSession(
+                session_id=1002,
+                call_sid="call_ws_test2",
+                agent_id="7777",
+                cycle_id=201,
+                conversation_id=501,
+                status="in_progress"
+            )
+            db.add(session)
+            await db.commit()
+
+        from fastapi.testclient import TestClient
+        from app.main import app
+        import asyncio
+        import time
+        
+        mock_gemini_ws = AsyncMock()
+        mock_gemini_ws.send = AsyncMock()
+        
+        async def mock_async_iter(*args, **kwargs):
+            yield json.dumps({"setupComplete": {}})
+            await asyncio.sleep(2.0)
+            
+        mock_gemini_ws.__aiter__ = mock_async_iter
+        
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__.return_value = mock_gemini_ws
+        mock_connect.__aexit__.return_value = None
+        
+        with patch("websockets.connect", return_value=mock_connect):
+            client = TestClient(app)
+            with client.websocket_connect("/bm/training/voice/twilio/media-stream?session_id=1002") as websocket:
+                websocket.send_json({"event": "connected"})
+                websocket.send_json({
+                    "event": "start",
+                    "start": {
+                        "streamSid": "stream_123",
+                        "callSid": "call_ws_test2",
+                        "customParameters": {
+                            "flow": "simulation",
+                            "session_id": "1002"
+                        }
+                    }
+                })
+                
+                # Give background thread time to run the WS loops
+                time.sleep(1.0)
+                
+                # Check call details in mock send
+                calls = mock_gemini_ws.send.call_args_list
+                greeting_sent = False
+                for c in calls:
+                    arg_str = c[0][0]
+                    if "clientContent" in arg_str:
+                        # Should contain name Cristina
+                        self.assertIn("Cristina", arg_str)
+                        # Should say "pues vamos con ese" (as they chose one of the multiple cycles)
+                        self.assertIn("pues vamos con ese", arg_str)
+                        # Should NOT say "Solo tienes un ciclo activo"
+                        self.assertNotIn("Solo tienes un ciclo activo", arg_str)
+                        greeting_sent = True
+                self.assertTrue(greeting_sent)
 
 if __name__ == "__main__":
     unittest.main()
