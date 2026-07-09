@@ -13,7 +13,7 @@ from typing import List, Optional, Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Query, Request, Response, WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_, desc, func
+from sqlalchemy import select, and_, or_, desc, func, text
 
 from app.dependencies import get_db, get_current_user
 from app.models.users import User
@@ -40,19 +40,20 @@ settings = get_settings()
 router = APIRouter(prefix="/bm/training", tags=["Training Voice Voice/IVR"])
 
 IDENTIFICATION_SYSTEM_INSTRUCTION = """
-Eres el Asistente de Identificación por Voz de Boston Medical Group.
-Tu labor en esta fase es identificar al agente y, si tiene varios ciclos de entrenamiento pendientes, ayudarle a seleccionar uno de ellos por voz.
+Eres el Asistente de Identificación por Voz de Doobot.
+Tu labor en esta fase es identificar al agente y, si tiene varios ciclos de entrenamiento pendientes, ayudarle a seleccionar uno de ellos por voz o teclado.
 
 Sigue estas pautas estrictas:
-1. Pide de forma amable al agente que te diga su código corto de empleado (que consiste en dos letras seguidas de números, por ejemplo: LD23, FR45, CM21, EC7).
-2. Una vez que el agente te diga su código (ej. "ele de veintitrés", "L D veintitrés", "efe erre cuarenta y cinco"), extráelo, normalízalo en mayúsculas y sin espacios, y llamar inmediatamente a la herramienta `verify_agent_code(agent_code=codigo_extraido)`.
-3. Si el backend te devuelve que el código es incorrecto (status es "invalid"), infórmale con tacto y pídele que lo intente de nuevo.
+1. Pide de forma amable al agente que te diga su código de empleado de cuatro dígitos.
+2. Una vez que el agente te diga su código (ej. "siete siete siete siete", "siete mil setecientos setenta y siete", "setenta y siete setenta y siete"), extráelo, normalízalo y llama inmediatamente a la herramienta `verify_agent_code(agent_code=codigo_extraido)`.
+3. Si el backend te devuelve que el código es incorrecto (status es "invalid"), debes repetirle/pronunciar exactamente el mensaje devuelto en el campo 'message' de la respuesta del tool, y esperar a que el usuario lo intente de nuevo.
 4. Si el backend te devuelve que se inicia la redirección directamente (status es "redirecting"), avisa brevemente ("Código verificado, un momento por favor...") y no digas nada más.
 5. Si el backend te devuelve que no hay ciclos activos (status es "no_active_cycles"), indícaselo claramente diciendo exactamente: "He visto que no tienes ningún entrenamiento en proceso, vas al día con todo." y luego despídete amablemente. No intentes pedir el código otra vez.
 6. Si el backend te devuelve que hay varios ciclos activos (status es "multiple_cycles"), debes saludar amistosamente al agente usando su nombre (ej. "Perfecto Fernanda, vamos a ver qué ciclos tienes pendientes.") y luego presentarle las opciones de ciclos de forma muy clara usando sus fechas reales provistas en la respuesta de la herramienta (debes pronunciar las fechas exactas devueltas por verify_agent_code, el texto "del 1 al 17 de mayo" es solo un ejemplo).
 7. Escucha atentamente la respuesta de voz del agente. El agente elegirá diciendo cosas como "el primero", "el segundo", "el de la primera quincena", "el uno", "el de mayo", etc.
 8. Asocia la respuesta del agente al ciclo correspondiente de la lista y llama inmediatamente a la herramienta `select_training_cycle(cycle_id=ID_DEL_CICLO)`.
 9. Cuando llames a `select_training_cycle`, hazlo inmediatamente después de que el usuario elija, sin añadir explicaciones largas ni despedidas adicionales, ya que la llamada se transferirá de forma inmediata.
+10. Si el backend te devuelve que se supera el límite de intentos (status es "terminate"), debes pronunciar exactamente el mensaje devuelto en el campo 'message' de la respuesta del tool, y esperar a que la llamada se cuelgue sin decir nada más.
 """
 
 SPANISH_VOICE_RULES = """
@@ -96,6 +97,306 @@ REGLAS ABSOLUTAS E IRROMPIBLES:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+import re
+
+WORDS_TO_NUM = {
+    "cero": 0, "uno": 1, "una": 1, "un": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5,
+    "seis": 6, "siete": 7, "ocho": 8, "nueve": 9, "diez": 10, "once": 11, "doce": 12,
+    "trece": 13, "catorce": 14, "quince": 15, "dieciséis": 16, "dieciseis": 16,
+    "diecisiete": 17, "dieciocho": 18, "diecinueve": 19, "veinte": 20, "veintiuno": 21,
+    "veintiún": 21, "veintiun": 21, "veintidós": 22, "veintidos": 22, "veintitrés": 23,
+    "veintitres": 23, "veinticuatro": 24, "veinticinco": 25, "veintiséis": 26,
+    "veintiseis": 26, "veintisiete": 27, "veintiocho": 28, "veintinueve": 29,
+    "treinta": 30, "cuarenta": 40, "cincuenta": 50, "sesenta": 60, "setenta": 70,
+    "ochenta": 80, "noventa": 90, "cien": 100, "ciento": 100, "doscientos": 200,
+    "trescientos": 300, "cuatrocientos": 400, "quinientos": 500, "seiscientos": 600,
+    "setecientos": 700, "ochocientos": 800, "novecientos": 900, "mil": 1000
+}
+
+def parse_spanish_number_phrase(words: list[str]) -> Optional[int]:
+    """Parse a list of Spanish number words into a single integer."""
+    if not words:
+        return None
+    total = 0
+    current = 0
+    valid = False
+    for word in words:
+        if word == "y":
+            continue
+        if word not in WORDS_TO_NUM:
+            continue
+        val = WORDS_TO_NUM[word]
+        valid = True
+        if val == 1000:
+            if current == 0:
+                current = 1
+            total += current * 1000
+            current = 0
+        elif val in (100, 200, 300, 400, 500, 600, 700, 800, 900):
+            current += val
+        elif val >= 10 and val <= 90:
+            current += val
+        else:
+            current += val
+    if valid:
+        return total + current
+    return None
+
+def normalize_training_code_input(raw_input: str) -> Optional[str]:
+    """Normalize Spanish phonetic or numeric input to a 4-digit code (preserving zeros)."""
+    if not raw_input:
+        return None
+        
+    cleaned = raw_input.lower().strip()
+    # Normalize accent marks
+    cleaned = cleaned.replace("á", "a").replace("é", "e").replace("í", "i").replace("ó", "o").replace("ú", "u")
+    cleaned = re.sub(r"[.,\/#!$%\^&\*;:{}=\-_`~()?¿¡]", " ", cleaned)
+    
+    # 1. Extract only literal digits. If there are exactly 4 digits in total, return them.
+    only_digits = "".join(re.findall(r"\d", cleaned))
+    if len(only_digits) == 4:
+        return only_digits
+        
+    words = cleaned.split()
+    parsed_nums = []
+    
+    temp_phrase = []
+    prev_val = None
+    prev_word = None
+    
+    for word in words:
+        if word.isdigit():
+            if temp_phrase:
+                val = parse_spanish_number_phrase(temp_phrase)
+                if val is not None:
+                    parsed_nums.append(val)
+                temp_phrase = []
+                prev_val = None
+                prev_word = None
+            parsed_nums.append(int(word))
+        elif word in WORDS_TO_NUM or word == "y":
+            if not temp_phrase:
+                temp_phrase.append(word)
+                if word != "y":
+                    prev_val = WORDS_TO_NUM[word]
+                    prev_word = word
+            else:
+                if word == "y" or prev_word == "y":
+                    temp_phrase.append(word)
+                    if word != "y":
+                        prev_val = WORDS_TO_NUM[word]
+                        prev_word = word
+                else:
+                    val = WORDS_TO_NUM[word]
+                    if val == 1000:
+                        temp_phrase.append(word)
+                        prev_val = 1000
+                        prev_word = word
+                    elif prev_val == 1000:
+                        temp_phrase.append(word)
+                        prev_val = val
+                        prev_word = word
+                    elif val < 10 and prev_val < 10:
+                        # Two adjacent units cannot group together. Start new phrase!
+                        parsed_val = parse_spanish_number_phrase(temp_phrase)
+                        if parsed_val is not None:
+                            parsed_nums.append(parsed_val)
+                        temp_phrase = [word]
+                        prev_val = val
+                        prev_word = word
+                    elif val < prev_val:
+                        temp_phrase.append(word)
+                        prev_val = val
+                        prev_word = word
+                    else:
+                        parsed_val = parse_spanish_number_phrase(temp_phrase)
+                        if parsed_val is not None:
+                            parsed_nums.append(parsed_val)
+                        temp_phrase = [word]
+                        prev_val = val
+                        prev_word = word
+        else:
+            if temp_phrase:
+                val = parse_spanish_number_phrase(temp_phrase)
+                if val is not None:
+                    parsed_nums.append(val)
+                temp_phrase = []
+                prev_val = None
+                prev_word = None
+
+    if temp_phrase:
+        val = parse_spanish_number_phrase(temp_phrase)
+        if val is not None:
+            parsed_nums.append(val)
+
+    # Filter out empty or none values
+    parsed_nums = [n for n in parsed_nums if n is not None]
+    if not parsed_nums:
+        return None
+        
+    # Format output
+    if len(parsed_nums) == 1:
+        num = parsed_nums[0]
+        if 1000 <= num <= 9999:
+            return str(num)
+        return None
+            
+    joined_str = "".join(str(n) for n in parsed_nums)
+    if len(joined_str) == 4:
+        return joined_str
+        
+    return None
+
+
+async def get_attempts_count(db: AsyncSession, call_sid: str) -> int:
+    """Retrieve attempt count for a call_sid from the database."""
+    query = text("""
+        SELECT attempts FROM bm_training_call_attempts WHERE call_sid = :call_sid;
+    """)
+    res = await db.execute(query, {"call_sid": call_sid})
+    val = res.scalar()
+    return val if val is not None else 0
+
+
+async def increment_attempts_count(db: AsyncSession, call_sid: str) -> int:
+    """Atomically increment and return the attempt count for a call_sid in the database."""
+    query = text("""
+        INSERT INTO bm_training_call_attempts (call_sid, attempts)
+        VALUES (:call_sid, 1)
+        ON CONFLICT (call_sid)
+        DO UPDATE SET attempts = bm_training_call_attempts.attempts + 1
+        RETURNING attempts;
+    """)
+    res = await db.execute(query, {"call_sid": call_sid})
+    await db.commit()
+    attempts = res.scalar()
+    return attempts if attempts is not None else 1
+
+
+async def clear_attempts_count(db: AsyncSession, call_sid: str) -> None:
+    """Delete the attempt record for a call_sid from the database."""
+    query = text("""
+        DELETE FROM bm_training_call_attempts WHERE call_sid = :call_sid;
+    """)
+    await db.execute(query, {"call_sid": call_sid})
+    await db.commit()
+
+
+async def handle_websocket_dtmf_verification(
+    code: str,
+    call_sid: str,
+    websocket: WebSocket,
+    gemini_ws: websockets.WebSocketClientProtocol
+):
+    """Handle DTMF input verification dynamically inside the active WebSocket session."""
+    host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"
+    engine = get_engine()
+    async with AsyncSession(engine) as db:
+        stmt = select(TrainingAgentSetting).where(
+            and_(
+                TrainingAgentSetting.training_numeric_code == code,
+                TrainingAgentSetting.is_enabled == True,
+                TrainingAgentSetting.training_code_enabled == True
+            )
+        )
+        res = await db.execute(stmt)
+        setting = res.scalars().first()
+        
+        if not setting:
+            attempts = await increment_attempts_count(db, call_sid)
+            if attempts >= 3:
+                # Clear attempts record upon final failure
+                await clear_attempts_count(db, call_sid)
+                msg = "No he podido identificarte después de varios intentos. Finalizamos la llamada."
+                inject_msg = {
+                    "clientContent": {
+                        "turns": [{
+                            "role": "user",
+                            "parts": [{"text": f"[INSTRUCCIÓN DEL SISTEMA: El usuario ha introducido el código {code} mediante el teclado, pero es incorrecto y se ha alcanzado el límite de intentos. Pronuncia exactamente: '{msg}' y espera a que se cuelgue la llamada.]"}]
+                        }],
+                        "turnComplete": True
+                    }
+                }
+                await gemini_ws.send(json.dumps(inject_msg))
+                await asyncio.sleep(6)
+                await hangup_twilio_call(call_sid)
+            elif attempts == 1:
+                msg = "No he podido identificar el código. Dilo dígito a dígito o introdúcelo con el teclado."
+                inject_msg = {
+                    "clientContent": {
+                        "turns": [{
+                            "role": "user",
+                            "parts": [{"text": f"[INSTRUCCIÓN DEL SISTEMA: El usuario ha introducido el código {code} mediante el teclado, pero es incorrecto. Pronuncia exactamente: '{msg}' y espera a que el usuario lo intente de nuevo.]"}]
+                        }],
+                        "turnComplete": True
+                    }
+                }
+                await gemini_ws.send(json.dumps(inject_msg))
+            else: # attempts == 2
+                msg = "No he podido identificar el código. Inténtalo de nuevo diciendo los cuatro dígitos uno a uno o utiliza el teclado."
+                inject_msg = {
+                    "clientContent": {
+                        "turns": [{
+                            "role": "user",
+                            "parts": [{"text": f"[INSTRUCCIÓN DEL SISTEMA: El usuario ha introducido el código {code} mediante el teclado, pero es incorrecto. Pronuncia exactamente: '{msg}' y espera.]"}]
+                        }],
+                        "turnComplete": True
+                    }
+                }
+                await gemini_ws.send(json.dumps(inject_msg))
+                await asyncio.sleep(6)
+                await redirect_to_dtmf(call_sid, host)
+        else:
+            # Code verified! Copy settings to local variables before commit expires the object
+            agent_name = setting.agent_name
+            hubspot_owner_id = setting.hubspot_owner_id
+            
+            await clear_attempts_count(db, call_sid)
+            websocket.identified = True
+            
+            # Verify active cycles
+            active_cycles = await get_active_cycles_for_agent(db, hubspot_owner_id)
+            
+            if not active_cycles:
+                msg = "He visto que no tienes ningún entrenamiento en proceso, vas al día con todo."
+                inject_msg = {
+                    "clientContent": {
+                        "turns": [{
+                            "role": "user",
+                            "parts": [{"text": f"[INSTRUCCIÓN DEL SISTEMA: El usuario ha sido identificado correctamente como {agent_name}, pero no tiene ciclos activos. Pronuncia exactamente: '{msg}' y despídete amablemente, luego espera a que se cuelgue la llamada.]"}]
+                        }],
+                        "turnComplete": True
+                    }
+                }
+                await gemini_ws.send(json.dumps(inject_msg))
+                await asyncio.sleep(6)
+                await hangup_twilio_call(call_sid)
+            elif len(active_cycles) == 1:
+                await redirect_twilio_call(call_sid, host, hubspot_owner_id, active_cycles[0].training_report_id)
+            else:
+                # Multiple active cycles
+                cycles_data = []
+                for idx, c in enumerate(active_cycles):
+                    p = format_period_spanish(c.period_start, c.period_end)
+                    cycles_data.append({
+                        "cycle_id": c.training_report_id,
+                        "index": idx + 1,
+                        "period_text": p
+                    })
+                
+                cycles_desc = ", ".join([f"opción {c['index']}: {c['period_text']}" for c in cycles_data])
+                inject_msg = {
+                    "clientContent": {
+                        "turns": [{
+                            "role": "user",
+                            "parts": [{"text": f"[INSTRUCCIÓN DEL SISTEMA: El usuario ha sido identificado correctamente como {setting.agent_name}. Dile que tiene varios ciclos activos y preséntale las opciones pronunciando las fechas exactas de forma muy clara: {cycles_desc}. Pídele que elija una opción.]"}]
+                        }],
+                        "turnComplete": True
+                    }
+                }
+                await gemini_ws.send(json.dumps(inject_msg))
+
 
 async def redirect_twilio_call(call_sid: str, host: str, agent_id: str, cycle_id: int) -> bool:
     """Redirect an active Twilio call to the start-roleplay route."""
@@ -359,8 +660,16 @@ async def start_cycle_roleplay(db: AsyncSession, cycle: TrainingAgentReport, hub
 # ── Twilio IVR Webhooks ────────────────────────────────────────────────────────
 
 @router.post("/voice/twilio/incoming-call")
-async def incoming_call(request: Request):
+async def incoming_call(
+    request: Request,
+    db: AsyncSession = Depends(get_db)
+):
     """Initial Twilio Webhook to answer calls and start identification stream by voice."""
+    form_data = await request.form()
+    call_sid = form_data.get("CallSid", "").strip()
+    if call_sid:
+        await clear_attempts_count(db, call_sid)
+        
     host = request.headers.get("x-forwarded-host") or request.headers.get("host") or "localhost"
     proto = request.headers.get("x-forwarded-proto", "http")
     scheme = "wss" if proto == "https" or "localhost" not in host else "ws"
@@ -428,13 +737,39 @@ async def verify_numeric_code(
     setting = res.scalars().first()
     
     if not setting:
-        twiml = """<?xml version="1.0" encoding="UTF-8"?>
-        <Response>
-            <Say language="es-ES">El código numérico introducido no es válido o está desactivado. Por favor, vuelve a llamar cuando lo tengas.</Say>
-            <Hangup/>
-        </Response>
-        """
+        attempts = await increment_attempts_count(db, call_sid)
+        action_url = "/bm/training/voice/twilio/verify-numeric-code"
+        if attempts >= 3:
+            twiml = """<?xml version="1.0" encoding="UTF-8"?>
+            <Response>
+                <Say language="es-ES">No he podido identificarte después de varios intentos. Finalizamos la llamada.</Say>
+                <Hangup/>
+            </Response>
+            """
+        elif attempts == 1:
+            twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+            <Response>
+                <Gather numDigits="4" timeout="10" action="{action_url}">
+                    <Say language="es-ES">No he podido identificar el código. Dilo dígito a dígito o introdúcelo con el teclado.</Say>
+                </Gather>
+                <Say language="es-ES">No he recibido ninguna entrada. La llamada finalizará.</Say>
+                <Hangup/>
+            </Response>
+            """
+        else: # attempts == 2
+            twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+            <Response>
+                <Gather numDigits="4" timeout="10" action="{action_url}">
+                    <Say language="es-ES">No he podido identificar el código. Inténtalo de nuevo diciendo los cuatro dígitos uno a uno o utiliza el teclado.</Say>
+                </Gather>
+                <Say language="es-ES">No he recibido ninguna entrada. La llamada finalizará.</Say>
+                <Hangup/>
+            </Response>
+            """
         return Response(content=twiml, media_type="application/xml")
+        
+    # Code verified! Clear attempts
+    await clear_attempts_count(db, call_sid)
         
     agent_name = setting.agent_name
     hubspot_owner_id = setting.hubspot_owner_id
@@ -642,45 +977,88 @@ async def handle_verify_agent_code(
     attempts: int
 ) -> dict:
     """Validate voice-identified agent code, route call to start-roleplay or DTMF fallback."""
-    cleaned = agent_code.replace(" ", "").upper()
+    cleaned = normalize_training_code_input(agent_code)
     host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"
     
     engine = get_engine()
     async with AsyncSession(engine) as db:
-        stmt = select(TrainingAgentSetting).where(
-            and_(
-                func.upper(TrainingAgentSetting.training_code) == cleaned,
-                TrainingAgentSetting.is_enabled == True,
-                TrainingAgentSetting.training_code_enabled == True
+        if not cleaned:
+            setting = None
+        else:
+            stmt = select(TrainingAgentSetting).where(
+                and_(
+                    TrainingAgentSetting.training_numeric_code == cleaned,
+                    TrainingAgentSetting.is_enabled == True,
+                    TrainingAgentSetting.training_code_enabled == True
+                )
             )
-        )
-        res = await db.execute(stmt)
-        setting = res.scalars().first()
-        
+            res = await db.execute(stmt)
+            setting = res.scalars().first()
+            
         if not setting:
-            attempts += 1
-            if attempts >= 2:
-                logger.warning("Agent voice identification failed twice. Redirecting to DTMF fallback. cleaned_code=%s", cleaned)
-                await redirect_to_dtmf(call_sid, host)
-                return {"attempts": attempts, "result": {"status": "fallback_dtmf"}, "redirected": True}
-            else:
-                logger.info("Agent voice identification failed once. attempts=%d, cleaned_code=%s", attempts, cleaned)
-                return {"attempts": attempts, "result": {"status": "invalid", "attempts": attempts}, "redirected": False}
+            attempts = await increment_attempts_count(db, call_sid)
+            if attempts >= 3:
+                # Clear attempts record upon final failure
+                await clear_attempts_count(db, call_sid)
+                logger.warning("Agent voice identification failed 3 times. Terminating call.")
+                async def delayed_hangup():
+                    await asyncio.sleep(6)
+                    await hangup_twilio_call(call_sid)
+                asyncio.create_task(delayed_hangup())
+                return {
+                    "attempts": attempts,
+                    "result": {
+                        "status": "terminate",
+                        "message": "No he podido identificarte después de varios intentos. Finalizamos la llamada."
+                    },
+                    "redirected": False
+                }
+            elif attempts == 1:
+                logger.info("Agent voice identification failed 1st time. attempts=%d", attempts)
+                return {
+                    "attempts": attempts,
+                    "result": {
+                        "status": "invalid",
+                        "message": "No he podido identificar el código. Dilo dígito a dígito o introdúcelo con el teclado."
+                    },
+                    "redirected": False
+                }
+            else: # attempts == 2
+                logger.warning("Agent voice identification failed 2nd time. Redirecting to DTMF fallback.")
+                async def delayed_redirect():
+                    await asyncio.sleep(6)
+                    await redirect_to_dtmf(call_sid, host)
+                asyncio.create_task(delayed_redirect())
+                return {
+                    "attempts": attempts,
+                    "result": {
+                        "status": "invalid",
+                        "message": "No he podido identificar el código. Inténtalo de nuevo diciendo los cuatro dígitos uno a uno o utiliza el teclado."
+                    },
+                    "redirected": False
+                }
+                
+        # Code verified! Copy settings to local variables before commit expires the object
+        agent_name = setting.agent_name
+        hubspot_owner_id = setting.hubspot_owner_id
+
+        await clear_attempts_count(db, call_sid)
+        websocket.identified = True
         
         # Verify active cycles
-        hubspot_owner_id = setting.hubspot_owner_id
         active_cycles = await get_active_cycles_for_agent(db, hubspot_owner_id)
         
         if not active_cycles:
-            logger.info("Agent %s identified, but has no active cycles with pending simulations.", setting.agent_name)
-            return {"attempts": attempts, "result": {"status": "no_active_cycles", "agent_name": setting.agent_name}, "redirected": False}
+            logger.info("Agent %s identified, but has no active cycles with pending simulations.", agent_name)
+            websocket.identified = True
+            return {"attempts": attempts, "result": {"status": "no_active_cycles", "agent_name": agent_name}, "redirected": False}
             
         if len(active_cycles) == 1:
-            logger.info("Agent %s identified with 1 active cycle. Redirecting to start-roleplay.", setting.agent_name)
+            logger.info("Agent %s identified with 1 active cycle. Redirecting to start-roleplay.", agent_name)
             await redirect_twilio_call(call_sid, host, hubspot_owner_id, active_cycles[0].training_report_id)
             return {"attempts": attempts, "result": {"status": "redirecting"}, "redirected": True}
         else:
-            logger.info("Agent %s identified with %d active cycles. Remaining in WebSocket to select cycle by voice.", setting.agent_name, len(active_cycles))
+            logger.info("Agent %s identified with %d active cycles. Remaining in WebSocket to select cycle by voice.", agent_name, len(active_cycles))
             cycles_data = []
             for idx, c in enumerate(active_cycles):
                 p = format_period_spanish(c.period_start, c.period_end)
@@ -1073,6 +1451,24 @@ async def twilio_media_stream(
                                         }
                                     }
                                     await gemini_ws.send(json.dumps(gemini_audio))
+                        elif event == "dtmf":
+                            if flow != "identify" or getattr(websocket, "identified", False):
+                                continue
+                            digit = data.get("dtmf", {}).get("digit")
+                            if digit:
+                                logger.info("Received DTMF digit over WebSocket: %s", digit)
+                                if not hasattr(websocket, "dtmf_buffer"):
+                                    websocket.dtmf_buffer = ""
+                                websocket.dtmf_buffer += digit
+                                if len(websocket.dtmf_buffer) > 4:
+                                    websocket.dtmf_buffer = websocket.dtmf_buffer[-4:]
+                                if len(websocket.dtmf_buffer) == 4:
+                                    code = websocket.dtmf_buffer
+                                    websocket.dtmf_buffer = ""
+                                    logger.info("4 digits collected via DTMF: %s. Verifying...", code)
+                                    asyncio.create_task(
+                                        handle_websocket_dtmf_verification(code, call_sid, websocket, gemini_ws)
+                                    )
                         elif event == "stop":
                             logger.info("Twilio stream stopped. Stopping loops.")
                             break
@@ -1096,7 +1492,7 @@ async def twilio_media_stream(
                                     "clientContent": {
                                         "turns": [{
                                             "role": "user",
-                                            "parts": [{"text": "Di exactamente: 'Hola, soy Luis, el asistente de entrenamiento de Boston Medical. Por favor, dime tu código de empleado.'"}]
+                                            "parts": [{"text": "Di exactamente: 'Soy el asistente de entrenamiento de agentes de Doobot. Por favor, dime tu código de empleado.'"}]
                                         }],
                                         "turnComplete": True
                                     }
@@ -1129,6 +1525,20 @@ async def twilio_media_stream(
                                 logger.info("Gemini Live toolCall request: %s", name)
                                 
                                 if name == "verify_agent_code" and flow == "identify":
+                                    if getattr(websocket, "identified", False):
+                                        logger.info("Agent already identified via DTMF. Ignoring voice verify_agent_code toolCall.")
+                                        resp_msg = {
+                                            "toolResponse": {
+                                                "functionResponses": [{
+                                                    "id": call_id,
+                                                    "name": name,
+                                                    "response": {"result": {"status": "redirecting"}}
+                                                }]
+                                            }
+                                        }
+                                        await gemini_ws.send(json.dumps(resp_msg))
+                                        continue
+
                                     agent_code = args.get("agent_code", "").strip()
                                     status_res = await handle_verify_agent_code(
                                         agent_code=agent_code,
