@@ -40,7 +40,7 @@ settings = get_settings()
 router = APIRouter(prefix="/bm/training", tags=["Training Voice Voice/IVR"])
 
 IDENTIFICATION_SYSTEM_INSTRUCTION = """
-Eres el Asistente de Identificación por Voz de Doobot.
+Eres el Asistente de Identificación por Voz de Doobot (marca pronunciada siempre exactamente como "Dubot").
 Tu labor en esta fase es identificar al agente y, si tiene varios ciclos de entrenamiento pendientes, ayudarle a seleccionar uno de ellos por voz o teclado.
 
 Sigue estas pautas estrictas:
@@ -49,14 +49,24 @@ Sigue estas pautas estrictas:
 3. Si el backend te devuelve que el código es incorrecto (status es "invalid"), debes repetirle/pronunciar exactamente el mensaje devuelto en el campo 'message' de la respuesta del tool, y esperar a que el usuario lo intente de nuevo.
 4. Si el backend te devuelve que se inicia la redirección directamente (status es "redirecting"), avisa brevemente ("Código verificado, un momento por favor...") y no digas nada más.
 5. Si el backend te devuelve que no hay ciclos activos (status es "no_active_cycles"), indícaselo claramente diciendo exactamente: "He visto que no tienes ningún entrenamiento en proceso, vas al día con todo." y luego despídete amablemente. No intentes pedir el código otra vez.
-6. Si el backend te devuelve que hay varios ciclos activos (status es "multiple_cycles"), debes saludar amistosamente al agente usando su nombre (ej. "Perfecto Fernanda, vamos a ver qué ciclos tienes pendientes.") y luego presentarle las opciones de ciclos de forma muy clara usando sus fechas reales provistas en la respuesta de la herramienta (debes pronunciar las fechas exactas devueltas por verify_agent_code, el texto "del 1 al 17 de mayo" es solo un ejemplo).
+6. Si el backend te devuelve que hay varios ciclos activos (status es "multiple_cycles"), debes saludar amistosamente al agente usando su primer nombre (ej. "Perfecto Cristina, vamos a ver qué ciclos tienes pendientes.") y luego presentarle las opciones de ciclos de forma muy clara usando sus fechas reales provistas en la respuesta de la herramienta (debes pronunciar las fechas exactas devueltas por verify_agent_code, el texto "del 1 al 17 de mayo" es solo un ejemplo).
 7. Escucha atentamente la respuesta de voz del agente. El agente elegirá diciendo cosas como "el primero", "el segundo", "el de la primera quincena", "el uno", "el de mayo", etc.
 8. Asocia la respuesta del agente al ciclo correspondiente de la lista y llama inmediatamente a la herramienta `select_training_cycle(cycle_id=ID_DEL_CICLO)`.
 9. Cuando llames a `select_training_cycle`, hazlo inmediatamente después de que el usuario elija, sin añadir explicaciones largas ni despedidas adicionales, ya que la llamada se transferirá de forma inmediata.
 10. Si el backend te devuelve que se supera el límite de intentos (status es "terminate"), debes pronunciar exactamente el mensaje devuelto en el campo 'message' de la respuesta del tool, y esperar a que la llamada se cuelgue sin decir nada más.
+
+=================================================
+PRONUNCIACIÓN OBLIGATORIA DEL NOMBRE DEL AGENTE
+=================================================
+- Siempre que identifiques al agente o le presentes múltiples opciones de ciclo, debes saludarle obligatoriamente usando su primer nombre de forma amistosa y natural (ej: "Perfecto, Cristina.", "Estupendo, Fernanda.") antes de continuar.
 """
 
 SPANISH_VOICE_RULES = """
+=================================================
+PRONUNCIACIÓN DE MARCA (OBLIGATORIA)
+=================================================
+- La marca escrita "Doobot" debe pronunciarse SIEMPRE exactamente como "Dubot". Nunca la pronuncies como "Do-obot", "Dó-obot", ni separes las oes. Debe sonar continuo y natural: "Dubot".
+
 =================================================
 REGLAS GENERALES DE VOZ (OBLIGATORIAS)
 =================================================
@@ -358,8 +368,50 @@ async def handle_websocket_dtmf_verification(
             # Verify active cycles
             active_cycles = await get_active_cycles_for_agent(db, hubspot_owner_id)
             
+            # Calculate counts for logging
+            eligible_cycles_count = len(active_cycles)
+            pending_simulations_count = 0
+            selected_cycle_id = None
+            selected_simulation_id = None
+            
+            for c in active_cycles:
+                stmt_c = select(func.count(TrainingCompletionStatus.completion_id)).where(
+                    and_(
+                        TrainingCompletionStatus.training_report_id == c.training_report_id,
+                        TrainingCompletionStatus.status.in_(["pending", "in_progress"])
+                    )
+                )
+                res_c = await db.execute(stmt_c)
+                pending_simulations_count += res_c.scalar() or 0
+                
+            if len(active_cycles) == 1:
+                selected_cycle_id = active_cycles[0].training_report_id
+                stmt_p = select(TrainingSimulationPrompt).where(
+                    TrainingSimulationPrompt.training_report_id == selected_cycle_id
+                ).order_by(TrainingSimulationPrompt.prompt_number.asc())
+                res_p = await db.execute(stmt_p)
+                prompts_list = res_p.scalars().all()
+                
+                stmt_cs = select(TrainingCompletionStatus).where(
+                    TrainingCompletionStatus.training_report_id == selected_cycle_id
+                )
+                res_cs = await db.execute(stmt_cs)
+                comps_map = {comp.simulation_prompt_id: comp for comp in res_cs.scalars().all()}
+                
+                for pr in prompts_list:
+                    comp = comps_map.get(pr.simulation_prompt_id)
+                    if comp and comp.status in ["pending", "in_progress"]:
+                        selected_simulation_id = pr.simulation_prompt_id
+                        break
+            
+            logger.info(
+                "Identification channel=dtmf | agent_name=%s | hubspot_owner_id=%s | eligible_cycles_count=%d | pending_simulations_count=%d | selected_cycle_id=%s | selected_simulation_id=%s",
+                agent_name, hubspot_owner_id, eligible_cycles_count, pending_simulations_count, selected_cycle_id, selected_simulation_id
+            )
+            
             if not active_cycles:
-                msg = "He visto que no tienes ningún entrenamiento en proceso, vas al día con todo."
+                first_name = agent_name.split()[0] if agent_name else "Agente"
+                msg = f"Perfecto {first_name}, he visto que no tienes ningún entrenamiento en proceso, vas al día con todo."
                 inject_msg = {
                     "clientContent": {
                         "turns": [{
@@ -472,12 +524,15 @@ def format_period_spanish(start: datetime, end: datetime) -> str:
         return f"del {start.day} de {meses[start.month]} al {end.day} de {meses[end.month]}"
 
 
+ELIGIBLE_CYCLE_STATUSES = ["pending", "in_progress", "running", "finalization_failed"]
+
+
 async def get_active_cycles_for_agent(db: AsyncSession, hubspot_owner_id: str) -> List[TrainingAgentReport]:
     """Retrieve all cycles for an agent that have pending or in_progress simulations."""
     stmt_cycles = select(TrainingAgentReport).where(
         and_(
             TrainingAgentReport.hubspot_owner_id == hubspot_owner_id,
-            TrainingAgentReport.status.in_(["pending", "running", "completed"])
+            TrainingAgentReport.status.in_(ELIGIBLE_CYCLE_STATUSES)
         )
     ).order_by(desc(TrainingAgentReport.training_report_id))
     res_cycles = await db.execute(stmt_cycles)
@@ -777,6 +832,47 @@ async def verify_numeric_code(
     # Query active reports (cycles)
     cycles = await get_active_cycles_for_agent(db, hubspot_owner_id)
     
+    # Calculate counts for logging
+    eligible_cycles_count = len(cycles)
+    pending_simulations_count = 0
+    selected_cycle_id = None
+    selected_simulation_id = None
+    
+    for c in cycles:
+        stmt_c = select(func.count(TrainingCompletionStatus.completion_id)).where(
+            and_(
+                TrainingCompletionStatus.training_report_id == c.training_report_id,
+                TrainingCompletionStatus.status.in_(["pending", "in_progress"])
+            )
+        )
+        res_c = await db.execute(stmt_c)
+        pending_simulations_count += res_c.scalar() or 0
+        
+    if len(cycles) == 1:
+        selected_cycle_id = cycles[0].training_report_id
+        stmt_p = select(TrainingSimulationPrompt).where(
+            TrainingSimulationPrompt.training_report_id == selected_cycle_id
+        ).order_by(TrainingSimulationPrompt.prompt_number.asc())
+        res_p = await db.execute(stmt_p)
+        prompts_list = res_p.scalars().all()
+        
+        stmt_cs = select(TrainingCompletionStatus).where(
+            TrainingCompletionStatus.training_report_id == selected_cycle_id
+        )
+        res_cs = await db.execute(stmt_cs)
+        comps_map = {comp.simulation_prompt_id: comp for comp in res_cs.scalars().all()}
+        
+        for pr in prompts_list:
+            comp = comps_map.get(pr.simulation_prompt_id)
+            if comp and comp.status in ["pending", "in_progress"]:
+                selected_simulation_id = pr.simulation_prompt_id
+                break
+    
+    logger.info(
+        "Identification channel=dtmf_post | agent_name=%s | hubspot_owner_id=%s | eligible_cycles_count=%d | pending_simulations_count=%d | selected_cycle_id=%s | selected_simulation_id=%s",
+        agent_name, hubspot_owner_id, eligible_cycles_count, pending_simulations_count, selected_cycle_id, selected_simulation_id
+    )
+    
     if not cycles:
         twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
         <Response>
@@ -1048,17 +1144,55 @@ async def handle_verify_agent_code(
         # Verify active cycles
         active_cycles = await get_active_cycles_for_agent(db, hubspot_owner_id)
         
+        # Calculate counts for logging
+        eligible_cycles_count = len(active_cycles)
+        pending_simulations_count = 0
+        selected_cycle_id = None
+        selected_simulation_id = None
+        
+        for c in active_cycles:
+            stmt_c = select(func.count(TrainingCompletionStatus.completion_id)).where(
+                and_(
+                    TrainingCompletionStatus.training_report_id == c.training_report_id,
+                    TrainingCompletionStatus.status.in_(["pending", "in_progress"])
+                )
+            )
+            res_c = await db.execute(stmt_c)
+            pending_simulations_count += res_c.scalar() or 0
+            
+        if len(active_cycles) == 1:
+            selected_cycle_id = active_cycles[0].training_report_id
+            stmt_p = select(TrainingSimulationPrompt).where(
+                TrainingSimulationPrompt.training_report_id == selected_cycle_id
+            ).order_by(TrainingSimulationPrompt.prompt_number.asc())
+            res_p = await db.execute(stmt_p)
+            prompts_list = res_p.scalars().all()
+            
+            stmt_cs = select(TrainingCompletionStatus).where(
+                TrainingCompletionStatus.training_report_id == selected_cycle_id
+            )
+            res_cs = await db.execute(stmt_cs)
+            comps_map = {comp.simulation_prompt_id: comp for comp in res_cs.scalars().all()}
+            
+            for pr in prompts_list:
+                comp = comps_map.get(pr.simulation_prompt_id)
+                if comp and comp.status in ["pending", "in_progress"]:
+                    selected_simulation_id = pr.simulation_prompt_id
+                    break
+        
+        logger.info(
+            "Identification channel=voice | agent_name=%s | hubspot_owner_id=%s | eligible_cycles_count=%d | pending_simulations_count=%d | selected_cycle_id=%s | selected_simulation_id=%s",
+            agent_name, hubspot_owner_id, eligible_cycles_count, pending_simulations_count, selected_cycle_id, selected_simulation_id
+        )
+
         if not active_cycles:
-            logger.info("Agent %s identified, but has no active cycles with pending simulations.", agent_name)
             websocket.identified = True
             return {"attempts": attempts, "result": {"status": "no_active_cycles", "agent_name": agent_name}, "redirected": False}
             
         if len(active_cycles) == 1:
-            logger.info("Agent %s identified with 1 active cycle. Redirecting to start-roleplay.", agent_name)
             await redirect_twilio_call(call_sid, host, hubspot_owner_id, active_cycles[0].training_report_id)
             return {"attempts": attempts, "result": {"status": "redirecting"}, "redirected": True}
         else:
-            logger.info("Agent %s identified with %d active cycles. Remaining in WebSocket to select cycle by voice.", agent_name, len(active_cycles))
             cycles_data = []
             for idx, c in enumerate(active_cycles):
                 p = format_period_spanish(c.period_start, c.period_end)
@@ -1492,7 +1626,7 @@ async def twilio_media_stream(
                                     "clientContent": {
                                         "turns": [{
                                             "role": "user",
-                                            "parts": [{"text": "Di exactamente: 'Soy el asistente de entrenamiento de agentes de Doobot. Por favor, dime tu código de empleado.'"}]
+                                            "parts": [{"text": "Di exactamente: 'Soy el asistente de entrenamiento de agentes de Dubot. Por favor, dime tu código de empleado.'"}]
                                         }],
                                         "turnComplete": True
                                     }

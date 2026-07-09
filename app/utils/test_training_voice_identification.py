@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 # Force DATABASE_URL to a safe local SQLite DB before any app modules are loaded
@@ -23,13 +24,21 @@ def compile_jsonb_sqlite(type_, compiler, **kw):
     return "JSON"
 
 from app.db import get_engine, Base
-from app.models.personalized_training import TrainingAgentSetting
+from app.models.personalized_training import (
+    TrainingAgentSetting,
+    TrainingAgentReport,
+    TrainingSimulationPrompt,
+    TrainingCompletionStatus,
+)
 from app.routers.training_voice import (
     normalize_training_code_input,
     get_attempts_count,
     increment_attempts_count,
     clear_attempts_count,
     handle_verify_agent_code,
+    get_active_cycles_for_agent,
+    SPANISH_VOICE_RULES,
+    IDENTIFICATION_SYSTEM_INSTRUCTION,
 )
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -165,9 +174,8 @@ class TestTrainingVoiceIdentification(unittest.IsolatedAsyncioTestCase):
             mock_ws.headers = {"x-forwarded-host": "localhost"}
             mock_ws.identified = False
 
-            # Test 1: Code valid
+            # Test 1: Code valid (but no active cycles)
             res = await handle_verify_agent_code("7777", "call_voice", mock_ws, 0)
-            # Should have no_active_cycles status for Cristina (as we didn't add cycles)
             self.assertEqual(res["result"]["status"], "no_active_cycles")
             self.assertTrue(mock_ws.identified)
             
@@ -216,6 +224,98 @@ class TestTrainingVoiceIdentification(unittest.IsolatedAsyncioTestCase):
             res = await handle_verify_agent_code("7777", "call_disabled", mock_ws, 0)
             self.assertEqual(res["result"]["status"], "invalid")
 
+    async def test_active_in_progress_cycles_retrieval(self):
+        """Verify that get_active_cycles_for_agent retrieves in_progress cycles with pending simulations."""
+        engine = get_engine()
+        async with AsyncSession(engine) as db:
+            # 1. Create a mock report for Cristina (in_progress)
+            report = TrainingAgentReport(
+                training_report_id=156,
+                hubspot_owner_id="7777",
+                agent_name="Cristina Montenegro",
+                agent_initials="CM",
+                status="in_progress",
+                period_start=datetime.now(timezone.utc),
+                period_end=datetime.now(timezone.utc),
+                is_current=True,
+            )
+            db.add(report)
+            await db.commit()
+
+            # 2. Add a simulation prompt and a pending completion status
+            prompt = TrainingSimulationPrompt(
+                simulation_prompt_id=318,
+                training_report_id=156,
+                hubspot_owner_id="7777",
+                prompt_number=1,
+                title="Simulacion 1",
+                scenario_type="roleplay",
+                prompt_text="Tension alta",
+            )
+            db.add(prompt)
+            await db.commit()
+
+            comp = TrainingCompletionStatus(
+                completion_id=310,
+                training_report_id=156,
+                simulation_prompt_id=318,
+                hubspot_owner_id="7777",
+                status="pending"
+            )
+            db.add(comp)
+            await db.commit()
+
+            # 3. Call get_active_cycles_for_agent
+            active_cycles = await get_active_cycles_for_agent(db, "7777")
+            self.assertEqual(len(active_cycles), 1)
+            self.assertEqual(active_cycles[0].training_report_id, 156)
+
+    async def test_completed_cycle_not_retrieved(self):
+        """Verify that a cycle in 'completed' status is not returned by get_active_cycles_for_agent even if it has a pending completion status (data inconsistency)."""
+        engine = get_engine()
+        async with AsyncSession(engine) as db:
+            # 1. Create a mock report for Cristina (completed)
+            report = TrainingAgentReport(
+                training_report_id=999,
+                hubspot_owner_id="7777",
+                agent_name="Cristina Montenegro",
+                agent_initials="CM",
+                status="completed",
+                period_start=datetime.now(timezone.utc),
+                period_end=datetime.now(timezone.utc),
+                is_current=True,
+            )
+            db.add(report)
+            await db.commit()
+
+            # 2. Add a simulation prompt and a pending completion status
+            prompt = TrainingSimulationPrompt(
+                simulation_prompt_id=9999,
+                training_report_id=999,
+                hubspot_owner_id="7777",
+                prompt_number=1,
+                title="Simulacion 1",
+                scenario_type="roleplay",
+                prompt_text="Tension alta",
+            )
+            db.add(prompt)
+            await db.commit()
+
+            comp = TrainingCompletionStatus(
+                completion_id=99999,
+                training_report_id=999,
+                simulation_prompt_id=9999,
+                hubspot_owner_id="7777",
+                status="pending"
+            )
+            db.add(comp)
+            await db.commit()
+
+            # 3. Call get_active_cycles_for_agent -> should NOT return it
+            active_cycles = await get_active_cycles_for_agent(db, "7777")
+            matching = [c for c in active_cycles if c.training_report_id == 999]
+            self.assertEqual(len(matching), 0)
+
     def test_dtmf_webhooks_integration(self):
         """Test DTMF verify-numeric-code webhooks and retry limits using TestClient."""
         from fastapi.testclient import TestClient
@@ -228,10 +328,9 @@ class TestTrainingVoiceIdentification(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res.status_code, 200)
         self.assertIn("Connect", res.text)
         
-        # 2. Valid DTMF code input
+        # 2. Valid DTMF code input (returns no active cycles initially)
         res = client.post("/bm/training/voice/twilio/verify-numeric-code", data={"Digits": "7777", "CallSid": "call_dtmf_test"})
         self.assertEqual(res.status_code, 200)
-        # Should speak no pending cycles or redirect
         self.assertIn("no tienes", res.text)
         self.assertIn("ciclo de entrenamiento", res.text)
         
@@ -248,6 +347,72 @@ class TestTrainingVoiceIdentification(unittest.IsolatedAsyncioTestCase):
         res = client.post("/bm/training/voice/twilio/verify-numeric-code", data={"Digits": "9999", "CallSid": "call_dtmf_test2"})
         self.assertIn("Finalizamos la llamada", res.text)
         self.assertIn("Hangup", res.text)
+
+    async def test_name_confirmation_and_redirect_flow(self):
+        """Verify that starting a cycle's roleplay returns TwiML with clean connect/stream (no TTS say)."""
+        engine = get_engine()
+        async with AsyncSession(engine) as db:
+            # Create a mock report for Cristina (in_progress)
+            report = TrainingAgentReport(
+                training_report_id=200,
+                hubspot_owner_id="7777",
+                agent_name="Cristina Montenegro",
+                agent_initials="CM",
+                status="in_progress",
+                period_start=datetime.now(timezone.utc),
+                period_end=datetime.now(timezone.utc),
+                is_current=True,
+            )
+            db.add(report)
+            
+            prompt = TrainingSimulationPrompt(
+                simulation_prompt_id=500,
+                training_report_id=200,
+                hubspot_owner_id="7777",
+                prompt_number=1,
+                title="Simulacion 1",
+                scenario_type="roleplay",
+                prompt_text="Prompt voice bot",
+            )
+            db.add(prompt)
+            
+            comp = TrainingCompletionStatus(
+                completion_id=600,
+                training_report_id=200,
+                simulation_prompt_id=500,
+                hubspot_owner_id="7777",
+                status="pending"
+            )
+            db.add(comp)
+            await db.commit()
+
+        from fastapi.testclient import TestClient
+        from app.main import app
+        client = TestClient(app)
+        
+        # Call verify-numeric-code DTMF endpoint (which should now redirect since we have 1 active cycle!)
+        res = client.post("/bm/training/voice/twilio/verify-numeric-code", data={"Digits": "7777", "CallSid": "call_name_test"})
+        self.assertEqual(res.status_code, 200)
+        self.assertIn("Redirect", res.text)
+        self.assertIn("cycle_id=200", res.text)
+        
+        # Follow redirect manually to start-roleplay
+        res_roleplay = client.post("/bm/training/voice/twilio/start-roleplay?agent_id=7777&cycle_id=200&call_sid=call_name_test")
+        self.assertEqual(res_roleplay.status_code, 200)
+        # Should NOT contain robot TTS Say tag to prevent voice jump
+        self.assertNotIn("<Say", res_roleplay.text)
+        # Should connect directly to media stream
+        self.assertIn("Stream", res_roleplay.text)
+        self.assertIn("session_id", res_roleplay.text)
+
+    def test_pronunciation_rules_present(self):
+        """Verify that brand name pronunciation guidelines are correctly present in system rules."""
+        self.assertIn("Doobot", SPANISH_VOICE_RULES)
+        self.assertIn("Dubot", SPANISH_VOICE_RULES)
+        self.assertIn("pronunciarse SIEMPRE exactamente como \"Dubot\"", SPANISH_VOICE_RULES)
+        
+        self.assertIn("Doobot (marca pronunciada siempre exactamente como \"Dubot\")", IDENTIFICATION_SYSTEM_INSTRUCTION)
+        self.assertIn("PRONUNCIACIÓN OBLIGATORIA DEL NOMBRE DEL AGENTE", IDENTIFICATION_SYSTEM_INSTRUCTION)
 
     async def test_combined_voice_and_dtmf_flow(self):
         """Verify alternating voice and DTMF failures use the same database counter."""
