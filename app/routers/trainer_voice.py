@@ -13,6 +13,7 @@ from typing import List, Optional, Annotated
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Query, Request, Response, WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, or_, desc, func
+from sqlalchemy.orm import selectinload, joinedload
 
 from app.dependencies import get_db, get_current_user
 from app.models.users import User
@@ -697,7 +698,15 @@ async def media_stream(
             }
         ]
     elif session_id is not None:
-        stmt = select(TrainerSession).where(TrainerSession.session_id == session_id)
+        stmt = (
+            select(TrainerSession)
+            .options(
+                selectinload(TrainerSession.simulation),
+                selectinload(TrainerSession.agent),
+                selectinload(TrainerSession.simulation_version),
+            )
+            .where(TrainerSession.session_id == session_id)
+        )
         res = await db.execute(stmt)
         sess = res.scalars().first()
         if not sess:
