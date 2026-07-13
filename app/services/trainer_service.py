@@ -451,7 +451,10 @@ class TrainerService:
         cleaned = agent_code.replace(" ", "").upper()
         stmt = select(TrainingAgentSetting).where(
             and_(
-                func.upper(TrainingAgentSetting.training_code) == cleaned,
+                or_(
+                    func.upper(TrainingAgentSetting.training_code) == cleaned,
+                    TrainingAgentSetting.training_numeric_code == cleaned,
+                ),
                 TrainingAgentSetting.is_enabled == True,
                 TrainingAgentSetting.training_code_enabled == True,
             )

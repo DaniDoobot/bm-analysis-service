@@ -106,6 +106,23 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
         req.headers = headers or {"host": "localhost"}
         return req
 
+    def test_normalize_agent_code(self):
+        from app.routers.training_hub_voice import normalize_agent_code
+        self.assertEqual(normalize_agent_code("7777"), "7777")
+        self.assertEqual(normalize_agent_code("7 7 7 7"), "7777")
+        self.assertEqual(normalize_agent_code("siete siete siete siete"), "7777")
+        self.assertEqual(normalize_agent_code("siete, siete, siete, siete"), "7777")
+        self.assertEqual(normalize_agent_code("setenta y siete setenta y siete"), "7777")
+        self.assertEqual(normalize_agent_code("siete mil setecientos setenta y siete"), "7777")
+        self.assertEqual(normalize_agent_code("CM77"), None)
+
+    def test_brand_pronunciation_dubot(self):
+        from app.routers.training_hub_voice import HUB_SYSTEM_INSTRUCTION, TRAINER_CODE_SYSTEM_INSTRUCTION
+        self.assertIn("Dubot", HUB_SYSTEM_INSTRUCTION)
+        self.assertNotIn("Doobot", HUB_SYSTEM_INSTRUCTION)
+        self.assertIn("Dubot", TRAINER_CODE_SYSTEM_INSTRUCTION)
+        self.assertNotIn("Doobot", TRAINER_CODE_SYSTEM_INSTRUCTION)
+
     @patch("app.routers.training_hub_voice.settings")
     async def test_incoming_call(self, mock_settings):
         mock_settings.gemini_api_key = "mock_key"
@@ -363,6 +380,26 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
         
         async def mock_async_iter(*args, **kwargs):
             yield json.dumps({"setupComplete": {}})
+            await asyncio.sleep(0.1)
+            yield json.dumps({
+                "toolCall": {
+                    "functionCalls": [{
+                        "id": "call_abc123",
+                        "name": "verify_agent_code",
+                        "args": {"agent_code": "siete siete siete siete"}
+                    }]
+                }
+            })
+            await asyncio.sleep(0.1)
+            yield json.dumps({
+                "toolCall": {
+                    "functionCalls": [{
+                        "id": "call_xyz789",
+                        "name": "select_mode",
+                        "args": {"mode": "cycles"}
+                    }]
+                }
+            })
             await asyncio.sleep(0.5)
             
         mock_gemini_ws.__aiter__ = mock_async_iter
@@ -371,7 +408,8 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
         mock_connect.__aenter__.return_value = mock_gemini_ws
         mock_connect.__aexit__.return_value = None
         
-        with patch("websockets.connect", return_value=mock_connect) as mock_websockets_connect:
+        with patch("websockets.connect", return_value=mock_connect) as mock_websockets_connect, \
+             patch("app.routers.training_hub_voice.redirect_call", new_callable=AsyncMock) as mock_redirect:
             client = TestClient(app)
             with client.websocket_connect("/bm/training/hub/media-stream?flow=hub") as websocket:
                 websocket.send_json({"event": "connected"})
@@ -389,7 +427,7 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
                         "payload": "f39/f39/f39/f39/"
                     }
                 })
-                time.sleep(0.5)
+                time.sleep(0.8)
 
             # Verify websockets.connect call arguments
             mock_websockets_connect.assert_called_once()
@@ -397,10 +435,15 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
             self.assertIn("v1beta", called_url)
             self.assertIn("key=mock_key", called_url)
             
-            # Verify the model passed to setup message
+            # Verify mock_redirect was called to redirect_call
+            mock_redirect.assert_called_once()
+            
+            # Verify the model passed to setup message and tool responses
             send_calls = mock_gemini_ws.send.call_args_list
             setup_payload = None
             audio_payload = None
+            verify_agent_response = None
+            select_mode_response = None
             
             for call in send_calls:
                 payload_str = call[0][0]
@@ -413,6 +456,13 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn("media_chunks", realtime_input)
                     if "audio" in realtime_input:
                         audio_payload = realtime_input["audio"]
+                elif "toolResponse" in payload:
+                    func_resps = payload["toolResponse"]["functionResponses"]
+                    for fr in func_resps:
+                        if fr["name"] == "verify_agent_code":
+                            verify_agent_response = fr["response"]["result"]
+                        elif fr["name"] == "select_mode":
+                            select_mode_response = fr["response"]["result"]
                         
             self.assertIsNotNone(setup_payload)
             self.assertEqual(setup_payload["model"], "models/gemini-3.1-flash-live-preview")
@@ -420,6 +470,13 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(audio_payload)
             self.assertEqual(audio_payload["mimeType"], "audio/pcm;rate=16000")
             self.assertTrue(len(audio_payload["data"]) > 0)
+
+            # Assertions for agent identification and mode selection
+            self.assertIsNotNone(verify_agent_response)
+            self.assertEqual(verify_agent_response["status"], "valid")
+            self.assertEqual(verify_agent_response["agent_name"], "Cristina Montenegro")
+            
+            self.assertIsNone(select_mode_response)
 
 
 if __name__ == "__main__":

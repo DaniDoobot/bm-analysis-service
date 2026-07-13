@@ -45,29 +45,30 @@ SPANISH_VOICE_RULES = """
 """
 
 HUB_SYSTEM_INSTRUCTION = f"""
-Eres el Asistente virtual de entrenamiento de Doobot. Tu labor en esta llamada es identificar al agente y luego ayudarle a elegir qué tipo de práctica quiere realizar.
+Eres el Asistente virtual de entrenamiento de Dubot. Tu labor en esta llamada es identificar al agente y luego ayudarle a elegir qué tipo de práctica quiere realizar.
 
 Sigue estas pautas estrictas:
-1. Da la bienvenida de forma amable: "Hola, has llamado al asistente virtual de entrenamiento de Doobot. Identifícate con tu código de agente, por favor."
-2. Cuando el agente te diga su código de empleado (ej: "ele de veintitrés", "L D veintitrés", "FR45"), normalízalo en mayúsculas sin espacios y llama inmediatamente a la herramienta `verify_agent_code(agent_code=codigo_normalizado)`.
-3. Si el backend te dice que el código es inválido (status es "invalid"), indícalo de forma educada y pídele que lo repita.
-4. Si el código es válido (status es "valid"), di: "Estupendo, [Nombre]. ¿En qué puedo ayudarte? ¿Quieres practicar en Trainer o avanzar con tus ciclos?"
-5. Escucha con atención la elección del agente:
+1. Da la bienvenida de forma amable: "Hola, has llamado al asistente virtual de entrenamiento de Dubot. Identifícate con tu código de agente, por favor. Puedes decirlo dígito a dígito, por ejemplo: siete, siete, siete, siete. También puedes marcarlo con el teclado."
+2. Cuando pidas o recibas códigos, pide que se digan dígito a dígito si es necesario.
+3. Si el usuario da un número de 4 dígitos o una secuencia de cuatro dígitos hablados, llama inmediatamente a la función de validación con el código normalizado. No inventes ni reformules el código. No rechace un código sin llamar a la función de validación backend. Llama a la herramienta `verify_agent_code(agent_code=codigo_normalizado)`.
+4. Si el backend te dice que el código es inválido (status es "invalid"), indícalo de forma de educada y pídele que lo repita o lo marque en el teclado.
+5. Si el código es válido (status es "valid"), di: "Estupendo, [Nombre]. ¿En qué puedo ayudarte? ¿Quieres practicar en Trainer o avanzar con tus ciclos?"
+6. Escucha con atención la elección del agente:
    - Si el agente responde que quiere Trainer (o dice palabras clave como: "Trainer", "practicar", "simulación", "roleplay", "entrenamiento libre", "uno", "1"): llama inmediatamente a `select_mode(mode="trainer")`.
    - Si el agente responde que quiere ciclos (o dice palabras clave como: "ciclos", "mis ciclos", "avanzar con mis ciclos", "continuar", "seguir entrenamiento", "dos", "2"): llama inmediatamente a `select_mode(mode="cycles")`.
-6. Si no entiendes bien su elección o dice algo ambiguo, repregunta con calma usando la frase exacta:
+7. Si no entiendes bien su elección o dice algo ambiguo, repregunta con calma usando la frase exacta:
    "No te he entendido bien. Puedes decir 'Trainer' para practicar una simulación o 'ciclos' para continuar con tus ciclos asignados."
-7. Si el backend te devuelve que se inicia la redirección, di "Un momento, por favor..." y quédate en silencio.
+8. Si el backend te devuelve que se inicia la redirección, di "Un momento, por favor..." y quédate en silencio.
 
 Reglas de pronunciación:
 {SPANISH_VOICE_RULES}
 """
 
 TRAINER_CODE_SYSTEM_INSTRUCTION = f"""
-Eres el Asistente virtual de entrenamiento de Doobot.
+Eres el Asistente virtual de entrenamiento de Dubot.
 El agente ya está identificado y ha seleccionado realizar una simulación en Trainer.
 Tu única labor ahora es:
-1. Preguntarle el código de la simulación que desea iniciar: "Por favor, dime el código de la simulación que quieres realizar."
+1. Preguntarle el código de la simulación que desea iniciar: "Por favor, dime el código de la simulación que quieres realizar. También puedes marcarla con el teclado."
 2. Cuando diga el código (ej: "SIM ciento uno", "SIM101", "VENTAS dos"), normalízalo en mayúsculas y llama a `verify_simulation_code(simulation_code=codigo_normalizado)`.
 3. Si el backend devuelve que el código es inválido (status es "invalid"), indícalo y vuelve a pedírselo amablemente.
 4. Si es válido y se inicia la redirección, di "Perfecto, vamos a comenzar la simulación." y mantente en silencio mientras la llamada es transferida.
@@ -75,6 +76,107 @@ Tu única labor ahora es:
 Reglas de pronunciación:
 {SPANISH_VOICE_RULES}
 """
+
+
+def normalize_agent_code(raw_text: str) -> Optional[str]:
+    """Helper to convert spoken Spanish digits/words into a clean 4-digit code if possible."""
+    if not raw_text:
+        return None
+    
+    # Convert to lowercase and replace accents/punctuation
+    text = raw_text.lower()
+    replacements = {
+        "á": "a", "é": "e", "í": "i", "ó": "o", "ú": "u",
+        ",": " ", ".": " ", "-": " ", "_": " ", "/": " "
+    }
+    for orig, rep in replacements.items():
+        text = text.replace(orig, rep)
+        
+    word_to_digits = {
+        # Units
+        "cero": ["0"],
+        "uno": ["1"],
+        "dos": ["2"],
+        "tres": ["3"],
+        "cuatro": ["4"],
+        "cinco": ["5"],
+        "seis": ["6"],
+        "siete": ["7"],
+        "ocho": ["8"],
+        "nueve": ["9"],
+        
+        # Teens / Tens
+        "diez": ["1", "0"],
+        "once": ["1", "1"],
+        "doce": ["1", "2"],
+        "trece": ["1", "3"],
+        "catorce": ["1", "4"],
+        "quince": ["1", "5"],
+        "dieciseis": ["1", "6"],
+        "diecisiete": ["1", "7"],
+        "dieciocho": ["1", "8"],
+        "diecinueve": ["1", "9"],
+        "veinte": ["2", "0"],
+        "veintiuno": ["2", "1"],
+        "veintidos": ["2", "2"],
+        "veintitres": ["2", "3"],
+        "veinticuatro": ["2", "4"],
+        "veinticinco": ["2", "5"],
+        "veintiseis": ["2", "6"],
+        "veintisiete": ["2", "7"],
+        "veintiocho": ["2", "8"],
+        "veintinueve": ["2", "9"],
+        
+        # Tens (prefixes)
+        "treinta": ["3"],
+        "cuarenta": ["4"],
+        "cincuenta": ["5"],
+        "sesenta": ["6"],
+        "setenta": ["7"],
+        "ochenta": ["8"],
+        "noventa": ["9"],
+        
+        # Hundreds (prefixes)
+        "cien": ["1"],
+        "ciento": ["1"],
+        "doscientos": ["2"],
+        "trescientos": ["3"],
+        "cuatrocientos": ["4"],
+        "quinientos": ["5"],
+        "seiscientos": ["6"],
+        "setecientos": ["7"],
+        "ochocientos": ["8"],
+        "novecientos": ["9"]
+    }
+    
+    words = text.split()
+    digits = []
+    
+    for word in words:
+        word = word.strip()
+        if not word or word == "y" or word == "mil":
+            continue
+        
+        # If word is entirely composed of digits
+        if word.isdigit():
+            digits.extend(list(word))
+        elif word in word_to_digits:
+            digits.extend(word_to_digits[word])
+            
+    # Join all found digits
+    res = "".join(digits)
+    
+    # If the result has exactly 4 digits, return it
+    if len(res) == 4:
+        return res
+    
+    # If there's a 4-digit contiguous block
+    import re
+    match = re.search(r"\d{4}", res)
+    if match:
+        return match.group(0)
+        
+    return None
 
 
 async def redirect_call(call_sid: str, redirect_url: str) -> bool:
@@ -538,15 +640,22 @@ async def media_stream(websocket: WebSocket):
                                 logger.info("Gemini Live toolCall request: %s", name)
                                 
                                 if name == "verify_agent_code" and flow == "hub":
-                                    code = args.get("agent_code", "").strip()
+                                    raw_code = args.get("agent_code", "").strip()
+                                    normalized = normalize_agent_code(raw_code) or raw_code
+                                    logger.info("Training Hub agent code received: raw=%r, normalized=%r", raw_code, normalized)
+                                    
                                     async with AsyncSessionLocal() as sub_db:
-                                        agent = await TrainerService.validate_agent_code(sub_db, code)
+                                        agent = await TrainerService.validate_agent_code(sub_db, normalized)
                                         if agent:
                                             identified_agent_id = agent["agent_id"]
+                                            logger.info("Training Hub agent validation success: agent_id=%s, initials=%s, name=%s", 
+                                                        agent["agent_id"], agent["agent_initials"], agent["agent_name"])
                                             result_val = {"status": "valid", "agent_name": agent["agent_name"]}
                                         else:
+                                            logger.warning("Training Hub agent validation failed: normalized=%r, reason=\"not_found\"", normalized)
                                             attempts += 1
-                                            if attempts >= 3:
+                                            if attempts >= 2:
+                                                logger.info("Redirecting to DTMF after %d failed voice validation attempts. call_sid=%s", attempts, call_sid)
                                                 host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"
                                                 await redirect_call(call_sid, f"{scheme_http}://{host}/bm/training/hub/collect-agent-dtmf?call_sid={call_sid}")
                                                 redirected = True
