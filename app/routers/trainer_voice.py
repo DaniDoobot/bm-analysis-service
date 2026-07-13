@@ -328,11 +328,12 @@ async def start_roleplay(
     scheme = "wss" if proto == "https" or "localhost" not in host else "ws"
     
     ws_url = f"{scheme}://{host}/bm/trainer/phone/media-stream?session_id={session.session_id}&flow=session"
+    ws_url_escaped = ws_url.replace("&", "&amp;")
 
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Connect>
-            <Stream url="{ws_url}">
+            <Stream url="{ws_url_escaped}">
                 <Parameter name="session_id" value="{session.session_id}" />
                 <Parameter name="flow" value="session" />
                 <Parameter name="agent_id" value="{agent_id}" />
@@ -342,6 +343,7 @@ async def start_roleplay(
         </Connect>
     </Response>
     """
+    logger.info("Trainer start-roleplay TwiML generated:\n%s", twiml)
     return Response(content=twiml, media_type="application/xml")
 
 
