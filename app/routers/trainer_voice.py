@@ -593,17 +593,52 @@ async def handle_roleplay_hangup(
 @router.websocket("/media-stream")
 async def media_stream(
     websocket: WebSocket,
+    flow: Optional[str] = Query(None),
+    session_id: Optional[int] = Query(None),
     db: AsyncSession = Depends(get_db)
 ):
     """Handle bidirectional media streaming between Twilio and Gemini Live API."""
     await websocket.accept()
-    logger.info("Twilio media stream connected.")
+    logger.info("Accepted Twilio WebSocket connection. Initial query params: flow=%s, session_id=%s, raw_query=%s", flow, session_id, websocket.scope.get("query_string", b"").decode("utf-8"))
     
-    # Check parameters from URL query string
-    params = websocket.query_params
-    flow = params.get("flow", "session")
-    session_id_str = params.get("session_id")
-    session_id = int(session_id_str) if session_id_str else None
+    start_event_data = None
+    stream_sid = None
+    call_sid = None
+    call_start_time = None
+    
+    # If parameters not provided in query params, wait for start event from Twilio
+    if flow is None and session_id is None:
+        try:
+            logger.info("No query params provided. Waiting for Twilio 'connected'/'start' events to extract customParameters...")
+            while True:
+                msg = await websocket.receive_text()
+                data = json.loads(msg)
+                event = data.get("event")
+                
+                if event == "connected":
+                    logger.info("Twilio connected event received. Waiting for start event...")
+                    continue
+                elif event == "start":
+                    start_event_data = data
+                    start_data = data.get("start", {})
+                    stream_sid = start_data.get("streamSid")
+                    call_sid = start_data.get("callSid")
+                    call_start_time = datetime.now(timezone.utc)
+                    
+                    custom_params = start_data.get("customParameters", {})
+                    flow = custom_params.get("flow", "session")
+                    sess_val = custom_params.get("session_id")
+                    if sess_val is not None:
+                        try:
+                            session_id = int(sess_val)
+                        except ValueError:
+                            pass
+                    logger.info("Extracted parameters from start event: flow=%s, session_id=%s, call_sid=%s", flow, session_id, call_sid)
+                    break
+        except Exception as e:
+            logger.error("Error receiving initial Twilio events: %s", e)
+            await websocket.close()
+            return
 
     # Load settings — use getattr() to avoid AttributeError if attribute doesn't exist
     gemini_api_key = getattr(settings, "gemini_live_api_key", None) or getattr(settings, "gemini_api_key", None)
@@ -757,13 +792,23 @@ async def media_stream(
             identified_agent_id = None
             identified_agent_code = None
             
-            stream_sid = None
-            call_sid = None
-            call_start_time = None
+            # Use variables read from start event if available (from early parsing)
+            stream_sid = stream_sid
+            call_sid = call_sid
+            call_start_time = call_start_time
             
             twilio_rate_state = None
             gemini_rate_state = None
             monitor_task = None
+
+            # Start recording and duration monitor early if we already have session_id and call_sid from the early start event
+            if session_id is not None and call_sid:
+                logger.info("Triggering recording and duration monitor task early from pre-parsed start event.")
+                host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"
+                recording_sid = await start_twilio_recording(call_sid, host)
+                monitor_task = asyncio.create_task(
+                    duration_monitor_task(call_sid, stream_sid, gemini_ws, websocket, session_id)
+                )
 
             # Concurrency loops
             async def twilio_to_gemini_loop():
@@ -788,6 +833,8 @@ async def media_stream(
                                     monitor_task = asyncio.create_task(
                                         duration_monitor_task(call_sid, stream_sid, gemini_ws, websocket, session_id)
                                     )
+                            else:
+                                logger.info("Twilio stream start event received in loop, but already initialized early.")
                                     
                         elif event == "media" and gemini_ready:
                             media = data.get("media", {})
