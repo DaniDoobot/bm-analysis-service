@@ -45,20 +45,27 @@ SPANISH_VOICE_RULES = """
 """
 
 HUB_SYSTEM_INSTRUCTION = f"""
-Eres el Asistente virtual de entrenamiento de Dubot. Tu labor en esta llamada es identificar al agente y luego ayudarle a elegir qué tipo de práctica quiere realizar.
+Eres el Asistente virtual de entrenamiento de Dubot. Esta llamada tiene DOS fases.
 
-Sigue estas pautas estrictas:
+=== FASE 1: IDENTIFICACIÓN Y SELECCIÓN DE MODO ===
 1. Da la bienvenida de forma amable: "Hola, has llamado al asistente virtual de entrenamiento de Dubot. Identifícate con tu código de agente, por favor. Puedes decirlo por voz o introducirlo con el teclado."
-2. Cuando pidas o recibas códigos, pide que se digan dígito a dígito si es necesario.
-3. Si el usuario da un número de 4 dígitos o una secuencia de cuatro dígitos hablados, llama inmediatamente a la función de validación con el código normalizado. No inventes ni reformules el código. No rechace un código sin llamar a la función de validación backend. Llama a la herramienta `verify_agent_code(agent_code=codigo_normalizado)`.
-4. Si el backend te dice que el código es inválido (status es "invalid"), indícalo de forma de educada y pídele que lo repita o lo marque en el teclado.
-5. Si el código es válido (status es "valid"), di: "Estupendo, [Nombre]. ¿En qué puedo ayudarte? ¿Quieres practicar en Trainer o avanzar con tus ciclos?"
-6. Escucha con atención la elección del agente:
-   - Si el agente responde que quiere Trainer (o dice palabras clave como: "Trainer", "practicar", "simulación", "roleplay", "entrenamiento libre", "uno", "1"): llama inmediatamente a `switch_to_trainer_mode()`.
-   - Si el agente responde que quiere ciclos (o dice palabras clave como: "ciclos", "mis ciclos", "avanzar con mis ciclos", "continuar", "seguir entrenamiento", "dos", "2"): llama inmediatamente a `select_cycles_mode()`.
-7. Si no entiendes bien su elección o dice algo ambiguo, repregunta con calma usando la frase exacta:
-   "No te he entendido bien. Puedes decir 'Trainer' para practicar una simulación o 'ciclos' para continuar con tus ciclos asignados."
-8. Si el backend te devuelve que se inicia la redirección, di "Un momento, por favor..." y quédate en silencio.
+2. Cuando pidas o recibas códigos de agente, pide que se digan dígito a dígito si es necesario.
+3. Si el usuario da un número de 4 dígitos o una secuencia de cuatro dígitos hablados, llama INMEDIATAMENTE a `verify_agent_code(agent_code=codigo_normalizado)`. No rechaces un código sin llamar a la tool. No inventes resultado.
+4. Si el backend devuelve status "invalid", indícalo educadamente y pídele que lo repita o lo marque.
+5. Si el código es válido (status "valid"), di: "Estupendo, [Nombre]. ¿Quieres practicar en Trainer o avanzar con tus ciclos?"
+6. Escucha la elección:
+   - Trainer ("Trainer", "practicar", "simulación", "roleplay", "uno", "1"): llama a `switch_to_trainer_mode()`.
+   - Ciclos ("ciclos", "mis ciclos", "continuar", "dos", "2"): llama a `select_cycles_mode()`.
+7. Si no entiendes la elección: "No te he entendido bien. Puedes decir 'Trainer' para practicar una simulación o 'ciclos' para continuar con tus ciclos asignados."
+
+=== FASE 2: CÓDIGO DE SIMULACIÓN TRAINER ===
+Esta fase se activa cuando el backend confirma que el agente ha seleccionado Trainer.
+Cuando estés en esta fase:
+1. Tu única labor es obtener el código de la simulación que quiere practicar.
+2. Cuando el usuario diga cualquier número, código o secuencia alfanumérica, llama INMEDIATAMENTE a `validate_trainer_simulation_code(code=codigo_normalizado)`. NO esperes, NO digas "lo compruebo" sin llamar a la tool en ese mismo momento. NO inventes el resultado.
+3. Si el backend devuelve valid=false, di claramente "Ese código no es válido" y pídelo otra vez.
+4. Si es válido, di "Perfecto, iniciamos la simulación." y quédate en silencio mientras se transfiere la llamada.
+5. NO pidas código de agente en esta fase. El agente ya está identificado.
 
 Reglas de pronunciación:
 {SPANISH_VOICE_RULES}
@@ -67,11 +74,12 @@ Reglas de pronunciación:
 TRAINER_CODE_SYSTEM_INSTRUCTION = f"""
 Eres el Asistente virtual de entrenamiento de Dubot.
 El agente ya está identificado y ha seleccionado realizar una simulación en Trainer.
-Tu única labor ahora es:
-1. Preguntarle el código de la simulación que desea iniciar: "Por favor, dime el código de la simulación que quieres realizar. También puedes marcarla con el teclado."
-2. Cuando diga el código (ej: "SIM ciento uno", "SIM101", "VENTAS dos"), normalízalo en mayúsculas y llama a `verify_simulation_code(simulation_code=codigo_normalizado)`.
-3. Si el backend devuelve que el código es inválido (status es "invalid"), indícalo y vuelve a pedírselo amablemente.
-4. Si es válido y se inicia la redirección, di "Perfecto, vamos a comenzar la simulación." y mantente en silencio mientras la llamada es transferida.
+Tu única labor es obtener el código de simulación:
+1. Di: "Perfecto. Dime el código de la simulación que quieres realizar. También puedes marcarlo con el teclado."
+2. Cuando el usuario diga cualquier número, código o secuencia alfanumérica, llama INMEDIATAMENTE a `validate_trainer_simulation_code(code=codigo_normalizado)`. NO esperes ni digas "lo compruebo" sin llamar a la tool en ese mismo turno. NO inventes el resultado.
+3. Si el backend devuelve valid=false, di "Ese código no es válido. Por favor, dímelo otra vez." y vuelve al punto 2.
+4. Si es válido, di "Perfecto, iniciamos la simulación." y quédate en silencio.
+5. NO pidas código de agente. El agente ya está identificado.
 
 Reglas de pronunciación:
 {SPANISH_VOICE_RULES}
@@ -512,17 +520,20 @@ async def media_stream(websocket: WebSocket):
         return
 
     # ── Tool declarations ──────────────────────────────────────────────────────
+    # IMPORTANT: HUB_TOOLS must include ALL tools that may be used throughout
+    # the session, because Gemini Live tools cannot be changed mid-session.
+    # This includes validate_trainer_simulation_code for Phase 2 (trainer code).
     HUB_TOOLS = [{
         "functionDeclarations": [
             {
                 "name": "verify_agent_code",
-                "description": "Verifica el código de empleado del agente (ej: LD23, FR45, CM21, EC7).",
+                "description": "Verifica el código de empleado del agente (ej: LD23, FR45, CM21, EC7). Úsala cuando el agente dé su código de identificación.",
                 "parameters": {
                     "type": "OBJECT",
                     "properties": {
                         "agent_code": {
                             "type": "STRING",
-                            "description": "Código de agente hablado"
+                            "description": "Código de agente hablado o marcado"
                         }
                     },
                     "required": ["agent_code"]
@@ -530,7 +541,7 @@ async def media_stream(websocket: WebSocket):
             },
             {
                 "name": "switch_to_trainer_mode",
-                "description": "El agente ha seleccionado practicar con Trainer. Cambia el modo a Trainer dentro de la misma llamada.",
+                "description": "El agente ha seleccionado practicar con Trainer. Cambia el modo a Trainer dentro de la misma llamada. Llama a esta función cuando el agente diga 'Trainer', 'uno' o '1'.",
                 "parameters": {
                     "type": "OBJECT",
                     "properties": {},
@@ -539,11 +550,25 @@ async def media_stream(websocket: WebSocket):
             },
             {
                 "name": "select_cycles_mode",
-                "description": "El agente ha seleccionado avanzar con sus ciclos de entrenamiento asignados.",
+                "description": "El agente ha seleccionado avanzar con sus ciclos de entrenamiento asignados. Llama cuando diga 'ciclos', 'dos' o '2'.",
                 "parameters": {
                     "type": "OBJECT",
                     "properties": {},
                     "required": []
+                }
+            },
+            {
+                "name": "validate_trainer_simulation_code",
+                "description": "Valida el código de la simulación de Trainer que el agente quiere iniciar. Llama a esta función INMEDIATAMENTE cuando el agente proporcione cualquier código numérico o alfanumérico de simulación en la fase Trainer (ej: '323334', 'SIM101', 'VENTAS2', 'tres dos tres tres tres cuatro'). Normaliza el código antes de enviarlo.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "code": {
+                            "type": "STRING",
+                            "description": "Código de simulación normalizado (solo dígitos o alfanumérico en mayúsculas)"
+                        }
+                    },
+                    "required": ["code"]
                 }
             }
         ]
@@ -552,17 +577,17 @@ async def media_stream(websocket: WebSocket):
     TRAINER_CODE_TOOLS = [{
         "functionDeclarations": [
             {
-                "name": "verify_simulation_code",
-                "description": "Verifica el código de la simulación de roleplay que el agente quiere iniciar (ej: SIM101, VENTAS2).",
+                "name": "validate_trainer_simulation_code",
+                "description": "Valida el código de la simulación de Trainer que el agente quiere iniciar. Llama INMEDIATAMENTE cuando el agente proporcione cualquier código de simulación (ej: SIM101, 323334, VENTAS2). Normaliza el código antes de enviarlo.",
                 "parameters": {
                     "type": "OBJECT",
                     "properties": {
-                        "simulation_code": {
+                        "code": {
                             "type": "STRING",
-                            "description": "Código de simulación hablado"
+                            "description": "Código de simulación normalizado"
                         }
                     },
-                    "required": ["simulation_code"]
+                    "required": ["code"]
                 }
             }
         ]
@@ -576,12 +601,13 @@ async def media_stream(websocket: WebSocket):
         first_name = agent_name.split()[0] if agent_name else "Agente"
         system_instruction = f"""
 Eres el Asistente virtual de entrenamiento de Dubot.
-El agente ya está identificado como {agent_name} y ha seleccionado realizar una simulación en Trainer.
-Tu única labor ahora es:
-1. Preguntarle el código de la simulación que desea iniciar: "Perfecto, {first_name}. Dime el código de la simulación que quieres realizar. También puedes marcarla con el teclado."
-2. Cuando diga el código (ej: "SIM ciento uno", "SIM101", "VENTAS dos"), normalízalo en mayúsculas y llama a `verify_simulation_code(simulation_code=codigo_normalizado)`.
-3. Si el backend devuelve que el código es inválido (status es "invalid"), indícalo y vuelve a pedírselo amablemente.
-4. Si es válido y se inicia la redirección, di "Perfecto, vamos a comenzar la simulación." y mantente en silencio mientras la llamada es transferida.
+El agente ya está identificado como {agent_name} y ha seleccionado practicar en Trainer.
+Tu única labor es obtener el código de simulación:
+1. Di: "Perfecto, {first_name}. Dime el código de la simulación que quieres realizar. También puedes marcarlo con el teclado."
+2. Cuando el usuario diga cualquier número, código o secuencia alfanumérica, llama INMEDIATAMENTE a `validate_trainer_simulation_code(code=codigo_normalizado)`. NO esperes ni digas "lo compruebo" sin llamar a la tool en ese mismo turno. NO inventes el resultado.
+3. Si el backend devuelve valid=false, di "Ese código no es válido. Por favor, dímelo otra vez." y vuelve al punto 1.
+4. Si es válido, di "Perfecto, iniciamos la simulación." y quédate en silencio.
+5. NO pidas código de agente. El agente ya está identificado.
 
 Reglas de pronunciación:
 {SPANISH_VOICE_RULES}
@@ -674,21 +700,28 @@ Reglas de pronunciación:
                 await gemini_ws.send(json.dumps(trainer_prompt_msg))
 
             async def validate_and_redirect_simulation(sim_code: str):
+                """Validate simulation code and redirect to Trainer roleplay. Used by DTMF path."""
                 nonlocal redirected, attempts, call_sid
                 proto_http = websocket.headers.get("x-forwarded-proto", "http")
                 scheme_http = "https" if proto_http == "https" or "localhost" not in (websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost") else "http"
                 host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"
                 
+                logger.info("Trainer simulation code validation started: code=%s", sim_code)
                 async with AsyncSessionLocal() as sub_db:
                     sim = await TrainerService.validate_simulation_code(sub_db, sim_code)
                     if sim and identified_agent_id:
-                        logger.info("Simulation validated via DTMF in stream: sim_id=%s, code=%s", sim.simulation_id, sim_code)
+                        logger.info("Trainer simulation validation success: simulation_id=%s, code=%s, name=%s", sim.simulation_id, sim_code, getattr(sim, 'name', 'unknown'))
+                        logger.info("Redirecting call to trainer roleplay: agent_id=%s, simulation_id=%s, call_sid=%s", identified_agent_id, sim.simulation_id, call_sid)
                         ok = await redirect_trainer_call(call_sid, host, identified_agent_id, sim.simulation_id)
-                        if not ok:
+                        if ok:
+                            logger.info("Trainer roleplay redirect success: call_sid=%s", call_sid)
+                            redirected = True
+                        else:
+                            logger.error("Trainer roleplay redirect failed: reason=redirect_trainer_call_returned_false")
                             await play_redirection_error()
-                        redirected = True
+                            redirected = True
                     else:
-                        logger.warning("Invalid simulation code entered via DTMF in stream: %s", sim_code)
+                        logger.warning("Trainer simulation validation failed: code=%s, reason=not_found", sim_code)
                         attempts += 1
                         if attempts >= 3:
                             logger.info("Redirecting to DTMF collect-simulation-dtmf after %d failed attempts.", attempts)
@@ -699,7 +732,7 @@ Reglas de pronunciación:
                                 "clientContent": {
                                     "turns": [{
                                         "role": "user",
-                                        "parts": [{"text": "Di exactamente: 'Código de simulación incorrecto. Por favor, dilo de nuevo o márcalo con el teclado.' y quédate en silencio."}]
+                                        "parts": [{"text": "Di exactamente: 'Ese código de simulación no es válido. Por favor, dímelo otra vez o márcalo con el teclado.' y quédate en silencio."}]
                                     }],
                                     "turnComplete": True
                                 }
@@ -979,15 +1012,26 @@ Reglas de pronunciación:
                                         }
                                         await gemini_ws.send(json.dumps(resp_msg))
 
-                                elif name == "verify_simulation_code" and current_state == "trainer_code":
-                                    sim_code = args.get("simulation_code", "").strip()
+                                elif name == "validate_trainer_simulation_code" and current_state == "trainer_code":
+                                    # ── Simulation code validation (voice path) ───────────────────────
+                                    sim_code = args.get("code", "").strip()
+                                    logger.info("Trainer simulation code received: raw=%r, normalized=%r", sim_code, sim_code)
+                                    logger.info("Trainer simulation code validation started: code=%s", sim_code)
                                     async with AsyncSessionLocal() as sub_db:
                                         sim = await TrainerService.validate_simulation_code(sub_db, sim_code)
                                         if sim and identified_agent_id:
                                             host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"
+                                            logger.info("Trainer simulation validation success: simulation_id=%s, code=%s, name=%s",
+                                                        sim.simulation_id, sim_code, getattr(sim, "name", "unknown"))
+                                            logger.info("Redirecting call to trainer roleplay: agent_id=%s, simulation_id=%s, call_sid=%s",
+                                                        identified_agent_id, sim.simulation_id, call_sid)
                                             ok = await redirect_trainer_call(call_sid, host, identified_agent_id, sim.simulation_id)
-                                            if not ok:
-                                                logger.error("Twilio redirect_trainer_call failed. Instructing Gemini to play error and closing.")
+                                            if ok:
+                                                logger.info("Trainer roleplay redirect success: call_sid=%s", call_sid)
+                                                redirected = True
+                                                return
+                                            else:
+                                                logger.error("Trainer roleplay redirect failed: reason=redirect_trainer_call_returned_false")
                                                 err_msg = {
                                                     "clientContent": {
                                                         "turns": [{
@@ -1001,16 +1045,15 @@ Reglas de pronunciación:
                                                 await asyncio.sleep(4.0)
                                                 await websocket.close()
                                                 return
-                                            redirected = True
-                                            return
                                         else:
+                                            logger.warning("Trainer simulation validation failed: code=%s, reason=not_found", sim_code)
                                             attempts += 1
                                             if attempts >= 3:
                                                 host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"
                                                 await redirect_call(call_sid, f"{scheme_http}://{host}/bm/training/hub/collect-simulation-dtmf?agent_id={identified_agent_id}&call_sid={call_sid}")
                                                 redirected = True
                                                 return
-                                            result_val = {"status": "invalid", "attempts": attempts}
+                                            result_val = {"valid": False, "attempts": attempts}
                                             
                                     resp_msg = {
                                         "toolResponse": {

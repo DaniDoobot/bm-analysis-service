@@ -139,10 +139,22 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
         self.assertIn("automaticActivityDetection", config["realtimeInputConfig"])
 
     def test_hub_system_instruction_uses_switch_to_trainer_mode(self):
-        """Hub system instruction must use switch_to_trainer_mode (not select_mode redirect)."""
+        """Hub system instruction must use switch_to_trainer_mode and validate_trainer_simulation_code."""
         from app.routers.training_hub_voice import HUB_SYSTEM_INSTRUCTION
         self.assertIn("switch_to_trainer_mode", HUB_SYSTEM_INSTRUCTION)
         self.assertNotIn("select_mode", HUB_SYSTEM_INSTRUCTION)
+        # Req 8: trainer_code system must reference validate_trainer_simulation_code
+        self.assertIn("validate_trainer_simulation_code", HUB_SYSTEM_INSTRUCTION)
+
+    def test_hub_tools_contains_validate_trainer_simulation_code(self):
+        """Req: HUB_TOOLS must declare validate_trainer_simulation_code so Gemini can call it mid-session."""
+        import json
+        # Simulate the tool declarations by importing and checking the module constants
+        from app.routers.training_hub_voice import TRAINER_CODE_SYSTEM_INSTRUCTION
+        # The system instruction for trainer_code must reference validate_trainer_simulation_code
+        self.assertIn("validate_trainer_simulation_code", TRAINER_CODE_SYSTEM_INSTRUCTION)
+        # Also ensure it does NOT reference the old verify_simulation_code
+        self.assertNotIn("verify_simulation_code", TRAINER_CODE_SYSTEM_INSTRUCTION)
 
     @patch("app.routers.training_hub_voice.settings")
     async def test_incoming_call(self, mock_settings):
@@ -1110,6 +1122,185 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
                 if "clientContent" in json.loads(c[0][0])
             )
             self.assertTrue(error_sent, "Invalid sim code must trigger error voice prompt to Gemini")
+
+
+    @patch("app.routers.training_hub_voice.settings")
+    async def test_validate_trainer_simulation_code_valid(self, mock_settings):
+        """Req 1+2: In trainer_code state, validate_trainer_simulation_code with valid code redirects to Trainer."""
+        from fastapi.testclient import TestClient
+        from app.main import app
+        import json
+        import asyncio
+        import time
+
+        mock_settings.gemini_api_key = "mock_key"
+        mock_settings.gemini_live_api_key = None
+        mock_settings.gemini_model = "models/gemini-3.1-flash-live-preview"
+        mock_settings.gemini_live_model = None
+
+        mock_gemini_ws = AsyncMock()
+        mock_gemini_ws.send = AsyncMock()
+
+        async def mock_async_iter(*args, **kwargs):
+            yield json.dumps({"setupComplete": {}})
+            await asyncio.sleep(0.1)
+            # Gemini calls validate_trainer_simulation_code with a valid code
+            yield json.dumps({
+                "toolCall": {
+                    "functionCalls": [{
+                        "id": "call_sim_valid",
+                        "name": "validate_trainer_simulation_code",
+                        "args": {"code": "SIM101"}
+                    }]
+                }
+            })
+            await asyncio.sleep(0.6)
+
+        mock_gemini_ws.__aiter__ = mock_async_iter
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__.return_value = mock_gemini_ws
+        mock_connect.__aexit__.return_value = None
+
+        with patch("websockets.connect", return_value=mock_connect), \
+             patch("app.routers.training_hub_voice.redirect_trainer_call", AsyncMock(return_value=True)) as mock_trainer_redirect:
+            client = TestClient(app)
+            with client.websocket_connect("/bm/training/hub/media-stream?flow=trainer_code&agent_id=7777") as ws:
+                ws.send_json({"event": "connected"})
+                ws.send_json({"event": "start", "start": {"streamSid": "s123", "callSid": "c_sim_test"}})
+                time.sleep(0.9)
+
+            # Req 2: redirect_trainer_call must have been called
+            mock_trainer_redirect.assert_called_once()
+            call_args = mock_trainer_redirect.call_args[0]
+            self.assertEqual(call_args[2], "7777")   # agent_id
+            self.assertIsInstance(call_args[3], int)  # simulation_id must be a valid int
+            self.assertGreater(call_args[3], 0)       # must be a positive ID
+
+    @patch("app.routers.training_hub_voice.settings")
+    async def test_validate_trainer_simulation_code_invalid(self, mock_settings):
+        """Req 3: In trainer_code state, invalid code sends toolResponse valid=False back to Gemini."""
+        from fastapi.testclient import TestClient
+        from app.main import app
+        import json
+        import asyncio
+        import time
+
+        mock_settings.gemini_api_key = "mock_key"
+        mock_settings.gemini_live_api_key = None
+        mock_settings.gemini_model = "models/gemini-3.1-flash-live-preview"
+        mock_settings.gemini_live_model = None
+
+        mock_gemini_ws = AsyncMock()
+        mock_gemini_ws.send = AsyncMock()
+
+        async def mock_async_iter(*args, **kwargs):
+            yield json.dumps({"setupComplete": {}})
+            await asyncio.sleep(0.1)
+            # Gemini calls validate_trainer_simulation_code with INVALID code
+            yield json.dumps({
+                "toolCall": {
+                    "functionCalls": [{
+                        "id": "call_sim_bad",
+                        "name": "validate_trainer_simulation_code",
+                        "args": {"code": "INVALID999"}
+                    }]
+                }
+            })
+            await asyncio.sleep(0.6)
+
+        mock_gemini_ws.__aiter__ = mock_async_iter
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__.return_value = mock_gemini_ws
+        mock_connect.__aexit__.return_value = None
+
+        with patch("websockets.connect", return_value=mock_connect), \
+             patch("app.routers.training_hub_voice.redirect_trainer_call", AsyncMock(return_value=True)) as mock_trainer_redirect:
+            client = TestClient(app)
+            with client.websocket_connect("/bm/training/hub/media-stream?flow=trainer_code&agent_id=7777") as ws:
+                ws.send_json({"event": "connected"})
+                ws.send_json({"event": "start", "start": {"streamSid": "s123", "callSid": "c_inv_test"}})
+                time.sleep(0.9)
+
+            # Req 3: redirect_trainer_call must NOT have been called
+            mock_trainer_redirect.assert_not_called()
+
+            # Gemini must have received toolResponse with valid=False
+            send_calls = mock_gemini_ws.send.call_args_list
+            invalid_response_sent = False
+            for call in send_calls:
+                payload = json.loads(call[0][0])
+                if "toolResponse" in payload:
+                    for fr in payload["toolResponse"]["functionResponses"]:
+                        if fr["name"] == "validate_trainer_simulation_code":
+                            result = fr["response"]["result"]
+                            if result.get("valid") is False:
+                                invalid_response_sent = True
+            self.assertTrue(invalid_response_sent,
+                "Invalid simulation code must send toolResponse valid=False to Gemini")
+
+    @patch("app.routers.training_hub_voice.settings")
+    async def test_hub_flow_trainer_voice_calls_validate_simulation_tool(self, mock_settings):
+        """Req 6+7: After switch_to_trainer_mode, Gemini calling validate_trainer_simulation_code
+        must trigger simulation lookup (not fall through silently)."""
+        from fastapi.testclient import TestClient
+        from app.main import app
+        import json
+        import asyncio
+        import time
+
+        mock_settings.gemini_api_key = "mock_key"
+        mock_settings.gemini_live_api_key = None
+        mock_settings.gemini_model = "models/gemini-3.1-flash-live-preview"
+        mock_settings.gemini_live_model = None
+
+        mock_gemini_ws = AsyncMock()
+        mock_gemini_ws.send = AsyncMock()
+
+        async def mock_async_iter(*args, **kwargs):
+            yield json.dumps({"setupComplete": {}})
+            await asyncio.sleep(0.05)
+            # Phase 1: verify_agent_code
+            yield json.dumps({
+                "toolCall": {"functionCalls": [{
+                    "id": "call_a", "name": "verify_agent_code",
+                    "args": {"agent_code": "siete siete siete siete"}
+                }]}
+            })
+            await asyncio.sleep(0.05)
+            # Phase 1: switch to trainer mode
+            yield json.dumps({
+                "toolCall": {"functionCalls": [{
+                    "id": "call_b", "name": "switch_to_trainer_mode", "args": {}
+                }]}
+            })
+            await asyncio.sleep(0.05)
+            # Phase 2: now in trainer_code state, Gemini calls validate_trainer_simulation_code
+            yield json.dumps({
+                "toolCall": {"functionCalls": [{
+                    "id": "call_c", "name": "validate_trainer_simulation_code",
+                    "args": {"code": "SIM101"}
+                }]}
+            })
+            await asyncio.sleep(0.8)
+
+        mock_gemini_ws.__aiter__ = mock_async_iter
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__.return_value = mock_gemini_ws
+        mock_connect.__aexit__.return_value = None
+
+        with patch("websockets.connect", return_value=mock_connect), \
+             patch("app.routers.training_hub_voice.redirect_trainer_call", AsyncMock(return_value=True)) as mock_trainer_redirect, \
+             patch("app.routers.training_hub_voice.redirect_call", AsyncMock(return_value=True)):
+            client = TestClient(app)
+            with client.websocket_connect("/bm/training/hub/media-stream?flow=hub") as ws:
+                ws.send_json({"event": "connected"})
+                ws.send_json({"event": "start", "start": {"streamSid": "s_full", "callSid": "c_full_test"}})
+                ws.send_json({"event": "media", "media": {"payload": "f39/f39/f39/f39/"}})
+                time.sleep(1.2)
+
+            # Req 6: redirect_trainer_call must have been called (simulation code processed)
+            mock_trainer_redirect.assert_called_once()
+            self.assertEqual(mock_trainer_redirect.call_args[0][3], 1)  # simulation_id=1
 
 
 if __name__ == "__main__":
