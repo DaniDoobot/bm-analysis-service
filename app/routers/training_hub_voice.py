@@ -54,8 +54,8 @@ Sigue estas pautas estrictas:
 4. Si el backend te dice que el código es inválido (status es "invalid"), indícalo de forma de educada y pídele que lo repita o lo marque en el teclado.
 5. Si el código es válido (status es "valid"), di: "Estupendo, [Nombre]. ¿En qué puedo ayudarte? ¿Quieres practicar en Trainer o avanzar con tus ciclos?"
 6. Escucha con atención la elección del agente:
-   - Si el agente responde que quiere Trainer (o dice palabras clave como: "Trainer", "practicar", "simulación", "roleplay", "entrenamiento libre", "uno", "1"): llama inmediatamente a `select_mode(mode="trainer")`.
-   - Si el agente responde que quiere ciclos (o dice palabras clave como: "ciclos", "mis ciclos", "avanzar con mis ciclos", "continuar", "seguir entrenamiento", "dos", "2"): llama inmediatamente a `select_mode(mode="cycles")`.
+   - Si el agente responde que quiere Trainer (o dice palabras clave como: "Trainer", "practicar", "simulación", "roleplay", "entrenamiento libre", "uno", "1"): llama inmediatamente a `switch_to_trainer_mode()`.
+   - Si el agente responde que quiere ciclos (o dice palabras clave como: "ciclos", "mis ciclos", "avanzar con mis ciclos", "continuar", "seguir entrenamiento", "dos", "2"): llama inmediatamente a `select_cycles_mode()`.
 7. Si no entiendes bien su elección o dice algo ambiguo, repregunta con calma usando la frase exacta:
    "No te he entendido bien. Puedes decir 'Trainer' para practicar una simulación o 'ciclos' para continuar con tus ciclos asignados."
 8. Si el backend te devuelve que se inicia la redirección, di "Un momento, por favor..." y quédate en silencio.
@@ -76,6 +76,42 @@ Tu única labor ahora es:
 Reglas de pronunciación:
 {SPANISH_VOICE_RULES}
 """
+
+# ── Gemini Live shared voice config (mirrors training_voice.py exactly) ────────
+
+def build_gemini_live_session_config(gemini_model: str, system_instruction: str, tools: list) -> dict:
+    """Build Gemini Live session setup dict identical to training_voice.py."""
+    return {
+        "model": gemini_model,
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": {
+                        "voiceName": "Algieba"  # Same voice as training_voice.py
+                    }
+                }
+            },
+            "thinkingConfig": {
+                "thinkingLevel": "minimal"
+            }
+        },
+        "realtimeInputConfig": {
+            "automaticActivityDetection": {
+                "disabled": False,
+                "startOfSpeechSensitivity": "START_SENSITIVITY_LOW",
+                "endOfSpeechSensitivity": "END_SENSITIVITY_HIGH",
+                "prefixPaddingMs": 120,
+                "silenceDurationMs": 130,
+            },
+            "turnCoverage": "TURN_INCLUDES_ONLY_ACTIVITY",
+            "activityHandling": "START_OF_ACTIVITY_INTERRUPTS",
+        },
+        "systemInstruction": {
+            "parts": [{"text": system_instruction.strip()}]
+        },
+        "tools": tools
+    }
 
 
 def normalize_agent_code(raw_text: str) -> Optional[str]:
@@ -404,7 +440,8 @@ async def verify_simulation_dtmf(request: Request, agent_id: str = Query(...), c
 
 
 @router.post("/cycles-init")
-async def cycles_init(request: Request, agent_id: str = Query(...), call_sid: str = Query(...), db: AsyncSession = Depends(get_db)):
+async def cycles_init(request: Request, agent_id: str = Query(...), call_sid: str = Query(...),
+                      agent_name: str = Query(default=""), db: AsyncSession = Depends(get_db)):
     """Redirect to agent active cycles flow."""
     active_cycles = await get_active_cycles_for_agent(db, agent_id)
     host = request.headers.get("x-forwarded-host") or request.headers.get("host") or "localhost"
@@ -474,42 +511,67 @@ async def media_stream(websocket: WebSocket):
         await websocket.close()
         return
 
-    # Choose instructions based on flow
+    # ── Tool declarations ──────────────────────────────────────────────────────
+    HUB_TOOLS = [{
+        "functionDeclarations": [
+            {
+                "name": "verify_agent_code",
+                "description": "Verifica el código de empleado del agente (ej: LD23, FR45, CM21, EC7).",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "agent_code": {
+                            "type": "STRING",
+                            "description": "Código de agente hablado"
+                        }
+                    },
+                    "required": ["agent_code"]
+                }
+            },
+            {
+                "name": "switch_to_trainer_mode",
+                "description": "El agente ha seleccionado practicar con Trainer. Cambia el modo a Trainer dentro de la misma llamada.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": "select_cycles_mode",
+                "description": "El agente ha seleccionado avanzar con sus ciclos de entrenamiento asignados.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {},
+                    "required": []
+                }
+            }
+        ]
+    }]
+
+    TRAINER_CODE_TOOLS = [{
+        "functionDeclarations": [
+            {
+                "name": "verify_simulation_code",
+                "description": "Verifica el código de la simulación de roleplay que el agente quiere iniciar (ej: SIM101, VENTAS2).",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "simulation_code": {
+                            "type": "STRING",
+                            "description": "Código de simulación hablado"
+                        }
+                    },
+                    "required": ["simulation_code"]
+                }
+            }
+        ]
+    }]
+
+    # Choose instructions and tools based on flow
     if flow == "hub":
         system_instruction = HUB_SYSTEM_INSTRUCTION
-        tools_decl = [{
-            "functionDeclarations": [
-                {
-                    "name": "verify_agent_code",
-                    "description": "Verifica el código de empleado del agente (ej: LD23, FR45, CM21, EC7).",
-                    "parameters": {
-                        "type": "OBJECT",
-                        "properties": {
-                            "agent_code": {
-                                                    "type": "STRING",
-                                "description": "Código de agente hablado"
-                            }
-                        },
-                        "required": ["agent_code"]
-                    }
-                },
-                {
-                    "name": "select_mode",
-                    "description": "Establece el modo de práctica deseado por el agente.",
-                    "parameters": {
-                        "type": "OBJECT",
-                        "properties": {
-                            "mode": {
-                                "type": "STRING",
-                                "enum": ["trainer", "cycles"],
-                                "description": "Modo seleccionado ('trainer' para Trainer, 'cycles' para ciclos asignados)"
-                            }
-                        },
-                        "required": ["mode"]
-                    }
-                }
-            ]
-        }]
+        tools_decl = HUB_TOOLS
     elif flow == "trainer_code":
         first_name = agent_name.split()[0] if agent_name else "Agente"
         system_instruction = f"""
@@ -524,24 +586,7 @@ Tu única labor ahora es:
 Reglas de pronunciación:
 {SPANISH_VOICE_RULES}
 """
-        tools_decl = [{
-            "functionDeclarations": [
-                {
-                    "name": "verify_simulation_code",
-                    "description": "Verifica el código de la simulación de roleplay que el agente quiere iniciar (ej: SIM101, VENTAS2).",
-                    "parameters": {
-                        "type": "OBJECT",
-                        "properties": {
-                            "simulation_code": {
-                                "type": "STRING",
-                                "description": "Código de simulación hablado"
-                            }
-                        },
-                        "required": ["simulation_code"]
-                    }
-                }
-            ]
-        }]
+        tools_decl = TRAINER_CODE_TOOLS
     else:
         logger.error("Invalid flow parameter: %s", flow)
         await websocket.close()
@@ -554,23 +599,7 @@ Reglas de pronunciación:
 
     uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={gemini_api_key}"
     
-    session_config = {
-        "model": gemini_model,
-        "generationConfig": {
-            "responseModalities": ["audio"],
-            "speechConfig": {
-                "voiceConfig": {
-                    "prebuiltVoiceConfig": {
-                        "voiceName": "Puck"
-                    }
-                }
-            }
-        },
-        "systemInstruction": {
-            "parts": [{"text": system_instruction}]
-        },
-        "tools": tools_decl
-    }
+    session_config = build_gemini_live_session_config(gemini_model, system_instruction, tools_decl)
 
     try:
         async with websockets.connect(uri) as gemini_ws:
@@ -585,7 +614,8 @@ Reglas de pronunciación:
             if flow == "hub":
                 greet_text = "Di exactamente: 'Hola, has llamado al asistente virtual de entrenamiento de Dubot. Identifícate con tu código de agente, por favor. Puedes decirlo por voz o introducirlo con el teclado.' y quédate en silencio."
             elif flow == "trainer_code":
-                greet_text = "Di exactamente: 'Por favor, dime el código de la simulación de Dubot que quieres realizar. También puedes marcarla con el teclado.' y quédate en silencio."
+                first_name = agent_name.split()[0] if agent_name else "Agente"
+                greet_text = f"Di exactamente: 'Perfecto, {first_name}. Pasamos a Trainer de Dubot. Dime el código de la simulación que quieres practicar. También puedes marcarlo con el teclado.' y quédate en silencio."
                 
             if greet_text:
                 greet_msg = {
@@ -604,6 +634,7 @@ Reglas de pronunciación:
             attempts = 0
             redirected = False
             identified_agent_id = agent_id
+            identified_agent_name = agent_name
             dtmf_buffer = ""
             current_state = "awaiting_agent_code" if flow == "hub" else "trainer_code"
             
@@ -621,6 +652,26 @@ Reglas de pronunciación:
                 await gemini_ws.send(json.dumps(err_msg))
                 await asyncio.sleep(4.0)
                 await websocket.close()
+
+            async def switch_to_trainer_in_stream(first_name_arg: str):
+                """Switch current WebSocket state to trainer_code without redirecting Twilio."""
+                nonlocal current_state, dtmf_buffer, attempts
+                logger.info("Training Hub trainer mode selected.")
+                logger.info("Training Hub state changed: awaiting_mode -> trainer_code")
+                current_state = "trainer_code"
+                dtmf_buffer = ""
+                attempts = 0
+                logger.info("Trainer code prompt requested.")
+                trainer_prompt_msg = {
+                    "clientContent": {
+                        "turns": [{
+                            "role": "user",
+                            "parts": [{"text": f"Di exactamente: 'Perfecto, {first_name_arg}. Pasamos a Trainer de Dubot. Dime el código de la simulación que quieres practicar. También puedes marcarlo con el teclado.' y quédate en silencio."}]
+                        }],
+                        "turnComplete": True
+                    }
+                }
+                await gemini_ws.send(json.dumps(trainer_prompt_msg))
 
             async def validate_and_redirect_simulation(sim_code: str):
                 nonlocal redirected, attempts, call_sid
@@ -656,7 +707,7 @@ Reglas de pronunciación:
                             await gemini_ws.send(json.dumps(err_msg))
             
             async def receive_from_twilio():
-                nonlocal call_sid, stream_sid, redirected, dtmf_buffer, current_state, identified_agent_id, attempts
+                nonlocal call_sid, stream_sid, redirected, dtmf_buffer, current_state, identified_agent_id, identified_agent_name, attempts
                 try:
                     async for message in websocket.iter_text():
                         if redirected:
@@ -668,6 +719,18 @@ Reglas de pronunciación:
                             stream_sid = data["start"]["streamSid"]
                             call_sid = data["start"]["callSid"]
                             logger.info("Twilio stream start: stream_sid=%s, call_sid=%s", stream_sid, call_sid)
+                            # Also read customParameters if Twilio delivers them via start event
+                            custom_params = data["start"].get("customParameters", {})
+                            if custom_params.get("flow") == "trainer_code" and not identified_agent_id:
+                                cp_agent_id = custom_params.get("agent_id")
+                                if cp_agent_id:
+                                    identified_agent_id = cp_agent_id
+                                    async with AsyncSessionLocal() as sub_db:
+                                        stmt = select(TrainingAgentSetting).where(TrainingAgentSetting.hubspot_owner_id == cp_agent_id)
+                                        res = await sub_db.execute(stmt)
+                                        setting = res.scalars().first()
+                                        if setting:
+                                            identified_agent_name = setting.agent_name
                         elif event == "media":
                             chunk_b64 = data["media"]["payload"]
                             raw_ulaw = base64.b64decode(chunk_b64)
@@ -705,6 +768,7 @@ Reglas de pronunciación:
                                         agent = await TrainerService.validate_agent_code(sub_db, dtmf_buffer)
                                         if agent:
                                             identified_agent_id = agent["agent_id"]
+                                            identified_agent_name = agent["agent_name"]
                                             first_name = agent["agent_name"].split()[0]
                                             logger.info("Training Hub agent validation success via DTMF: agent_id=%s, name=%s", agent["agent_id"], agent["agent_name"])
                                             current_state = "awaiting_mode"
@@ -744,12 +808,10 @@ Reglas de pronunciación:
                                                 
                             elif current_state == "awaiting_mode":
                                 if digit == "1":
-                                    logger.info("Training Hub DTMF mode selected: trainer")
-                                    ok = await redirect_call(call_sid, f"{scheme_http}://{host}/bm/training/hub/trainer-init?agent_id={identified_agent_id}&call_sid={call_sid}")
-                                    if not ok:
-                                        await play_redirection_error()
-                                    redirected = True
-                                    break
+                                    # ── TRAINER: Stay in same WebSocket, change state ──────────────────
+                                    first_name = identified_agent_name.split()[0] if identified_agent_name else "Agente"
+                                    await switch_to_trainer_in_stream(first_name)
+                                    # Do NOT redirect, do NOT break — continue the same stream
                                 elif digit == "2":
                                     logger.info("Training Hub DTMF mode selected: cycles")
                                     ok = await redirect_call(call_sid, f"{scheme_http}://{host}/bm/training/hub/cycles-init?agent_id={identified_agent_id}&call_sid={call_sid}")
@@ -779,10 +841,11 @@ Reglas de pronunciación:
                     logger.error("Error in receive_from_twilio: %s", e)
 
             async def send_to_twilio():
-                nonlocal call_sid, stream_sid, attempts, redirected, identified_agent_id, current_state
+                nonlocal call_sid, stream_sid, attempts, redirected, identified_agent_id, identified_agent_name, current_state
                 proto_http = websocket.headers.get("x-forwarded-proto", "http")
                 scheme_http = "https" if proto_http == "https" or "localhost" not in (websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost") else "http"
                 logged_initial_greeting_sent = False
+                logged_trainer_code_prompt_sent = False
                 
                 try:
                     async for response_str in gemini_ws:
@@ -792,12 +855,12 @@ Reglas de pronunciación:
                         
                         # Forward audio from Gemini to Twilio
                         if "serverContent" in data:
-                            if not logged_initial_greeting_sent:
+                            if not logged_initial_greeting_sent and flow == "hub":
                                 logged_initial_greeting_sent = True
-                                if flow == "hub":
-                                    logger.info("Training Hub initial greeting sent by Gemini.")
-                                elif flow == "trainer_code":
-                                    logger.info("Trainer code prompt sent by Gemini.")
+                                logger.info("Training Hub initial greeting sent by Gemini.")
+                            elif not logged_trainer_code_prompt_sent and (flow == "trainer_code" or current_state == "trainer_code"):
+                                logged_trainer_code_prompt_sent = True
+                                logger.info("Trainer code prompt sent by Gemini.")
                             parts = data["serverContent"].get("modelTurn", {}).get("parts", [])
                             for part in parts:
                                 mime = part.get("inlineData", {}).get("mimeType", "")
@@ -825,7 +888,7 @@ Reglas de pronunciación:
                                 
                                 logger.info("Gemini Live toolCall request: %s", name)
                                 
-                                if name == "verify_agent_code" and flow == "hub":
+                                if name == "verify_agent_code" and current_state == "awaiting_agent_code":
                                     raw_code = args.get("agent_code", "").strip()
                                     normalized = normalize_agent_code(raw_code) or raw_code
                                     logger.info("Training Hub agent code received: raw=%r, normalized=%r", raw_code, normalized)
@@ -834,6 +897,7 @@ Reglas de pronunciación:
                                         agent = await TrainerService.validate_agent_code(sub_db, normalized)
                                         if agent:
                                             identified_agent_id = agent["agent_id"]
+                                            identified_agent_name = agent["agent_name"]
                                             current_state = "awaiting_mode"
                                             logger.info("Training Hub agent validation success: agent_id=%s, initials=%s, name=%s", 
                                                         agent["agent_id"], agent["agent_initials"], agent["agent_name"])
@@ -860,16 +924,30 @@ Reglas de pronunciación:
                                     }
                                     await gemini_ws.send(json.dumps(resp_msg))
                                     
-                                elif name == "select_mode" and flow == "hub":
-                                    mode = args.get("mode", "").strip().lower()
-                                    if mode in ("trainer", "cycles") and identified_agent_id:
+                                elif name == "switch_to_trainer_mode" and current_state == "awaiting_mode":
+                                    # ── Trainer selected by voice: stay in same WebSocket ──────────────
+                                    first_name = identified_agent_name.split()[0] if identified_agent_name else "Agente"
+                                    
+                                    # Acknowledge the tool call first
+                                    resp_msg = {
+                                        "toolResponse": {
+                                            "functionResponses": [{
+                                                "id": fid,
+                                                "name": name,
+                                                "response": {"result": {"status": "ok"}}
+                                            }]
+                                        }
+                                    }
+                                    await gemini_ws.send(json.dumps(resp_msg))
+                                    
+                                    # Then switch state and send prompt
+                                    await switch_to_trainer_in_stream(first_name)
+
+                                elif name == "select_cycles_mode" and current_state == "awaiting_mode":
+                                    if identified_agent_id:
                                         host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"
-                                        if mode == "trainer":
-                                            logger.info("Redirecting call to trainer-init: agent_id=%s", identified_agent_id)
-                                            ok = await redirect_call(call_sid, f"{scheme_http}://{host}/bm/training/hub/trainer-init?agent_id={identified_agent_id}&call_sid={call_sid}")
-                                        else:
-                                            logger.info("Redirecting call to cycles-init: agent_id=%s", identified_agent_id)
-                                            ok = await redirect_call(call_sid, f"{scheme_http}://{host}/bm/training/hub/cycles-init?agent_id={identified_agent_id}&call_sid={call_sid}")
+                                        logger.info("Redirecting call to cycles-init: agent_id=%s", identified_agent_id)
+                                        ok = await redirect_call(call_sid, f"{scheme_http}://{host}/bm/training/hub/cycles-init?agent_id={identified_agent_id}&call_sid={call_sid}")
                                         
                                         if not ok:
                                             logger.error("Twilio redirection failed. Instructing Gemini to play config error and closing.")
@@ -901,7 +979,7 @@ Reglas de pronunciación:
                                         }
                                         await gemini_ws.send(json.dumps(resp_msg))
 
-                                elif name == "verify_simulation_code" and flow == "trainer_code":
+                                elif name == "verify_simulation_code" and current_state == "trainer_code":
                                     sim_code = args.get("simulation_code", "").strip()
                                     async with AsyncSessionLocal() as sub_db:
                                         sim = await TrainerService.validate_simulation_code(sub_db, sim_code)

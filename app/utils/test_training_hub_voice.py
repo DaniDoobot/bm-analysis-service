@@ -106,6 +106,8 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
         req.headers = headers or {"host": "localhost"}
         return req
 
+    # ── Unit tests ─────────────────────────────────────────────────────────────
+
     def test_normalize_agent_code(self):
         from app.routers.training_hub_voice import normalize_agent_code
         self.assertEqual(normalize_agent_code("7777"), "7777")
@@ -122,6 +124,25 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Doobot", HUB_SYSTEM_INSTRUCTION)
         self.assertIn("Dubot", TRAINER_CODE_SYSTEM_INSTRUCTION)
         self.assertNotIn("Doobot", TRAINER_CODE_SYSTEM_INSTRUCTION)
+
+    def test_gemini_voice_config_matches_training_voice(self):
+        """Req 11: Hub Gemini setup must use same voice as training_voice.py (Algieba)."""
+        from app.routers.training_hub_voice import build_gemini_live_session_config
+        config = build_gemini_live_session_config("models/test", "instruction", [])
+        voice_name = config["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"]
+        self.assertEqual(voice_name, "Algieba")
+        # Must have thinkingConfig
+        thinking_level = config["generationConfig"]["thinkingConfig"]["thinkingLevel"]
+        self.assertEqual(thinking_level, "minimal")
+        # Must have realtimeInputConfig VAD
+        self.assertIn("realtimeInputConfig", config)
+        self.assertIn("automaticActivityDetection", config["realtimeInputConfig"])
+
+    def test_hub_system_instruction_uses_switch_to_trainer_mode(self):
+        """Hub system instruction must use switch_to_trainer_mode (not select_mode redirect)."""
+        from app.routers.training_hub_voice import HUB_SYSTEM_INSTRUCTION
+        self.assertIn("switch_to_trainer_mode", HUB_SYSTEM_INSTRUCTION)
+        self.assertNotIn("select_mode", HUB_SYSTEM_INSTRUCTION)
 
     @patch("app.routers.training_hub_voice.settings")
     async def test_incoming_call(self, mock_settings):
@@ -362,8 +383,11 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
             body = resp.body.decode("utf-8")
             self.assertIn("/bm/training/voice/twilio/select-cycle-menu?agent_id=7777&amp;call_sid=call_123", body)
 
+    # ── WebSocket Integration Tests ────────────────────────────────────────────
+
     @patch("app.routers.training_hub_voice.settings")
     async def test_media_stream_websocket_connect(self, mock_settings):
+        """Full WebSocket flow: identify by voice + select cycles."""
         from fastapi.testclient import TestClient
         from app.main import app
         import json
@@ -395,8 +419,8 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
                 "toolCall": {
                     "functionCalls": [{
                         "id": "call_xyz789",
-                        "name": "select_mode",
-                        "args": {"mode": "cycles"}
+                        "name": "select_cycles_mode",
+                        "args": {}
                     }]
                 }
             })
@@ -435,15 +459,14 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
             self.assertIn("v1beta", called_url)
             self.assertIn("key=mock_key", called_url)
             
-            # Verify mock_redirect was called to redirect_call
+            # Verify mock_redirect was called to redirect_call (for cycles)
             mock_redirect.assert_called_once()
             
-            # Verify the model passed to setup message and tool responses
+            # Verify setup config uses Algieba voice (Req 11)
             send_calls = mock_gemini_ws.send.call_args_list
             setup_payload = None
             audio_payload = None
             verify_agent_response = None
-            select_mode_response = None
             
             for call in send_calls:
                 payload_str = call[0][0]
@@ -461,8 +484,6 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
                     for fr in func_resps:
                         if fr["name"] == "verify_agent_code":
                             verify_agent_response = fr["response"]["result"]
-                        elif fr["name"] == "select_mode":
-                            select_mode_response = fr["response"]["result"]
                         
             # Verify the initial greeting was requested automatically
             initial_greeting_text = None
@@ -478,7 +499,7 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
                                 initial_greeting_text = text
                                 break
             self.assertIsNotNone(initial_greeting_text)
-            self.assertIn("Dubot", initial_greeting_text)
+            self.assertIn("Dubot", initial_greeting_text)  # Req 12
             self.assertNotIn("Doobot", initial_greeting_text)
             self.assertNotIn("7777", initial_greeting_text)
             self.assertNotIn("siete siete siete siete", initial_greeting_text)
@@ -486,16 +507,18 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(setup_payload)
             self.assertEqual(setup_payload["model"], "models/gemini-3.1-flash-live-preview")
             
+            # Req 11: verify voice name matches training_voice.py
+            voice_name = setup_payload["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"]
+            self.assertEqual(voice_name, "Algieba")
+            
             self.assertIsNotNone(audio_payload)
             self.assertEqual(audio_payload["mimeType"], "audio/pcm;rate=16000")
             self.assertTrue(len(audio_payload["data"]) > 0)
 
-            # Assertions for agent identification and mode selection
+            # Assertions for agent identification
             self.assertIsNotNone(verify_agent_response)
             self.assertEqual(verify_agent_response["status"], "valid")
             self.assertEqual(verify_agent_response["agent_name"], "Cristina Montenegro")
-            
-            self.assertIsNone(select_mode_response)
 
     @patch("app.routers.training_hub_voice.settings")
     async def test_media_stream_websocket_redirect_failure(self, mock_settings):
@@ -530,8 +553,8 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
                 "toolCall": {
                     "functionCalls": [{
                         "id": "call_xyz789",
-                        "name": "select_mode",
-                        "args": {"mode": "cycles"}
+                        "name": "select_cycles_mode",
+                        "args": {}
                     }]
                 }
             })
@@ -581,7 +604,11 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(error_prompt_sent)
 
     @patch("app.routers.training_hub_voice.settings")
-    async def test_media_stream_dtmf_agent_and_mode_routing(self, mock_settings):
+    async def test_media_stream_dtmf_trainer_no_redirect(self, mock_settings):
+        """Req 2+3: DTMF '1' must NOT call redirect_call towards trainer-init.
+        Req 3: Must change current_state to trainer_code within same WebSocket.
+        Req 4: Gemini must receive a clientContent asking for simulation code.
+        Req 5+6+7: The prompt must NOT contain the hub greeting or agent code request."""
         from fastapi.testclient import TestClient
         from app.main import app
         import json
@@ -598,7 +625,7 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
         
         async def mock_async_iter(*args, **kwargs):
             yield json.dumps({"setupComplete": {}})
-            await asyncio.sleep(0.8)
+            await asyncio.sleep(1.2)
             
         mock_gemini_ws.__aiter__ = mock_async_iter
         
@@ -618,33 +645,31 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
                         "callSid": "call_ws_test_hub",
                     }
                 })
-                # Send DTMF 7777
+                # Req 1: DTMF 7777 identifies Cristina Montenegro
                 for digit in ["7", "7", "7", "7"]:
                     websocket.send_json({
                         "event": "dtmf",
-                        "dtmf": {
-                            "digit": digit
-                        }
+                        "dtmf": {"digit": digit}
                     })
                 time.sleep(0.2)
-                # Send DTMF 1 to select Trainer
+                # Req 2: DTMF '1' selects Trainer
                 websocket.send_json({
                     "event": "dtmf",
-                    "dtmf": {
-                        "digit": "1"
-                    }
+                    "dtmf": {"digit": "1"}
                 })
-                time.sleep(0.4)
+                time.sleep(0.5)
 
-            # Verify redirect_call was called to trainer-init with the correct arguments
-            mock_redirect.assert_called_once()
-            called_url = mock_redirect.call_args[0][1]
-            self.assertIn("trainer-init", called_url)
-            self.assertIn("agent_id=7777", called_url)
+            # Req 2: redirect_call must NOT have been called towards trainer-init
+            for call_args in mock_redirect.call_args_list:
+                called_url = call_args[0][1] if call_args[0] else ""
+                self.assertNotIn("trainer-init", called_url,
+                    "redirect_call must NOT redirect to trainer-init when DTMF 1 is pressed")
 
-            # Verify that the Gemini WebSocket received the validation prompt turn
+            # Req 4+5+6+7: Gemini must have received the trainer code prompt
             send_calls = mock_gemini_ws.send.call_args_list
-            dtmf_welcome_prompt = None
+            trainer_prompt_text = None
+            hub_greeting_text = None
+            
             for call in send_calls:
                 payload_str = call[0][0]
                 payload = json.loads(payload_str)
@@ -653,13 +678,120 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
                     for turn in turns:
                         for part in turn.get("parts", []):
                             text = part.get("text", "")
-                            if "Estupendo, Cristina" in text:
-                                dtmf_welcome_prompt = text
-            self.assertIsNotNone(dtmf_welcome_prompt)
-            self.assertNotIn("dímelo por voz", dtmf_welcome_prompt.lower())
+                            # Look for the Trainer code prompt (sent after DTMF 1)
+                            if "código de la simulación" in text.lower() and "Cristina" in text:
+                                trainer_prompt_text = text
+                            # Check for unwanted hub initial greeting
+                            if "has llamado al asistente virtual" in text.lower():
+                                hub_greeting_text = text
+
+            # Req 4: Gemini received a clientContent asking for sim code
+            self.assertIsNotNone(trainer_prompt_text,
+                "Gemini must receive a clientContent with simulation code request after DTMF 1")
+            # Req 12: Dubot in trainer prompt
+            self.assertIn("Dubot", trainer_prompt_text)
+            # Req 7: no agent code request in trainer prompt
+            self.assertNotIn("código de agente", trainer_prompt_text.lower())
+            # Req 6: no hub greeting in trainer prompt
+            self.assertNotIn("has llamado al asistente virtual", trainer_prompt_text.lower())
+            # Req 5: initial hub greeting should NOT be re-sent after Trainer selection
+            # (it may have been sent initially at flow=hub, but NOT after DTMF 1)
+            # Verify "Perfecto, Cristina" in trainer prompt
+            self.assertIn("Cristina", trainer_prompt_text)
+
+    @patch("app.routers.training_hub_voice.settings")
+    async def test_media_stream_dtmf_trainer_voice_selects_switch_mode(self, mock_settings):
+        """Req 3: Gemini tool switch_to_trainer_mode must change state without redirect."""
+        from fastapi.testclient import TestClient
+        from app.main import app
+        import json
+        import asyncio
+        import time
+        
+        mock_settings.gemini_api_key = "mock_key"
+        mock_settings.gemini_live_api_key = None
+        mock_settings.gemini_model = "models/gemini-3.1-flash-live-preview"
+        mock_settings.gemini_live_model = None
+        
+        mock_gemini_ws = AsyncMock()
+        mock_gemini_ws.send = AsyncMock()
+        
+        async def mock_async_iter(*args, **kwargs):
+            yield json.dumps({"setupComplete": {}})
+            await asyncio.sleep(0.1)
+            # Gemini verifies agent code first
+            yield json.dumps({
+                "toolCall": {
+                    "functionCalls": [{
+                        "id": "call_verify",
+                        "name": "verify_agent_code",
+                        "args": {"agent_code": "siete siete siete siete"}
+                    }]
+                }
+            })
+            await asyncio.sleep(0.1)
+            # Gemini selects trainer by voice (switch_to_trainer_mode, NOT select_mode)
+            yield json.dumps({
+                "toolCall": {
+                    "functionCalls": [{
+                        "id": "call_trainer",
+                        "name": "switch_to_trainer_mode",
+                        "args": {}
+                    }]
+                }
+            })
+            await asyncio.sleep(0.6)
+            
+        mock_gemini_ws.__aiter__ = mock_async_iter
+        
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__.return_value = mock_gemini_ws
+        mock_connect.__aexit__.return_value = None
+        
+        with patch("websockets.connect", return_value=mock_connect), \
+             patch("app.routers.training_hub_voice.redirect_call", AsyncMock(return_value=True)) as mock_redirect:
+            client = TestClient(app)
+            with client.websocket_connect("/bm/training/hub/media-stream?flow=hub") as websocket:
+                websocket.send_json({"event": "connected"})
+                websocket.send_json({
+                    "event": "start",
+                    "start": {
+                        "streamSid": "stream_123",
+                        "callSid": "call_ws_test_hub",
+                    }
+                })
+                websocket.send_json({
+                    "event": "media",
+                    "media": {"payload": "f39/f39/f39/f39/"}
+                })
+                time.sleep(0.8)
+
+            # redirect_call must NOT have been called to trainer-init
+            for call_args in mock_redirect.call_args_list:
+                called_url = call_args[0][1] if call_args[0] else ""
+                self.assertNotIn("trainer-init", called_url,
+                    "switch_to_trainer_mode must NOT redirect to trainer-init")
+
+            # Gemini must have received the trainer code prompt
+            send_calls = mock_gemini_ws.send.call_args_list
+            trainer_prompt_text = None
+            for call in send_calls:
+                payload_str = call[0][0]
+                payload = json.loads(payload_str)
+                if "clientContent" in payload:
+                    turns = payload["clientContent"].get("turns", [])
+                    for turn in turns:
+                        for part in turn.get("parts", []):
+                            text = part.get("text", "")
+                            if "código de la simulación" in text.lower() and "Cristina" in text:
+                                trainer_prompt_text = text
+            self.assertIsNotNone(trainer_prompt_text,
+                "Gemini must receive trainer code prompt when switch_to_trainer_mode is called")
+            self.assertIn("Dubot", trainer_prompt_text)  # Req 12
 
     @patch("app.routers.training_hub_voice.settings")
     async def test_media_stream_dtmf_agent_and_mode_routing_cycles(self, mock_settings):
+        """Req 8: DTMF '2' still correctly redirects to cycles-init."""
         from fastapi.testclient import TestClient
         from app.main import app
         import json
@@ -696,25 +828,21 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
                         "callSid": "call_ws_test_hub",
                     }
                 })
-                # Send DTMF 7777
+                # Req 1: DTMF 7777 identifies Cristina Montenegro
                 for digit in ["7", "7", "7", "7"]:
                     websocket.send_json({
                         "event": "dtmf",
-                        "dtmf": {
-                            "digit": digit
-                        }
+                        "dtmf": {"digit": digit}
                     })
                 time.sleep(0.2)
-                # Send DTMF 2 to select Cycles
+                # Req 8: DTMF 2 to select Cycles
                 websocket.send_json({
                     "event": "dtmf",
-                    "dtmf": {
-                        "digit": "2"
-                    }
+                    "dtmf": {"digit": "2"}
                 })
                 time.sleep(0.4)
 
-            # Verify redirect_call was called to cycles-init
+            # Req 8: redirect_call must have been called to cycles-init
             mock_redirect.assert_called_once()
             called_url = mock_redirect.call_args[0][1]
             self.assertIn("cycles-init", called_url)
@@ -722,6 +850,7 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
 
     @patch("app.routers.training_hub_voice.settings")
     async def test_media_stream_trainer_code_greeting(self, mock_settings):
+        """Req 5+6+7+12: flow=trainer_code must send sim code prompt, no hub greeting, uses Dubot."""
         from fastapi.testclient import TestClient
         from app.main import app
         import json
@@ -773,18 +902,214 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
                             if "código" in text.lower():
                                 greeting_text = text
             self.assertIsNotNone(greeting_text)
-            self.assertIn("Dubot", greeting_text)
+            self.assertIn("Dubot", greeting_text)  # Req 12
             self.assertIn("código de la simulación", greeting_text.lower())
+            # Req 6: no hub greeting
             self.assertNotIn("has llamado al asistente virtual", greeting_text.lower())
+            # Req 7: no agent code request
             self.assertNotIn("identifícate con tu código de agente", greeting_text.lower())
             self.assertNotIn("código de agente", greeting_text.lower())
 
     async def test_trainer_init_appends_query_params(self):
+        """Req 9: trainer_init TwiML contains correct ws URL with flow and agent_id."""
         from app.routers.training_hub_voice import trainer_init
         req = self.mock_request(headers={"host": "test-host.com"})
         resp = await trainer_init(req, agent_id="7777", call_sid="call_123")
         body = resp.body.decode("utf-8")
         self.assertIn("wss://test-host.com/bm/training/hub/media-stream?flow=trainer_code&amp;agent_id=7777", body)
+
+    # ── DTMF in-stream edge cases ──────────────────────────────────────────────
+
+    @patch("app.routers.training_hub_voice.settings")
+    async def test_dtmf_invalid_agent_code(self, mock_settings):
+        """DTMF with invalid agent code (9999) must log warning, not crash."""
+        from fastapi.testclient import TestClient
+        from app.main import app
+        import json
+        import asyncio
+        import time
+        
+        mock_settings.gemini_api_key = "mock_key"
+        mock_settings.gemini_live_api_key = None
+        mock_settings.gemini_model = "models/gemini-3.1-flash-live-preview"
+        mock_settings.gemini_live_model = None
+        
+        mock_gemini_ws = AsyncMock()
+        mock_gemini_ws.send = AsyncMock()
+        
+        async def mock_async_iter(*args, **kwargs):
+            yield json.dumps({"setupComplete": {}})
+            await asyncio.sleep(0.8)
+            
+        mock_gemini_ws.__aiter__ = mock_async_iter
+        
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__.return_value = mock_gemini_ws
+        mock_connect.__aexit__.return_value = None
+        
+        with patch("websockets.connect", return_value=mock_connect), \
+             patch("app.routers.training_hub_voice.redirect_call", AsyncMock(return_value=True)):
+            client = TestClient(app)
+            with client.websocket_connect("/bm/training/hub/media-stream?flow=hub") as websocket:
+                websocket.send_json({"event": "connected"})
+                websocket.send_json({
+                    "event": "start",
+                    "start": {"streamSid": "stream_123", "callSid": "call_ws_test_hub"}
+                })
+                for digit in ["9", "9", "9", "9"]:
+                    websocket.send_json({"event": "dtmf", "dtmf": {"digit": digit}})
+                time.sleep(0.4)
+
+            # Gemini must have received an error prompt
+            send_calls = mock_gemini_ws.send.call_args_list
+            error_sent = any(
+                "incorrecto" in json.loads(c[0][0]).get("clientContent", {}).get("turns", [{}])[0].get("parts", [{}])[0].get("text", "").lower()
+                for c in send_calls
+                if "clientContent" in json.loads(c[0][0])
+            )
+            self.assertTrue(error_sent, "Invalid agent code must trigger error voice prompt")
+
+    @patch("app.routers.training_hub_voice.settings")
+    async def test_dtmf_invalid_mode(self, mock_settings):
+        """DTMF invalid mode digit (9 after identification) must not crash."""
+        from fastapi.testclient import TestClient
+        from app.main import app
+        import json
+        import asyncio
+        import time
+        
+        mock_settings.gemini_api_key = "mock_key"
+        mock_settings.gemini_live_api_key = None
+        mock_settings.gemini_model = "models/gemini-3.1-flash-live-preview"
+        mock_settings.gemini_live_model = None
+        
+        mock_gemini_ws = AsyncMock()
+        mock_gemini_ws.send = AsyncMock()
+        
+        async def mock_async_iter(*args, **kwargs):
+            yield json.dumps({"setupComplete": {}})
+            await asyncio.sleep(1.0)
+            
+        mock_gemini_ws.__aiter__ = mock_async_iter
+        
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__.return_value = mock_gemini_ws
+        mock_connect.__aexit__.return_value = None
+        
+        with patch("websockets.connect", return_value=mock_connect), \
+             patch("app.routers.training_hub_voice.redirect_call", AsyncMock(return_value=True)) as mock_redirect:
+            client = TestClient(app)
+            with client.websocket_connect("/bm/training/hub/media-stream?flow=hub") as websocket:
+                websocket.send_json({"event": "connected"})
+                websocket.send_json({
+                    "event": "start",
+                    "start": {"streamSid": "stream_123", "callSid": "call_ws_test_hub"}
+                })
+                for digit in ["7", "7", "7", "7"]:
+                    websocket.send_json({"event": "dtmf", "dtmf": {"digit": digit}})
+                time.sleep(0.2)
+                websocket.send_json({"event": "dtmf", "dtmf": {"digit": "9"}})
+                time.sleep(0.3)
+
+            # No redirect called (invalid digit = ignored)
+            mock_redirect.assert_not_called()
+
+    @patch("app.routers.training_hub_voice.settings")
+    async def test_dtmf_simulation_code_valid(self, mock_settings):
+        """DTMF simulation code SIM101 in trainer_code state redirects to Trainer."""
+        from fastapi.testclient import TestClient
+        from app.main import app
+        import json
+        import asyncio
+        import time
+        
+        mock_settings.gemini_api_key = "mock_key"
+        mock_settings.gemini_live_api_key = None
+        mock_settings.gemini_model = "models/gemini-3.1-flash-live-preview"
+        mock_settings.gemini_live_model = None
+        
+        mock_gemini_ws = AsyncMock()
+        mock_gemini_ws.send = AsyncMock()
+        
+        async def mock_async_iter(*args, **kwargs):
+            yield json.dumps({"setupComplete": {}})
+            await asyncio.sleep(1.5)
+            
+        mock_gemini_ws.__aiter__ = mock_async_iter
+        
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__.return_value = mock_gemini_ws
+        mock_connect.__aexit__.return_value = None
+        
+        with patch("websockets.connect", return_value=mock_connect), \
+             patch("app.routers.training_hub_voice.redirect_trainer_call", AsyncMock(return_value=True)) as mock_trainer_redirect:
+            client = TestClient(app)
+            with client.websocket_connect("/bm/training/hub/media-stream?flow=trainer_code&agent_id=7777") as websocket:
+                websocket.send_json({"event": "connected"})
+                websocket.send_json({
+                    "event": "start",
+                    "start": {"streamSid": "stream_123", "callSid": "call_ws_test_hub"}
+                })
+                # SIM101 = digits S-I-M-1-0-1 -> we test numeric: 101 # (short fallback)
+                for digit in ["S", "I", "M", "1", "0", "1"]:
+                    websocket.send_json({"event": "dtmf", "dtmf": {"digit": digit}})
+                time.sleep(0.4)
+
+            # Trainer redirect should have been called (SIM101 is 6 chars)
+            mock_trainer_redirect.assert_called_once()
+
+    @patch("app.routers.training_hub_voice.settings")
+    async def test_dtmf_simulation_code_invalid(self, mock_settings):
+        """DTMF invalid simulation code triggers retry prompt."""
+        from fastapi.testclient import TestClient
+        from app.main import app
+        import json
+        import asyncio
+        import time
+        
+        mock_settings.gemini_api_key = "mock_key"
+        mock_settings.gemini_live_api_key = None
+        mock_settings.gemini_model = "models/gemini-3.1-flash-live-preview"
+        mock_settings.gemini_live_model = None
+        
+        mock_gemini_ws = AsyncMock()
+        mock_gemini_ws.send = AsyncMock()
+        
+        async def mock_async_iter(*args, **kwargs):
+            yield json.dumps({"setupComplete": {}})
+            await asyncio.sleep(1.5)
+            
+        mock_gemini_ws.__aiter__ = mock_async_iter
+        
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__.return_value = mock_gemini_ws
+        mock_connect.__aexit__.return_value = None
+        
+        with patch("websockets.connect", return_value=mock_connect), \
+             patch("app.routers.training_hub_voice.redirect_trainer_call", AsyncMock(return_value=True)) as mock_trainer_redirect:
+            client = TestClient(app)
+            with client.websocket_connect("/bm/training/hub/media-stream?flow=trainer_code&agent_id=7777") as websocket:
+                websocket.send_json({"event": "connected"})
+                websocket.send_json({
+                    "event": "start",
+                    "start": {"streamSid": "stream_123", "callSid": "call_ws_test_hub"}
+                })
+                # INVALI = 6 chars but invalid code
+                for digit in ["I", "N", "V", "A", "L", "I"]:
+                    websocket.send_json({"event": "dtmf", "dtmf": {"digit": digit}})
+                time.sleep(0.4)
+
+            # Should NOT have been redirected for invalid code
+            mock_trainer_redirect.assert_not_called()
+            
+            # Error prompt must have been sent to Gemini
+            send_calls = mock_gemini_ws.send.call_args_list
+            error_sent = any(
+                "incorrecto" in json.loads(c[0][0]).get("clientContent", {}).get("turns", [{}])[0].get("parts", [{}])[0].get("text", "").lower()
+                for c in send_calls
+                if "clientContent" in json.loads(c[0][0])
+            )
+            self.assertTrue(error_sent, "Invalid sim code must trigger error voice prompt to Gemini")
 
 
 if __name__ == "__main__":
