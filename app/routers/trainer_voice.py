@@ -28,8 +28,30 @@ try:
 except ImportError:
     import audioop_lts as audioop
 
+import struct
+import math
+
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+VAD_ENERGY_THRESHOLD = 400.0
+VAD_MIN_SPEECH_DURATION_MS = 250
+VAD_GRACE_PERIOD_MS = 700
+
+def calculate_pcm_energy(pcm_data: bytes) -> float:
+    """Calculates RMS energy of 16-bit linear PCM audio data."""
+    if not pcm_data:
+        return 0.0
+    count = len(pcm_data) // 2
+    if count == 0:
+        return 0.0
+    try:
+        shorts = struct.unpack(f"<{count}h", pcm_data)
+        sum_squares = sum(float(s) * float(s) for s in shorts)
+        rms = math.sqrt(sum_squares / count)
+        return rms
+    except Exception:
+        return 0.0
 
 router = APIRouter(prefix="/bm/trainer/phone", tags=["Trainer Voice Voice/IVR"])
 
@@ -730,9 +752,16 @@ async def media_stream(
 
         logger.info("Trainer WS roleplay prompt loaded successfully.")
         turn_discipline = (
-            "\n=== REGLA DE TURNO CRÍTICA ===\n"
-            "No simules nunca la respuesta del agente. Solo habla como el cliente/personaje del escenario. "
-            "Después de cada intervención, detente y espera a que el agente humano responda. No continúes la conversación sin entrada del agente."
+            "\n=== REGLAS CRÍTICAS DE CONVERSACIÓN Y TURNO ===\n"
+            "1. NO simules nunca la respuesta del agente. Solo interpreta al cliente simulado.\n"
+            "2. Después de cada intervención, detente y espera a que el agente humano responda. No continúes la conversación sin entrada del agente.\n"
+            "3. Preséntate una sola vez al inicio. No repitas tu nombre en cada turno.\n"
+            "4. No reinicies el escenario. Mantén memoria conversacional. Si ya te presentaste (ej: 'Pedro Lázaro'), no vuelvas a hacerlo.\n"
+            "5. Reglas de objeción económica: Úsala de forma natural y progresiva, no de forma obsesiva ni repetitiva en todos los turnos. "
+            "No repitas la misma objeción de precio en turnos consecutivos. Máximo 1 mención de precio cada 3 turnos. "
+            "Varía tus preocupaciones entre tratamiento, confianza, resultados, tiempos, primera cita, privacidad y experiencia. "
+            "Si el agente ya respondió a una preocupación o explicó valor, financiación o beneficios, avanza la conversación de forma natural.\n"
+            "6. Haz intervenciones breves y naturales (de 1 a 2 frases como máximo)."
         )
         instruction = roleplay_prompt + turn_discipline + "\n" + SPANISH_VOICE_RULES
         tools = [
@@ -809,6 +838,11 @@ async def media_stream(
             waiting_for_user_response = False
             user_audio_seen_since_last_assistant_turn = False
             initial_roleplay_prompt_sent = False
+            last_assistant_turn_completed_at = None
+            speech_state = "silent"
+            accumulated_voice_ms = 0
+            consecutive_silent_ms = 0
+            discard_current_assistant_audio = False
             attempts = 0
             recording_sid = None
             redirected = False
@@ -837,6 +871,8 @@ async def media_stream(
             async def twilio_to_gemini_loop():
                 nonlocal stream_sid, call_sid, call_start_time, recording_sid, monitor_task, twilio_rate_state
                 nonlocal waiting_for_user_response, user_audio_seen_since_last_assistant_turn
+                nonlocal last_assistant_turn_completed_at, speech_state, accumulated_voice_ms, consecutive_silent_ms
+                nonlocal assistant_is_speaking, discard_current_assistant_audio
                 async for message in websocket.iter_text():
                     try:
                         data = json.loads(message)
@@ -864,19 +900,67 @@ async def media_stream(
                             media = data.get("media", {})
                             track = media.get("track")
                             payload = media.get("payload")
-                            if payload:
-                                logger.info("Trainer Twilio media received: track=%s, size=%d", track, len(payload))
                                 
                             # Only accept inbound track (user speech) to prevent feedback loops
                             if track == "inbound" and payload:
-                                if waiting_for_user_response:
-                                    logger.info("Trainer turn gate: user audio detected, allowing next assistant response.")
-                                    waiting_for_user_response = False
-                                    user_audio_seen_since_last_assistant_turn = True
-                                    
                                 # Transcode base64 G.711 µ-law to 16kHz linear PCM
                                 pcm_payload, twilio_rate_state = decode_twilio_to_gemini(payload, twilio_rate_state)
                                 if pcm_payload:
+                                    rms = calculate_pcm_energy(pcm_payload)
+                                    
+                                    # VAD grace period check
+                                    in_grace_period = False
+                                    if last_assistant_turn_completed_at:
+                                        elapsed_ms = (datetime.now(timezone.utc) - last_assistant_turn_completed_at).total_seconds() * 1000
+                                        if elapsed_ms < VAD_GRACE_PERIOD_MS:
+                                            in_grace_period = True
+                                            
+                                    if in_grace_period:
+                                        # Reset speech detection metrics during grace period to ignore tail noise/echoes
+                                        accumulated_voice_ms = 0
+                                        consecutive_silent_ms = 0
+                                    else:
+                                        if rms > VAD_ENERGY_THRESHOLD:
+                                            accumulated_voice_ms += 20
+                                            consecutive_silent_ms = 0
+                                            
+                                            # Speech confirmed threshold
+                                            if accumulated_voice_ms >= VAD_MIN_SPEECH_DURATION_MS:
+                                                if speech_state != "speaking":
+                                                    speech_state = "speaking"
+                                                    logger.info("Trainer VAD: user speech started.")
+                                                    
+                                                if waiting_for_user_response:
+                                                    logger.info("Trainer VAD: user speech confirmed, allowing next assistant response.")
+                                                    waiting_for_user_response = False
+                                                    user_audio_seen_since_last_assistant_turn = True
+                                                    
+                                                # Handle Barge-in (interruption)
+                                                if assistant_is_speaking:
+                                                    logger.info("Trainer barge-in detected: user interrupted assistant.")
+                                                    discard_current_assistant_audio = True
+                                                    assistant_is_speaking = False
+                                                    waiting_for_user_response = False
+                                                    user_audio_seen_since_last_assistant_turn = True
+                                                    logger.info("Trainer barge-in: stopped forwarding current assistant audio.")
+                                                    logger.info("Trainer turn gate: user interruption accepted.")
+                                                    
+                                                    # Send clear event to Twilio to stop playing queued audio immediately
+                                                    if stream_sid:
+                                                        clear_msg = {
+                                                            "event": "clear",
+                                                            "streamSid": stream_sid
+                                                        }
+                                                        await websocket.send_text(json.dumps(clear_msg))
+                                                        logger.info("Trainer barge-in: sent Twilio clear event.")
+                                        else:
+                                            consecutive_silent_ms += 20
+                                            if consecutive_silent_ms >= 300:
+                                                accumulated_voice_ms = 0
+                                                if speech_state == "speaking":
+                                                    speech_state = "silent"
+                                                    logger.info("Trainer VAD: user speech ended.")
+
                                     input_msg = {
                                         "realtimeInput": {
                                             "audio": {
@@ -897,6 +981,7 @@ async def media_stream(
             async def gemini_to_twilio_loop():
                 nonlocal gemini_ready, attempts, identified_agent_id, identified_agent_code, redirected, gemini_rate_state
                 nonlocal assistant_is_speaking, waiting_for_user_response, user_audio_seen_since_last_assistant_turn, initial_roleplay_prompt_sent
+                nonlocal last_assistant_turn_completed_at, discard_current_assistant_audio
                 async for message in gemini_ws:
                     try:
                         data = json.loads(message)
@@ -1006,6 +1091,10 @@ async def media_stream(
                                 logger.warning("Trainer turn gate: blocked assistant self-response because no user audio was received.")
                                 continue
                                 
+                            # Barge-in: Discard current assistant audio packets if user interrupted
+                            if discard_current_assistant_audio:
+                                continue
+                                
                             model_turn = data["serverContent"].get("modelTurn", {})
                             parts = model_turn.get("parts", [])
                             for part in parts:
@@ -1032,6 +1121,8 @@ async def media_stream(
                                 assistant_is_speaking = False
                                 waiting_for_user_response = True
                                 user_audio_seen_since_last_assistant_turn = False
+                                last_assistant_turn_completed_at = datetime.now(timezone.utc)
+                                discard_current_assistant_audio = False
                                 
                     except Exception as e_inner:
                         logger.error("Error in gemini_to_twilio_loop: %s", e_inner)

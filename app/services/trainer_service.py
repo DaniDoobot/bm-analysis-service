@@ -713,10 +713,14 @@ class TrainerService:
             db.add(eval_record)
             
             # Update session status
-            sess.evaluation_status = "evaluated"
+            if score_decimal is None:
+                sess.evaluation_status = "completed_without_score"
+                logger.warning("Session %d evaluated but completed without score.", session_id)
+            else:
+                sess.evaluation_status = "evaluated"
+                logger.info("Session %d evaluated successfully with score %s.", session_id, score_decimal)
             sess.updated_at = datetime.now(timezone.utc)
             await db.commit()
-            logger.info("Session %d evaluated successfully with score %s.", session_id, score_decimal)
 
         except Exception as e:
             logger.exception("Evaluation execution failed for session %d: %s", session_id, e)
@@ -792,9 +796,21 @@ class TrainerService:
         total_count = res_count.scalar() or 0
 
         # Sort and limit
-        stmt = stmt.order_by(desc(TrainerSession.started_at)).limit(limit)
+        from sqlalchemy.orm import selectinload
+        stmt = stmt.options(selectinload(TrainerSession.simulation)).order_by(desc(TrainerSession.started_at)).limit(limit)
         res = await db.execute(stmt)
         sessions = list(res.scalars().all())
+
+        if sessions:
+            session_ids = [s.session_id for s in sessions]
+            stmt_evals = select(TrainerEvaluation).where(TrainerEvaluation.session_id.in_(session_ids))
+            res_evals = await db.execute(stmt_evals)
+            evals_map = {e.session_id: e for e in res_evals.scalars().all()}
+            for s in sessions:
+                s.evaluation = evals_map.get(s.session_id)
+        else:
+            for s in sessions:
+                s.evaluation = None
 
         return sessions, total_count
 
