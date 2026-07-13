@@ -729,7 +729,12 @@ async def media_stream(
                 roleplay_prompt = version.roleplay_prompt_snapshot
 
         logger.info("Trainer WS roleplay prompt loaded successfully.")
-        instruction = roleplay_prompt + "\n" + SPANISH_VOICE_RULES
+        turn_discipline = (
+            "\n=== REGLA DE TURNO CRÍTICA ===\n"
+            "No simules nunca la respuesta del agente. Solo habla como el cliente/personaje del escenario. "
+            "Después de cada intervención, detente y espera a que el agente humano responda. No continúes la conversación sin entrada del agente."
+        )
+        instruction = roleplay_prompt + turn_discipline + "\n" + SPANISH_VOICE_RULES
         tools = [
             {
                 "functionDeclarations": [
@@ -800,6 +805,10 @@ async def media_stream(
             
             # State variables
             gemini_ready = False
+            assistant_is_speaking = False
+            waiting_for_user_response = False
+            user_audio_seen_since_last_assistant_turn = False
+            initial_roleplay_prompt_sent = False
             attempts = 0
             recording_sid = None
             redirected = False
@@ -827,6 +836,7 @@ async def media_stream(
             # Concurrency loops
             async def twilio_to_gemini_loop():
                 nonlocal stream_sid, call_sid, call_start_time, recording_sid, monitor_task, twilio_rate_state
+                nonlocal waiting_for_user_response, user_audio_seen_since_last_assistant_turn
                 async for message in websocket.iter_text():
                     try:
                         data = json.loads(message)
@@ -852,8 +862,18 @@ async def media_stream(
                                     
                         elif event == "media" and gemini_ready:
                             media = data.get("media", {})
+                            track = media.get("track")
                             payload = media.get("payload")
                             if payload:
+                                logger.info("Trainer Twilio media received: track=%s, size=%d", track, len(payload))
+                                
+                            # Only accept inbound track (user speech) to prevent feedback loops
+                            if track == "inbound" and payload:
+                                if waiting_for_user_response:
+                                    logger.info("Trainer turn gate: user audio detected, allowing next assistant response.")
+                                    waiting_for_user_response = False
+                                    user_audio_seen_since_last_assistant_turn = True
+                                    
                                 # Transcode base64 G.711 µ-law to 16kHz linear PCM
                                 pcm_payload, twilio_rate_state = decode_twilio_to_gemini(payload, twilio_rate_state)
                                 if pcm_payload:
@@ -876,6 +896,7 @@ async def media_stream(
 
             async def gemini_to_twilio_loop():
                 nonlocal gemini_ready, attempts, identified_agent_id, identified_agent_code, redirected, gemini_rate_state
+                nonlocal assistant_is_speaking, waiting_for_user_response, user_audio_seen_since_last_assistant_turn, initial_roleplay_prompt_sent
                 async for message in gemini_ws:
                     try:
                         data = json.loads(message)
@@ -886,26 +907,31 @@ async def media_stream(
                             
                             # Initial greeting if starting roleplay
                             if session_id is not None:
-                                async with AsyncSessionLocal() as sub_db:
-                                    stmt_s = select(TrainerSession).where(TrainerSession.session_id == session_id)
-                                    res_s = await sub_db.execute(stmt_s)
-                                    sess_obj = res_s.scalars().first()
-                                    
-                                    stmt_ag = select(TrainingAgentSetting).where(TrainingAgentSetting.hubspot_owner_id == sess_obj.agent_id)
-                                    res_ag = await sub_db.execute(stmt_ag)
-                                    setting_obj = res_ag.scalars().first()
-                                    agent_first_name = setting_obj.agent_name.split()[0] if setting_obj else "Agente"
+                                if not initial_roleplay_prompt_sent:
+                                    initial_roleplay_prompt_sent = True
+                                    logger.info("Trainer roleplay initial prompt sent.")
+                                    async with AsyncSessionLocal() as sub_db:
+                                        stmt_s = select(TrainerSession).where(TrainerSession.session_id == session_id)
+                                        res_s = await sub_db.execute(stmt_s)
+                                        sess_obj = res_s.scalars().first()
+                                        
+                                        stmt_ag = select(TrainingAgentSetting).where(TrainingAgentSetting.hubspot_owner_id == sess_obj.agent_id)
+                                        res_ag = await sub_db.execute(stmt_ag)
+                                        setting_obj = res_ag.scalars().first()
+                                        agent_first_name = setting_obj.agent_name.split()[0] if setting_obj else "Agente"
 
-                                greet_msg = {
-                                    "clientContent": {
-                                        "turns": [{
-                                            "role": "user",
-                                            "parts": [{"text": f"Di exactamente: 'Perfecto {agent_first_name}, se ha verificado el código de la simulación. Iniciamos el roleplay. Prepárate.' y a continuación, sin pausar, asume tu personaje de paciente."}]
-                                        }],
-                                        "turnComplete": True
+                                    greet_msg = {
+                                        "clientContent": {
+                                            "turns": [{
+                                                "role": "user",
+                                                "parts": [{"text": f"Di exactamente: 'Perfecto {agent_first_name}, se ha verificado el código de la simulación. Iniciamos el roleplay. Prepárate.' y a continuación, sin pausar, asume tu personaje de paciente."}]
+                                            }],
+                                            "turnComplete": True
+                                        }
                                     }
-                                }
-                                await gemini_ws.send(json.dumps(greet_msg))
+                                    await gemini_ws.send(json.dumps(greet_msg))
+                                else:
+                                    logger.info("Ignoring duplicate initial roleplay prompt trigger.")
                                 
                         elif "toolCall" in data:
                             calls = data["toolCall"].get("functionCalls", [])
@@ -975,11 +1001,20 @@ async def media_stream(
                                     return
 
                         elif "serverContent" in data:
+                            # Turn taking block gate
+                            if initial_roleplay_prompt_sent and waiting_for_user_response and not user_audio_seen_since_last_assistant_turn:
+                                logger.warning("Trainer turn gate: blocked assistant self-response because no user audio was received.")
+                                continue
+                                
                             model_turn = data["serverContent"].get("modelTurn", {})
                             parts = model_turn.get("parts", [])
                             for part in parts:
                                 audio_base64 = part.get("inlineData", {}).get("data")
                                 if audio_base64:
+                                    if not assistant_is_speaking:
+                                        logger.info("Trainer turn gate: assistant response started.")
+                                        assistant_is_speaking = True
+                                        
                                     # Transcode 24kHz linear PCM to µ-law 8kHz
                                     mulaw_payload, gemini_rate_state = encode_gemini_to_twilio(audio_base64, gemini_rate_state)
                                     if mulaw_payload and stream_sid:
@@ -991,6 +1026,13 @@ async def media_stream(
                                             }
                                         }
                                         await websocket.send_text(json.dumps(media_msg))
+                                        
+                            if data["serverContent"].get("turnComplete"):
+                                logger.info("Trainer turn gate: assistant response completed, waiting for user.")
+                                assistant_is_speaking = False
+                                waiting_for_user_response = True
+                                user_audio_seen_since_last_assistant_turn = False
+                                
                     except Exception as e_inner:
                         logger.error("Error in gemini_to_twilio_loop: %s", e_inner)
                         break
