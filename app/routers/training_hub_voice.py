@@ -226,7 +226,7 @@ async def incoming_call(request: Request):
     proto = request.headers.get("x-forwarded-proto", "http")
     scheme = "wss" if proto == "https" or "localhost" not in host else "ws"
     
-    ws_url = f"{scheme}://{host}/bm/training/hub/media-stream"
+    ws_url = f"{scheme}://{host}/bm/training/hub/media-stream?flow=hub"
     
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
@@ -344,7 +344,7 @@ async def trainer_init(request: Request, agent_id: str = Query(...), call_sid: s
     proto = request.headers.get("x-forwarded-proto", "http")
     scheme = "wss" if proto == "https" or "localhost" not in host else "ws"
     
-    ws_url = f"{scheme}://{host}/bm/training/hub/media-stream"
+    ws_url = f"{scheme}://{host}/bm/training/hub/media-stream?flow=trainer_code&amp;agent_id={agent_id}"
     
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
@@ -450,13 +450,23 @@ async def no_active_cycles(request: Request):
 
 @router.websocket("/media-stream")
 async def media_stream(websocket: WebSocket):
-    """WebSocket for unified voice identification, mode selection and Trainer code entry."""
     await websocket.accept()
     logger.info("Accepted training hub media stream connection.")
     
     params = dict(websocket.query_params)
     flow = params.get("flow", "hub")
     agent_id = params.get("agent_id")
+    
+    agent_name = "Agente"
+    agent_initials = ""
+    if agent_id:
+        async with AsyncSessionLocal() as db:
+            stmt = select(TrainingAgentSetting).where(TrainingAgentSetting.hubspot_owner_id == agent_id)
+            res = await db.execute(stmt)
+            setting = res.scalars().first()
+            if setting:
+                agent_name = setting.agent_name
+                agent_initials = setting.agent_initials
     
     gemini_api_key = getattr(settings, "gemini_live_api_key", None) or getattr(settings, "gemini_api_key", None)
     if not gemini_api_key:
@@ -476,7 +486,7 @@ async def media_stream(websocket: WebSocket):
                         "type": "OBJECT",
                         "properties": {
                             "agent_code": {
-                                "type": "STRING",
+                                                    "type": "STRING",
                                 "description": "Código de agente hablado"
                             }
                         },
@@ -501,7 +511,19 @@ async def media_stream(websocket: WebSocket):
             ]
         }]
     elif flow == "trainer_code":
-        system_instruction = TRAINER_CODE_SYSTEM_INSTRUCTION
+        first_name = agent_name.split()[0] if agent_name else "Agente"
+        system_instruction = f"""
+Eres el Asistente virtual de entrenamiento de Dubot.
+El agente ya está identificado como {agent_name} y ha seleccionado realizar una simulación en Trainer.
+Tu única labor ahora es:
+1. Preguntarle el código de la simulación que desea iniciar: "Perfecto, {first_name}. Dime el código de la simulación que quieres realizar. También puedes marcarla con el teclado."
+2. Cuando diga el código (ej: "SIM ciento uno", "SIM101", "VENTAS dos"), normalízalo en mayúsculas y llama a `verify_simulation_code(simulation_code=codigo_normalizado)`.
+3. Si el backend devuelve que el código es inválido (status es "invalid"), indícalo y vuelve a pedírselo amablemente.
+4. Si es válido y se inicia la redirección, di "Perfecto, vamos a comenzar la simulación." y mantente en silencio mientras la llamada es transferida.
+
+Reglas de pronunciación:
+{SPANISH_VOICE_RULES}
+"""
         tools_decl = [{
             "functionDeclarations": [
                 {
@@ -563,7 +585,7 @@ async def media_stream(websocket: WebSocket):
             if flow == "hub":
                 greet_text = "Di exactamente: 'Hola, has llamado al asistente virtual de entrenamiento de Dubot. Identifícate con tu código de agente, por favor. Puedes decirlo por voz o introducirlo con el teclado.' y quédate en silencio."
             elif flow == "trainer_code":
-                greet_text = "Di exactamente: 'Por favor, dime el código de la simulación que quieres realizar. También puedes marcarla con el teclado.' y quédate en silencio."
+                greet_text = "Di exactamente: 'Por favor, dime el código de la simulación de Dubot que quieres realizar. También puedes marcarla con el teclado.' y quédate en silencio."
                 
             if greet_text:
                 greet_msg = {
@@ -582,9 +604,59 @@ async def media_stream(websocket: WebSocket):
             attempts = 0
             redirected = False
             identified_agent_id = agent_id
+            dtmf_buffer = ""
+            current_state = "awaiting_agent_code" if flow == "hub" else "trainer_code"
+            
+            async def play_redirection_error():
+                logger.error("Twilio redirection failed. Instructing Gemini to play config error and closing.")
+                err_msg = {
+                    "clientContent": {
+                        "turns": [{
+                            "role": "user",
+                            "parts": [{"text": "Di exactamente: 'Lo siento, hay un problema de configuración de telefonía. Por favor, ponte en contacto con soporte. La llamada finalizará.' y quédate en silencio."}]
+                        }],
+                        "turnComplete": True
+                    }
+                }
+                await gemini_ws.send(json.dumps(err_msg))
+                await asyncio.sleep(4.0)
+                await websocket.close()
+
+            async def validate_and_redirect_simulation(sim_code: str):
+                nonlocal redirected, attempts, call_sid
+                proto_http = websocket.headers.get("x-forwarded-proto", "http")
+                scheme_http = "https" if proto_http == "https" or "localhost" not in (websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost") else "http"
+                host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"
+                
+                async with AsyncSessionLocal() as sub_db:
+                    sim = await TrainerService.validate_simulation_code(sub_db, sim_code)
+                    if sim and identified_agent_id:
+                        logger.info("Simulation validated via DTMF in stream: sim_id=%s, code=%s", sim.simulation_id, sim_code)
+                        ok = await redirect_trainer_call(call_sid, host, identified_agent_id, sim.simulation_id)
+                        if not ok:
+                            await play_redirection_error()
+                        redirected = True
+                    else:
+                        logger.warning("Invalid simulation code entered via DTMF in stream: %s", sim_code)
+                        attempts += 1
+                        if attempts >= 3:
+                            logger.info("Redirecting to DTMF collect-simulation-dtmf after %d failed attempts.", attempts)
+                            await redirect_call(call_sid, f"{scheme_http}://{host}/bm/training/hub/collect-simulation-dtmf?agent_id={identified_agent_id}&call_sid={call_sid}")
+                            redirected = True
+                        else:
+                            err_msg = {
+                                "clientContent": {
+                                    "turns": [{
+                                        "role": "user",
+                                        "parts": [{"text": "Di exactamente: 'Código de simulación incorrecto. Por favor, dilo de nuevo o márcalo con el teclado.' y quédate en silencio."}]
+                                    }],
+                                    "turnComplete": True
+                                }
+                            }
+                            await gemini_ws.send(json.dumps(err_msg))
             
             async def receive_from_twilio():
-                nonlocal call_sid, stream_sid, redirected
+                nonlocal call_sid, stream_sid, redirected, dtmf_buffer, current_state, identified_agent_id, attempts
                 try:
                     async for message in websocket.iter_text():
                         if redirected:
@@ -616,6 +688,88 @@ async def media_stream(websocket: WebSocket):
                                 }
                             }
                             await gemini_ws.send(json.dumps(gemini_msg))
+                        elif event == "dtmf":
+                            digit = data["dtmf"]["digit"]
+                            logger.info("Training Hub DTMF received: digit=%s", digit)
+                            
+                            proto_http = websocket.headers.get("x-forwarded-proto", "http")
+                            scheme_http = "https" if proto_http == "https" or "localhost" not in (websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost") else "http"
+                            host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"
+                            
+                            if current_state == "awaiting_agent_code":
+                                dtmf_buffer += digit
+                                logger.info("Training Hub DTMF buffer updated: state=awaiting_agent_code, length=%d", len(dtmf_buffer))
+                                if len(dtmf_buffer) == 4:
+                                    logger.info("Training Hub DTMF agent code completed: code=%s", dtmf_buffer)
+                                    async with AsyncSessionLocal() as sub_db:
+                                        agent = await TrainerService.validate_agent_code(sub_db, dtmf_buffer)
+                                        if agent:
+                                            identified_agent_id = agent["agent_id"]
+                                            first_name = agent["agent_name"].split()[0]
+                                            logger.info("Training Hub agent validation success via DTMF: agent_id=%s, name=%s", agent["agent_id"], agent["agent_name"])
+                                            current_state = "awaiting_mode"
+                                            dtmf_buffer = ""
+                                            
+                                            # Instruct Gemini to speak the success prompt
+                                            greet_msg = {
+                                                "clientContent": {
+                                                    "turns": [{
+                                                        "role": "user",
+                                                        "parts": [{"text": f"Di exactamente: 'Estupendo, {first_name}. ¿Quieres practicar en Trainer o avanzar con tus ciclos?'"}]
+                                                    }],
+                                                    "turnComplete": True
+                                                }
+                                            }
+                                            await gemini_ws.send(json.dumps(greet_msg))
+                                        else:
+                                            logger.warning("Training Hub agent validation failed via DTMF: code=%s", dtmf_buffer)
+                                            dtmf_buffer = ""
+                                            attempts += 1
+                                            if attempts >= 2:
+                                                logger.info("Redirecting to DTMF collect-agent-dtmf after %d failed attempts.", attempts)
+                                                await redirect_call(call_sid, f"{scheme_http}://{host}/bm/training/hub/collect-agent-dtmf?call_sid={call_sid}")
+                                                redirected = True
+                                                break
+                                            else:
+                                                err_msg = {
+                                                    "clientContent": {
+                                                        "turns": [{
+                                                            "role": "user",
+                                                            "parts": [{"text": "Di exactamente: 'Código de agente incorrecto. Por favor, dilo de nuevo o márcalo con el teclado.' y quédate en silencio."}]
+                                                        }],
+                                                        "turnComplete": True
+                                                    }
+                                                }
+                                                await gemini_ws.send(json.dumps(err_msg))
+                                                
+                            elif current_state == "awaiting_mode":
+                                if digit == "1":
+                                    logger.info("Training Hub DTMF mode selected: trainer")
+                                    ok = await redirect_call(call_sid, f"{scheme_http}://{host}/bm/training/hub/trainer-init?agent_id={identified_agent_id}&call_sid={call_sid}")
+                                    if not ok:
+                                        await play_redirection_error()
+                                    redirected = True
+                                    break
+                                elif digit == "2":
+                                    logger.info("Training Hub DTMF mode selected: cycles")
+                                    ok = await redirect_call(call_sid, f"{scheme_http}://{host}/bm/training/hub/cycles-init?agent_id={identified_agent_id}&call_sid={call_sid}")
+                                    if not ok:
+                                        await play_redirection_error()
+                                    redirected = True
+                                    break
+                                    
+                            elif current_state == "trainer_code":
+                                if digit == "#":
+                                    sim_code = dtmf_buffer
+                                    dtmf_buffer = ""
+                                    await validate_and_redirect_simulation(sim_code)
+                                else:
+                                    dtmf_buffer += digit
+                                    logger.info("Training Hub DTMF buffer updated: state=trainer_code, length=%d", len(dtmf_buffer))
+                                    if len(dtmf_buffer) == 6:
+                                        sim_code = dtmf_buffer
+                                        dtmf_buffer = ""
+                                        await validate_and_redirect_simulation(sim_code)
                         elif event == "stop":
                             logger.info("Twilio stream stop.")
                             break
@@ -625,7 +779,7 @@ async def media_stream(websocket: WebSocket):
                     logger.error("Error in receive_from_twilio: %s", e)
 
             async def send_to_twilio():
-                nonlocal call_sid, stream_sid, attempts, redirected, identified_agent_id
+                nonlocal call_sid, stream_sid, attempts, redirected, identified_agent_id, current_state
                 proto_http = websocket.headers.get("x-forwarded-proto", "http")
                 scheme_http = "https" if proto_http == "https" or "localhost" not in (websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost") else "http"
                 logged_initial_greeting_sent = False
@@ -640,7 +794,10 @@ async def media_stream(websocket: WebSocket):
                         if "serverContent" in data:
                             if not logged_initial_greeting_sent:
                                 logged_initial_greeting_sent = True
-                                logger.info("Training Hub initial greeting sent by Gemini.")
+                                if flow == "hub":
+                                    logger.info("Training Hub initial greeting sent by Gemini.")
+                                elif flow == "trainer_code":
+                                    logger.info("Trainer code prompt sent by Gemini.")
                             parts = data["serverContent"].get("modelTurn", {}).get("parts", [])
                             for part in parts:
                                 mime = part.get("inlineData", {}).get("mimeType", "")
@@ -677,6 +834,7 @@ async def media_stream(websocket: WebSocket):
                                         agent = await TrainerService.validate_agent_code(sub_db, normalized)
                                         if agent:
                                             identified_agent_id = agent["agent_id"]
+                                            current_state = "awaiting_mode"
                                             logger.info("Training Hub agent validation success: agent_id=%s, initials=%s, name=%s", 
                                                         agent["agent_id"], agent["agent_initials"], agent["agent_name"])
                                             result_val = {"status": "valid", "agent_name": agent["agent_name"]}

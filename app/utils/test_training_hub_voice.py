@@ -580,6 +580,212 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
                                 break
             self.assertTrue(error_prompt_sent)
 
+    @patch("app.routers.training_hub_voice.settings")
+    async def test_media_stream_dtmf_agent_and_mode_routing(self, mock_settings):
+        from fastapi.testclient import TestClient
+        from app.main import app
+        import json
+        import asyncio
+        import time
+        
+        mock_settings.gemini_api_key = "mock_key"
+        mock_settings.gemini_live_api_key = None
+        mock_settings.gemini_model = "models/gemini-3.1-flash-live-preview"
+        mock_settings.gemini_live_model = None
+        
+        mock_gemini_ws = AsyncMock()
+        mock_gemini_ws.send = AsyncMock()
+        
+        async def mock_async_iter(*args, **kwargs):
+            yield json.dumps({"setupComplete": {}})
+            await asyncio.sleep(0.8)
+            
+        mock_gemini_ws.__aiter__ = mock_async_iter
+        
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__.return_value = mock_gemini_ws
+        mock_connect.__aexit__.return_value = None
+        
+        with patch("websockets.connect", return_value=mock_connect), \
+             patch("app.routers.training_hub_voice.redirect_call", AsyncMock(return_value=True)) as mock_redirect:
+            client = TestClient(app)
+            with client.websocket_connect("/bm/training/hub/media-stream?flow=hub") as websocket:
+                websocket.send_json({"event": "connected"})
+                websocket.send_json({
+                    "event": "start",
+                    "start": {
+                        "streamSid": "stream_123",
+                        "callSid": "call_ws_test_hub",
+                    }
+                })
+                # Send DTMF 7777
+                for digit in ["7", "7", "7", "7"]:
+                    websocket.send_json({
+                        "event": "dtmf",
+                        "dtmf": {
+                            "digit": digit
+                        }
+                    })
+                time.sleep(0.2)
+                # Send DTMF 1 to select Trainer
+                websocket.send_json({
+                    "event": "dtmf",
+                    "dtmf": {
+                        "digit": "1"
+                    }
+                })
+                time.sleep(0.4)
+
+            # Verify redirect_call was called to trainer-init with the correct arguments
+            mock_redirect.assert_called_once()
+            called_url = mock_redirect.call_args[0][1]
+            self.assertIn("trainer-init", called_url)
+            self.assertIn("agent_id=7777", called_url)
+
+            # Verify that the Gemini WebSocket received the validation prompt turn
+            send_calls = mock_gemini_ws.send.call_args_list
+            dtmf_welcome_prompt = None
+            for call in send_calls:
+                payload_str = call[0][0]
+                payload = json.loads(payload_str)
+                if "clientContent" in payload:
+                    turns = payload["clientContent"].get("turns", [])
+                    for turn in turns:
+                        for part in turn.get("parts", []):
+                            text = part.get("text", "")
+                            if "Estupendo, Cristina" in text:
+                                dtmf_welcome_prompt = text
+            self.assertIsNotNone(dtmf_welcome_prompt)
+            self.assertNotIn("dímelo por voz", dtmf_welcome_prompt.lower())
+
+    @patch("app.routers.training_hub_voice.settings")
+    async def test_media_stream_dtmf_agent_and_mode_routing_cycles(self, mock_settings):
+        from fastapi.testclient import TestClient
+        from app.main import app
+        import json
+        import asyncio
+        import time
+        
+        mock_settings.gemini_api_key = "mock_key"
+        mock_settings.gemini_live_api_key = None
+        mock_settings.gemini_model = "models/gemini-3.1-flash-live-preview"
+        mock_settings.gemini_live_model = None
+        
+        mock_gemini_ws = AsyncMock()
+        mock_gemini_ws.send = AsyncMock()
+        
+        async def mock_async_iter(*args, **kwargs):
+            yield json.dumps({"setupComplete": {}})
+            await asyncio.sleep(0.8)
+            
+        mock_gemini_ws.__aiter__ = mock_async_iter
+        
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__.return_value = mock_gemini_ws
+        mock_connect.__aexit__.return_value = None
+        
+        with patch("websockets.connect", return_value=mock_connect), \
+             patch("app.routers.training_hub_voice.redirect_call", AsyncMock(return_value=True)) as mock_redirect:
+            client = TestClient(app)
+            with client.websocket_connect("/bm/training/hub/media-stream?flow=hub") as websocket:
+                websocket.send_json({"event": "connected"})
+                websocket.send_json({
+                    "event": "start",
+                    "start": {
+                        "streamSid": "stream_123",
+                        "callSid": "call_ws_test_hub",
+                    }
+                })
+                # Send DTMF 7777
+                for digit in ["7", "7", "7", "7"]:
+                    websocket.send_json({
+                        "event": "dtmf",
+                        "dtmf": {
+                            "digit": digit
+                        }
+                    })
+                time.sleep(0.2)
+                # Send DTMF 2 to select Cycles
+                websocket.send_json({
+                    "event": "dtmf",
+                    "dtmf": {
+                        "digit": "2"
+                    }
+                })
+                time.sleep(0.4)
+
+            # Verify redirect_call was called to cycles-init
+            mock_redirect.assert_called_once()
+            called_url = mock_redirect.call_args[0][1]
+            self.assertIn("cycles-init", called_url)
+            self.assertIn("agent_id=7777", called_url)
+
+    @patch("app.routers.training_hub_voice.settings")
+    async def test_media_stream_trainer_code_greeting(self, mock_settings):
+        from fastapi.testclient import TestClient
+        from app.main import app
+        import json
+        import asyncio
+        import time
+        
+        mock_settings.gemini_api_key = "mock_key"
+        mock_settings.gemini_live_api_key = None
+        mock_settings.gemini_model = "models/gemini-3.1-flash-live-preview"
+        mock_settings.gemini_live_model = None
+        
+        mock_gemini_ws = AsyncMock()
+        mock_gemini_ws.send = AsyncMock()
+        
+        async def mock_async_iter(*args, **kwargs):
+            yield json.dumps({"setupComplete": {}})
+            await asyncio.sleep(0.5)
+            
+        mock_gemini_ws.__aiter__ = mock_async_iter
+        
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__.return_value = mock_gemini_ws
+        mock_connect.__aexit__.return_value = None
+        
+        with patch("websockets.connect", return_value=mock_connect):
+            client = TestClient(app)
+            with client.websocket_connect("/bm/training/hub/media-stream?flow=trainer_code&agent_id=7777") as websocket:
+                websocket.send_json({"event": "connected"})
+                websocket.send_json({
+                    "event": "start",
+                    "start": {
+                        "streamSid": "stream_123",
+                        "callSid": "call_ws_test_hub",
+                    }
+                })
+                time.sleep(0.4)
+
+            # Verify greeting contents for trainer_code
+            send_calls = mock_gemini_ws.send.call_args_list
+            greeting_text = None
+            for call in send_calls:
+                payload_str = call[0][0]
+                payload = json.loads(payload_str)
+                if "clientContent" in payload:
+                    turns = payload["clientContent"].get("turns", [])
+                    for turn in turns:
+                        for part in turn.get("parts", []):
+                            text = part.get("text", "")
+                            if "código" in text.lower():
+                                greeting_text = text
+            self.assertIsNotNone(greeting_text)
+            self.assertIn("Dubot", greeting_text)
+            self.assertIn("código de la simulación", greeting_text.lower())
+            self.assertNotIn("has llamado al asistente virtual", greeting_text.lower())
+            self.assertNotIn("identifícate con tu código de agente", greeting_text.lower())
+            self.assertNotIn("código de agente", greeting_text.lower())
+
+    async def test_trainer_init_appends_query_params(self):
+        from app.routers.training_hub_voice import trainer_init
+        req = self.mock_request(headers={"host": "test-host.com"})
+        resp = await trainer_init(req, agent_id="7777", call_sid="call_123")
+        body = resp.body.decode("utf-8")
+        self.assertIn("wss://test-host.com/bm/training/hub/media-stream?flow=trainer_code&amp;agent_id=7777", body)
+
 
 if __name__ == "__main__":
     unittest.main()
