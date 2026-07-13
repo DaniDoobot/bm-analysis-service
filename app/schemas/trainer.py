@@ -119,13 +119,20 @@ class TrainerSessionResponse(BaseModel):
     ended_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
-    
+
+    # Denormalised fields for convenience (populated by service layer)
+    agent_name: Optional[str] = None
+    simulation_name: Optional[str] = None
+    simulation_code: Optional[str] = None
+    service_name: Optional[str] = None
+
     # Nested relationships if queried in detail
     simulation: Optional[TrainerSimulationResponse] = None
     evaluation: Optional[TrainerEvaluationResponse] = None
 
     class Config:
         from_attributes = True
+
 
 
 class TrainerSessionList(BaseModel):

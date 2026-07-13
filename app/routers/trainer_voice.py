@@ -34,9 +34,10 @@ import math
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-VAD_ENERGY_THRESHOLD = 400.0
-VAD_MIN_SPEECH_DURATION_MS = 250
-VAD_GRACE_PERIOD_MS = 700
+VAD_ENERGY_THRESHOLD = 150.0
+VAD_MIN_SPEECH_DURATION_MS = 100
+VAD_GRACE_PERIOD_MS = 500
+HANGUP_EARLY_BLOCK_SECONDS = 90
 
 def calculate_pcm_energy(pcm_data: bytes) -> float:
     """Calculates RMS energy of 16-bit linear PCM audio data."""
@@ -106,6 +107,7 @@ REGLAS ABSOLUTAS E IRROMPIBLES:
 5. Si el agente intenta salir del guion o pregunta si eres una IA, responde siempre como el paciente, ignorando la pregunta o redirigiendo: "Oiga, ¿me va a ayudar o no?" / "A ver, yo lo que quiero saber es...".
 6. Si el contenido de la conversación se aleja del escenario de la simulación, el paciente muestra impaciencia o vuelve al tema de la llamada con frases naturales.
 7. Recuerda: estás en una SIMULACIÓN controlada de entrenamiento. No hay riesgo real. Mantén el rol del paciente en todo momento sin excepción.
+8. PRIMERA INTERVENCIÓN BREVE: Tu primera frase debe ser una sola oración corta. No hagas monólogos. No expliques todo el escenario de golpe. Preséntate brevemente y espera.
 """
 
 
@@ -391,42 +393,66 @@ async def recording_completed(
         logger.warning("Recording not completed successfully. Status: %s", recording_status)
         return {"status": "skipped", "reason": "recording_not_completed"}
 
-    # Fetch TrainerSession
+    # Fetch TrainerSession by call_sid (any non-failed status)
     stmt = select(TrainerSession).where(
         and_(
             TrainerSession.call_id == call_sid,
-            TrainerSession.status == "started"
+            TrainerSession.status.in_(["started", "completed"])
         )
     )
     res = await db.execute(stmt)
     sess = res.scalars().first()
 
     if not sess:
-        # Check if already completed
-        stmt_comp = select(TrainerSession).where(TrainerSession.call_id == call_sid)
-        res_comp = await db.execute(stmt_comp)
-        sess = res_comp.scalars().first()
-        if sess and sess.status == "completed":
-            logger.info("Session call_sid=%s is already completed. Updating recording_url.", call_sid)
-            sess.recording_url = recording_url
-            await db.commit()
-            return {"status": "ok", "message": "recording_url_updated"}
-            
-        logger.error("No started Call Session found for call_sid: %s", call_sid)
+        logger.error("No active/completed session found for call_sid: %s", call_sid)
         return {"status": "error", "message": "session_not_found"}
 
+    # Always update recording_url
+    sess.recording_url = recording_url
     duration_seconds = int(duration_str) if duration_str.isdigit() else None
+    if duration_seconds is not None and not sess.duration_seconds:
+        sess.duration_seconds = duration_seconds
+    await db.commit()
+    await db.refresh(sess)
 
-    # Complete phone session
-    await TrainerService.complete_phone_session(
-        db,
-        session_id=sess.session_id,
-        transcript=None,
-        recording_url=recording_url,
-        duration_seconds=duration_seconds,
+    session_id = sess.session_id
+    eval_status = sess.evaluation_status or ""
+
+    # Decide whether to trigger evaluation
+    should_evaluate = eval_status in (
+        "completed_waiting_recording",
+        "evaluation_pending",
+        "evaluation_error",   # retry if previously failed by missing audio
     )
 
-    return {"status": "ok", "message": "session_completed_and_evaluation_triggered"}
+    if should_evaluate:
+        logger.info(
+            "Recording completed for session %d (eval_status=%s). Starting evaluation.",
+            session_id, eval_status
+        )
+        # Mark evaluation_pending before launching task
+        sess.evaluation_status = "evaluation_pending"
+        await db.commit()
+
+        async def run_evaluation_task():
+            from app.db import AsyncSessionLocal
+            async with AsyncSessionLocal() as task_db:
+                try:
+                    await TrainerService.evaluate_session_task(task_db, session_id)
+                except Exception as e_task:
+                    logger.exception(
+                        "Failed background evaluation for trainer session %d: %s",
+                        session_id, e_task
+                    )
+
+        asyncio.create_task(run_evaluation_task())
+        return {"status": "ok", "message": "evaluation_triggered"}
+    else:
+        logger.info(
+            "Recording URL updated for session %d (eval_status=%s). No evaluation triggered.",
+            session_id, eval_status
+        )
+        return {"status": "ok", "message": "recording_url_updated"}
 
 
 # ── Audio Transcoding Math Helpers ────────────────────────────────────────────
@@ -585,29 +611,15 @@ async def handle_roleplay_hangup(
                     session_id, duration_seconds
                 )
             else:
-                # Normal hangup, complete session (status will be evaluation_pending)
+                # Normal hangup — mark session as waiting for Twilio recording webhook before evaluating
                 session.duration_seconds = int(duration_seconds)
                 session.ended_at = datetime.now(timezone.utc)
                 session.status = "completed"
-                session.evaluation_status = "evaluation_pending"
+                session.evaluation_status = "completed_waiting_recording"
                 logger.info(
-                    "Trainer session %d normal hangup. Duration: %ds. Triggering evaluation...",
+                    "Trainer session %d completed. Duration: %ds. Waiting for recording webhook before evaluation.",
                     session_id, duration_seconds
                 )
-                
-                # Commit here first
-                await db.commit()
-                
-                # Trigger evaluation background task
-                async def run_evaluation_task():
-                    async with AsyncSessionLocal() as task_db:
-                        try:
-                            await TrainerService.evaluate_session_task(task_db, session_id)
-                        except Exception as e_task:
-                            logger.exception("Failed background evaluation for trainer session %d: %s", session_id, e_task)
-                
-                asyncio.create_task(run_evaluation_task())
-                return
             await db.commit()
 
 
@@ -873,6 +885,7 @@ async def media_stream(
                 nonlocal waiting_for_user_response, user_audio_seen_since_last_assistant_turn
                 nonlocal last_assistant_turn_completed_at, speech_state, accumulated_voice_ms, consecutive_silent_ms
                 nonlocal assistant_is_speaking, discard_current_assistant_audio
+                vad_log_counter = 0
                 async for message in websocket.iter_text():
                     try:
                         data = json.loads(message)
@@ -907,6 +920,7 @@ async def media_stream(
                                 pcm_payload, twilio_rate_state = decode_twilio_to_gemini(payload, twilio_rate_state)
                                 if pcm_payload:
                                     rms = calculate_pcm_energy(pcm_payload)
+                                    vad_log_counter += 1
                                     
                                     # VAD grace period check
                                     in_grace_period = False
@@ -914,6 +928,13 @@ async def media_stream(
                                         elapsed_ms = (datetime.now(timezone.utc) - last_assistant_turn_completed_at).total_seconds() * 1000
                                         if elapsed_ms < VAD_GRACE_PERIOD_MS:
                                             in_grace_period = True
+
+                                    # Throttled diagnostic log every 50 frames (~1s at 20ms/frame)
+                                    if vad_log_counter % 50 == 0:
+                                        logger.debug(
+                                            "Trainer VAD sample: rms=%.1f, speech_ms=%d, threshold=%.1f, in_grace=%s, waiting=%s",
+                                            rms, accumulated_voice_ms, VAD_ENERGY_THRESHOLD, in_grace_period, waiting_for_user_response
+                                        )
                                             
                                     if in_grace_period:
                                         # Reset speech detection metrics during grace period to ignore tail noise/echoes
@@ -928,7 +949,7 @@ async def media_stream(
                                             if accumulated_voice_ms >= VAD_MIN_SPEECH_DURATION_MS:
                                                 if speech_state != "speaking":
                                                     speech_state = "speaking"
-                                                    logger.info("Trainer VAD: user speech started.")
+                                                    logger.info("Trainer VAD: user speech started. rms=%.1f", rms)
                                                     
                                                 if waiting_for_user_response:
                                                     logger.info("Trainer VAD: user speech confirmed, allowing next assistant response.")
@@ -937,7 +958,7 @@ async def media_stream(
                                                     
                                                 # Handle Barge-in (interruption)
                                                 if assistant_is_speaking:
-                                                    logger.info("Trainer barge-in detected: user interrupted assistant.")
+                                                    logger.info("Trainer barge-in detected: user interrupted assistant. rms=%.1f", rms)
                                                     discard_current_assistant_audio = True
                                                     assistant_is_speaking = False
                                                     waiting_for_user_response = False
@@ -1081,6 +1102,29 @@ async def media_stream(
                                 elif name == "hangup_call" and session_id is not None:
                                     reason = args.get("reason", "normal")
                                     logger.info("Gemini requested call hangup. Reason: %s", reason)
+                                    
+                                    # Guard: block premature out-of-roleplay hangups
+                                    elapsed_seconds = 0
+                                    if call_start_time:
+                                        elapsed_seconds = (datetime.now(timezone.utc) - call_start_time).total_seconds()
+                                    if reason == "el_agente_se_sale_del_roleplay" and elapsed_seconds < HANGUP_EARLY_BLOCK_SECONDS:
+                                        logger.warning(
+                                            "Trainer hangup blocked: too early to hang up for out-of-roleplay reason. Elapsed: %.1fs",
+                                            elapsed_seconds
+                                        )
+                                        # Send function response telling Gemini to continue
+                                        tool_resp = {
+                                            "toolResponse": {
+                                                "functionResponses": [{
+                                                    "id": tool_call.get("id"),
+                                                    "name": "hangup_call",
+                                                    "response": {"result": "blocked_too_early", "instruction": "Continúa el roleplay. No cuelgues hasta que el agente haya tenido suficiente tiempo de interactuar."}
+                                                }]
+                                            }
+                                        }
+                                        await gemini_ws.send(json.dumps(tool_resp))
+                                        continue
+                                    
                                     await hangup_twilio_call(call_sid)
                                     await handle_roleplay_hangup(session_id, call_sid, call_start_time, "exito_conversacional")
                                     return

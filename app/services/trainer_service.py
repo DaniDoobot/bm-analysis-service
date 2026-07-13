@@ -656,13 +656,21 @@ class TrainerService:
 
             # 4. Build prompt
             system_prompt = (
-                f"Estás evaluando una simulación de entrenamiento telefónico (roleplay) realizada por un agente.\n"
-                f"Estructura de evaluación base:\n\"\"\"\n{prompt_content}\n\"\"\"\n\n"
-                f"Instrucciones adicionales del módulo Trainer:\n\"\"\"\n{cfg.extra_instructions or ''}\n\"\"\"\n\n"
-                f"Información de la simulación realizada:\n"
+                f"Estás evaluando una simulación de entrenamiento telefónico (roleplay) realizada por un agente de Boston Medical Group.\n\n"
+                f"=== CONTEXTO DE ROLES ===\n"
+                f"- La llamada es entre UN AGENTE HUMANO de BMG y UN PACIENTE SIMULADO por IA.\n"
+                f"- El AGENTE HUMANO es quien se identifica como representante de Boston Medical Group, inicia la llamada de seguimiento, presenta servicios y maneja objeciones.\n"
+                f"- El PACIENTE SIMULADO es quien hace preguntas, pone objeciones (ej: preguntas sobre precio, dudas sobre el tratamiento) y actúa como cliente potencial.\n"
+                f"- Ignora cualquier frase introductoria del sistema como 'Perfecto, [nombre]...' o 'Iniciamos el roleplay' — estas NO son parte de la conversación real.\n"
+                f"- Evalúa ÚNICAMENTE al agente humano. No penalices al agente por frases dichas por el paciente simulado.\n\n"
+                f"=== ESTRUCTURA DE EVALUACIÓN ===\n"
+                f"\"\"\"{prompt_content}\"\"\"\n\n"
+                f"=== INSTRUCCIONES ADICIONALES DEL MÓDULO TRAINER ===\n"
+                f"\"\"\"{cfg.extra_instructions or ''}\"\"\"\n\n"
+                f"=== INFORMACIÓN DE LA SIMULACIÓN ===\n"
                 f"- Nombre: {sim.name}\n"
                 f"- Objetivo: {sim.objective or 'No especificado'}\n"
-                f"- Escenario/Personaje: {roleplay_prompt}\n\n"
+                f"- Escenario/Personaje del paciente simulado: {roleplay_prompt}\n\n"
                 f"Devuelve exclusivamente un objeto JSON válido que cumpla con el formato de salida JSON especificado en la estructura base. "
                 f"No agregues texto explicativo ni bloques de código de markdown. Asegúrate de incluir los campos 'score' (o 'evaluacion_global'), "
                 f"'summary' (o 'feedback'), 'strengths' y 'improvement_points' en el JSON."
@@ -797,17 +805,54 @@ class TrainerService:
 
         # Sort and limit
         from sqlalchemy.orm import selectinload
-        stmt = stmt.options(selectinload(TrainerSession.simulation)).order_by(desc(TrainerSession.started_at)).limit(limit)
+        stmt = (
+            stmt
+            .options(
+                selectinload(TrainerSession.simulation)
+            )
+            .order_by(desc(TrainerSession.started_at))
+            .limit(limit)
+        )
         res = await db.execute(stmt)
         sessions = list(res.scalars().all())
 
         if sessions:
             session_ids = [s.session_id for s in sessions]
+
+            # Eager-load evaluations
             stmt_evals = select(TrainerEvaluation).where(TrainerEvaluation.session_id.in_(session_ids))
             res_evals = await db.execute(stmt_evals)
             evals_map = {e.session_id: e for e in res_evals.scalars().all()}
+
+            # Eager-load agent settings for agent_name
+            agent_codes = list({s.agent_code for s in sessions if s.agent_code})
+            agent_name_map: dict = {}
+            if agent_codes:
+                stmt_agents = select(TrainingAgentSetting).where(
+                    TrainingAgentSetting.training_code.in_(agent_codes)
+                )
+                res_agents = await db.execute(stmt_agents)
+                for ag in res_agents.scalars().all():
+                    agent_name_map[ag.training_code] = ag.agent_name
+
+            # Eager-load service names via simulation
+            service_ids = list({s.simulation.service_id for s in sessions if s.simulation and s.simulation.service_id})
+            service_name_map: dict = {}
+            if service_ids:
+                from app.models.services import Service
+                stmt_svcs = select(Service).where(Service.service_id.in_(service_ids))
+                res_svcs = await db.execute(stmt_svcs)
+                for svc in res_svcs.scalars().all():
+                    service_name_map[svc.service_id] = svc.service_name
+
             for s in sessions:
                 s.evaluation = evals_map.get(s.session_id)
+                # Attach denormalised fields as transient attributes
+                s.__dict__["agent_name"] = agent_name_map.get(s.agent_code)
+                sim = s.simulation
+                s.__dict__["simulation_name"] = sim.name if sim else None
+                s.__dict__["simulation_code"] = sim.code if sim else None
+                s.__dict__["service_name"] = service_name_map.get(sim.service_id) if sim else None
         else:
             for s in sessions:
                 s.evaluation = None

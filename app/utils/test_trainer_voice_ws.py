@@ -590,14 +590,16 @@ class TestTrainerVoiceDetailedVAD(unittest.IsolatedAsyncioTestCase):
         await self.db.commit()
 
         # Session 1: completed with score=None
-        s1 = TrainerSession(session_id=10, agent_id="33013277", agent_code="33013277", simulation_id=2, service_id=1, call_id="call_10", status="completed", evaluation_status="completed_without_score")
+        s1 = TrainerSession(agent_id="33013277", agent_code="33013277", simulation_id=2, service_id=1, call_id="call_10", status="completed", evaluation_status="completed_without_score")
         self.db.add(s1)
         # Session 2: incomplete/started (no evaluation)
-        s2 = TrainerSession(session_id=11, agent_id="33013277", agent_code="33013277", simulation_id=2, service_id=1, call_id="call_11", status="started", evaluation_status="started")
+        s2 = TrainerSession(agent_id="33013277", agent_code="33013277", simulation_id=2, service_id=1, call_id="call_11", status="started", evaluation_status="started")
         self.db.add(s2)
         await self.db.commit()
+        await self.db.refresh(s1)
+        await self.db.refresh(s2)
 
-        e1 = TrainerEvaluation(evaluation_id=10, session_id=10, evaluation_config_id=1, prompt_snapshot="Test snapshot", result_json={}, score=None)
+        e1 = TrainerEvaluation(session_id=s1.session_id, evaluation_config_id=1, prompt_snapshot="Test snapshot", result_json={}, score=None)
         self.db.add(e1)
         await self.db.commit()
 
@@ -610,6 +612,122 @@ class TestTrainerVoiceDetailedVAD(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sessions[0].simulation.simulation_id, 2)
         self.assertIsNone(sessions[0].evaluation.score)
         self.assertIsNone(sessions[1].evaluation)
+
+
+
+class TestTrainerVoiceV2(unittest.IsolatedAsyncioTestCase):
+    """Tests for Trainer Voice v2 requirements: VAD threshold, early hangup guard, race condition fix."""
+
+    async def asyncSetUp(self):
+        import app.models
+        from app.db import engine, Base
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+    async def asyncTearDown(self):
+        import app.models
+        from app.db import engine, Base
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
+
+
+    def test_vad_threshold_lowered(self):
+        """P1: VAD_ENERGY_THRESHOLD must be <= 200 for real call detection."""
+        from app.routers import trainer_voice
+        self.assertLessEqual(trainer_voice.VAD_ENERGY_THRESHOLD, 200.0,
+            "VAD_ENERGY_THRESHOLD too high — real speech may not be detected.")
+
+    def test_vad_min_speech_duration_lowered(self):
+        """P1: VAD_MIN_SPEECH_DURATION_MS must be <= 150ms."""
+        from app.routers import trainer_voice
+        self.assertLessEqual(trainer_voice.VAD_MIN_SPEECH_DURATION_MS, 150,
+            "VAD_MIN_SPEECH_DURATION_MS too high — may block real speech detection.")
+
+    def test_hangup_early_block_constant_exists(self):
+        """P5: HANGUP_EARLY_BLOCK_SECONDS must exist and be >= 60."""
+        from app.routers import trainer_voice
+        self.assertTrue(hasattr(trainer_voice, "HANGUP_EARLY_BLOCK_SECONDS"),
+            "HANGUP_EARLY_BLOCK_SECONDS not defined.")
+        self.assertGreaterEqual(trainer_voice.HANGUP_EARLY_BLOCK_SECONDS, 60)
+
+    def test_handle_roleplay_hangup_uses_completed_waiting_recording(self):
+        """P6: handle_roleplay_hangup must set status=completed_waiting_recording, NOT trigger evaluation."""
+        import inspect
+        from app.routers import trainer_voice
+        src = inspect.getsource(trainer_voice.handle_roleplay_hangup)
+        self.assertIn("completed_waiting_recording", src,
+            "handle_roleplay_hangup must use completed_waiting_recording status.")
+        # Must NOT contain asyncio.create_task for evaluation inside handle_roleplay_hangup
+        self.assertNotIn("run_evaluation_task", src,
+            "handle_roleplay_hangup must not trigger evaluation directly — wait for recording webhook.")
+
+    def test_recording_completed_triggers_evaluation_for_waiting_status(self):
+        """P6: recording_completed endpoint must trigger evaluation when eval_status=completed_waiting_recording."""
+        import inspect
+        from app.routers import trainer_voice
+        src = inspect.getsource(trainer_voice.recording_completed)
+        self.assertIn("completed_waiting_recording", src,
+            "recording_completed must handle completed_waiting_recording status.")
+        self.assertIn("evaluation_error", src,
+            "recording_completed must retry on evaluation_error status.")
+
+    def test_first_turn_brevity_in_prompt(self):
+        """P4: CHARACTER_LOCK must include first-turn brevity rule."""
+        from app.routers import trainer_voice
+        self.assertIn("PRIMERA INTERVENCIÓN BREVE", trainer_voice.SPANISH_VOICE_RULES,
+            "Prompt must include first-turn brevity rule.")
+
+    async def test_list_sessions_returns_simulation_name_and_service_name(self):
+        """P7: list_sessions must attach simulation_name, simulation_code, service_name as transient attributes."""
+        from app.services.trainer_service import TrainerService
+        from app.models.trainer import TrainerSimulation, TrainerSession
+        from app.models.personalized_training import TrainingAgentSetting
+        from app.models.services import Service
+        from app.db import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as db:
+            # Seed service
+            svc = Service(service_id=999, service_key="test_svc", service_name="TestService999")
+            db.add(svc)
+            await db.flush()
+
+            sim = TrainerSimulation(
+                simulation_id=500, code="SIM500", name="Test Sim 500",
+                roleplay_prompt="Test Prompt", service_id=999
+            )
+            db.add(sim)
+
+            agent_setting = TrainingAgentSetting(
+                hubspot_owner_id="HUB_TEST_500",
+                agent_name="Agent Test 500",
+                agent_initials="AT5",
+                is_enabled=True,
+                training_code="CODE500"
+            )
+            db.add(agent_setting)
+            await db.commit()
+
+            s = TrainerSession(
+                session_id=500,
+                agent_id="HUB_TEST_500",
+                agent_code="CODE500",
+                simulation_id=500,
+                service_id=999,
+                call_id="call_500",
+                status="completed",
+                evaluation_status="evaluated"
+            )
+            db.add(s)
+            await db.commit()
+
+            sessions, total = await TrainerService.list_sessions(db, agent_id="HUB_TEST_500")
+            self.assertGreaterEqual(total, 1)
+            sess = next((s for s in sessions if s.session_id == 500), None)
+            self.assertIsNotNone(sess)
+            self.assertEqual(sess.__dict__.get("simulation_name"), "Test Sim 500")
+            self.assertEqual(sess.__dict__.get("simulation_code"), "SIM500")
+            self.assertEqual(sess.__dict__.get("service_name"), "TestService999")
+            self.assertEqual(sess.__dict__.get("agent_name"), "Agent Test 500")
 
 
 if __name__ == "__main__":
