@@ -382,6 +382,13 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
                         "callSid": "call_ws_test_hub",
                     }
                 })
+                # Send a mock base64 ulaw media payload
+                websocket.send_json({
+                    "event": "media",
+                    "media": {
+                        "payload": "f39/f39/f39/f39/"
+                    }
+                })
                 time.sleep(0.5)
 
             # Verify websockets.connect call arguments
@@ -393,14 +400,26 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
             # Verify the model passed to setup message
             send_calls = mock_gemini_ws.send.call_args_list
             setup_payload = None
+            audio_payload = None
+            
             for call in send_calls:
                 payload_str = call[0][0]
                 payload = json.loads(payload_str)
                 if "setup" in payload:
                     setup_payload = payload["setup"]
-                    break
+                elif "realtimeInput" in payload:
+                    realtime_input = payload["realtimeInput"]
+                    self.assertNotIn("mediaChunks", realtime_input)
+                    self.assertNotIn("media_chunks", realtime_input)
+                    if "audio" in realtime_input:
+                        audio_payload = realtime_input["audio"]
+                        
             self.assertIsNotNone(setup_payload)
             self.assertEqual(setup_payload["model"], "models/gemini-3.1-flash-live-preview")
+            
+            self.assertIsNotNone(audio_payload)
+            self.assertEqual(audio_payload["mimeType"], "audio/pcm;rate=16000")
+            self.assertTrue(len(audio_payload["data"]) > 0)
 
 
 if __name__ == "__main__":

@@ -476,12 +476,16 @@ async def media_stream(websocket: WebSocket):
                             raw_pcm = audioop.ulaw2lin(raw_ulaw, 2)
                             raw_pcm_16k, _ = audioop.ratecv(raw_pcm, 2, 1, 8000, 16000, None)
                             
+                            if not getattr(websocket, "logged_audio_payload_info", False):
+                                setattr(websocket, "logged_audio_payload_info", True)
+                                logger.info("Sending realtime audio to Gemini using v1beta audio payload | mime=audio/pcm;rate=16000 | stream_sid=%s | call_sid=%s", stream_sid, call_sid)
+                                
                             gemini_msg = {
                                 "realtimeInput": {
-                                    "mediaChunks": [{
+                                    "audio": {
                                         "mimeType": "audio/pcm;rate=16000",
                                         "data": base64.b64encode(raw_pcm_16k).decode("utf-8")
-                                    }]
+                                    }
                                 }
                             }
                             await gemini_ws.send(json.dumps(gemini_msg))
