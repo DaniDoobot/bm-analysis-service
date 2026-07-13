@@ -345,6 +345,43 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
             body = resp.body.decode("utf-8")
             self.assertIn("/bm/training/voice/twilio/select-cycle-menu?agent_id=7777&amp;call_sid=call_123", body)
 
+    @patch("app.routers.training_hub_voice.settings")
+    async def test_media_stream_websocket_connect(self, mock_settings):
+        from fastapi.testclient import TestClient
+        from app.main import app
+        import json
+        import asyncio
+        import time
+        
+        mock_settings.gemini_api_key = "mock_key"
+        mock_settings.gemini_live_api_key = None
+        
+        mock_gemini_ws = AsyncMock()
+        mock_gemini_ws.send = AsyncMock()
+        
+        async def mock_async_iter(*args, **kwargs):
+            yield json.dumps({"setupComplete": {}})
+            await asyncio.sleep(0.5)
+            
+        mock_gemini_ws.__aiter__ = mock_async_iter
+        
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__.return_value = mock_gemini_ws
+        mock_connect.__aexit__.return_value = None
+        
+        with patch("websockets.connect", return_value=mock_connect):
+            client = TestClient(app)
+            with client.websocket_connect("/bm/training/hub/media-stream?flow=hub") as websocket:
+                websocket.send_json({"event": "connected"})
+                websocket.send_json({
+                    "event": "start",
+                    "start": {
+                        "streamSid": "stream_123",
+                        "callSid": "call_ws_test_hub",
+                    }
+                })
+                time.sleep(0.5)
+
 
 if __name__ == "__main__":
     unittest.main()
