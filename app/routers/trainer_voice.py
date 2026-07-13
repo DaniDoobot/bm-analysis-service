@@ -170,7 +170,7 @@ async def collect_dtmf(request: Request):
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Gather numDigits="4" timeout="10" action="{action_url}">
-            <Say language="es-ES">No he podido identificar tu código por voz. Por favor, introduce tu código numérico de empleado de cuatro dígitos en el teclado, seguido de la tecla almohadilla.</Say>
+            <Say language="es-ES">No he podido identificar tu código por voz. Por favor, introduce tu código numérico de empleado de cuatro dígitos, seguido de la tecla almohadilla.</Say>
         </Gather>
         <Say language="es-ES">No he recibido ninguna entrada. La llamada finalizará.</Say>
         <Hangup/>
@@ -224,7 +224,7 @@ async def verify_numeric_code(
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Gather numDigits="4" timeout="10" action="{action_url}">
-            <Say language="es-ES">Hola {agent_name}. Por favor, introduce ahora el código numérico de la simulación de cuatro dígitos en el teclado, seguido de la tecla almohadilla.</Say>
+            <Say language="es-ES">Hola {agent_name}. Por favor, introduce ahora el código numérico de la simulación de cuatro dígitos, seguido de la tecla almohadilla.</Say>
         </Gather>
         <Say language="es-ES">No he recibido el código de la simulación. La llamada finalizará.</Say>
         <Hangup/>
@@ -698,11 +698,11 @@ async def media_stream(
             }
         ]
     elif session_id is not None:
+        logger.info("Trainer WS validating session_id=%s", session_id)
         stmt = (
             select(TrainerSession)
             .options(
                 selectinload(TrainerSession.simulation),
-                selectinload(TrainerSession.agent),
                 selectinload(TrainerSession.simulation_version),
             )
             .where(TrainerSession.session_id == session_id)
@@ -714,6 +714,9 @@ async def media_stream(
             await websocket.close()
             return
             
+        logger.info("Trainer WS session validation success: session_id=%s, agent_id=%s, simulation_id=%s", sess.session_id, sess.agent_id, sess.simulation_id)
+        logger.info("Trainer WS simulation loaded: simulation_id=%s, code=%s, name=%s", sess.simulation.simulation_id, sess.simulation.code, getattr(sess.simulation, 'name', 'unknown'))
+        
         # Get active version prompt snapshot
         roleplay_prompt = sess.simulation.roleplay_prompt
         if sess.simulation_version_id:
@@ -725,6 +728,7 @@ async def media_stream(
             if version:
                 roleplay_prompt = version.roleplay_prompt_snapshot
 
+        logger.info("Trainer WS roleplay prompt loaded successfully.")
         instruction = roleplay_prompt + "\n" + SPANISH_VOICE_RULES
         tools = [
             {
@@ -792,6 +796,7 @@ async def media_stream(
             }
             await gemini_ws.send(json.dumps(setup_msg))
             logger.info("Sent Gemini Setup configuration.")
+            logger.info("Trainer Gemini Live configuration established.")
             
             # State variables
             gemini_ready = False
@@ -993,8 +998,7 @@ async def media_stream(
             # Run loops concurrently
             await asyncio.gather(
                 twilio_to_gemini_loop(),
-                gemini_to_twilio_loop(),
-                return_exceptions=True
+                gemini_to_twilio_loop()
             )
             
             # Cancel monitor task if running
@@ -1010,6 +1014,12 @@ async def media_stream(
     except Exception as e:
         logger.error("Error in media_stream websocket: %s", e)
     finally:
+        # Cancel monitor task if running
+        try:
+            if 'monitor_task' in locals() and monitor_task:
+                monitor_task.cancel()
+        except Exception:
+            pass
         if not websocket.client_state.name == "DISCONNECTED":
             await websocket.close()
         logger.info("Media stream cleanup completed.")

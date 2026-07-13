@@ -41,7 +41,7 @@ router = APIRouter(prefix="/bm/training", tags=["Training Voice Voice/IVR"])
 
 IDENTIFICATION_SYSTEM_INSTRUCTION = """
 Eres el Asistente de Identificación por Voz de Doobot (marca pronunciada siempre exactamente como "Dubot").
-Tu labor en esta fase es identificar al agente y, si tiene varios ciclos de entrenamiento pendientes, ayudarle a seleccionar uno de ellos por voz o teclado.
+Tu labor en esta fase es identificar al agente y, si tiene varios ciclos de entrenamiento pendientes, ayudarle a seleccionar uno de ellos.
 
 Sigue estas pautas estrictas:
 1. Pide de forma amable al agente que te diga su código de empleado de cuatro dígitos.
@@ -323,7 +323,7 @@ async def handle_websocket_dtmf_verification(
                     "clientContent": {
                         "turns": [{
                             "role": "user",
-                            "parts": [{"text": f"[INSTRUCCIÓN DEL SISTEMA: El usuario ha introducido el código {code} mediante el teclado, pero es incorrecto y se ha alcanzado el límite de intentos. Pronuncia exactamente: '{msg}' y espera a que se cuelgue la llamada.]"}]
+                            "parts": [{"text": f"[INSTRUCCIÓN DEL SISTEMA: El usuario ha introducido el código {code}, pero es incorrecto y se ha alcanzado el límite de intentos. Pronuncia exactamente: '{msg}' y espera a que se cuelgue la llamada.]"}]
                         }],
                         "turnComplete": True
                     }
@@ -332,24 +332,24 @@ async def handle_websocket_dtmf_verification(
                 await asyncio.sleep(6)
                 await hangup_twilio_call(call_sid)
             elif attempts == 1:
-                msg = "No he podido identificar el código. Dilo dígito a dígito o introdúcelo con el teclado."
+                msg = "No he podido identificar el código. Repítelo, por favor."
                 inject_msg = {
                     "clientContent": {
                         "turns": [{
                             "role": "user",
-                            "parts": [{"text": f"[INSTRUCCIÓN DEL SISTEMA: El usuario ha introducido el código {code} mediante el teclado, pero es incorrecto. Pronuncia exactamente: '{msg}' y espera a que el usuario lo intente de nuevo.]"}]
+                            "parts": [{"text": f"[INSTRUCCIÓN DEL SISTEMA: El usuario ha introducido el código {code}, pero es incorrecto. Pronuncia exactamente: '{msg}' y espera a que el usuario lo intente de nuevo.]"}]
                         }],
                         "turnComplete": True
                     }
                 }
                 await gemini_ws.send(json.dumps(inject_msg))
             else: # attempts == 2
-                msg = "No he podido identificar el código. Inténtalo de nuevo diciendo los cuatro dígitos uno a uno o utiliza el teclado."
+                msg = "No he podido identificar el código. Inténtalo de nuevo, por favor."
                 inject_msg = {
                     "clientContent": {
                         "turns": [{
                             "role": "user",
-                            "parts": [{"text": f"[INSTRUCCIÓN DEL SISTEMA: El usuario ha introducido el código {code} mediante el teclado, pero es incorrecto. Pronuncia exactamente: '{msg}' y espera.]"}]
+                            "parts": [{"text": f"[INSTRUCCIÓN DEL SISTEMA: El usuario ha introducido el código {code}, pero es incorrecto. Pronuncia exactamente: '{msg}' y espera.]"}]
                         }],
                         "turnComplete": True
                     }
@@ -752,7 +752,7 @@ async def collect_dtmf(request: Request):
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Gather numDigits="4" timeout="10" action="{action_url}">
-            <Say language="es-ES">No he podido identificar tu código por voz. Por favor, introduce tu código numérico de empleado de cuatro dígitos en el teclado, seguido de la tecla almohadilla.</Say>
+            <Say language="es-ES">No he podido identificar tu código por voz. Por favor, introduce tu código numérico de empleado de cuatro dígitos, seguido de la tecla almohadilla.</Say>
         </Gather>
         <Say language="es-ES">No he recibido ninguna entrada. La llamada finalizará.</Say>
         <Hangup/>
@@ -805,7 +805,7 @@ async def verify_numeric_code(
             twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
             <Response>
                 <Gather numDigits="4" timeout="10" action="{action_url}">
-                    <Say language="es-ES">No he podido identificar el código. Dilo dígito a dígito o introdúcelo con el teclado.</Say>
+                    <Say language="es-ES">No he podido identificar el código. Repítelo, por favor.</Say>
                 </Gather>
                 <Say language="es-ES">No he recibido ninguna entrada. La llamada finalizará.</Say>
                 <Hangup/>
@@ -815,7 +815,7 @@ async def verify_numeric_code(
             twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
             <Response>
                 <Gather numDigits="4" timeout="10" action="{action_url}">
-                    <Say language="es-ES">No he podido identificar el código. Inténtalo de nuevo diciendo los cuatro dígitos uno a uno o utiliza el teclado.</Say>
+                    <Say language="es-ES">No he podido identificar el código. Inténtalo de nuevo, por favor.</Say>
                 </Gather>
                 <Say language="es-ES">No he recibido ninguna entrada. La llamada finalizará.</Say>
                 <Hangup/>
@@ -1115,7 +1115,7 @@ async def handle_verify_agent_code(
                     "attempts": attempts,
                     "result": {
                         "status": "invalid",
-                        "message": "No he podido identificar el código. Dilo dígito a dígito o introdúcelo con el teclado."
+                        "message": "No he podido identificar el código. Repítelo, por favor."
                     },
                     "redirected": False
                 }
@@ -1129,7 +1129,7 @@ async def handle_verify_agent_code(
                     "attempts": attempts,
                     "result": {
                         "status": "invalid",
-                        "message": "No he podido identificar el código. Inténtalo de nuevo diciendo los cuatro dígitos uno a uno o utiliza el teclado."
+                        "message": "No he podido identificar el código. Inténtalo de nuevo, por favor."
                     },
                     "redirected": False
                 }

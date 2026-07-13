@@ -507,7 +507,7 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
                     for turn in turns:
                         for part in turn.get("parts", []):
                             text = part.get("text", "")
-                            if "Hola, has llamado" in text:
+                            if "Hola, soy el asistente" in text:
                                 initial_greeting_text = text
                                 break
             self.assertIsNotNone(initial_greeting_text)
@@ -691,10 +691,10 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
                         for part in turn.get("parts", []):
                             text = part.get("text", "")
                             # Look for the Trainer code prompt (sent after DTMF 1)
-                            if "código de la simulación" in text.lower() and "Cristina" in text:
+                            if "código de simulación" in text.lower() and "Cristina" in text:
                                 trainer_prompt_text = text
                             # Check for unwanted hub initial greeting
-                            if "has llamado al asistente virtual" in text.lower():
+                            if "hola, soy el asistente" in text.lower():
                                 hub_greeting_text = text
 
             # Req 4: Gemini received a clientContent asking for sim code
@@ -705,7 +705,7 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
             # Req 7: no agent code request in trainer prompt
             self.assertNotIn("código de agente", trainer_prompt_text.lower())
             # Req 6: no hub greeting in trainer prompt
-            self.assertNotIn("has llamado al asistente virtual", trainer_prompt_text.lower())
+            self.assertNotIn("hola, soy el asistente", trainer_prompt_text.lower())
             # Req 5: initial hub greeting should NOT be re-sent after Trainer selection
             # (it may have been sent initially at flow=hub, but NOT after DTMF 1)
             # Verify "Perfecto, Cristina" in trainer prompt
@@ -795,7 +795,7 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
                     for turn in turns:
                         for part in turn.get("parts", []):
                             text = part.get("text", "")
-                            if "código de la simulación" in text.lower() and "Cristina" in text:
+                            if "código de simulación" in text.lower() and "Cristina" in text:
                                 trainer_prompt_text = text
             self.assertIsNotNone(trainer_prompt_text,
                 "Gemini must receive trainer code prompt when switch_to_trainer_mode is called")
@@ -915,11 +915,11 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
                                 greeting_text = text
             self.assertIsNotNone(greeting_text)
             self.assertIn("Dubot", greeting_text)  # Req 12
-            self.assertIn("código de la simulación", greeting_text.lower())
+            self.assertIn("código de simulación", greeting_text.lower())
             # Req 6: no hub greeting
-            self.assertNotIn("has llamado al asistente virtual", greeting_text.lower())
+            self.assertNotIn("hola, soy el asistente", greeting_text.lower())
             # Req 7: no agent code request
-            self.assertNotIn("identifícate con tu código de agente", greeting_text.lower())
+            self.assertNotIn("dime tu código de agente", greeting_text.lower())
             self.assertNotIn("código de agente", greeting_text.lower())
 
     async def test_trainer_init_appends_query_params(self):
@@ -1117,7 +1117,7 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
             # Error prompt must have been sent to Gemini
             send_calls = mock_gemini_ws.send.call_args_list
             error_sent = any(
-                "incorrecto" in json.loads(c[0][0]).get("clientContent", {}).get("turns", [{}])[0].get("parts", [{}])[0].get("text", "").lower()
+                "encontrado" in json.loads(c[0][0]).get("clientContent", {}).get("turns", [{}])[0].get("parts", [{}])[0].get("text", "").lower()
                 for c in send_calls
                 if "clientContent" in json.loads(c[0][0])
             )
@@ -1301,6 +1301,122 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
             # Req 6: redirect_trainer_call must have been called (simulation code processed)
             mock_trainer_redirect.assert_called_once()
             self.assertEqual(mock_trainer_redirect.call_args[0][3], 1)  # simulation_id=1
+
+
+    @patch("app.routers.training_hub_voice.settings")
+    async def test_idempotence_and_text_checks(self, mock_settings):
+        """Task 6 / Task 1 & 2 tests: check idempotence of switch_to_trainer_mode and ensure no forbidden phrases exist."""
+        from app.routers.training_hub_voice import HUB_SYSTEM_INSTRUCTION, TRAINER_CODE_SYSTEM_INSTRUCTION
+        
+        mock_settings.gemini_api_key = "mock_key"
+        mock_settings.gemini_live_api_key = None
+        mock_settings.gemini_model = "models/gemini-3.1-flash-live-preview"
+        mock_settings.gemini_live_model = None
+
+        # 1. No forbidden phrases in system prompts
+        for prompt_name, prompt_text in [
+            ("HUB_SYSTEM_INSTRUCTION", HUB_SYSTEM_INSTRUCTION),
+            ("TRAINER_CODE_SYSTEM_INSTRUCTION", TRAINER_CODE_SYSTEM_INSTRUCTION)
+        ]:
+            for forbidden in ["puedes decirlo por voz", "introducirlo por teclado", "por voz o por teclado", "marcarlo con el teclado"]:
+                self.assertNotIn(forbidden, prompt_text.lower(), f"Forbidden phrase '{forbidden}' found in {prompt_name}")
+
+        # 2. Greeting exact content
+        self.assertIn("hola, soy el asistente de entrenamiento de dubot. dime tu código de agente", HUB_SYSTEM_INSTRUCTION.lower())
+        self.assertIn("código de la simulación que quiere practicar", HUB_SYSTEM_INSTRUCTION.lower())
+        self.assertIn("no he encontrado ese código. repítelo, por favor", HUB_SYSTEM_INSTRUCTION.lower())
+        self.assertIn("pasamos a trainer. dime el código de simulación", TRAINER_CODE_SYSTEM_INSTRUCTION.lower())
+
+        # 3. Simulate websocket tool calls for switch_to_trainer_mode idempotency
+        from fastapi.testclient import TestClient
+        from app.main import app
+        import json
+        import asyncio
+        import time
+
+        mock_gemini_ws = AsyncMock()
+        mock_gemini_ws.send = AsyncMock()
+
+        # We will feed it verify_agent_code, then select trainer mode twice
+        async def mock_async_iter(*args, **kwargs):
+            # Setup complete
+            yield json.dumps({"setupComplete": {}})
+            # Verify Cristina Montenegro (7777)
+            yield json.dumps({
+                "toolCall": {
+                    "functionCalls": [{
+                        "id": "call_agent",
+                        "name": "verify_agent_code",
+                        "args": {"agent_code": "7777"}
+                    }]
+                }
+            })
+            await asyncio.sleep(0.1)
+            # Call switch_to_trainer_mode 1st time
+            yield json.dumps({
+                "toolCall": {
+                    "functionCalls": [{
+                        "id": "call_switch_1",
+                        "name": "switch_to_trainer_mode",
+                        "args": {}
+                    }]
+                }
+            })
+            await asyncio.sleep(0.1)
+            # Call switch_to_trainer_mode 2nd time (duplicate)
+            yield json.dumps({
+                "toolCall": {
+                    "functionCalls": [{
+                        "id": "call_switch_2",
+                        "name": "switch_to_trainer_mode",
+                        "args": {}
+                    }]
+                }
+            })
+            await asyncio.sleep(0.5)
+
+        mock_gemini_ws.__aiter__ = mock_async_iter
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__.return_value = mock_gemini_ws
+        mock_connect.__aexit__.return_value = None
+
+        with patch("websockets.connect", return_value=mock_connect), \
+             patch("app.services.trainer_service.TrainerService.validate_agent_code", AsyncMock(return_value={"agent_id": 7777, "agent_name": "Cristina Montenegro", "agent_initials": "CM"})):
+            client = TestClient(app)
+            with client.websocket_connect("/bm/training/hub/media-stream?flow=hub") as ws:
+                ws.send_json({"event": "connected"})
+                ws.send_json({"event": "start", "start": {"streamSid": "s1", "callSid": "c1"}})
+                time.sleep(1.0)
+
+        # Retrieve the messages sent to Gemini
+        sent_messages = [json.loads(c[0][0]) for c in mock_gemini_ws.send.call_args_list]
+        
+        # Check responses
+        responses = []
+        for msg in sent_messages:
+            if "toolResponse" in msg:
+                for resp in msg["toolResponse"].get("functionResponses", []):
+                    responses.append(resp)
+                    
+        # Find responses for switch_to_trainer_mode
+        switch_responses = [r for r in responses if r["name"] == "switch_to_trainer_mode"]
+        self.assertEqual(len(switch_responses), 2)
+        
+        # First response must be ok
+        self.assertEqual(switch_responses[0]["response"], {"result": {"status": "ok"}})
+        # Second response must be already_in_trainer
+        self.assertEqual(switch_responses[1]["response"]["result"]["already_in_trainer"], True)
+        self.assertEqual(switch_responses[1]["response"]["result"]["state"], "trainer_code")
+
+        # Verify that the Trainer code prompt was only sent once (it contains 'Pasamos a Trainer de Dubot. Dime el código')
+        trainer_prompts_sent = 0
+        for msg in sent_messages:
+            if "clientContent" in msg:
+                for turn in msg["clientContent"].get("turns", []):
+                    for part in turn.get("parts", []):
+                        if "Pasamos a Trainer de Dubot. Dime el código" in part.get("text", ""):
+                            trainer_prompts_sent += 1
+        self.assertEqual(trainer_prompts_sent, 1)
 
 
 if __name__ == "__main__":

@@ -47,26 +47,29 @@ SPANISH_VOICE_RULES = """
 HUB_SYSTEM_INSTRUCTION = f"""
 Eres el Asistente virtual de entrenamiento de Dubot. Esta llamada tiene DOS fases.
 
+=== REGLA CRÍTICA DE COMUNICACIÓN ===
+NO des nunca explicaciones sobre el uso de la entrada vocal o el marcado en teclado. El usuario ya conoce de antemano el funcionamiento. Habla siempre de forma directa. La marca hablada debe ser siempre "Dubot".
+
 === FASE 1: IDENTIFICACIÓN Y SELECCIÓN DE MODO ===
-1. Da la bienvenida de forma amable: "Hola, has llamado al asistente virtual de entrenamiento de Dubot. Identifícate con tu código de agente, por favor. Puedes decirlo por voz o introducirlo con el teclado."
+1. Da la bienvenida diciendo exactamente: "Hola, soy el asistente de entrenamiento de Dubot. Dime tu código de agente."
 2. Cuando pidas o recibas códigos de agente, pide que se digan dígito a dígito si es necesario.
 3. Si el usuario da un número de 4 dígitos o una secuencia de cuatro dígitos hablados, llama INMEDIATAMENTE a `verify_agent_code(agent_code=codigo_normalizado)`. No rechaces un código sin llamar a la tool. No inventes resultado.
-4. Si el backend devuelve status "invalid", indícalo educadamente y pídele que lo repita o lo marque.
-5. Si el código es válido (status "valid"), di: "Estupendo, [Nombre]. ¿Quieres practicar en Trainer o avanzar con tus ciclos?"
+4. Si el backend devuelve status "invalid", di exactamente: "No he encontrado ese código. Repítelo, por favor."
+5. Si el código es válido (status "valid"), di exactamente: "Perfecto, [Nombre]. ¿Quieres ir a Trainer o continuar con tus ciclos?"
 6. Escucha la elección:
-   - Trainer ("Trainer", "practicar", "simulación", "roleplay", "uno", "1"): llama a `switch_to_trainer_mode()`.
+   - Trainer ("Trainer", "practicar", "simulación", "roleplay", "uno", "1"): llama a `switch_to_trainer_mode()`. NO vuelvas a llamar a esta función una vez que ya estás en estado Trainer.
    - Ciclos ("ciclos", "mis ciclos", "continuar", "dos", "2"): llama a `select_cycles_mode()`.
 7. Si no entiendes la elección: "No te he entendido bien. Puedes decir 'Trainer' para practicar una simulación o 'ciclos' para continuar con tus ciclos asignados."
 
 === FASE 2: CÓDIGO DE SIMULACIÓN TRAINER ===
-Esta fase se activa cuando el backend confirma que el agente ha seleccionado Trainer.
+Esta fase se activa cuando el backend confirma que el agente ha seleccionado Trainer (es decir, el estado cambia a trainer_code).
 Cuando estés en esta fase:
 1. Tu única labor es obtener el código de la simulación que quiere practicar.
-2. Cuando el usuario diga cualquier número, código o secuencia alfanumérica, llama INMEDIATAMENTE a `validate_trainer_simulation_code(code=codigo_normalizado)`. NO esperes, NO digas "lo compruebo" sin llamar a la tool en ese mismo momento. NO inventes el resultado.
-3. Si el backend devuelve valid=false, di claramente: "No he encontrado ese código. Puedes repetirlo dígito a dígito o marcarlo con el teclado." y pídelo otra vez.
-4. Si es válido, di "Perfecto, iniciamos la simulación." y quédate en silencio mientras se transfiere la llamada.
-5. NO pidas código de agente en esta fase. El agente ya está identificado.
-6. Si el usuario prefiere marcar el código en el teclado, espera a que lo introduzca con el teclado.
+2. No repitas el prompt de entrada a Trainer si ya se ha enviado.
+3. Cuando el usuario proporcione cualquier número, código o secuencia alfanumérica, llama INMEDIATAMENTE a `validate_trainer_simulation_code(code=codigo_normalizado)`. NO esperes ni digas "lo compruebo" sin llamar a la tool en ese mismo momento. NO inventes el resultado.
+4. Si el backend devuelve valid=false, di exactamente: "No he encontrado ese código. Repítelo, por favor."
+5. Si es válido, di exactamente: "Perfecto, iniciamos la simulación." y quédate en silencio mientras se transfiere la llamada.
+6. NO pidas código de agente en esta fase. El agente ya está identificado.
 
 Reglas de pronunciación:
 {SPANISH_VOICE_RULES}
@@ -75,11 +78,15 @@ Reglas de pronunciación:
 TRAINER_CODE_SYSTEM_INSTRUCTION = f"""
 Eres el Asistente virtual de entrenamiento de Dubot.
 El agente ya está identificado y ha seleccionado realizar una simulación en Trainer.
+
+=== REGLA CRÍTICA DE COMUNICACIÓN ===
+NO des nunca explicaciones sobre el uso de la entrada vocal o el marcado en teclado. El usuario ya conoce de antemano el funcionamiento. Habla siempre de forma directa. La marca hablada debe ser siempre "Dubot".
+
 Tu única labor es obtener el código de simulación:
-1. Di: "Perfecto. Para mayor precisión, te recomiendo marcar el código con el teclado de tu teléfono. Si prefieres decirlo por voz, hazlo dígito a dígito."
-2. Cuando el usuario proporcione el código (por voz dígito a dígito o por teclado), normalízalo y llama INMEDIATAMENTE a `validate_trainer_simulation_code(code=codigo_normalizado)`. NO esperes ni digas "lo compruebo" sin llamar a la tool en ese mismo turno. NO inventes el resultado.
-3. Si el backend devuelve valid=false, di exactamente: "No he encontrado ese código. Por favor, repítelo dígito a dígito o márcalo con el teclado." y espera nueva entrada.
-4. Si es válido, di "Perfecto, iniciamos la simulación." y quédate en silencio.
+1. Di exactamente: "Perfecto. Pasamos a Trainer. Dime el código de simulación."
+2. Cuando el usuario proporcione el código, normalízalo y llama INMEDIATAMENTE a `validate_trainer_simulation_code(code=codigo_normalizado)`. NO esperes ni digas "lo compruebo" sin llamar a la tool en ese mismo turno. NO inventes el resultado.
+3. Si el backend devuelve valid=false, di exactamente: "No he encontrado ese código. Repítelo, por favor." y espera nueva entrada.
+4. Si es válido, di exactamente: "Perfecto, iniciamos la simulación." y quédate en silencio.
 5. NO pidas código de agente. El agente ya está identificado.
 
 Reglas de pronunciación:
@@ -293,7 +300,7 @@ async def collect_agent_dtmf(request: Request, call_sid: str = Query(...)):
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Gather numDigits="4" timeout="10" action="{action_url}">
-            <Say language="es-ES">No he podido identificar tu código por voz. Por favor, introduce tu código numérico de empleado de cuatro dígitos en el teclado, seguido de la tecla almohadilla.</Say>
+            <Say language="es-ES">No he podido identificar tu código por voz. Por favor, introduce los cuatro dígitos de tu código de agente.</Say>
         </Gather>
         <Say language="es-ES">No he recibido ninguna entrada. La llamada finalizará.</Say>
         <Hangup/>
@@ -339,7 +346,7 @@ async def select_mode_menu(request: Request, agent_id: str = Query(...), call_si
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Gather numDigits="1" timeout="10" action="{action_url}">
-            <Say language="es-ES">Por favor, selecciona una opción usando tu teclado. Pulsa 1 para Trainer o pulsa 2 para continuar con tus ciclos asignados.</Say>
+            <Say language="es-ES">Pulsa 1 para Trainer o pulsa 2 para continuar con tus ciclos asignados.</Say>
         </Gather>
         <Say language="es-ES">No he recibido ninguna selección. La llamada finalizará.</Say>
         <Hangup/>
@@ -412,7 +419,7 @@ async def collect_simulation_dtmf(request: Request, agent_id: str = Query(...), 
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Gather numDigits="6" timeout="10" action="{action_url}">
-            <Say language="es-ES">No he podido entender el código de la simulación. Por favor, introduce el código numérico de la simulación usando el teclado de tu teléfono, terminado en almohadilla.</Say>
+            <Say language="es-ES">No he podido entender el código de la simulación. Por favor, introduce el código numérico de la simulación terminado en almohadilla.</Say>
         </Gather>
         <Say language="es-ES">No he recibido ningún código. La llamada finalizará.</Say>
         <Hangup/>
@@ -604,7 +611,7 @@ async def media_stream(websocket: WebSocket):
 Eres el Asistente virtual de entrenamiento de Dubot.
 El agente ya está identificado como {agent_name} y ha seleccionado practicar en Trainer.
 Tu única labor es obtener el código de simulación:
-1. Di: "Perfecto, {first_name}. Dime el código de la simulación que quieres realizar. También puedes marcarlo con el teclado."
+1. Di exactamente: "Perfecto, {first_name}. Pasamos a Trainer. Dime el código de simulación."
 2. Cuando el usuario diga cualquier número, código o secuencia alfanumérica, llama INMEDIATAMENTE a `validate_trainer_simulation_code(code=codigo_normalizado)`. NO esperes ni digas "lo compruebo" sin llamar a la tool en ese mismo turno. NO inventes el resultado.
 3. Si el backend devuelve valid=false, di "Ese código no es válido. Por favor, dímelo otra vez." y vuelve al punto 1.
 4. Si es válido, di "Perfecto, iniciamos la simulación." y quédate en silencio.
@@ -639,10 +646,10 @@ Reglas de pronunciación:
             logger.info("Training Hub initial greeting requested.")
             greet_text = ""
             if flow == "hub":
-                greet_text = "Di exactamente: 'Hola, has llamado al asistente virtual de entrenamiento de Dubot. Identifícate con tu código de agente, por favor. Puedes decirlo por voz o introducirlo con el teclado.' y quédate en silencio."
+                greet_text = "Di exactamente: 'Hola, soy el asistente de entrenamiento de Dubot. Dime tu código de agente.' y quédate en silencio."
             elif flow == "trainer_code":
                 first_name = agent_name.split()[0] if agent_name else "Agente"
-                greet_text = f"Di exactamente: 'Perfecto, {first_name}. Pasamos a Trainer de Dubot. Dime el código de la simulación que quieres practicar. También puedes marcarlo con el teclado.' y quédate en silencio."
+                greet_text = f"Di exactamente: 'Perfecto, {first_name}. Pasamos a Trainer de Dubot. Dime el código de simulación.' y quédate en silencio."
                 
             if greet_text:
                 greet_msg = {
@@ -664,6 +671,7 @@ Reglas de pronunciación:
             identified_agent_name = agent_name
             dtmf_buffer = ""
             current_state = "awaiting_agent_code" if flow == "hub" else "trainer_code"
+            trainer_prompt_sent = False
             
             async def play_redirection_error():
                 logger.error("Twilio redirection failed. Instructing Gemini to play config error and closing.")
@@ -682,18 +690,22 @@ Reglas de pronunciación:
 
             async def switch_to_trainer_in_stream(first_name_arg: str):
                 """Switch current WebSocket state to trainer_code without redirecting Twilio."""
-                nonlocal current_state, dtmf_buffer, attempts
+                nonlocal current_state, dtmf_buffer, attempts, trainer_prompt_sent
+                if trainer_prompt_sent:
+                    logger.info("Ignoring switch_to_trainer_in_stream call because trainer prompt has already been sent.")
+                    return
                 logger.info("Training Hub trainer mode selected.")
                 logger.info("Training Hub state changed: awaiting_mode -> trainer_code")
                 current_state = "trainer_code"
                 dtmf_buffer = ""
                 attempts = 0
+                trainer_prompt_sent = True
                 logger.info("Trainer code prompt requested.")
                 trainer_prompt_msg = {
                     "clientContent": {
                         "turns": [{
                             "role": "user",
-                            "parts": [{"text": f"Di exactamente: 'Perfecto, {first_name_arg}. Pasamos a Trainer de Dubot. Dime el código de la simulación que quieres practicar. También puedes marcarlo con el teclado.' y quédate en silencio."}]
+                            "parts": [{"text": f"Di exactamente: 'Perfecto, {first_name_arg}. Pasamos a Trainer de Dubot. Dime el código de simulación.' y quédate en silencio."}]
                         }],
                         "turnComplete": True
                     }
@@ -733,7 +745,7 @@ Reglas de pronunciación:
                                 "clientContent": {
                                     "turns": [{
                                         "role": "user",
-                                        "parts": [{"text": "Di exactamente: 'Código de simulación incorrecto. Por favor, dímelo otra vez o márcalo con el teclado.' y quédate en silencio."}]
+                                        "parts": [{"text": "Di exactamente: 'No he encontrado ese código. Repítelo, por favor.' y quédate en silencio."}]
                                     }],
                                     "turnComplete": True
                                 }
@@ -833,7 +845,7 @@ Reglas de pronunciación:
                                                     "clientContent": {
                                                         "turns": [{
                                                             "role": "user",
-                                                            "parts": [{"text": "Di exactamente: 'Código de agente incorrecto. Por favor, dilo de nuevo o márcalo con el teclado.' y quédate en silencio."}]
+                                                            "parts": [{"text": "Di exactamente: 'No he encontrado ese código. Repítelo, por favor.' y quédate en silencio."}]
                                                         }],
                                                         "turnComplete": True
                                                     }
@@ -958,24 +970,42 @@ Reglas de pronunciación:
                                     }
                                     await gemini_ws.send(json.dumps(resp_msg))
                                     
-                                elif name == "switch_to_trainer_mode" and current_state == "awaiting_mode":
-                                    # ── Trainer selected by voice: stay in same WebSocket ──────────────
-                                    first_name = identified_agent_name.split()[0] if identified_agent_name else "Agente"
-                                    
-                                    # Acknowledge the tool call first
-                                    resp_msg = {
-                                        "toolResponse": {
-                                            "functionResponses": [{
-                                                "id": fid,
-                                                "name": name,
-                                                "response": {"result": {"status": "ok"}}
-                                            }]
+                                elif name == "switch_to_trainer_mode":
+                                    if current_state == "trainer_code":
+                                        logger.info("Ignoring duplicate switch_to_trainer_mode because state is already trainer_code.")
+                                        resp_msg = {
+                                            "toolResponse": {
+                                                "functionResponses": [{
+                                                    "id": fid,
+                                                    "name": name,
+                                                    "response": {"result": {
+                                                        "ok": True,
+                                                        "already_in_trainer": True,
+                                                        "state": "trainer_code",
+                                                        "message": "Ya estamos en Trainer. Espera el código de simulación."
+                                                    }}
+                                                }]
+                                            }
                                         }
-                                    }
-                                    await gemini_ws.send(json.dumps(resp_msg))
-                                    
-                                    # Then switch state and send prompt
-                                    await switch_to_trainer_in_stream(first_name)
+                                        await gemini_ws.send(json.dumps(resp_msg))
+                                    elif current_state == "awaiting_mode":
+                                        # ── Trainer selected by voice: stay in same WebSocket ──────────────
+                                        first_name = identified_agent_name.split()[0] if identified_agent_name else "Agente"
+                                        
+                                        # Acknowledge the tool call first
+                                        resp_msg = {
+                                            "toolResponse": {
+                                                "functionResponses": [{
+                                                    "id": fid,
+                                                    "name": name,
+                                                    "response": {"result": {"status": "ok"}}
+                                                }]
+                                            }
+                                        }
+                                        await gemini_ws.send(json.dumps(resp_msg))
+                                        
+                                        # Then switch state and send prompt
+                                        await switch_to_trainer_in_stream(first_name)
 
                                 elif name == "select_cycles_mode" and current_state == "awaiting_mode":
                                     if identified_agent_id:
