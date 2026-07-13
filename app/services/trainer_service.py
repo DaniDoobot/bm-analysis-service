@@ -59,8 +59,9 @@ class TrainerService:
         )
         db.add(config)
         await db.commit()
-        await db.refresh(config)
-        return config
+        stmt_reload = select(TrainerEvaluationConfig).where(TrainerEvaluationConfig.config_id == config.config_id)
+        res_reload = await db.execute(stmt_reload)
+        return res_reload.scalars().first()
 
     @staticmethod
     async def update_evaluation_config(
@@ -81,8 +82,9 @@ class TrainerService:
 
         config.updated_at = datetime.now(timezone.utc)
         await db.commit()
-        await db.refresh(config)
-        return config
+        stmt_reload = select(TrainerEvaluationConfig).where(TrainerEvaluationConfig.config_id == config.config_id)
+        res_reload = await db.execute(stmt_reload)
+        return res_reload.scalars().first()
 
     @staticmethod
     async def get_evaluation_config(db: AsyncSession, config_id: int) -> Optional[TrainerEvaluationConfig]:
@@ -107,21 +109,30 @@ class TrainerService:
         return list(res.scalars().all())
 
     @staticmethod
-    async def list_available_structures(db: AsyncSession, service_id: int) -> List[Prompt]:
+    async def list_available_structures(
+        db: AsyncSession,
+        service_id: int,
+        include_inactive: bool = False,
+        include_archived: bool = False,
+    ) -> List[Prompt]:
         # Validate that service exists
         stmt_srv = select(Service).where(Service.service_id == service_id)
         res_srv = await db.execute(stmt_srv)
         if not res_srv.scalars().first():
             raise ValueError(f"El servicio con ID {service_id} no existe.")
 
-        stmt = select(Prompt).where(
-            and_(
-                Prompt.service_id == service_id,
-                Prompt.is_active == True,
-                Prompt.is_archived == False,
-                Prompt.deleted_at == None,
-            )
-        ).order_by(Prompt.prompt_name.asc())
+        filters = [
+            Prompt.service_id == service_id,
+            Prompt.deleted_at == None,
+        ]
+
+        if not include_inactive:
+            filters.append(Prompt.is_active == True)
+
+        if not include_archived:
+            filters.append(Prompt.is_archived == False)
+
+        stmt = select(Prompt).where(and_(*filters)).order_by(Prompt.prompt_name.asc())
         res = await db.execute(stmt)
         return list(res.scalars().all())
 

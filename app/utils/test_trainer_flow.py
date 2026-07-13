@@ -114,6 +114,13 @@ async def test_trainer_module_logic():
         db.add(prompt)
         await db.flush()
 
+        prompt_inactive = Prompt(prompt_name="Clinica Eval Structure Inactive", prompt_type="audio", is_active=False, service_id=service.service_id)
+        db.add(prompt_inactive)
+        
+        prompt_archived = Prompt(prompt_name="Clinica Eval Structure Archived", prompt_type="audio", is_active=True, is_archived=True, service_id=service.service_id)
+        db.add(prompt_archived)
+        await db.flush()
+
         prompt_version = PromptVersion(prompt_id=prompt.prompt_id, prompt="Estructura base de evaluación de Clinica. Criterio score.", is_current=True)
         db.add(prompt_version)
         await db.flush()
@@ -132,6 +139,21 @@ async def test_trainer_module_logic():
         print("[OK] Seed data created.")
 
         print("\n--- 2. CONFIGURATIONS CREATION ---")
+        # Validate listing available structures
+        res_default = await TrainerService.list_available_structures(db, service_id=service.service_id)
+        assert len(res_default) == 1
+        assert res_default[0].prompt_id == prompt.prompt_id
+
+        res_inactive = await TrainerService.list_available_structures(db, service_id=service.service_id, include_inactive=True)
+        assert len(res_inactive) == 2
+
+        res_archived = await TrainerService.list_available_structures(db, service_id=service.service_id, include_archived=True)
+        assert len(res_archived) == 2
+
+        res_all = await TrainerService.list_available_structures(db, service_id=service.service_id, include_inactive=True, include_archived=True)
+        assert len(res_all) == 3
+        print("[OK] list_available_structures query and filters validated.")
+
         config_payload = TrainerEvaluationConfigCreate(
             name="Clinica Eval Config",
             service_id=service.service_id,
@@ -142,7 +164,10 @@ async def test_trainer_module_logic():
         config = await TrainerService.create_evaluation_config(db, config_payload, created_by="admin@speech.com")
         assert config.config_id is not None
         assert config.name == "Clinica Eval Config"
-        print("[OK] Evaluation Config created.")
+        assert config.service_name == "Clinica Service"
+        assert config.speech_structure_name == "Clinica Eval Structure"
+        assert config.speech_structure_type == "audio"
+        print("[OK] Evaluation Config created with enriched metadata properties.")
 
         print("\n--- 3. SIMULATIONS STATES & VALIDATIONS ---")
         # Validate unique code
@@ -274,7 +299,7 @@ async def test_trainer_module_logic():
         await db.execute(delete(TrainerEvaluationConfig).where(TrainerEvaluationConfig.config_id == config.config_id))
         await db.execute(delete(TrainingAgentSetting).where(TrainingAgentSetting.hubspot_owner_id == "agent_owner_1"))
         await db.execute(delete(PromptVersion).where(PromptVersion.prompt_id == prompt.prompt_id))
-        await db.execute(delete(Prompt).where(Prompt.prompt_id == prompt.prompt_id))
+        await db.execute(delete(Prompt).where(Prompt.service_id == service.service_id))
         await db.execute(delete(Service).where(Service.service_id == service.service_id))
         await db.commit()
         print("=== TODAS LAS PRUEBAS DE TRAINER HAN PASADO CON EXITO ===")

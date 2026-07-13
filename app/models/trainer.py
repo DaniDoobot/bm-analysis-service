@@ -44,6 +44,22 @@ class TrainerEvaluationConfig(Base):
     service = relationship("Service", lazy="joined")
     speech_structure = relationship("Prompt", lazy="joined")
 
+    @property
+    def service_name(self) -> str | None:
+        return self.service.service_name if self.service else None
+
+    @property
+    def speech_structure_name(self) -> str | None:
+        return self.speech_structure.prompt_name if self.speech_structure else None
+
+    @property
+    def speech_structure_type(self) -> str | None:
+        return self.speech_structure.prompt_type if self.speech_structure else None
+
+    @property
+    def speech_structure_description(self) -> str | None:
+        return self.speech_structure.description if self.speech_structure else None
+
 
 class TrainerSimulation(Base):
     __tablename__ = "bm_trainer_simulations"

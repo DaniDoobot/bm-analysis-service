@@ -25,7 +25,11 @@ class TrainerEvaluationConfigResponse(BaseModel):
     config_id: int
     name: str
     service_id: int
+    service_name: Optional[str] = None
     speech_structure_id: int
+    speech_structure_name: Optional[str] = None
+    speech_structure_type: Optional[str] = None
+    speech_structure_description: Optional[str] = None
     extra_instructions: Optional[str] = None
     is_active: bool
     created_by: Optional[str] = None
@@ -150,6 +154,8 @@ class AvailableSpeechStructure(BaseModel):
     prompt_name: str
     prompt_type: str
     description: Optional[str] = None
+    is_active: bool
+    is_archived: bool
 
     class Config:
         from_attributes = True

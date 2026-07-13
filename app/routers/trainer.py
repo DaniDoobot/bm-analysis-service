@@ -256,11 +256,18 @@ async def deactivate_evaluation_config(
 async def list_available_structures(
     service_id: int,
     current_user: Annotated[User, Depends(get_current_user)],
+    include_inactive: bool = Query(False, description="Incluir estructuras de evaluación inactivas"),
+    include_archived: bool = Query(False, description="Incluir estructuras de evaluación archivadas"),
     db: AsyncSession = Depends(get_db),
 ):
     """List available Speech prompts/structures for a service."""
     try:
-        return await TrainerService.list_available_structures(db, service_id=service_id)
+        return await TrainerService.list_available_structures(
+            db,
+            service_id=service_id,
+            include_inactive=include_inactive,
+            include_archived=include_archived,
+        )
     except ValueError as ve:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(ve))
 
