@@ -464,6 +464,25 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
                         elif fr["name"] == "select_mode":
                             select_mode_response = fr["response"]["result"]
                         
+            # Verify the initial greeting was requested automatically
+            initial_greeting_text = None
+            for call in send_calls:
+                payload_str = call[0][0]
+                payload = json.loads(payload_str)
+                if "clientContent" in payload:
+                    turns = payload["clientContent"].get("turns", [])
+                    for turn in turns:
+                        for part in turn.get("parts", []):
+                            text = part.get("text", "")
+                            if "Hola, has llamado" in text:
+                                initial_greeting_text = text
+                                break
+            self.assertIsNotNone(initial_greeting_text)
+            self.assertIn("Dubot", initial_greeting_text)
+            self.assertNotIn("Doobot", initial_greeting_text)
+            self.assertNotIn("7777", initial_greeting_text)
+            self.assertNotIn("siete siete siete siete", initial_greeting_text)
+
             self.assertIsNotNone(setup_payload)
             self.assertEqual(setup_payload["model"], "models/gemini-3.1-flash-live-preview")
             
@@ -477,6 +496,89 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(verify_agent_response["agent_name"], "Cristina Montenegro")
             
             self.assertIsNone(select_mode_response)
+
+    @patch("app.routers.training_hub_voice.settings")
+    async def test_media_stream_websocket_redirect_failure(self, mock_settings):
+        from fastapi.testclient import TestClient
+        from app.main import app
+        import json
+        import asyncio
+        import time
+        
+        mock_settings.gemini_api_key = "mock_key"
+        mock_settings.gemini_live_api_key = None
+        mock_settings.gemini_model = "models/gemini-3.1-flash-live-preview"
+        mock_settings.gemini_live_model = None
+        
+        mock_gemini_ws = AsyncMock()
+        mock_gemini_ws.send = AsyncMock()
+        
+        async def mock_async_iter(*args, **kwargs):
+            yield json.dumps({"setupComplete": {}})
+            await asyncio.sleep(0.1)
+            yield json.dumps({
+                "toolCall": {
+                    "functionCalls": [{
+                        "id": "call_abc123",
+                        "name": "verify_agent_code",
+                        "args": {"agent_code": "siete siete siete siete"}
+                    }]
+                }
+            })
+            await asyncio.sleep(0.1)
+            yield json.dumps({
+                "toolCall": {
+                    "functionCalls": [{
+                        "id": "call_xyz789",
+                        "name": "select_mode",
+                        "args": {"mode": "cycles"}
+                    }]
+                }
+            })
+            await asyncio.sleep(0.5)
+            
+        mock_gemini_ws.__aiter__ = mock_async_iter
+        
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__.return_value = mock_gemini_ws
+        mock_connect.__aexit__.return_value = None
+        
+        # Patch redirect_call to return False (simulating redirect failure)
+        with patch("websockets.connect", return_value=mock_connect), \
+             patch("app.routers.training_hub_voice.redirect_call", AsyncMock(return_value=False)) as mock_redirect:
+            client = TestClient(app)
+            try:
+                with client.websocket_connect("/bm/training/hub/media-stream?flow=hub") as websocket:
+                    websocket.send_json({"event": "connected"})
+                    websocket.send_json({
+                        "event": "start",
+                        "start": {
+                            "streamSid": "stream_123",
+                            "callSid": "call_ws_test_hub",
+                        }
+                    })
+                    time.sleep(0.8)
+            except Exception:
+                pass
+
+            # Verify mock_redirect was called
+            mock_redirect.assert_called_once()
+            
+            # Verify the error voice prompt was sent to Gemini Live
+            send_calls = mock_gemini_ws.send.call_args_list
+            error_prompt_sent = False
+            for call in send_calls:
+                payload_str = call[0][0]
+                payload = json.loads(payload_str)
+                if "clientContent" in payload:
+                    turns = payload["clientContent"].get("turns", [])
+                    for turn in turns:
+                        for part in turn.get("parts", []):
+                            text = part.get("text", "")
+                            if "problema de configuracion de telefonia" in text.lower() or "problema de configuración de telefonía" in text.lower():
+                                error_prompt_sent = True
+                                break
+            self.assertTrue(error_prompt_sent)
 
 
 if __name__ == "__main__":

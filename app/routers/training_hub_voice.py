@@ -48,7 +48,7 @@ HUB_SYSTEM_INSTRUCTION = f"""
 Eres el Asistente virtual de entrenamiento de Dubot. Tu labor en esta llamada es identificar al agente y luego ayudarle a elegir qué tipo de práctica quiere realizar.
 
 Sigue estas pautas estrictas:
-1. Da la bienvenida de forma amable: "Hola, has llamado al asistente virtual de entrenamiento de Dubot. Identifícate con tu código de agente, por favor. Puedes decirlo dígito a dígito, por ejemplo: siete, siete, siete, siete. También puedes marcarlo con el teclado."
+1. Da la bienvenida de forma amable: "Hola, has llamado al asistente virtual de entrenamiento de Dubot. Identifícate con tu código de agente, por favor. Puedes decirlo por voz o introducirlo con el teclado."
 2. Cuando pidas o recibas códigos, pide que se digan dígito a dígito si es necesario.
 3. Si el usuario da un número de 4 dígitos o una secuencia de cuatro dígitos hablados, llama inmediatamente a la función de validación con el código normalizado. No inventes ni reformules el código. No rechace un código sin llamar a la función de validación backend. Llama a la herramienta `verify_agent_code(agent_code=codigo_normalizado)`.
 4. Si el backend te dice que el código es inválido (status es "invalid"), indícalo de forma de educada y pídele que lo repita o lo marque en el teclado.
@@ -181,8 +181,13 @@ def normalize_agent_code(raw_text: str) -> Optional[str]:
 
 async def redirect_call(call_sid: str, redirect_url: str) -> bool:
     """Helper to update a Twilio call and redirect it to a new TwiML URL."""
-    account_sid = os.getenv("TWILIO_ACCOUNT_SID")
-    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+    account_sid = getattr(settings, "twilio_account_sid", None) or os.getenv("TWILIO_ACCOUNT_SID")
+    auth_token = getattr(settings, "twilio_auth_token", None) or os.getenv("TWILIO_AUTH_TOKEN")
+    
+    logger.info("Redirect call credentials check: account_sid is %s, auth_token is %s",
+                "configured" if account_sid else "NOT configured",
+                "configured" if auth_token else "NOT configured")
+                
     if not account_sid or not auth_token:
         logger.error("Twilio credentials not configured. Cannot redirect call.")
         return False
@@ -552,6 +557,26 @@ async def media_stream(websocket: WebSocket):
             setup_resp = await gemini_ws.recv()
             logger.info("Established Gemini Live training hub session.")
             
+            # Trigger initial greeting automatically
+            logger.info("Training Hub initial greeting requested.")
+            greet_text = ""
+            if flow == "hub":
+                greet_text = "Di exactamente: 'Hola, has llamado al asistente virtual de entrenamiento de Dubot. Identifícate con tu código de agente, por favor. Puedes decirlo por voz o introducirlo con el teclado.' y quédate en silencio."
+            elif flow == "trainer_code":
+                greet_text = "Di exactamente: 'Por favor, dime el código de la simulación que quieres realizar. También puedes marcarla con el teclado.' y quédate en silencio."
+                
+            if greet_text:
+                greet_msg = {
+                    "clientContent": {
+                        "turns": [{
+                            "role": "user",
+                            "parts": [{"text": greet_text}]
+                        }],
+                        "turnComplete": True
+                    }
+                }
+                await gemini_ws.send(json.dumps(greet_msg))
+            
             call_sid = None
             stream_sid = None
             attempts = 0
@@ -603,6 +628,7 @@ async def media_stream(websocket: WebSocket):
                 nonlocal call_sid, stream_sid, attempts, redirected, identified_agent_id
                 proto_http = websocket.headers.get("x-forwarded-proto", "http")
                 scheme_http = "https" if proto_http == "https" or "localhost" not in (websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost") else "http"
+                logged_initial_greeting_sent = False
                 
                 try:
                     async for response_str in gemini_ws:
@@ -612,6 +638,9 @@ async def media_stream(websocket: WebSocket):
                         
                         # Forward audio from Gemini to Twilio
                         if "serverContent" in data:
+                            if not logged_initial_greeting_sent:
+                                logged_initial_greeting_sent = True
+                                logger.info("Training Hub initial greeting sent by Gemini.")
                             parts = data["serverContent"].get("modelTurn", {}).get("parts", [])
                             for part in parts:
                                 mime = part.get("inlineData", {}).get("mimeType", "")
@@ -679,10 +708,27 @@ async def media_stream(websocket: WebSocket):
                                         host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"
                                         if mode == "trainer":
                                             logger.info("Redirecting call to trainer-init: agent_id=%s", identified_agent_id)
-                                            await redirect_call(call_sid, f"{scheme_http}://{host}/bm/training/hub/trainer-init?agent_id={identified_agent_id}&call_sid={call_sid}")
+                                            ok = await redirect_call(call_sid, f"{scheme_http}://{host}/bm/training/hub/trainer-init?agent_id={identified_agent_id}&call_sid={call_sid}")
                                         else:
                                             logger.info("Redirecting call to cycles-init: agent_id=%s", identified_agent_id)
-                                            await redirect_call(call_sid, f"{scheme_http}://{host}/bm/training/hub/cycles-init?agent_id={identified_agent_id}&call_sid={call_sid}")
+                                            ok = await redirect_call(call_sid, f"{scheme_http}://{host}/bm/training/hub/cycles-init?agent_id={identified_agent_id}&call_sid={call_sid}")
+                                        
+                                        if not ok:
+                                            logger.error("Twilio redirection failed. Instructing Gemini to play config error and closing.")
+                                            err_msg = {
+                                                "clientContent": {
+                                                    "turns": [{
+                                                        "role": "user",
+                                                        "parts": [{"text": "Di exactamente: 'Lo siento, hay un problema de configuración de telefonía. Por favor, ponte en contacto con soporte. La llamada finalizará.' y quédate en silencio."}]
+                                                    }],
+                                                    "turnComplete": True
+                                                }
+                                            }
+                                            await gemini_ws.send(json.dumps(err_msg))
+                                            await asyncio.sleep(4.0)
+                                            await websocket.close()
+                                            return
+                                            
                                         redirected = True
                                         return
                                     else:
@@ -703,7 +749,22 @@ async def media_stream(websocket: WebSocket):
                                         sim = await TrainerService.validate_simulation_code(sub_db, sim_code)
                                         if sim and identified_agent_id:
                                             host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"
-                                            await redirect_trainer_call(call_sid, host, identified_agent_id, sim.simulation_id)
+                                            ok = await redirect_trainer_call(call_sid, host, identified_agent_id, sim.simulation_id)
+                                            if not ok:
+                                                logger.error("Twilio redirect_trainer_call failed. Instructing Gemini to play error and closing.")
+                                                err_msg = {
+                                                    "clientContent": {
+                                                        "turns": [{
+                                                            "role": "user",
+                                                            "parts": [{"text": "Di exactamente: 'Lo siento, hay un problema de configuración de telefonía. Por favor, ponte en contacto con soporte. La llamada finalizará.' y quédate en silencio."}]
+                                                        }],
+                                                        "turnComplete": True
+                                                    }
+                                                }
+                                                await gemini_ws.send(json.dumps(err_msg))
+                                                await asyncio.sleep(4.0)
+                                                await websocket.close()
+                                                return
                                             redirected = True
                                             return
                                         else:
