@@ -327,13 +327,17 @@ async def start_roleplay(
     proto = request.headers.get("x-forwarded-proto", "http")
     scheme = "wss" if proto == "https" or "localhost" not in host else "ws"
     
-    ws_url = f"{scheme}://{host}/bm/trainer/phone/media-stream"
+    ws_url = f"{scheme}://{host}/bm/trainer/phone/media-stream?session_id={session.session_id}&flow=session"
 
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Connect>
             <Stream url="{ws_url}">
                 <Parameter name="session_id" value="{session.session_id}" />
+                <Parameter name="flow" value="session" />
+                <Parameter name="agent_id" value="{agent_id}" />
+                <Parameter name="simulation_id" value="{simulation_id}" />
+                <Parameter name="call_sid" value="{call_sid}" />
             </Stream>
         </Connect>
     </Response>
