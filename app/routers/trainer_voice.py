@@ -1,5 +1,6 @@
 """FastAPI router for Twilio voice trainer integration (IVR, WebSockets media streaming, and Gemini Live)."""
 import logging
+import os
 import base64
 import json
 import httpx
@@ -89,8 +90,8 @@ REGLAS ABSOLUTAS E IRROMPIBLES:
 
 async def redirect_trainer_call(call_sid: str, host: str, agent_id: str, simulation_id: int) -> bool:
     """Redirect an active Twilio call to the start-roleplay route."""
-    account_sid = settings.twilio_account_sid
-    auth_token = settings.twilio_auth_token
+    account_sid = getattr(settings, "twilio_account_sid", None) or os.getenv("TWILIO_ACCOUNT_SID")
+    auth_token = getattr(settings, "twilio_auth_token", None) or os.getenv("TWILIO_AUTH_TOKEN")
     if not account_sid or not auth_token:
         logger.error("Twilio credentials not configured. Cannot redirect trainer call.")
         return False
@@ -114,8 +115,8 @@ async def redirect_trainer_call(call_sid: str, host: str, agent_id: str, simulat
 
 async def redirect_to_dtmf(call_sid: str, host: str) -> bool:
     """Redirect an active Twilio call to collect-dtmf fallback route."""
-    account_sid = settings.twilio_account_sid
-    auth_token = settings.twilio_auth_token
+    account_sid = getattr(settings, "twilio_account_sid", None) or os.getenv("TWILIO_ACCOUNT_SID")
+    auth_token = getattr(settings, "twilio_auth_token", None) or os.getenv("TWILIO_AUTH_TOKEN")
     if not account_sid or not auth_token:
         logger.error("Twilio credentials not configured. Cannot redirect trainer call to DTMF.")
         return False
@@ -431,8 +432,8 @@ def encode_gemini_to_twilio(base64_payload: str, rate_state: Optional[tuple]) ->
 
 async def start_twilio_recording(call_sid: str, host: str) -> Optional[str]:
     """Instruct Twilio to start recording the call."""
-    account_sid = settings.twilio_account_sid
-    auth_token = settings.twilio_auth_token
+    account_sid = getattr(settings, "twilio_account_sid", None) or os.getenv("TWILIO_ACCOUNT_SID")
+    auth_token = getattr(settings, "twilio_auth_token", None) or os.getenv("TWILIO_AUTH_TOKEN")
     if not account_sid or not auth_token:
         logger.error("Twilio credentials not configured. Cannot record call.")
         return None
@@ -464,8 +465,8 @@ async def start_twilio_recording(call_sid: str, host: str) -> Optional[str]:
 
 async def hangup_twilio_call(call_sid: str) -> bool:
     """Hang up the active Twilio call."""
-    account_sid = settings.twilio_account_sid
-    auth_token = settings.twilio_auth_token
+    account_sid = getattr(settings, "twilio_account_sid", None) or os.getenv("TWILIO_ACCOUNT_SID")
+    auth_token = getattr(settings, "twilio_auth_token", None) or os.getenv("TWILIO_AUTH_TOKEN")
     if not account_sid or not auth_token:
         return False
         
@@ -494,9 +495,12 @@ async def duration_monitor_task(
         # Minuto 8:00 (Aviso de Cierre)
         await asyncio.sleep(480)
         warning_msg = {
-            "realtimeInput": {
-                "mediaChunks": [],
-                "text": "Oiga, disculpe, pero me tengo que marchar en un par de minutos a una cita..."
+            "clientContent": {
+                "turns": [{
+                    "role": "user",
+                    "parts": [{"text": "Oiga, disculpe, pero me tengo que marchar en un par de minutos a una cita..."}]
+                }],
+                "turnComplete": True
             }
         }
         await gemini_ws.send(json.dumps(warning_msg))
@@ -507,9 +511,12 @@ async def duration_monitor_task(
         logger.info("Forced 10-minute timeout reached for trainer call: %s. Hanging up.", call_sid)
         
         close_msg = {
-            "realtimeInput": {
-                "mediaChunks": [],
-                "text": "Bueno, mire, me tengo que ir ya. Adiós."
+            "clientContent": {
+                "turns": [{
+                    "role": "user",
+                    "parts": [{"text": "Bueno, mire, me tengo que ir ya. Adiós."}]
+                }],
+                "turnComplete": True
             }
         }
         await gemini_ws.send(json.dumps(close_msg))
@@ -592,14 +599,17 @@ async def media_stream(
     session_id_str = params.get("session_id")
     session_id = int(session_id_str) if session_id_str else None
 
-    # Load settings
-    gemini_api_key = settings.gemini_live_api_key or settings.gemini_api_key
-    gemini_model = settings.gemini_live_model or "gemini-2.0-flash-exp"
+    # Load settings — use getattr() to avoid AttributeError if attribute doesn't exist
+    gemini_api_key = getattr(settings, "gemini_live_api_key", None) or getattr(settings, "gemini_api_key", None)
+    gemini_model = getattr(settings, "gemini_live_model", None) or getattr(settings, "gemini_model", None) or "models/gemini-2.0-flash-exp"
+    if gemini_model and not gemini_model.startswith("models/"):
+        gemini_model = f"models/{gemini_model}"
     
     if not gemini_api_key:
-        logger.error("Gemini API key is not configured.")
+        logger.error("Trainer voice Gemini API key is not configured. Closing WebSocket.")
         await websocket.close()
         return
+    logger.info("Trainer voice Gemini API key configured: yes")
 
     instruction = ""
     tools = []
@@ -782,10 +792,10 @@ async def media_stream(
                                 if pcm_payload:
                                     input_msg = {
                                         "realtimeInput": {
-                                            "mediaChunks": [{
-                                                "mimeType": "audio/pcm",
+                                            "audio": {
+                                                "mimeType": "audio/pcm;rate=16000",
                                                 "data": pcm_payload
-                                            }]
+                                            }
                                         }
                                     }
                                     await gemini_ws.send(json.dumps(input_msg))
@@ -820,9 +830,12 @@ async def media_stream(
                                     agent_first_name = setting_obj.agent_name.split()[0] if setting_obj else "Agente"
 
                                 greet_msg = {
-                                    "realtimeInput": {
-                                        "mediaChunks": [],
-                                        "text": f"Di exactamente: 'Perfecto {agent_first_name}, se ha verificado el código de la simulación. Iniciamos el roleplay. Prepárate.' y a continuación, sin pausar, asume tu personaje de paciente."
+                                    "clientContent": {
+                                        "turns": [{
+                                            "role": "user",
+                                            "parts": [{"text": f"Di exactamente: 'Perfecto {agent_first_name}, se ha verificado el código de la simulación. Iniciamos el roleplay. Prepárate.' y a continuación, sin pausar, asume tu personaje de paciente."}]
+                                        }],
+                                        "turnComplete": True
                                     }
                                 }
                                 await gemini_ws.send(json.dumps(greet_msg))

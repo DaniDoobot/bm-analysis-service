@@ -63,9 +63,10 @@ Esta fase se activa cuando el backend confirma que el agente ha seleccionado Tra
 Cuando estés en esta fase:
 1. Tu única labor es obtener el código de la simulación que quiere practicar.
 2. Cuando el usuario diga cualquier número, código o secuencia alfanumérica, llama INMEDIATAMENTE a `validate_trainer_simulation_code(code=codigo_normalizado)`. NO esperes, NO digas "lo compruebo" sin llamar a la tool en ese mismo momento. NO inventes el resultado.
-3. Si el backend devuelve valid=false, di claramente "Ese código no es válido" y pídelo otra vez.
+3. Si el backend devuelve valid=false, di claramente: "No he encontrado ese código. Puedes repetirlo dígito a dígito o marcarlo con el teclado." y pídelo otra vez.
 4. Si es válido, di "Perfecto, iniciamos la simulación." y quédate en silencio mientras se transfiere la llamada.
 5. NO pidas código de agente en esta fase. El agente ya está identificado.
+6. Si el usuario prefiere marcar el código en el teclado, espera a que lo introduzca con el teclado.
 
 Reglas de pronunciación:
 {SPANISH_VOICE_RULES}
@@ -75,9 +76,9 @@ TRAINER_CODE_SYSTEM_INSTRUCTION = f"""
 Eres el Asistente virtual de entrenamiento de Dubot.
 El agente ya está identificado y ha seleccionado realizar una simulación en Trainer.
 Tu única labor es obtener el código de simulación:
-1. Di: "Perfecto. Dime el código de la simulación que quieres realizar. También puedes marcarlo con el teclado."
-2. Cuando el usuario diga cualquier número, código o secuencia alfanumérica, llama INMEDIATAMENTE a `validate_trainer_simulation_code(code=codigo_normalizado)`. NO esperes ni digas "lo compruebo" sin llamar a la tool en ese mismo turno. NO inventes el resultado.
-3. Si el backend devuelve valid=false, di "Ese código no es válido. Por favor, dímelo otra vez." y vuelve al punto 2.
+1. Di: "Perfecto. Para mayor precisión, te recomiendo marcar el código con el teclado de tu teléfono. Si prefieres decirlo por voz, hazlo dígito a dígito."
+2. Cuando el usuario proporcione el código (por voz dígito a dígito o por teclado), normalízalo y llama INMEDIATAMENTE a `validate_trainer_simulation_code(code=codigo_normalizado)`. NO esperes ni digas "lo compruebo" sin llamar a la tool en ese mismo turno. NO inventes el resultado.
+3. Si el backend devuelve valid=false, di exactamente: "No he encontrado ese código. Por favor, repítelo dígito a dígito o márcalo con el teclado." y espera nueva entrada.
 4. Si es válido, di "Perfecto, iniciamos la simulación." y quédate en silencio.
 5. NO pidas código de agente. El agente ya está identificado.
 
@@ -732,7 +733,7 @@ Reglas de pronunciación:
                                 "clientContent": {
                                     "turns": [{
                                         "role": "user",
-                                        "parts": [{"text": "Di exactamente: 'Ese código de simulación no es válido. Por favor, dímelo otra vez o márcalo con el teclado.' y quédate en silencio."}]
+                                        "parts": [{"text": "Di exactamente: 'Código de simulación incorrecto. Por favor, dímelo otra vez o márcalo con el teclado.' y quédate en silencio."}]
                                     }],
                                     "turnComplete": True
                                 }
