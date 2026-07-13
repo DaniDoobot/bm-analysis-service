@@ -419,11 +419,14 @@ async def media_stream(websocket: WebSocket):
         return
 
     # Connect to Gemini Live API
-    uri = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent"
-    uri += f"?key={gemini_api_key}"
+    gemini_model = getattr(settings, "gemini_live_model", None) or getattr(settings, "gemini_model", None) or "models/gemini-2.0-flash-exp"
+    if gemini_model and not gemini_model.startswith("models/"):
+        gemini_model = f"models/{gemini_model}"
+
+    uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={gemini_api_key}"
     
     session_config = {
-        "model": "models/gemini-2.0-flash-exp",
+        "model": gemini_model,
         "generationConfig": {
             "responseModalities": ["audio"],
             "speechConfig": {

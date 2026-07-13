@@ -355,6 +355,8 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
         
         mock_settings.gemini_api_key = "mock_key"
         mock_settings.gemini_live_api_key = None
+        mock_settings.gemini_model = "models/gemini-3.1-flash-live-preview"
+        mock_settings.gemini_live_model = None
         
         mock_gemini_ws = AsyncMock()
         mock_gemini_ws.send = AsyncMock()
@@ -369,7 +371,7 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
         mock_connect.__aenter__.return_value = mock_gemini_ws
         mock_connect.__aexit__.return_value = None
         
-        with patch("websockets.connect", return_value=mock_connect):
+        with patch("websockets.connect", return_value=mock_connect) as mock_websockets_connect:
             client = TestClient(app)
             with client.websocket_connect("/bm/training/hub/media-stream?flow=hub") as websocket:
                 websocket.send_json({"event": "connected"})
@@ -381,6 +383,24 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
                     }
                 })
                 time.sleep(0.5)
+
+            # Verify websockets.connect call arguments
+            mock_websockets_connect.assert_called_once()
+            called_url = mock_websockets_connect.call_args[0][0]
+            self.assertIn("v1beta", called_url)
+            self.assertIn("key=mock_key", called_url)
+            
+            # Verify the model passed to setup message
+            send_calls = mock_gemini_ws.send.call_args_list
+            setup_payload = None
+            for call in send_calls:
+                payload_str = call[0][0]
+                payload = json.loads(payload_str)
+                if "setup" in payload:
+                    setup_payload = payload["setup"]
+                    break
+            self.assertIsNotNone(setup_payload)
+            self.assertEqual(setup_payload["model"], "models/gemini-3.1-flash-live-preview")
 
 
 if __name__ == "__main__":
