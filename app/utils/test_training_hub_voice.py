@@ -108,13 +108,25 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
 
     @patch("app.routers.training_hub_voice.settings")
     async def test_incoming_call(self, mock_settings):
-        mock_settings.GEMINI_API_KEY = "mock_key"
+        mock_settings.gemini_api_key = "mock_key"
+        mock_settings.gemini_live_api_key = None
         from app.routers.training_hub_voice import incoming_call
         req = self.mock_request(headers={"host": "test-host.com"})
         resp = await incoming_call(req)
         body = resp.body.decode("utf-8")
         self.assertIn("wss://test-host.com/bm/training/hub/media-stream", body)
         self.assertIn('<Parameter name="flow" value="hub"', body)
+
+    @patch("app.routers.training_hub_voice.settings")
+    async def test_incoming_call_missing_api_key(self, mock_settings):
+        mock_settings.gemini_api_key = None
+        mock_settings.gemini_live_api_key = None
+        from app.routers.training_hub_voice import incoming_call
+        req = self.mock_request(headers={"host": "test-host.com"})
+        resp = await incoming_call(req)
+        body = resp.body.decode("utf-8")
+        self.assertIn("clave de API de Gemini no está configurada", body)
+        self.assertIn("<Hangup/>", body)
 
     async def test_collect_agent_dtmf(self):
         from app.routers.training_hub_voice import collect_agent_dtmf

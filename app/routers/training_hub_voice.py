@@ -103,6 +103,17 @@ async def redirect_call(call_sid: str, redirect_url: str) -> bool:
 @router.post("/incoming-call")
 async def incoming_call(request: Request):
     """Unified phone assistant entry point."""
+    gemini_api_key = getattr(settings, "gemini_live_api_key", None) or getattr(settings, "gemini_api_key", None)
+    if not gemini_api_key:
+        logger.error("GEMINI_API_KEY / gemini_live_api_key is not configured. Answering call with config error TwiML.")
+        twiml_error = """<?xml version="1.0" encoding="UTF-8"?>
+        <Response>
+            <Say language="es-ES">Lo siento, la clave de API de Gemini no está configurada. Por favor, contacta con soporte. La llamada finalizará.</Say>
+            <Hangup/>
+        </Response>
+        """
+        return Response(content=twiml_error, media_type="application/xml")
+
     host = request.headers.get("x-forwarded-host") or request.headers.get("host") or "localhost"
     proto = request.headers.get("x-forwarded-proto", "http")
     scheme = "wss" if proto == "https" or "localhost" not in host else "ws"
@@ -339,9 +350,9 @@ async def media_stream(websocket: WebSocket):
     flow = params.get("flow", "hub")
     agent_id = params.get("agent_id")
     
-    gemini_api_key = settings.GEMINI_API_KEY
+    gemini_api_key = getattr(settings, "gemini_live_api_key", None) or getattr(settings, "gemini_api_key", None)
     if not gemini_api_key:
-        logger.error("GEMINI_API_KEY not configured.")
+        logger.error("GEMINI_API_KEY / gemini_live_api_key is not configured in WebSocket.")
         await websocket.close()
         return
 
