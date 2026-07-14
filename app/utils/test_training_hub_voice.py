@@ -960,7 +960,8 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
         mock_connect.__aexit__.return_value = None
         
         with patch("websockets.connect", return_value=mock_connect), \
-             patch("app.routers.training_hub_voice.redirect_call", AsyncMock(return_value=True)):
+             patch("app.routers.training_hub_voice.redirect_call", AsyncMock(return_value=True)), \
+             patch("app.routers.training_hub_voice.TrainerService.validate_agent_code", AsyncMock(return_value=None)):
             client = TestClient(app)
             with client.websocket_connect("/bm/training/hub/media-stream?flow=hub") as websocket:
                 websocket.send_json({"event": "connected"})
@@ -975,11 +976,19 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
             # Gemini must have received an error prompt
             send_calls = mock_gemini_ws.send.call_args_list
             error_sent = any(
-                "incorrecto" in json.loads(c[0][0]).get("clientContent", {}).get("turns", [{}])[0].get("parts", [{}])[0].get("text", "").lower()
+                # The router sends: 'No he encontrado ese código. Repítelo, por favor.'
+                # after the first invalid DTMF attempt (attempts < 2)
+                any(
+                    "encontrado" in part.get("text", "").lower()
+                    for part in turn.get("parts", [])
+                )
                 for c in send_calls
-                if "clientContent" in json.loads(c[0][0])
+                for payload in [json.loads(c[0][0])]
+                if "clientContent" in payload
+                for turn in payload["clientContent"].get("turns", [])
             )
-            self.assertTrue(error_sent, "Invalid agent code must trigger error voice prompt")
+            self.assertTrue(error_sent, "Invalid agent code must trigger 'No he encontrado ese código' voice prompt")
+
 
     @patch("app.routers.training_hub_voice.settings")
     async def test_dtmf_invalid_mode(self, mock_settings):

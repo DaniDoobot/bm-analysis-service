@@ -449,6 +449,31 @@ class TrainerService:
     @staticmethod
     async def validate_agent_code(db: AsyncSession, agent_code: str) -> Optional[dict]:
         cleaned = agent_code.replace(" ", "").upper()
+
+        # Count active agents that have at least one code set (for diagnostics)
+        stmt_all = select(TrainingAgentSetting).where(
+            TrainingAgentSetting.is_enabled == True,
+            TrainingAgentSetting.training_code_enabled == True,
+        )
+        res_all = await db.execute(stmt_all)
+        active_with_codes = list(res_all.scalars().all())
+        active_count = len(active_with_codes)
+
+        # Check for duplicate code collision (defensive: detect ambiguous state)
+        matching_all = [
+            s for s in active_with_codes
+            if (s.training_code and s.training_code.upper() == cleaned)
+            or (s.training_numeric_code and s.training_numeric_code.upper() == cleaned)
+        ]
+        if len(matching_all) > 1:
+            names = [s.agent_name for s in matching_all]
+            logger.error(
+                "Training Hub agent validation CONFLICT: normalized_code=%s "
+                "matches %d agents (%s). Rejecting to avoid ambiguity.",
+                cleaned, len(matching_all), ", ".join(names)
+            )
+            return None
+
         stmt = select(TrainingAgentSetting).where(
             and_(
                 or_(
@@ -462,12 +487,49 @@ class TrainerService:
         res = await db.execute(stmt)
         setting = res.scalars().first()
         if not setting:
+            # Build a compact code map for diagnostics (initials → numeric_code)
+            code_map = ", ".join(
+                f"{s.agent_initials}→{s.training_numeric_code or '–'}"
+                for s in active_with_codes
+                if s.training_numeric_code
+            )
+            logger.warning(
+                "Training Hub agent validation failed: "
+                "normalized_code=%s | searched_fields=training_code,training_numeric_code | "
+                "active_agents_with_codes=%d | code_map=[%s] | reason=not_found",
+                cleaned, active_count, code_map
+            )
             return None
+
+        logger.info(
+            "Training Hub agent validation OK: normalized_code=%s → agent=%s (%s)",
+            cleaned, setting.agent_name, setting.agent_initials
+        )
         return {
             "agent_id": setting.hubspot_owner_id,
             "agent_name": setting.agent_name,
             "agent_initials": setting.agent_initials,
         }
+
+    @staticmethod
+    async def log_agent_code_map(db: AsyncSession) -> None:
+        """Startup diagnostic: print all active agent codes to logs."""
+        stmt = select(TrainingAgentSetting).where(
+            TrainingAgentSetting.is_enabled == True,
+        ).order_by(TrainingAgentSetting.agent_initials)
+        res = await db.execute(stmt)
+        agents = list(res.scalars().all())
+        lines = []
+        for s in agents:
+            code_part = s.training_numeric_code or "–"
+            alpha_part = s.training_code or "–"
+            enabled_flag = "✔" if s.training_code_enabled else "✗ (disabled)"
+            lines.append(f"  {s.agent_initials} → numeric={code_part}, alpha={alpha_part} [{enabled_flag}]")
+        if lines:
+            logger.info("Training agent code map:\n%s", "\n".join(lines))
+        else:
+            logger.warning("Training agent code map: no agents found in bm_training_agent_settings")
+
 
     @staticmethod
     async def validate_simulation_code(db: AsyncSession, simulation_code: str) -> Optional[TrainerSimulation]:
