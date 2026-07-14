@@ -42,11 +42,12 @@ _ALLOWED_TIPOS: frozenset[str] = frozenset({
 async def analyze_transcription_pipeline(
     db: AsyncSession,
     call_id: str,
-    transcription: str,
+    transcription: str | None = None,
     analysis_type: str = "text",
     prompt_id: int | None = None,
     prompt_version_id: int | None = None,
     metadata: dict[str, Any] | None = None,
+    custom_prompt_text: str | None = None,
 ) -> dict[str, Any]:
     """
     Core pipeline to analyze an existing transcription.
@@ -61,13 +62,67 @@ async def analyze_transcription_pipeline(
             "stage": "validation",
             "error_message": "call_id is required.",
         }
+
+    # If transcription is not provided, resolve and transcribe the audio first
     if not transcription:
-        return {
-            "ok": False,
-            "status": "error",
-            "stage": "validation",
-            "error_message": "transcription is required.",
-        }
+        logger.info("No transcription provided. Resolving and transcribing audio for call_id=%s", call_id)
+        from app.services.hubspot_service import HubSpotService
+        from app.services.twilio_service import TwilioService
+        
+        # 1. HubSpot Resolution
+        try:
+            hs_service = HubSpotService()
+            hubspot_data = await hs_service.get_call(call_id)
+            target_url = hubspot_data.get("recording_url")
+            if not target_url:
+                return {
+                    "ok": False,
+                    "status": "error",
+                    "stage": "hubspot",
+                    "error_message": "Call resolved via HubSpot has no recording URL.",
+                }
+        except Exception as e:
+            logger.error("Failed to fetch HubSpot data for call_id=%s: %s", call_id, e)
+            return {
+                "ok": False,
+                "status": "error",
+                "stage": "hubspot",
+                "error_message": f"HubSpot resolution failed: {str(e)}",
+            }
+            
+        # 2. Download audio
+        try:
+            twilio_service = TwilioService()
+            audio_bytes = await twilio_service.download_audio(target_url)
+        except Exception as e:
+            logger.error("Failed to download Twilio audio from %s: %s", target_url, e)
+            return {
+                "ok": False,
+                "status": "error",
+                "stage": "download_audio",
+                "error_message": f"Twilio download failed: {str(e)}",
+            }
+            
+        # 3. Transcribe audio
+        try:
+            logger.info("Transcribing call audio via Whisper for transcription analysis...")
+            transcription_result = await openai_service.transcribe_audio(audio_bytes, filename="call.mp3")
+            transcription = transcription_result.get("text")
+            if not transcription:
+                return {
+                    "ok": False,
+                    "status": "error",
+                    "stage": "transcription",
+                    "error_message": "Whisper transcription returned empty text.",
+                }
+        except Exception as e:
+            logger.error("Whisper transcription failed: %s", e)
+            return {
+                "ok": False,
+                "status": "error",
+                "stage": "transcription",
+                "error_message": f"Whisper transcription failed: {str(e)}",
+            }
 
     now = datetime.now(timezone.utc)
 
@@ -76,7 +131,13 @@ async def analyze_transcription_pipeline(
     resolved_version_id = prompt_version_id
     prompt_content: str | None = None
 
-    if resolved_prompt_id:
+    if custom_prompt_text:
+        # If custom prompt is passed explicitly, use it directly and bypass DB resolution/healing
+        prompt_content = custom_prompt_text
+        resolved_prompt_id = None
+        resolved_version_id = None
+
+    elif resolved_prompt_id:
         # Explicit prompt_id provided: fetch its current active version
         from app.services.prompts_service import _get_current_version
         v = await _get_current_version(db, resolved_prompt_id)
@@ -137,50 +198,52 @@ async def analyze_transcription_pipeline(
         }
 
     # Self-heal/Sync the prompt content with active criteria before validating or analyzing
-    try:
-        from app.services.prompts_service import sync_prompt_text_with_active_criteria, PromptValidationError
-        from app.models.prompts import PromptVersion
-        
-        prompt_content_healed, changed = await sync_prompt_text_with_active_criteria(db, resolved_prompt_id, prompt_content)
-        if changed:
-            prompt_content = prompt_content_healed
-            v_obj = await db.get(PromptVersion, resolved_version_id)
-            if v_obj:
-                from sqlalchemy import func
-                v_obj.prompt = prompt_content
-                v_obj.updated_at = func.now() if hasattr(func, 'now') else datetime.now(timezone.utc)
-                db.add(v_obj)
-                await db.commit()
-                logger.info("Self-healed prompt version ID %s in transcription analysis pipeline.", resolved_version_id)
-    except PromptValidationError as val_ex:
-        logger.error("Prompt validation failed: %s", val_ex)
-        return {
-            "ok": False,
-            "status": "error",
-            "stage": "prompt_validation",
-            "error_message": f"Prompt validation failed: {str(val_ex)}",
-        }
-    except Exception as ex:
-        logger.error("Error during prompt self-healing in transcription analysis pipeline: %s", ex, exc_info=True)
+    is_fallback_active = False
+    if resolved_prompt_id and prompt_content:
+        try:
+            from app.services.prompts_service import sync_prompt_text_with_active_criteria, PromptValidationError
+            from app.models.prompts import PromptVersion
+            
+            prompt_content_healed, changed = await sync_prompt_text_with_active_criteria(db, resolved_prompt_id, prompt_content)
+            if changed:
+                prompt_content = prompt_content_healed
+                v_obj = await db.get(PromptVersion, resolved_version_id)
+                if v_obj:
+                    from sqlalchemy import func
+                    v_obj.prompt = prompt_content
+                    v_obj.updated_at = func.now() if hasattr(func, 'now') else datetime.now(timezone.utc)
+                    db.add(v_obj)
+                    await db.commit()
+                    logger.info("Self-healed prompt version ID %s in transcription analysis pipeline.", resolved_version_id)
+        except PromptValidationError as val_ex:
+            logger.warning(
+                "Prompt validation failed during transcription analysis self-healing: %s. "
+                "Falling back to the last valid prompt version content currently stored.",
+                val_ex
+            )
+            is_fallback_active = True
+        except Exception as ex:
+            logger.error("Error during prompt self-healing in transcription analysis pipeline: %s", ex, exc_info=True)
 
     # ── 1.2. Validate Active Criteria are in prompt_content ────────────
-    from app.services.criteria_service import get_active_criteria
-    active_criteria = await get_active_criteria(db, resolved_prompt_id)
-    missing_keys = []
-    for c in active_criteria:
-        if c.output_key and c.output_key not in prompt_content:
-            missing_keys.append(c.output_key)
+    if resolved_prompt_id:
+        from app.services.criteria_service import get_active_criteria
+        active_criteria = await get_active_criteria(db, resolved_prompt_id)
+        missing_keys = []
+        for c in active_criteria:
+            if c.output_key and c.output_key not in prompt_content:
+                missing_keys.append(c.output_key)
 
-    if missing_keys:
-        return {
-            "ok": False,
-            "status": "error",
-            "stage": "validation",
-            "error_message": "Hay criterios activos que no están incluidos en el prompt activo. Regenera y activa una nueva versión del prompt.",
-            "details": {
-                "missing_keys": missing_keys
+        if missing_keys and not is_fallback_active:
+            return {
+                "ok": False,
+                "status": "error",
+                "stage": "validation",
+                "error_message": "Hay criterios activos que no están incluidos en el prompt activo. Regenera y activa una nueva versión del prompt.",
+                "details": {
+                    "missing_keys": missing_keys
+                }
             }
-        }
 
 
     # ── 2. Call Azure OpenAI ───────────────────────────────────────────────

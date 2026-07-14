@@ -210,6 +210,7 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
         }
 
     # Self-heal/Sync the prompt text with active criteria before validating or analyzing
+    is_fallback_active = False
     try:
         from app.services.prompts_service import sync_prompt_text_with_active_criteria, PromptValidationError
         from app.models.prompts import PromptVersion
@@ -226,13 +227,12 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
                 await db.commit()
                 logger.info("Self-healed prompt version ID %s in audio analysis pipeline.", resolved_version_id)
     except PromptValidationError as val_ex:
-        logger.error("Prompt validation failed in audio analysis pipeline: %s", val_ex)
-        return {
-            "ok": False,
-            "status": "error",
-            "stage": "prompt_validation",
-            "error_message": f"Prompt validation failed: {str(val_ex)}",
-        }
+        logger.warning(
+            "Prompt validation failed during audio analysis self-healing: %s. "
+            "Falling back to the last valid prompt version content currently stored.",
+            val_ex
+        )
+        is_fallback_active = True
     except Exception as ex:
         logger.error("Error during prompt self-healing in audio analysis pipeline: %s", ex, exc_info=True)
 
@@ -244,7 +244,7 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
         if c.output_key and c.output_key not in prompt_text:
             missing_keys.append(c.output_key)
 
-    if missing_keys:
+    if missing_keys and not is_fallback_active:
         return {
             "ok": False,
             "status": "error",

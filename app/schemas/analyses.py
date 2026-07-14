@@ -135,9 +135,17 @@ class TranscribeRequest(BaseModel):
 
 class AnalyzeTranscriptionRequest(BaseModel):
     call_id: str
-    transcription: str
+    transcription: str | None = None
     analysis_type: str = "text"
     prompt_id: int | None = None
     prompt_version_id: int | None = None
     metadata: dict[str, Any] | None = None
+
+
+class TestAnalysisByCallIdRequest(BaseModel):
+    call_id: str
+    custom_prompt: str | None = None
+    prompt: str | None = None
+
+
 

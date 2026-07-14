@@ -3,14 +3,13 @@ Transcription & text-analysis router.
 """
 import logging
 from typing import Annotated
-
 from fastapi import APIRouter, Depends
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_db
-from app.schemas.analyses import AnalyzeTranscriptionRequest, TranscribeRequest
+from app.schemas.analyses import AnalyzeTranscriptionRequest, TranscribeRequest, TestAnalysisByCallIdRequest
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/bm", tags=["Transcription Analysis"])
@@ -109,3 +108,64 @@ async def analyze_transcription(
         status_code=200,
         content=jsonable_encoder(result),
     )
+
+
+@router.post("/test-analysis/by-call-id")
+async def test_analysis_by_call_id(
+    body: TestAnalysisByCallIdRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Test direct analysis using call_id. Resolves audio from HubSpot/Twilio,
+    transcribes it, and analyzes it. Can accept a custom prompt (as custom_prompt or prompt).
+    """
+    logger.info(f"Received request for test-analysis/by-call-id. Body: {body.model_dump()}")
+    from app.services.transcription_analysis_service import analyze_transcription_pipeline
+
+    custom_prompt = body.custom_prompt or body.prompt
+
+    try:
+        result = await analyze_transcription_pipeline(
+            db=db,
+            call_id=body.call_id,
+            transcription=None,
+            custom_prompt_text=custom_prompt,
+        )
+    except Exception as exc:
+        logger.error(
+            "Unhandled exception in test_analysis_by_call_id (call_id=%s): %s",
+            body.call_id,
+            exc,
+            exc_info=True,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "status": "error",
+                "stage": "internal",
+                "error_message": f"Internal server error: {str(exc)}",
+            },
+        )
+
+    if not result.get("ok"):
+        stage = result.get("stage", "")
+        if stage == "validation":
+            status_code = 422
+        elif stage in ("azure",):
+            status_code = 502
+        elif stage in ("save_analysis", "internal"):
+            status_code = 500
+        else:
+            status_code = 400
+
+        return JSONResponse(
+            status_code=status_code,
+            content=jsonable_encoder(result),
+        )
+
+    return JSONResponse(
+        status_code=200,
+        content=jsonable_encoder(result),
+    )
+

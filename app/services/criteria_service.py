@@ -445,15 +445,9 @@ async def _sync_prompt_on_removal(db: AsyncSession, prompt_id: int, criterion) -
         # 1. Sincronizar en PromptVersion
         current_version = await _get_current_version(db, prompt_id)
         if current_version and current_version.prompt:
-            prompt_text = current_version.prompt
-            new_text, removed = remove_criterion_block(prompt_text, criterion)
-            
-            # Rebuild output format section without this criterion
-            new_text, format_changed = sync_output_format_in_prompt(new_text, remaining_criteria, typologies)
-            
-            new_text = clean_whitespaces(new_text)
-            
-            if (removed or format_changed) and new_text != current_version.prompt:
+            from app.services.prompts_service import sync_prompt_text_with_active_criteria, PromptValidationError
+            new_text, sync_changed = await sync_prompt_text_with_active_criteria(db, prompt_id, current_version.prompt)
+            if sync_changed or new_text != current_version.prompt:
                 current_version.prompt = new_text
                 current_version.updated_at = func.now() if hasattr(func, 'now') else datetime.now(timezone.utc)
                 db.add(current_version)
@@ -462,7 +456,7 @@ async def _sync_prompt_on_removal(db: AsyncSession, prompt_id: int, criterion) -
                 if prompt_obj:
                     prompt_obj.updated_at = func.now() if hasattr(func, 'now') else datetime.now(timezone.utc)
                     db.add(prompt_obj)
-                logger.info(f"Sincronización de eliminación: Se eliminó el bloque del criterio '{criterion.output_key}' y se reconstruyó el formato JSON en la versión activa del prompt.")
+                logger.info("Sincronización de eliminación: Se actualizó el prompt activo reconstruyendo el formato JSON y criterios.")
 
         # 2. Sincronizar en borradores activos (PromptDraft)
         drafts_stmt = select(PromptDraft).where(
@@ -477,14 +471,14 @@ async def _sync_prompt_on_removal(db: AsyncSession, prompt_id: int, criterion) -
             
             # A. Eliminar bloque del prompt de borrador
             if "prompt" in draft_data and isinstance(draft_data["prompt"], str):
+                from app.services.prompts_service import sync_prompt_text_with_criteria_list
                 draft_prompt = draft_data["prompt"]
-                new_draft_prompt, removed = remove_criterion_block(draft_prompt, criterion)
-                
-                # Rebuild output format section
-                new_draft_prompt, format_changed = sync_output_format_in_prompt(new_draft_prompt, remaining_criteria, typologies)
-                
-                new_draft_prompt = clean_whitespaces(new_draft_prompt)
-                if removed or format_changed:
+                new_draft_prompt, desc_changed = sync_prompt_text_with_criteria_list(
+                    prompt_text=draft_prompt,
+                    active_criteria=remaining_criteria,
+                    typologies=typologies
+                )
+                if desc_changed or new_draft_prompt != draft_prompt:
                     draft_data["prompt"] = new_draft_prompt
                     draft_changed = True
                     
@@ -508,6 +502,9 @@ async def _sync_prompt_on_removal(db: AsyncSession, prompt_id: int, criterion) -
                 db.add(draft)
                 logger.info(f"Sincronización de eliminación en borrador: Se actualizó el borrador ID {draft.draft_id} tras eliminar/deactivar el criterio.")
                 
+    except PromptValidationError as val_ex:
+        logger.warning(f"Validation failed on sync_prompt_on_removal: {val_ex}")
+        raise val_ex
     except Exception as ex:
         logger.error(f"Error al sincronizar eliminación del criterio en prompt/borradores: {ex}", exc_info=True)
 
@@ -644,7 +641,7 @@ async def _sync_criterion_on_save(
     """
     await db.flush()
     try:
-        from app.services.prompts_service import sync_prompt_text_with_active_criteria, sync_output_format_in_prompt, clean_whitespaces
+        from app.services.prompts_service import sync_prompt_text_with_active_criteria, sync_output_format_in_prompt, clean_whitespaces, PromptValidationError
         from app.models.prompts import Prompt
         from app.models.drafts import PromptDraft
         from app.models.typologies import Typology
@@ -695,28 +692,9 @@ async def _sync_criterion_on_save(
         from app.services.prompts_service import _get_current_version
         current_version = await _get_current_version(db, prompt_id)
         if current_version and current_version.prompt:
-            prompt_text = current_version.prompt
-            changed = False
-            
-            # Primero, aplicar reemplazos globales de nombre y claves
-            if old_name and criterion.criterion_name and old_name != criterion.criterion_name:
-                if old_name in prompt_text:
-                    prompt_text = prompt_text.replace(old_name, criterion.criterion_name)
-                    changed = True
-            
-            if old_output_key and criterion.output_key and old_output_key != criterion.output_key:
-                if old_output_key in prompt_text:
-                    prompt_text = prompt_text.replace(old_output_key, criterion.output_key)
-                    changed = True
-            
-            # Luego, sincronizar usando la lógica centralizada
-            new_text, sync_changed = await sync_prompt_text_with_active_criteria(db, prompt_id, prompt_text)
-            if sync_changed:
-                changed = True
-                prompt_text = new_text
-            
-            if changed or prompt_text != current_version.prompt:
-                current_version.prompt = prompt_text
+            new_text, sync_changed = await sync_prompt_text_with_active_criteria(db, prompt_id, current_version.prompt)
+            if sync_changed or new_text != current_version.prompt:
+                current_version.prompt = new_text
                 current_version.updated_at = func.now() if hasattr(func, 'now') else datetime.now(timezone.utc)
                 if prompt_obj:
                     prompt_obj.updated_at = func.now() if hasattr(func, 'now') else datetime.now(timezone.utc)
@@ -737,34 +715,16 @@ async def _sync_criterion_on_save(
             
             # A. Actualizar texto de prompt en el borrador
             if "prompt" in draft_data and isinstance(draft_data["prompt"], str):
+                from app.services.prompts_service import sync_prompt_text_with_criteria_list
                 draft_prompt = draft_data["prompt"]
-                
-                if old_name and criterion.criterion_name and old_name != criterion.criterion_name:
-                    if old_name in draft_prompt:
-                        draft_prompt = draft_prompt.replace(old_name, criterion.criterion_name)
-                        draft_changed = True
-                        
-                if old_output_key and criterion.output_key and old_output_key != criterion.output_key:
-                    if old_output_key in draft_prompt:
-                        draft_prompt = draft_prompt.replace(old_output_key, criterion.output_key)
-                        draft_changed = True
-                        
-                # Sincronizar el bloque descriptivo del criterio
-                for c in active_criteria:
-                    draft_prompt, desc_changed = sync_criterion_block(draft_prompt, c)
-                    if desc_changed:
-                        draft_changed = True
-                
-                draft_prompt = clean_orphaned_blocks(draft_prompt, active_criteria)
-                
-                # Sincronizar el JSON de formato de salida del borrador
-                draft_prompt, format_changed = sync_output_format_in_prompt(draft_prompt, active_criteria, typologies)
-                if format_changed:
+                new_draft_prompt, desc_changed = sync_prompt_text_with_criteria_list(
+                    prompt_text=draft_prompt,
+                    active_criteria=active_criteria,
+                    typologies=typologies
+                )
+                if desc_changed or new_draft_prompt != draft_prompt:
+                    draft_data["prompt"] = new_draft_prompt
                     draft_changed = True
-                
-                draft_prompt = clean_whitespaces(draft_prompt)
-                draft_data["prompt"] = draft_prompt
-                draft_changed = True
             
             # B. Actualizar elemento correspondiente en la lista de criterios estructurados del borrador
             if "criteria" in draft_data and isinstance(draft_data["criteria"], list):
@@ -817,6 +777,9 @@ async def _sync_criterion_on_save(
                 db.add(draft)
                 logger.info(f"Sincronización automática de borrador: Se actualizó el borrador ID {draft.draft_id} con el criterio modificado/creado.")
                 
+    except PromptValidationError as val_ex:
+        logger.warning(f"Validation failed on sync_criterion_on_save: {val_ex}")
+        raise val_ex
     except Exception as sync_ex:
         logger.error(f"Error durante la sincronización automática de criterio en prompt/borradores: {sync_ex}", exc_info=True)
 
@@ -893,28 +856,32 @@ async def save_criterion(db: AsyncSession, body: SaveCriterionRequest) -> Prompt
                 )
                 
         # Update existing
-        logger.info(f"Updating existing active criterion (ID: {body.criterion_id}, key: '{body.criterion_key}').")
-        old_desc = criterion.criterion_description
-        old_name = criterion.criterion_name
-        old_output_key = criterion.output_key
+        try:
+            logger.info(f"Updating existing active criterion (ID: {body.criterion_id}, key: '{body.criterion_key}').")
+            old_desc = criterion.criterion_description
+            old_name = criterion.criterion_name
+            old_output_key = criterion.output_key
 
-        for field, value in body.model_dump(exclude={"criterion_id"}).items():
-            setattr(criterion, field, value)
-        criterion.deleted_at = None
-        criterion.deleted_by_email = None
+            for field, value in body.model_dump(exclude={"criterion_id"}).items():
+                setattr(criterion, field, value)
+            criterion.deleted_at = None
+            criterion.deleted_by_email = None
 
-        await _sync_criterion_on_save(db, criterion, old_name=old_name, old_output_key=old_output_key)
+            await _sync_criterion_on_save(db, criterion, old_name=old_name, old_output_key=old_output_key)
 
-        await db.flush()
-        from app.services.prompts_service import validate_prompt_sync
-        val_res = await validate_prompt_sync(db, criterion.prompt_id)
-        if not val_res["ok"]:
+            await db.flush()
+            from app.services.prompts_service import validate_prompt_sync
+            val_res = await validate_prompt_sync(db, criterion.prompt_id)
+            if not val_res["ok"]:
+                await db.rollback()
+                raise CriterionSyncError(val_res)
+
+            await db.commit()
+            await db.refresh(criterion)
+            return criterion
+        except Exception as e:
             await db.rollback()
-            raise CriterionSyncError(val_res)
-
-        await db.commit()
-        await db.refresh(criterion)
-        return criterion
+            raise e
 
     # --- Case B: Creating new (no ID passed) ---
     if conflicting_items:
@@ -939,51 +906,59 @@ async def save_criterion(db: AsyncSession, body: SaveCriterionRequest) -> Prompt
         # Check soft-deleted conflicts -> RESTORE
         soft_deleted_items = [c for c in conflicting_items if c.deleted_at is not None]
         if soft_deleted_items:
-            criterion = soft_deleted_items[0]
-            logger.info(f"Restoring soft-deleted criterion (ID: {criterion.criterion_id}, key: '{criterion.criterion_key}') to active state.")
-            
-            # Restore & update
-            criterion.is_active = True
-            criterion.deleted_at = None
-            criterion.deleted_by_email = None
-            for field, value in body.model_dump(exclude={"criterion_id"}).items():
-                setattr(criterion, field, value)
+            try:
+                criterion = soft_deleted_items[0]
+                logger.info(f"Restoring soft-deleted criterion (ID: {criterion.criterion_id}, key: '{criterion.criterion_key}') to active state.")
                 
-            await _ensure_typology_associations(db, criterion)
-            
-            await _sync_criterion_on_save(db, criterion)
-            
-            await db.flush()
-            from app.services.prompts_service import validate_prompt_sync
-            val_res = await validate_prompt_sync(db, criterion.prompt_id)
-            if not val_res["ok"]:
-                await db.rollback()
-                raise CriterionSyncError(val_res)
+                # Restore & update
+                criterion.is_active = True
+                criterion.deleted_at = None
+                criterion.deleted_by_email = None
+                for field, value in body.model_dump(exclude={"criterion_id"}).items():
+                    setattr(criterion, field, value)
+                    
+                await _ensure_typology_associations(db, criterion)
+                
+                await _sync_criterion_on_save(db, criterion)
+                
+                await db.flush()
+                from app.services.prompts_service import validate_prompt_sync
+                val_res = await validate_prompt_sync(db, criterion.prompt_id)
+                if not val_res["ok"]:
+                    await db.rollback()
+                    raise CriterionSyncError(val_res)
 
-            await db.commit()
-            await db.refresh(criterion)
-            return criterion
+                await db.commit()
+                await db.refresh(criterion)
+                return criterion
+            except Exception as e:
+                await db.rollback()
+                raise e
             
     # Create new
-    logger.info(f"Creating new criterion (key: '{body.criterion_key}').")
-    criterion = PromptCriterion(**body.model_dump(exclude={"criterion_id"}))
-    db.add(criterion)
-    await db.flush() # Flush to generate criterion_id
-    
-    await _ensure_typology_associations(db, criterion)
-    
-    await _sync_criterion_on_save(db, criterion)
-    
-    await db.flush()
-    from app.services.prompts_service import validate_prompt_sync
-    val_res = await validate_prompt_sync(db, criterion.prompt_id)
-    if not val_res["ok"]:
-        await db.rollback()
-        raise CriterionSyncError(val_res)
+    try:
+        logger.info(f"Creating new criterion (key: '{body.criterion_key}').")
+        criterion = PromptCriterion(**body.model_dump(exclude={"criterion_id"}))
+        db.add(criterion)
+        await db.flush() # Flush to generate criterion_id
+        
+        await _ensure_typology_associations(db, criterion)
+        
+        await _sync_criterion_on_save(db, criterion)
+        
+        await db.flush()
+        from app.services.prompts_service import validate_prompt_sync
+        val_res = await validate_prompt_sync(db, criterion.prompt_id)
+        if not val_res["ok"]:
+            await db.rollback()
+            raise CriterionSyncError(val_res)
 
-    await db.commit()
-    await db.refresh(criterion)
-    return criterion
+        await db.commit()
+        await db.refresh(criterion)
+        return criterion
+    except Exception as e:
+        await db.rollback()
+        raise e
 
 
 async def toggle_criterion(db: AsyncSession, criterion_id: int, is_active: bool) -> None:
@@ -998,17 +973,21 @@ async def toggle_criterion(db: AsyncSession, criterion_id: int, is_active: bool)
     criterion.is_active = is_active
     db.add(criterion)
     
-    # Sincronización
-    await _sync_criterion_on_save(db, criterion)
-    
-    await db.flush()
-    from app.services.prompts_service import validate_prompt_sync
-    val_res = await validate_prompt_sync(db, criterion.prompt_id)
-    if not val_res["ok"]:
-        await db.rollback()
-        raise CriterionSyncError(val_res)
+    try:
+        # Sincronización
+        await _sync_criterion_on_save(db, criterion)
+        
+        await db.flush()
+        from app.services.prompts_service import validate_prompt_sync
+        val_res = await validate_prompt_sync(db, criterion.prompt_id)
+        if not val_res["ok"]:
+            await db.rollback()
+            raise CriterionSyncError(val_res)
 
-    await db.commit()
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise e
 
 
 async def get_criterion_typologies(db: AsyncSession, criterion_id: int) -> list[CriterionTypologyAssociation]:
@@ -1139,31 +1118,35 @@ async def update_criterion_typologies(db: AsyncSession, criterion_id: int, typol
     # Filter incoming typology_ids to only keep valid ones
     valid_typology_ids = [tid for tid in (typology_ids or []) if tid in allowed_ids]
 
-    # 3. In transaction: delete old associations and insert new ones
-    await db.execute(
-        delete(PromptCriterionTypology).where(PromptCriterionTypology.criterion_id == criterion_id)
-    )
-
-    # Adding new
-    for t_id in valid_typology_ids:
-        new_assoc = PromptCriterionTypology(
-            criterion_id=criterion_id,
-            typology_id=t_id
+    try:
+        # 3. In transaction: delete old associations and insert new ones
+        await db.execute(
+            delete(PromptCriterionTypology).where(PromptCriterionTypology.criterion_id == criterion_id)
         )
-        db.add(new_assoc)
 
-    # Sync prompt output format when typologies are updated
-    if criterion.prompt_id:
-        await _sync_criterion_on_save(db, criterion)
-        
-        await db.flush()
-        from app.services.prompts_service import validate_prompt_sync
-        val_res = await validate_prompt_sync(db, criterion.prompt_id)
-        if not val_res["ok"]:
-            await db.rollback()
-            raise CriterionSyncError(val_res)
+        # Adding new
+        for t_id in valid_typology_ids:
+            new_assoc = PromptCriterionTypology(
+                criterion_id=criterion_id,
+                typology_id=t_id
+            )
+            db.add(new_assoc)
 
-    await db.commit()
+        # Sync prompt output format when typologies are updated
+        if criterion.prompt_id:
+            await _sync_criterion_on_save(db, criterion)
+            
+            await db.flush()
+            from app.services.prompts_service import validate_prompt_sync
+            val_res = await validate_prompt_sync(db, criterion.prompt_id)
+            if not val_res["ok"]:
+                await db.rollback()
+                raise CriterionSyncError(val_res)
+
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise e
     return {"ok": True, "detail": f"Asociación de tipologías para el criterio {criterion_id} actualizada correctamente."}
 
 
@@ -1196,50 +1179,54 @@ async def delete_criterion(db: AsyncSession, criterion_id: int, performed_by_ema
             detail="No se puede borrar el item tipo_llamada porque es necesario para clasificar la llamada."
         )
 
-    # Sincronizar la eliminación en el texto del prompt y borradores antes de borrar en la BD
-    if criterion.prompt_id:
-        await _sync_prompt_on_removal(db, criterion.prompt_id, criterion)
+    try:
+        # Sincronizar la eliminación en el texto del prompt y borradores antes de borrar en la BD
+        if criterion.prompt_id:
+            await _sync_prompt_on_removal(db, criterion.prompt_id, criterion)
 
-    # Check if used in AnalysisResult
-    used_in_analysis_stmt = select(AnalysisResult.result_id).where(AnalysisResult.criterion_id == criterion_id).limit(1)
-    used_in_analysis_res = await db.execute(used_in_analysis_stmt)
-    is_used = used_in_analysis_res.scalar() is not None
+        # Check if used in AnalysisResult
+        used_in_analysis_stmt = select(AnalysisResult.result_id).where(AnalysisResult.criterion_id == criterion_id).limit(1)
+        used_in_analysis_res = await db.execute(used_in_analysis_stmt)
+        is_used = used_in_analysis_res.scalar() is not None
 
-    # Check if used in MassEvaluationResult
-    if not is_used and criterion.prompt_id:
-        used_in_mass_stmt = select(MassEvaluationResult.mass_analysis_id).where(MassEvaluationResult.prompt_id == criterion.prompt_id).limit(1)
-        used_in_mass_res = await db.execute(used_in_mass_stmt)
-        is_used = used_in_mass_res.scalar() is not None
+        # Check if used in MassEvaluationResult
+        if not is_used and criterion.prompt_id:
+            used_in_mass_stmt = select(MassEvaluationResult.mass_analysis_id).where(MassEvaluationResult.prompt_id == criterion.prompt_id).limit(1)
+            used_in_mass_res = await db.execute(used_in_mass_stmt)
+            is_used = used_in_mass_res.scalar() is not None
 
-    action = ""
+        action = ""
 
-    if is_used:
-        # Soft delete
-        criterion.is_active = False
-        criterion.deleted_at = datetime.now(timezone.utc)
-        criterion.deleted_by_email = performed_by_email
-        db.add(criterion)
-        
-        # We must also clean up typologies relations logically or physically
-        await db.execute(
-            delete(PromptCriterionTypology).where(PromptCriterionTypology.criterion_id == criterion_id)
-        )
-        action = "soft_deleted"
-    else:
-        # Hard delete
-        await db.delete(criterion)
-        action = "deleted"
+        if is_used:
+            # Soft delete
+            criterion.is_active = False
+            criterion.deleted_at = datetime.now(timezone.utc)
+            criterion.deleted_by_email = performed_by_email
+            db.add(criterion)
+            
+            # We must also clean up typologies relations logically or physically
+            await db.execute(
+                delete(PromptCriterionTypology).where(PromptCriterionTypology.criterion_id == criterion_id)
+            )
+            action = "soft_deleted"
+        else:
+            # Hard delete
+            await db.delete(criterion)
+            action = "deleted"
 
-    # Validate sync after deletion
-    if criterion.prompt_id:
-        await db.flush()
-        from app.services.prompts_service import validate_prompt_sync
-        val_res = await validate_prompt_sync(db, criterion.prompt_id)
-        if not val_res["ok"]:
-            await db.rollback()
-            raise CriterionSyncError(val_res)
+        # Validate sync after deletion
+        if criterion.prompt_id:
+            await db.flush()
+            from app.services.prompts_service import validate_prompt_sync
+            val_res = await validate_prompt_sync(db, criterion.prompt_id)
+            if not val_res["ok"]:
+                await db.rollback()
+                raise CriterionSyncError(val_res)
 
-    await db.commit()
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise e
 
     return {
         "ok": True,

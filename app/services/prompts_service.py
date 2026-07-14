@@ -91,27 +91,166 @@ def sync_output_format_in_prompt(
     return new_prompt_text, changed
 
 
+def build_criteria_text_block(active_criteria: list) -> str:
+    """
+    Builds the criteria text block from active criteria list.
+    Formatted identically to sync_criterion_block format.
+    """
+    import re
+    blocks = []
+    for c in active_criteria:
+        # Build block header: e.g. "- [type] Name (output_key: key)"
+        header_bullet = "- "
+        id_prefix = f"[ID: {c.criterion_id}] " if getattr(c, "criterion_id", None) is not None else ""
+        header = f"{header_bullet}{id_prefix}[{c.criterion_type or 'text'}] {c.criterion_name}"
+        keys_meta = []
+        if getattr(c, "output_key", None):
+            keys_meta.append(f"output_key: {c.output_key}")
+        if getattr(c, "feed_key", None):
+            keys_meta.append(f"feed_key: {c.feed_key}")
+        if keys_meta:
+            header += " (" + ", ".join(keys_meta) + ")"
+            
+        block_lines = [header]
+        desc = getattr(c, "criterion_description", "") or ""
+        indent = "  "
+        for line in desc.splitlines():
+            if line.strip():
+                block_lines.append(indent + line.strip())
+            else:
+                block_lines.append("")
+                
+        # Reconstruct allowed values and typologies
+        if getattr(c, "allowed_values", None):
+            vals = c.allowed_values
+            vals_str = ", ".join(vals) if isinstance(vals, list) else str(vals)
+            block_lines.append(f"{indent}Valores permitidos: {vals_str}")
+            
+        if getattr(c, "applies_to_types", None):
+            typos = c.applies_to_types
+            typos_str = ", ".join(typos) if isinstance(typos, list) else str(typos)
+            block_lines.append(f"{indent}Tipologías aplicables: {typos_str}")
+        else:
+            block_lines.append(f"{indent}Tipologías aplicables: Todas")
+            
+        blocks.append("\n".join(block_lines))
+        
+    return "\n\n".join(blocks)
+
+
+def replace_criteria_block_with_delimiters(prompt_text: str, new_criteria_block: str) -> tuple[str, bool]:
+    """
+    Replaces the criteria section in prompt_text with the new_criteria_block enclosed in
+    <!-- BM_CRITERIA_BLOCK_START --> and <!-- BM_CRITERIA_BLOCK_END -->.
+    Idempotent: removes all legacy duplicate blocks and inserts exactly one.
+    """
+    import re
+    start_tag = "<!-- BM_CRITERIA_BLOCK_START -->"
+    end_tag = "<!-- BM_CRITERIA_BLOCK_END -->"
+    
+    pattern = re.compile(
+        rf"{re.escape(start_tag)}.*?{re.escape(end_tag)}",
+        re.DOTALL | re.IGNORECASE
+    )
+    
+    delimited_block = f"{start_tag}\n{new_criteria_block}\n{end_tag}"
+    
+    if pattern.search(prompt_text):
+        # Delimiters exist. Clean any duplicates and replace
+        matches = list(pattern.finditer(prompt_text))
+        if len(matches) > 1:
+            # Clean duplicate delimited blocks
+            new_prompt_text = ""
+            last_idx = 0
+            for idx, match in enumerate(matches):
+                new_prompt_text += prompt_text[last_idx:match.start()]
+                if idx == 0:
+                    new_prompt_text += delimited_block
+                last_idx = match.end()
+            new_prompt_text += prompt_text[last_idx:]
+            return new_prompt_text, True
+        else:
+            old_block = matches[0].group(0)
+            if old_block != delimited_block:
+                new_prompt_text = prompt_text[:matches[0].start()] + delimited_block + prompt_text[matches[0].end():]
+                return new_prompt_text, True
+            return prompt_text, False
+            
+    # Delimiters not found. Search for legacy criteria section headers.
+    header_pattern = re.compile(
+        r"^(###?\s+)?(?:CRITERIOS?\s+DE\s+(?:ANÁLISIS|ANALISIS|EVALUACIÓN|EVALUACION))\b",
+        re.IGNORECASE | re.MULTILINE
+    )
+    
+    matches = list(header_pattern.finditer(prompt_text))
+    if matches:
+        header_match = matches[-1]
+        start_idx = header_match.end()
+        
+        # Look for the next section header after criteria section
+        next_header_pattern = re.compile(r"^\s*#", re.MULTILINE)
+        next_header_match = next_header_pattern.search(prompt_text, pos=start_idx)
+        
+        if next_header_match:
+            end_idx = next_header_match.start()
+            prefix = prompt_text[:start_idx].rstrip()
+            suffix = prompt_text[end_idx:].lstrip()
+            new_prompt_text = f"{prefix}\n\n{delimited_block}\n\n{suffix}"
+            return new_prompt_text, True
+        else:
+            prefix = prompt_text[:start_idx].rstrip()
+            new_prompt_text = f"{prefix}\n\n{delimited_block}"
+            return new_prompt_text, True
+            
+    # Fallback: append at the end
+    new_prompt_text = f"{prompt_text.rstrip()}\n\n{delimited_block}"
+    return new_prompt_text, True
+
+
+def sync_prompt_text_with_criteria_list(
+    prompt_text: str,
+    active_criteria: list,
+    typologies: list,
+) -> tuple[str, bool]:
+    """
+    Rebuilds prompt text by replacing the criteria section and the output format JSON.
+    Uses delimiters for the criteria section to ensure idempotence.
+    """
+    if not prompt_text:
+        return prompt_text, False
+
+    # Apply dynamic prompt sanitization for legacy/hardcoded typologies block
+    from app.services.prompt_builder import sanitize_legacy_typologies_block
+    prompt_text = sanitize_legacy_typologies_block(prompt_text, typologies)
+
+    # Rebuild criteria section
+    new_criteria_block = build_criteria_text_block(active_criteria)
+    prompt_text, block_changed = replace_criteria_block_with_delimiters(prompt_text, new_criteria_block)
+
+    # Rebuild JSON output format
+    prompt_text, format_changed = sync_output_format_in_prompt(prompt_text, active_criteria, typologies)
+
+    # Clean whitespaces
+    prompt_text = clean_whitespaces(prompt_text)
+
+    changed = block_changed or format_changed
+    return prompt_text, changed
+
+
 async def sync_prompt_text_with_active_criteria(
     db: AsyncSession,
     prompt_id: int,
     prompt_text: str,
 ) -> tuple[str, bool]:
     """
-    Sincroniza el texto del prompt con los criterios activos de la base de datos.
-    Deduplica bloques, sincroniza la descripción de criterios activos, limpia huérfanos,
-    actualiza el formato JSON de salida y sanea espacios en blanco.
-    Valida límites defensivos de longitud y duplicación.
-    Retorna (new_prompt_text, changed).
+    Sincroniza el texto del prompt con los criterios activos de la base de datos de manera idempotente.
+    Usa delimitadores para el bloque de criterios y actualiza el formato JSON de salida.
+    Valida límites defensivos de longitud.
     """
     if not prompt_text:
         return prompt_text, False
 
-    from app.services.criteria_service import (
-        sync_criterion_block,
-        clean_orphaned_blocks,
-        get_active_criteria,
-        deduplicate_criteria_blocks,
-    )
+    from app.services.criteria_service import get_active_criteria
     from app.models.typologies import Typology
     from app.models.services import Service
     from sqlalchemy import select
@@ -159,115 +298,73 @@ async def sync_prompt_text_with_active_criteria(
             f"the maximum allowed limit of {MAX_CRITERIA_LIMIT}."
         )
 
-    # 4. Contar filas crudas antes de deduplicar (para diagnóstico de logs)
-    # Usamos marcas comunes como "Reglas de puntuación" o "Cuándo devolver null" como proxy para bloques repetidos sin cabeceras
-    total_raw_rows = len(re.findall(r"Cuándo devolver null|Criterios de penalización", prompt_text, re.IGNORECASE))
-    # Si da 0 (ej. estructura base sin descripciones detalladas), usamos el conteo de cabeceras tradicionales
-    if total_raw_rows == 0:
-        total_raw_rows = len(re.findall(r"^\s*[-*]\s*\[[^\]]+\]", prompt_text, re.MULTILINE))
+    # 4. Run the unifier sync
+    new_prompt_text, changed = sync_prompt_text_with_criteria_list(
+        prompt_text=prompt_text,
+        active_criteria=active_criteria,
+        typologies=typologies
+    )
 
-    changed = False
-    original_text = prompt_text
-
-    # Apply dynamic prompt sanitization for legacy/hardcoded typologies block
-    from app.services.prompt_builder import sanitize_legacy_typologies_block
-    prompt_text = sanitize_legacy_typologies_block(prompt_text, typologies)
-
-    # Step 0: Deduplicate criteria blocks
-    new_text = deduplicate_criteria_blocks(prompt_text)
-    if new_text != prompt_text:
-        prompt_text = new_text
-        changed = True
-
-    # Step A: Synchronize active criteria blocks
-    for c in active_criteria:
-        new_text, block_changed = sync_criterion_block(prompt_text, c)
-        if block_changed and new_text != prompt_text:
-            prompt_text = new_text
-            changed = True
-
-    # Step B: Clean orphaned blocks
-    new_text = clean_orphaned_blocks(prompt_text, active_criteria)
-    if new_text != prompt_text:
-        prompt_text = new_text
-        changed = True
-
-    # Step C: Synchronize Output JSON format
-    new_text, format_changed = sync_output_format_in_prompt(prompt_text, active_criteria, typologies)
-    if format_changed:
-        prompt_text = new_text
-        changed = True
-
-    # Step D: Clean whitespaces
-    prompt_text = clean_whitespaces(prompt_text)
-
-    # Re-verify if text is actually different from the start
-    if prompt_text != clean_whitespaces(original_text):
-        changed = True
-
-    # 5. Contar ocurrencias en el prompt finalizado para validar duplicados
+    # 5. Check duplicate keys in new_prompt_text
+    import re
+    header_count = len(re.findall(r"^\s*[-*]\s*\[[^\]]+\]", new_prompt_text, re.MULTILINE))
+    
     final_header_occurrences = {}
-    lines = prompt_text.splitlines()
     for c in active_criteria:
         canonical_key = c.criterion_key or c.output_key or f"id:{c.criterion_id}"
         final_header_occurrences[canonical_key] = 0
-        for line in lines:
+        for line in new_prompt_text.splitlines():
             stripped = line.strip()
-            if stripped.startswith("- [") or stripped.startswith("* [") or stripped.startswith("-  [") or stripped.startswith("*  ["):
-                # Verificar si esta línea de cabecera contiene la clave técnica exacta en sus metadatos
-                has_meta = "output_key:" in line.lower() or "feed_key:" in line.lower()
-                if has_meta:
-                    matched = False
-                    if c.output_key and re.search(rf"output_key:\s*{re.escape(c.output_key)}\b", line, re.IGNORECASE):
-                        matched = True
-                    elif c.feed_key and re.search(rf"feed_key:\s*{re.escape(c.feed_key)}\b", line, re.IGNORECASE):
-                        matched = True
-                    
-                    if matched:
-                        final_header_occurrences[canonical_key] += 1
-                else:
-                    # Fallback a nombre de visualización exacto
-                    name_match = re.search(r"\]\s*([^(#\n]+)", stripped)
-                    if name_match:
-                        name_str = name_match.group(1).strip().lower()
-                        if c.criterion_name and c.criterion_name.strip().lower() == name_str:
-                            final_header_occurrences[canonical_key] += 1
+            if stripped.startswith("- [") or stripped.startswith("* ["):
+                matched = False
+                if c.output_key and re.search(rf"output_key:\s*{re.escape(c.output_key)}\b", line, re.IGNORECASE):
+                    matched = True
+                elif c.feed_key and re.search(rf"feed_key:\s*{re.escape(c.feed_key)}\b", line, re.IGNORECASE):
+                    matched = True
+                
+                if matched:
+                    final_header_occurrences[canonical_key] += 1
 
     duplicate_keys = {k: v for k, v in final_header_occurrences.items() if v > 1}
-    total_removed = total_raw_rows - len(active_criteria) if total_raw_rows > len(active_criteria) else 0
 
-    # Registrar estadísticas en logs
     logger.info(
         "Prompt build:\n"
         "- raw criteria rows: %d\n"
         "- unique criteria: %d\n"
-        "- duplicated rows removed: %d\n"
         "- final prompt chars: %d\n"
         "- duplicate keys detected:\n%s",
-        total_raw_rows if total_raw_rows > 0 else len(active_criteria),
+        header_count,
         len(active_criteria),
-        total_removed,
-        len(prompt_text),
+        len(new_prompt_text),
         "\n".join(f"  {k}: {v}" for k, v in duplicate_keys.items()) if duplicate_keys else "  None"
     )
 
-    # 6. Validaciones defensivas del prompt finalizado
     if duplicate_keys:
         dup_details = ", ".join(f"{k}: {v}" for k, v in duplicate_keys.items())
-        logger.warning(f"Validation failed: Duplicate keys detected: {dup_details}")
         raise PromptValidationError(
             f"Prompt build failed: Duplicate criteria keys detected in finalized prompt: {dup_details}."
         )
 
-    # LÍMITE DEFENSIVO: Longitud máxima de caracteres (120,000)
+    # 6. Length check (120,000)
     MAX_CHARACTERS_LIMIT = 120000
-    if len(prompt_text) > MAX_CHARACTERS_LIMIT:
+    if len(new_prompt_text) > MAX_CHARACTERS_LIMIT:
+        # Determine the largest criteria
+        crit_sizes = []
+        for c in active_criteria:
+            desc_len = len(c.criterion_description or "")
+            crit_sizes.append((c.criterion_name or c.output_key, desc_len))
+        crit_sizes.sort(key=lambda x: x[1], reverse=True)
+        largest_str = ", ".join(f"'{name}' ({size} chars)" for name, size in crit_sizes[:5])
+        
         raise PromptValidationError(
-            f"Prompt build failed: Prompt length ({len(prompt_text)} characters) exceeds "
-            f"the maximum allowed defensive limit of {MAX_CHARACTERS_LIMIT} characters."
+            f"Prompt build failed: Prompt length ({len(new_prompt_text)} characters) exceeds "
+            f"the maximum allowed defensive limit of {MAX_CHARACTERS_LIMIT} characters. "
+            f"Largest criteria: {largest_str}. "
+            f"Please compact active criteria descriptions or deactivate redundant criteria."
         )
 
-    return prompt_text, changed
+    return new_prompt_text, changed
+
 
 
 from app.models.prompts import Prompt, PromptVersion, PromptBaseStructure
