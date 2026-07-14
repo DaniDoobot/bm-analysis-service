@@ -127,21 +127,33 @@ async def run(dry_run: bool = False) -> None:
                     db.add(new_s)
                 created += 1
             else:
-                # Check if codes need updating
+                # Check if codes and enabled statuses need updating
+                target_enabled = True if (num_code or alpha_code) else setting.is_enabled
+                target_code_enabled = True if (num_code or alpha_code) else setting.training_code_enabled
+
                 needs_update = (
                     setting.training_numeric_code != num_code or
-                    setting.training_code != alpha_code
+                    setting.training_code != alpha_code or
+                    setting.is_enabled != target_enabled or
+                    setting.training_code_enabled != target_code_enabled
                 )
                 if needs_update:
-                    action = (
-                        f"UPDATE  {setting.training_numeric_code or '-'} -> {num_code or '-'}"
-                    )
+                    action = "UPDATE"
+                    if setting.training_numeric_code != num_code:
+                        action += f" | num: {setting.training_numeric_code or '-'} -> {num_code or '-'}"
+                    if setting.training_code != alpha_code:
+                        action += f" | alpha: {setting.training_code or '-'} -> {alpha_code or '-'}"
+                    if setting.is_enabled != target_enabled:
+                        action += f" | enabled: {setting.is_enabled} -> {target_enabled}"
+                    if setting.training_code_enabled != target_code_enabled:
+                        action += f" | code_enabled: {setting.training_code_enabled} -> {target_code_enabled}"
+
                     print(f"{setting.setting_id:>6}  {setting.agent_initials:8}  {setting.agent_name:<28}  {str(num_code or '-'):10}  {str(alpha_code or '-'):10}  {action}")
                     if not dry_run:
                         setting.training_numeric_code = num_code
                         setting.training_code = alpha_code
-                        if alpha_code or num_code:
-                            setting.training_code_enabled = True
+                        setting.is_enabled = target_enabled
+                        setting.training_code_enabled = target_code_enabled
                     updated += 1
                 else:
                     action = "OK (no change)"
