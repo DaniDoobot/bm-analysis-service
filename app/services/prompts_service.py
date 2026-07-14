@@ -44,6 +44,85 @@ def clean_whitespaces(text: str) -> str:
     return text
 
 
+def sanitize_static_prompt_sections(prompt_text: str) -> tuple[str, dict]:
+    """
+    Parses prompt_text into sections starting with '###'.
+    Deduplicates sections starting with known headers:
+    - DEFINICIÓN DE TIPOS DE LLAMADA
+    - PRIORIDADES EN CASO DE CONFLICTO
+    - CRITERIOS DE ANÁLISIS
+    - FORMATO DE SALIDA JSON
+    Keeps only the first occurrence of each section, preserving order.
+    Returns the sanitized prompt text and a dict with statistics on removed duplicates.
+    """
+    header_pattern = re.compile(r'(?:\r?\n|^)(###\s+[^\r\n]+)')
+    
+    matches = list(header_pattern.finditer(prompt_text))
+    if not matches:
+        return prompt_text, {"removed_count": 0, "details": {}}
+        
+    sections = []
+    # Add intro section (before the first header)
+    first_match = matches[0]
+    intro = prompt_text[:first_match.start()]
+    sections.append(("", intro))
+    
+    # Slice the remaining sections
+    for i in range(len(matches)):
+        start = matches[i].start()
+        header_text = matches[i].group(1).strip()
+        
+        end = matches[i+1].start() if i + 1 < len(matches) else len(prompt_text)
+        content = prompt_text[start:end]
+        sections.append((header_text, content))
+        
+    # Deduplicate known sections
+    seen_canonical_headers = set()
+    sanitized_sections = []
+    removed_count = 0
+    details = {}
+    
+    def canonicalize(h: str) -> str:
+        h = h.lower()
+        h = re.sub(r'\s+', ' ', h)
+        h = h.replace('á', 'a').replace('é', 'e').replace('í', 'i').replace('ó', 'o').replace('ú', 'u')
+        h = re.sub(r'[^a-z0-9 ]', '', h)
+        return h.strip()
+        
+    known_keys = {
+        "definicion de tipos de llamada": "### DEFINICIÓN DE TIPOS DE LLAMADA",
+        "prioridades en caso de conflicto": "### PRIORIDADES EN CASO DE CONFLICTO",
+        "criterios de analisis": "### CRITERIOS DE ANÁLISIS",
+        "formato de salida json": "### FORMATO DE SALIDA JSON"
+    }
+    
+    for header, content in sections:
+        if not header:
+            sanitized_sections.append(content)
+            continue
+            
+        canon = canonicalize(header)
+        matched_key = None
+        for k in known_keys:
+            if k in canon:
+                matched_key = k
+                break
+                
+        if matched_key:
+            if matched_key in seen_canonical_headers:
+                removed_count += 1
+                details[matched_key] = details.get(matched_key, 0) + 1
+            else:
+                seen_canonical_headers.add(matched_key)
+                sanitized_sections.append(content)
+        else:
+            # Unknown header, keep it
+            sanitized_sections.append(content)
+            
+    sanitized_text = "".join(sanitized_sections)
+    return sanitized_text, {"removed_count": removed_count, "details": details}
+
+
 def sync_output_format_in_prompt(
     prompt_text: str,
     active_criteria: list,
@@ -171,7 +250,16 @@ def replace_criteria_block_with_delimiters(prompt_text: str, new_criteria_block:
             return new_prompt_text, True
         else:
             old_block = matches[0].group(0)
-            if old_block != delimited_block:
+            old_cleaned = clean_whitespaces(old_block.replace("\r\n", "\n")).strip()
+            new_cleaned = clean_whitespaces(delimited_block.replace("\r\n", "\n")).strip()
+            if old_cleaned != new_cleaned:
+                print(f"INNER_COMPARE_DIFF: old_cleaned len={len(old_cleaned)} | new_cleaned len={len(new_cleaned)}")
+                for idx, (c1, c2) in enumerate(zip(old_cleaned, new_cleaned)):
+                    if c1 != c2:
+                        print(f"INNER_COMPARE_DIFF index {idx}: c1={repr(c1)} | c2={repr(c2)}")
+                        print("OLD CONTEXT:", repr(old_cleaned[max(0, idx-20):idx+30]))
+                        print("NEW CONTEXT:", repr(new_cleaned[max(0, idx-20):idx+30]))
+                        break
                 new_prompt_text = prompt_text[:matches[0].start()] + delimited_block + prompt_text[matches[0].end():]
                 return new_prompt_text, True
             return prompt_text, False
@@ -225,6 +313,7 @@ def sync_prompt_text_with_criteria_list(
 
     # Rebuild criteria section
     new_criteria_block = build_criteria_text_block(active_criteria)
+    new_criteria_block = sanitize_legacy_typologies_block(new_criteria_block, typologies, prepend_if_missing=False)
     prompt_text, block_changed = replace_criteria_block_with_delimiters(prompt_text, new_criteria_block)
 
     # Rebuild JSON output format
@@ -298,12 +387,17 @@ async def sync_prompt_text_with_active_criteria(
             f"the maximum allowed limit of {MAX_CRITERIA_LIMIT}."
         )
 
+    # 3.5 Sanitize static prompt sections first
+    sanitized_prompt_text, stats = sanitize_static_prompt_sections(prompt_text)
+    sanitized_changed = (stats["removed_count"] > 0) or (sanitized_prompt_text != prompt_text)
+
     # 4. Run the unifier sync
-    new_prompt_text, changed = sync_prompt_text_with_criteria_list(
-        prompt_text=prompt_text,
+    new_prompt_text, list_changed = sync_prompt_text_with_criteria_list(
+        prompt_text=sanitized_prompt_text,
         active_criteria=active_criteria,
         typologies=typologies
     )
+    changed = sanitized_changed or list_changed
 
     # 5. Check duplicate keys in new_prompt_text
     import re

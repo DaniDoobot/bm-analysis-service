@@ -25,7 +25,12 @@ from app.utils.json_utils import safe_parse_json
 
 logger = logging.getLogger(__name__)
 
-def sanitize_legacy_typologies_block(prompt_text: str, active_typologies: list[Any], legacy_typos_list: list[str] | None = None) -> str:
+def sanitize_legacy_typologies_block(
+    prompt_text: str,
+    active_typologies: list[Any],
+    legacy_typos_list: list[str] | None = None,
+    prepend_if_missing: bool = True
+) -> str:
     """
     Sanitizes or neutralizes legacy typology references in prompt templates.
     Replaces old typologies sections with the current service typologies list
@@ -87,7 +92,6 @@ def sanitize_legacy_typologies_block(prompt_text: str, active_typologies: list[A
         "Si una llamada cumple con características de múltiples tipologías o hay dudas sobre cuál elegir, aplica estrictamente este orden de prioridad decreciente (de mayor a menor importancia):\n" +
         "\n".join(priority_lines) + "\n\n"
     )
-
     # 1. Regex to find markdown headers related to call types/typologies
     import re
     header_pattern = re.compile(
@@ -97,16 +101,25 @@ def sanitize_legacy_typologies_block(prompt_text: str, active_typologies: list[A
     match = header_pattern.search(prompt_text)
     if match:
         start_idx = match.start()
-        # Find the next header starting with # after this section
+        # Find the next header starting with # after this section that is NOT PRIORIDADES EN CASO DE CONFLICTO
         next_header_pattern = re.compile(r"(?m)^#+\s+")
-        next_match = next_header_pattern.search(prompt_text, pos=match.end())
-        if next_match:
-            end_idx = next_match.start()
-            # Replace the entire block from the old header to the next header
-            prompt_text = prompt_text[:start_idx] + dynamic_section + prompt_text[end_idx:]
-        else:
-            # If there is no next header, replace until the end of the text
-            prompt_text = prompt_text[:start_idx] + dynamic_section
+        pos = match.end()
+        end_idx = len(prompt_text)
+        while True:
+            next_match = next_header_pattern.search(prompt_text, pos=pos)
+            if not next_match:
+                end_idx = len(prompt_text)
+                break
+            # Extract the header line
+            header_line = prompt_text[next_match.start():].splitlines()[0]
+            if "prioridades" in header_line.lower() and "conflicto" in header_line.lower():
+                pos = next_match.end()
+            else:
+                end_idx = next_match.start()
+                break
+                
+        # Replace the entire block from the old header to the next header
+        prompt_text = prompt_text[:start_idx] + dynamic_section + prompt_text[end_idx:]
     else:
         # If no explicit header is found, but legacy keywords exist, let's do a safe string replacement
         active_keys = {t.typology_key for t in active_typologies} if active_typologies else set()
@@ -115,7 +128,7 @@ def sanitize_legacy_typologies_block(prompt_text: str, active_typologies: list[A
         else:
             legacy_typos = [lt for lt in ["informacion", "informacion_sin_cita", "falta_con_reagendo", "falta_sin_reagendo", "no_interesado", "no_apto"] if lt not in active_keys]
         has_legacy = any(lt in prompt_text for lt in legacy_typos)
-        if has_legacy:
+        if has_legacy and prepend_if_missing:
             # We prepend the dynamic section to the beginning of the prompt,
             # and explicitly remove legacy bullet lines
             lines = prompt_text.splitlines()
