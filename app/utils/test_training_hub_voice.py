@@ -445,7 +445,8 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
         mock_connect.__aexit__.return_value = None
         
         with patch("websockets.connect", return_value=mock_connect) as mock_websockets_connect, \
-             patch("app.routers.training_hub_voice.redirect_call", new_callable=AsyncMock) as mock_redirect:
+             patch("app.routers.training_hub_voice.redirect_call", new_callable=AsyncMock) as mock_redirect, \
+             patch("app.routers.training_voice.get_active_cycles_for_agent", AsyncMock(return_value=[MagicMock()])):
             client = TestClient(app)
             with client.websocket_connect("/bm/training/hub/media-stream?flow=hub") as websocket:
                 websocket.send_json({"event": "connected"})
@@ -580,7 +581,8 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
         
         # Patch redirect_call to return False (simulating redirect failure)
         with patch("websockets.connect", return_value=mock_connect), \
-             patch("app.routers.training_hub_voice.redirect_call", AsyncMock(return_value=False)) as mock_redirect:
+             patch("app.routers.training_hub_voice.redirect_call", AsyncMock(return_value=False)) as mock_redirect, \
+             patch("app.routers.training_voice.get_active_cycles_for_agent", AsyncMock(return_value=[MagicMock()])):
             client = TestClient(app)
             try:
                 with client.websocket_connect("/bm/training/hub/media-stream?flow=hub") as websocket:
@@ -614,6 +616,86 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
                                 error_prompt_sent = True
                                 break
             self.assertTrue(error_prompt_sent)
+
+    @patch("app.routers.training_hub_voice.settings")
+    async def test_media_stream_websocket_no_active_cycles(self, mock_settings):
+        """Selecting cycles with 0 active cycles must NOT redirect, and must return ok=False with error message to Gemini."""
+        from fastapi.testclient import TestClient
+        from app.main import app
+        import json
+        import asyncio
+        import time
+        
+        mock_settings.gemini_api_key = "mock_key"
+        mock_settings.gemini_live_api_key = None
+        mock_settings.gemini_model = "models/gemini-3.1-flash-live-preview"
+        mock_settings.gemini_live_model = None
+        
+        mock_gemini_ws = AsyncMock()
+        mock_gemini_ws.send = AsyncMock()
+        
+        async def mock_async_iter(*args, **kwargs):
+            yield json.dumps({"setupComplete": {}})
+            await asyncio.sleep(0.1)
+            yield json.dumps({
+                "toolCall": {
+                    "functionCalls": [{
+                        "id": "call_abc123",
+                        "name": "verify_agent_code",
+                        "args": {"agent_code": "siete siete siete siete"}
+                    }]
+                }
+            })
+            await asyncio.sleep(0.1)
+            yield json.dumps({
+                "toolCall": {
+                    "functionCalls": [{
+                        "id": "call_xyz789",
+                        "name": "select_cycles_mode",
+                        "args": {}
+                    }]
+                }
+            })
+            await asyncio.sleep(0.5)
+            
+        mock_gemini_ws.__aiter__ = mock_async_iter
+        
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__.return_value = mock_gemini_ws
+        mock_connect.__aexit__.return_value = None
+        
+        # Patch get_active_cycles_for_agent to return empty list (no active cycles)
+        with patch("websockets.connect", return_value=mock_connect), \
+             patch("app.routers.training_hub_voice.redirect_call", AsyncMock()) as mock_redirect, \
+             patch("app.routers.training_hub_voice.get_active_cycles_for_agent", AsyncMock(return_value=[])):
+            client = TestClient(app)
+            with client.websocket_connect("/bm/training/hub/media-stream?flow=hub") as websocket:
+                websocket.send_json({"event": "connected"})
+                websocket.send_json({
+                    "event": "start",
+                    "start": {
+                        "streamSid": "stream_123",
+                        "callSid": "call_ws_test_hub",
+                    }
+                })
+                time.sleep(0.8)
+
+            # redirect_call must NOT have been called
+            mock_redirect.assert_not_called()
+            
+            # Gemini must have received functionResponse with ok=False and no_active_cycles message
+            send_calls = mock_gemini_ws.send.call_args_list
+            found_tool_response = False
+            for call in send_calls:
+                payload = json.loads(call[0][0])
+                if "toolResponse" in payload:
+                    for resp in payload["toolResponse"].get("functionResponses", []):
+                        if resp.get("name") == "select_cycles_mode":
+                            res_dict = resp.get("response", {}).get("result", {})
+                            if res_dict.get("ok") is False and res_dict.get("reason") == "no_active_cycles":
+                                found_tool_response = True
+                                self.assertIn("no tienes ciclos activos", res_dict.get("message"))
+            self.assertTrue(found_tool_response, "Expected ok=False toolResponse with 'no_active_cycles' reason")
 
     @patch("app.routers.training_hub_voice.settings")
     async def test_media_stream_dtmf_trainer_no_redirect(self, mock_settings):

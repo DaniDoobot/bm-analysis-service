@@ -59,7 +59,8 @@ NO des nunca explicaciones sobre el uso de la entrada vocal o el marcado en tecl
 6. Escucha la elección:
    - Trainer ("Trainer", "practicar", "simulación", "roleplay", "uno", "1"): llama a `switch_to_trainer_mode()`. NO vuelvas a llamar a esta función una vez que ya estás en estado Trainer.
    - Ciclos ("ciclos", "mis ciclos", "continuar", "dos", "2"): llama a `select_cycles_mode()`.
-7. Si no entiendes la elección: "No te he entendido bien. Puedes decir 'Trainer' para practicar una simulación o 'ciclos' para continuar con tus ciclos asignados."
+7. Si la llamada a `select_cycles_mode()` devuelve una respuesta con `ok` igual a `false` (que indica que el agente no tiene ciclos activos), lee exactamente el texto que viene en el campo "message" de la respuesta (sin añadir explicaciones extras sobre teclado/voz) y mantente a la escucha de si el usuario decide pasar a Trainer.
+8. Si no entiendes la elección: "No te he entendido bien. Puedes decir 'Trainer' para practicar una simulación o 'ciclos' para continuar con tus ciclos asignados."
 
 === FASE 2: CÓDIGO DE SIMULACIÓN TRAINER ===
 Esta fase se activa cuando el backend confirma que el agente ha seleccionado Trainer (es decir, el estado cambia a trainer_code).
@@ -1009,28 +1010,52 @@ Reglas de pronunciación:
 
                                 elif name == "select_cycles_mode" and current_state == "awaiting_mode":
                                     if identified_agent_id:
-                                        host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"
-                                        logger.info("Redirecting call to cycles-init: agent_id=%s", identified_agent_id)
-                                        ok = await redirect_call(call_sid, f"{scheme_http}://{host}/bm/training/hub/cycles-init?agent_id={identified_agent_id}&call_sid={call_sid}")
+                                        from app.routers.training_voice import get_active_cycles_for_agent
+                                        async with AsyncSessionLocal() as sub_db:
+                                            active_cycles = await get_active_cycles_for_agent(sub_db, identified_agent_id)
                                         
-                                        if not ok:
-                                            logger.error("Twilio redirection failed. Instructing Gemini to play config error and closing.")
-                                            err_msg = {
-                                                "clientContent": {
-                                                    "turns": [{
-                                                        "role": "user",
-                                                        "parts": [{"text": "Di exactamente: 'Lo siento, hay un problema de configuración de telefonía. Por favor, ponte en contacto con soporte. La llamada finalizará.' y quédate en silencio."}]
-                                                    }],
-                                                    "turnComplete": True
+                                        if active_cycles:
+                                            host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"
+                                            logger.info("Redirecting call to cycles-init: agent_id=%s", identified_agent_id)
+                                            ok = await redirect_call(call_sid, f"{scheme_http}://{host}/bm/training/hub/cycles-init?agent_id={identified_agent_id}&call_sid={call_sid}")
+                                            
+                                            if not ok:
+                                                logger.error("Twilio redirection failed. Instructing Gemini to play config error and closing.")
+                                                err_msg = {
+                                                    "clientContent": {
+                                                        "turns": [{
+                                                            "role": "user",
+                                                            "parts": [{"text": "Di exactamente: 'Lo siento, hay un problema de configuración de telefonía. Por favor, ponte en contacto con soporte. La llamada finalizará.' y quédate en silencio."}]
+                                                        }],
+                                                        "turnComplete": True
+                                                    }
+                                                }
+                                                await gemini_ws.send(json.dumps(err_msg))
+                                                await asyncio.sleep(4.0)
+                                                await websocket.close()
+                                                return
+                                                
+                                            redirected = True
+                                            return
+                                        else:
+                                            logger.info("Agent %s selected Cycles but has 0 active cycles. Keeping Gemini session active.", identified_agent_id)
+                                            first_name = identified_agent_name.split()[0] if identified_agent_name else "Agente"
+                                            resp_msg = {
+                                                "toolResponse": {
+                                                    "functionResponses": [{
+                                                        "id": fid,
+                                                        "name": name,
+                                                        "response": {
+                                                            "result": {
+                                                                "ok": False,
+                                                                "reason": "no_active_cycles",
+                                                                "message": f"{first_name}, ahora mismo no tienes ciclos activos disponibles. Consulta con tu supervisor para que te asigne un ciclo. Si quieres, podemos pasar a Trainer."
+                                                            }
+                                                        }
+                                                    }]
                                                 }
                                             }
-                                            await gemini_ws.send(json.dumps(err_msg))
-                                            await asyncio.sleep(4.0)
-                                            await websocket.close()
-                                            return
-                                            
-                                        redirected = True
-                                        return
+                                            await gemini_ws.send(json.dumps(resp_msg))
                                     else:
                                         resp_msg = {
                                             "toolResponse": {
@@ -1042,6 +1067,7 @@ Reglas de pronunciación:
                                             }
                                         }
                                         await gemini_ws.send(json.dumps(resp_msg))
+
 
                                 elif name == "validate_trainer_simulation_code" and current_state == "trainer_code":
                                     # ── Simulation code validation (voice path) ───────────────────────
