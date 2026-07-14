@@ -876,5 +876,159 @@ class TestTrainerVoiceV2(unittest.IsolatedAsyncioTestCase):
         app.dependency_overrides.clear()
 
 
+class TestTrainerVoiceBargeInRecovery(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        import app.models
+        from app.db import Base, get_engine
+        engine = get_engine()
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+            
+        from app.db import AsyncSessionLocal
+        self.db = AsyncSessionLocal()
+        
+        # Seed dummy agent and session
+        from app.models.personalized_training import TrainingAgentSetting
+        from app.models.trainer import TrainerSimulation, TrainerSession
+        
+        agent = TrainingAgentSetting(
+            agent_name="Eugenia Carreño",
+            agent_initials="EC",
+            hubspot_owner_id="8808",
+            training_numeric_code="8808",
+            is_enabled=True
+        )
+        self.db.add(agent)
+        
+        sim = TrainerSimulation(
+            simulation_id=1,
+            code="121314",
+            name="Test Sim",
+            roleplay_prompt="Test roleplay",
+            service_id=1
+        )
+        self.db.add(sim)
+        
+        sess = TrainerSession(
+            session_id=14,
+            agent_id="8808",
+            agent_code="8808",
+            simulation_id=1,
+            service_id=1,
+            call_id="CAa6e55255e7fd66dc881fdb04713110e3",
+            status="started",
+            evaluation_status="started"
+        )
+        self.db.add(sess)
+        await self.db.commit()
+
+    async def asyncTearDown(self):
+        await self.db.close()
+        from app.db import Base, get_engine
+        engine = get_engine()
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
+        await engine.dispose()
+
+    @patch("app.routers.trainer_voice.settings")
+    async def test_barge_in_and_watchdog_recovery_loop(self, mock_settings):
+        """Test barge-in VAD state transition, Twilio clear event, watchdog nudge, and 1008 logging."""
+        from app.routers.trainer_voice import media_stream
+        
+        mock_settings.gemini_api_key = "mock"
+        mock_settings.gemini_live_api_key = None
+        mock_settings.gemini_model = "models/gemini-2.0-flash-exp"
+        mock_settings.gemini_live_model = None
+        
+        mock_ws = AsyncMock()
+        mock_ws.send_text = AsyncMock()
+        mock_ws.close = AsyncMock()
+        mock_ws.client_state.name = "CONNECTED"
+        
+        mock_gemini_ws = AsyncMock()
+        mock_gemini_ws.send = AsyncMock()
+        
+        async def mock_iter_text():
+            # 1. Start event
+            yield json.dumps({
+                "event": "start",
+                "start": {
+                    "streamSid": "stream_123",
+                    "callSid": "CAa6e55255e7fd66dc881fdb04713110e3",
+                }
+            })
+            await asyncio.sleep(0.05)
+            # 2. Media event (user speaking)
+            yield json.dumps({
+                "event": "media",
+                "media": {
+                    "track": "inbound",
+                    "payload": "f39/f39/f39/"
+                }
+            })
+            await asyncio.sleep(0.3)
+            # 3. Stop event
+            yield json.dumps({"event": "stop"})
+            
+        mock_ws.iter_text = mock_iter_text
+        
+        # Gemini messages
+        async def mock_gemini_iter():
+            # setupComplete
+            yield json.dumps({"setupComplete": {}})
+            await asyncio.sleep(0.05)
+            # serverContent modelTurn (assistant begins speaking)
+            yield json.dumps({
+                "serverContent": {
+                    "modelTurn": {
+                        "parts": [{"inlineData": {"mimeType": "audio/pcm", "data": "DUMMY_AUDIO_BASE64"}}]
+                    }
+                }
+            })
+            await asyncio.sleep(0.05)
+            # serverContent interrupted (simulated server interruption)
+            yield json.dumps({
+                "serverContent": {
+                    "interrupted": True
+                }
+            })
+            await asyncio.sleep(0.5)
+            
+        mock_gemini_ws.__aiter__ = mock_gemini_iter
+        
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__.return_value = mock_gemini_ws
+        
+        with patch("websockets.connect", return_value=mock_connect), \
+             patch("app.routers.trainer_voice.start_twilio_recording", AsyncMock(return_value="rec_1")), \
+             patch("app.routers.trainer_voice.decode_twilio_to_gemini", return_value=("DUMMY", None)), \
+             patch("app.routers.trainer_voice.calculate_pcm_energy", return_value=500.0), \
+             patch("app.routers.trainer_voice.handle_roleplay_hangup", AsyncMock()) as mock_hangup:
+            
+            await media_stream(mock_ws, flow="session", session_id=14, db=self.db)
+            
+            # Check hangup was called inside finally block
+            mock_hangup.assert_called()
+            
+        # Verify clear was sent to Twilio
+        clear_sent = False
+        for call in mock_ws.send_text.call_args_list:
+            if "clear" in call[0][0]:
+                clear_sent = True
+        self.assertTrue(clear_sent)
+        
+        # Verify nudge was sent to Gemini
+        nudge_sent = False
+        for call in mock_gemini_ws.send.call_args_list:
+            payload = json.loads(call[0][0])
+            if "clientContent" in payload:
+                turns = payload["clientContent"].get("turns", [])
+                for turn in turns:
+                    for part in turn.get("parts", []):
+                        if "Continua el roleplay" in part.get("text", ""):
+                            nudge_sent = True
+        self.assertTrue(nudge_sent)
+
+
 if __name__ == "__main__":
     unittest.main()

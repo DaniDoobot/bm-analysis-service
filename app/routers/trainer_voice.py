@@ -667,6 +667,7 @@ async def media_stream(
     start_event_data = None
     stream_sid = None
     call_sid = None
+    call_active = True
     call_start_time = None
     
     # If parameters not provided in query params, wait for start event from Twilio
@@ -899,6 +900,14 @@ async def media_stream(
             last_debug_log_time = datetime.now(timezone.utc)
             last_blocked_log_time = datetime.now(timezone.utc)
             
+            # Barge-in state machine variables
+            barge_in_active = False
+            barge_in_recovery_pending = False
+            assistant_audio_forwarding_enabled = True
+            last_user_speech_end_time = None
+            barge_in_time = None
+            nudge_triggered = False
+            
             # Use variables read from start event if available (from early parsing)
             stream_sid = stream_sid
             call_sid = call_sid
@@ -916,6 +925,7 @@ async def media_stream(
                 nonlocal assistant_is_speaking, discard_current_assistant_audio
                 nonlocal media_events_total, media_events_inbound, media_events_outbound, media_events_unknown_track
                 nonlocal last_track, max_rms_last_second, last_debug_log_time
+                nonlocal barge_in_active, barge_in_recovery_pending, assistant_audio_forwarding_enabled, last_user_speech_end_time, barge_in_time, nudge_triggered, call_active
                 vad_log_counter = 0
                 async for message in websocket.iter_text():
                     try:
@@ -1023,6 +1033,7 @@ async def media_stream(
                                             if accumulated_voice_ms >= VAD_MIN_SPEECH_DURATION_MS:
                                                 if speech_state != "speaking":
                                                     speech_state = "speaking"
+                                                    nudge_triggered = False
                                                     logger.info("Trainer VAD speech detected:\n  - rms: %.1f\n  - speech_ms: %d\n  - setting user_audio_seen_since_last_assistant_turn=True", rms, accumulated_voice_ms)
                                                     
                                                 if waiting_for_user_response:
@@ -1037,6 +1048,21 @@ async def media_stream(
                                                     assistant_is_speaking = False
                                                     waiting_for_user_response = False
                                                     user_audio_seen_since_last_assistant_turn = True
+                                                    
+                                                    barge_in_active = True
+                                                    barge_in_recovery_pending = True
+                                                    assistant_audio_forwarding_enabled = False
+                                                    barge_in_time = datetime.now(timezone.utc)
+                                                    nudge_triggered = False
+                                                    
+                                                    logger.info(
+                                                        "Trainer barge-in state:\n"
+                                                        "  - assistant_is_speaking: False\n"
+                                                        "  - waiting_for_user_response: False\n"
+                                                        "  - user_audio_seen_since_last_assistant_turn: True\n"
+                                                        "  - assistant_audio_forwarding_enabled: False\n"
+                                                        "  - barge_in_active: True"
+                                                    )
                                                     logger.info("Trainer barge-in: stopped forwarding current assistant audio.")
                                                     logger.info("Trainer turn gate: user interruption accepted.")
                                                     
@@ -1067,6 +1093,22 @@ async def media_stream(
                                                     if speech_state == "speaking":
                                                         speech_state = "silent"
                                                         logger.info("Trainer VAD: user speech ended.")
+                                                        last_user_speech_end_time = datetime.now(timezone.utc)
+                                                        
+                                                        if barge_in_active:
+                                                            elapsed_ms = int((last_user_speech_end_time - barge_in_time).total_seconds() * 1000)
+                                                            barge_in_active = False
+                                                            discard_current_assistant_audio = False
+                                                            assistant_audio_forwarding_enabled = True
+                                                            waiting_for_user_response = False
+                                                            user_audio_seen_since_last_assistant_turn = True
+                                                            logger.info(
+                                                                "Trainer barge-in user speech ended:\n"
+                                                                "  - elapsed_ms_since_barge_in: %d\n"
+                                                                "  - user_audio_seen_since_last_assistant_turn: True\n"
+                                                                "  - allowing_assistant_response: True",
+                                                                elapsed_ms
+                                                            )
 
                                     input_msg = {
                                         "realtimeInput": {
@@ -1080,15 +1122,21 @@ async def media_stream(
                                     
                         elif event == "stop":
                             logger.info("Twilio stream stop event received.")
+                            call_active = False
                             break
                     except Exception as e_inner:
-                        logger.error("Error in twilio_to_gemini_loop: %s", e_inner)
+                        err_str = str(e_inner).lower()
+                        if not call_active or "1008" in err_str or "aborted" in err_str or "closed" in err_str:
+                            logger.info("Twilio websocket already closed after call stop; cleanup completed.")
+                        else:
+                            logger.error("Error in twilio_to_gemini_loop: %s", e_inner)
                         break
 
             async def gemini_to_twilio_loop():
                 nonlocal gemini_ready, attempts, identified_agent_id, identified_agent_code, redirected, gemini_rate_state
                 nonlocal assistant_is_speaking, waiting_for_user_response, user_audio_seen_since_last_assistant_turn, initial_roleplay_prompt_sent
                 nonlocal last_assistant_turn_completed_at, discard_current_assistant_audio, last_blocked_log_time
+                nonlocal barge_in_active, barge_in_recovery_pending, assistant_audio_forwarding_enabled, last_user_speech_end_time, barge_in_time, nudge_triggered, call_active
                 async for message in gemini_ws:
                     try:
                         data = json.loads(message)
@@ -1216,6 +1264,15 @@ async def media_stream(
                                     return
 
                         elif "serverContent" in data:
+                            # Check for server-side interruption event
+                            if data["serverContent"].get("interrupted"):
+                                logger.info("Trainer turn gate: assistant response interrupted by server.")
+                                assistant_is_speaking = False
+                                waiting_for_user_response = True
+                                user_audio_seen_since_last_assistant_turn = False
+                                discard_current_assistant_audio = False
+                                continue
+
                             # Turn taking block gate
                             if initial_roleplay_prompt_sent and waiting_for_user_response and not user_audio_seen_since_last_assistant_turn:
                                 now_blocked = datetime.now(timezone.utc)
@@ -1236,6 +1293,8 @@ async def media_stream(
                                     if not assistant_is_speaking:
                                         logger.info("Trainer turn gate: assistant response started.")
                                         assistant_is_speaking = True
+                                        barge_in_recovery_pending = False
+                                        nudge_triggered = False
                                         
                                     # Transcode 24kHz linear PCM to µ-law 8kHz
                                     mulaw_payload, gemini_rate_state = encode_gemini_to_twilio(audio_base64, gemini_rate_state)
@@ -1258,27 +1317,69 @@ async def media_stream(
                                 discard_current_assistant_audio = False
                                 
                     except Exception as e_inner:
-                        logger.error("Error in gemini_to_twilio_loop: %s", e_inner)
+                        err_str = str(e_inner).lower()
+                        if not call_active or "1008" in err_str or "aborted" in err_str or "closed" in err_str:
+                            logger.info("Twilio websocket already closed after call stop; cleanup completed.")
+                        else:
+                            logger.error("Error in gemini_to_twilio_loop: %s", e_inner)
+                        break
+
+            async def barge_in_watchdog_loop():
+                nonlocal last_user_speech_end_time, assistant_is_speaking, nudge_triggered
+                nonlocal barge_in_recovery_pending, call_active, gemini_ws, gemini_ready
+                while call_active:
+                    try:
+                        await asyncio.sleep(0.1)
+                        if (
+                            barge_in_recovery_pending
+                            and last_user_speech_end_time is not None
+                            and not assistant_is_speaking
+                            and not nudge_triggered
+                        ):
+                            diff = (datetime.now(timezone.utc) - last_user_speech_end_time).total_seconds()
+                            if diff >= 1.5:
+                                logger.info(
+                                    "Trainer barge-in recovery triggered:\n"
+                                    "  - elapsed_ms_since_user_speech_end: %d\n"
+                                    "  - assistant_response_started: False\n"
+                                    "  - action: nudge_gemini",
+                                    int(diff * 1000)
+                                )
+                                nudge_triggered = True
+                                nudge_msg = {
+                                    "clientContent": {
+                                        "turns": [{
+                                            "role": "user",
+                                            "parts": [{"text": "Continúa el roleplay respondiendo al último mensaje del agente. No repitas tu presentación."}]
+                                        }],
+                                        "turnComplete": True
+                                    }
+                                }
+                                if gemini_ws and gemini_ready:
+                                    await gemini_ws.send(json.dumps(nudge_msg))
+                    except Exception as e_watchdog:
+                        logger.error("Error in barge_in_watchdog_loop: %s", e_watchdog)
                         break
 
             # Run loops concurrently
             await asyncio.gather(
                 twilio_to_gemini_loop(),
-                gemini_to_twilio_loop()
+                gemini_to_twilio_loop(),
+                barge_in_watchdog_loop()
             )
             
             # Cancel monitor task if running
             if monitor_task:
                 monitor_task.cancel()
-                
-            # Finalize session if websocket closed
-            if session_id is not None and not redirected:
-                await handle_roleplay_hangup(session_id, call_sid, call_start_time, "websocket_close")
 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected.")
     except Exception as e:
-        logger.error("Error in media_stream websocket: %s", e)
+        err_str = str(e).lower()
+        if not call_active or "1008" in err_str or "aborted" in err_str or "closed" in err_str:
+            logger.info("Twilio websocket already closed after call stop; cleanup completed.")
+        else:
+            logger.error("Error in media_stream websocket: %s", e)
     finally:
         # Cancel monitor task if running
         try:
@@ -1288,4 +1389,12 @@ async def media_stream(
             pass
         if not websocket.client_state.name == "DISCONNECTED":
             await websocket.close()
+            
+        # Finalize session if websocket closed and not redirected
+        if session_id is not None and 'redirected' in locals() and not redirected:
+            try:
+                await handle_roleplay_hangup(session_id, call_sid, call_start_time, "websocket_close")
+            except Exception as e_hang:
+                logger.error("Error finalizing session in hangup finally: %s", e_hang)
+                
         logger.info("Media stream cleanup completed.")
