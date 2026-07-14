@@ -152,6 +152,7 @@ class TrainerSession(Base):
     simulation = relationship("TrainerSimulation")
     simulation_version = relationship("TrainerSimulationVersion")
     service = relationship("Service")
+    evaluation = relationship("TrainerEvaluation", back_populates="session", uselist=False)
 
 
 class TrainerEvaluation(Base):
@@ -178,5 +179,5 @@ class TrainerEvaluation(Base):
         DateTime(timezone=True), default=func.now(), onupdate=func.now(), server_default=func.now()
     )
 
-    session = relationship("TrainerSession")
+    session = relationship("TrainerSession", back_populates="evaluation")
     evaluation_config = relationship("TrainerEvaluationConfig")

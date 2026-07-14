@@ -126,6 +126,26 @@ class TrainerSessionResponse(BaseModel):
     simulation_code: Optional[str] = None
     service_name: Optional[str] = None
 
+    # New structured evaluation fields
+    score: Optional[float] = None
+    score_max: Optional[int] = None
+    score_source: Optional[str] = None
+    transcription: Optional[str] = None
+    call_status: Optional[str] = None
+
+    evaluation_summary: Optional[str] = None
+    criteria_scores: Optional[List[dict]] = None
+    extraction_values: Optional[dict] = None
+    score_items: Optional[List[dict]] = None
+    non_score_items: Optional[List[dict]] = None
+    evaluation_json: Optional[dict] = None
+
+    # Config & structure info
+    evaluation_config_id: Optional[int] = None
+    evaluation_config_name: Optional[str] = None
+    speech_structure_id: Optional[int] = None
+    speech_structure_name: Optional[str] = None
+
     # Nested relationships if queried in detail
     simulation: Optional[TrainerSimulationResponse] = None
     evaluation: Optional[TrainerEvaluationResponse] = None

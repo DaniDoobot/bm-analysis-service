@@ -853,6 +853,31 @@ class TrainerService:
                 for svc in res_svcs.scalars().all():
                     service_name_map[svc.service_id] = svc.service_name
 
+            # Eager-load configs and active criteria to map scores in batch
+            prompt_ids = set()
+            config_ids = {e.evaluation_config_id for e in evals_map.values() if e.evaluation_config_id}
+            for s in sessions:
+                if s.simulation and s.simulation.evaluation_config_id:
+                    config_ids.add(s.simulation.evaluation_config_id)
+            config_map = {}
+            if config_ids:
+                stmt_cfgs = select(TrainerEvaluationConfig).where(TrainerEvaluationConfig.config_id.in_(list(config_ids)))
+                res_cfgs = await db.execute(stmt_cfgs)
+                for cfg in res_cfgs.scalars().all():
+                    config_map[cfg.config_id] = cfg
+                    prompt_ids.add(cfg.speech_structure_id)
+            criteria_map = {}
+            if prompt_ids:
+                from app.models.criteria import PromptCriterion
+                stmt_crits = select(PromptCriterion).where(
+                    PromptCriterion.prompt_id.in_(list(prompt_ids)),
+                    PromptCriterion.is_active == True,
+                    PromptCriterion.deleted_at.is_(None)
+                ).order_by(PromptCriterion.order_index.asc().nullslast(), PromptCriterion.criterion_id.asc())
+                res_crits = await db.execute(stmt_crits)
+                for crit in res_crits.scalars().all():
+                    criteria_map.setdefault(crit.prompt_id, []).append(crit)
+
             for s in sessions:
                 s.evaluation = evals_map.get(s.session_id)
                 # Attach denormalised fields as transient attributes
@@ -861,6 +886,18 @@ class TrainerService:
                 s.__dict__["simulation_name"] = sim.name if sim else None
                 s.__dict__["simulation_code"] = sim.code if sim else None
                 s.__dict__["service_name"] = service_name_map.get(sim.service_id) if sim else None
+
+                cfg = config_map.get(s.evaluation.evaluation_config_id) if s.evaluation else None
+                if not cfg and sim:
+                    cfg = config_map.get(sim.evaluation_config_id)
+                active_crits = criteria_map.get(cfg.speech_structure_id) if cfg else None
+
+                await TrainerService._map_session_evaluation_details(
+                    db,
+                    s,
+                    active_criteria=active_crits,
+                    config=cfg
+                )
         else:
             for s in sessions:
                 s.evaluation = None
@@ -884,4 +921,204 @@ class TrainerService:
         res_eval = await db.execute(stmt_eval)
         session.evaluation = res_eval.scalars().first()
         
+        # Populate denormalized fields
+        # Fetch agent_name
+        stmt_agent = select(TrainingAgentSetting.agent_name).where(
+            TrainingAgentSetting.training_code == session.agent_code
+        )
+        res_agent = await db.execute(stmt_agent)
+        session.__dict__["agent_name"] = res_agent.scalar()
+
+        if session.simulation:
+            session.__dict__["simulation_name"] = session.simulation.name
+            session.__dict__["simulation_code"] = session.simulation.code
+            
+            # Fetch service_name
+            from app.models.services import Service
+            stmt_svc = select(Service.service_name).where(Service.service_id == session.simulation.service_id)
+            res_svc = await db.execute(stmt_svc)
+            session.__dict__["service_name"] = res_svc.scalar()
+
+        # Map detail evaluation structure and fields
+        await TrainerService._map_session_evaluation_details(db, session)
+        
         return session
+
+    @staticmethod
+    def _map_trainer_criteria_scores(result_json: dict | None, active_criteria: list) -> list[dict]:
+        if not result_json:
+            result_json = {}
+        criteria_scores = []
+        
+        _TRUE_VALUES = {"si", "sí", "yes", "true", "1", True}
+        _FALSE_VALUES = {"no", "false", "0", False}
+        
+        for crit in active_criteria:
+            output_key = crit.output_key
+            feed_key = crit.feed_key
+            item_type = crit.criterion_type or "text"
+            is_score = (item_type == "score_1_10")
+            max_score = 10 if is_score else None
+            
+            raw_val = result_json.get(output_key)
+            raw_feedback = result_json.get(feed_key) if feed_key else None
+            
+            # Coerce/Extract value and display_value
+            value = None
+            score = None
+            display_value = None
+            
+            if raw_val is None:
+                display_value = "No evaluable"
+            else:
+                if item_type in ("score_1_10", "percentage", "number"):
+                    try:
+                        # Clean potential non-numeric chars
+                        val_str = str(raw_val).replace("%", "").strip()
+                        coerced_val = float(val_str)
+                        value = coerced_val
+                        if is_score:
+                            score = coerced_val
+                            display_value = f"{int(coerced_val)}/10" if coerced_val.is_integer() else f"{coerced_val}/10"
+                        elif item_type == "percentage":
+                            display_value = f"{coerced_val}%"
+                        else:
+                            display_value = str(coerced_val)
+                    except (ValueError, TypeError):
+                        value = raw_val
+                        display_value = str(raw_val)
+                elif item_type == "boolean":
+                    if isinstance(raw_val, bool):
+                        value = raw_val
+                        display_value = "Sí" if raw_val else "No"
+                    else:
+                        normalized = str(raw_val).strip().lower()
+                        if normalized in _TRUE_VALUES:
+                            value = True
+                            display_value = "Sí"
+                        elif normalized in _FALSE_VALUES:
+                            value = False
+                            display_value = "No"
+                        else:
+                            value = raw_val
+                            display_value = str(raw_val)
+                else: # text, category, etc.
+                    value = raw_val
+                    display_value = str(raw_val)
+                    
+            # Parse feedback
+            feedback = None
+            if raw_feedback is not None:
+                if isinstance(raw_feedback, dict):
+                    feedback = raw_feedback.get("text") or str(raw_feedback)
+                else:
+                    feedback = str(raw_feedback)
+                    
+            criteria_scores.append({
+                "criterion_id": crit.criterion_id,
+                "criterion_name": crit.criterion_name,
+                "output_key": output_key,
+                "feed_key": feed_key,
+                "item_type": item_type,
+                "score": score,
+                "max_score": max_score,
+                "value": value,
+                "feedback": feedback,
+                "display_value": display_value,
+                "is_score": is_score
+            })
+            
+        return criteria_scores
+
+    @staticmethod
+    async def _map_session_evaluation_details(
+        db: AsyncSession,
+        session: TrainerSession,
+        active_criteria: Optional[List[Any]] = None,
+        config: Optional[TrainerEvaluationConfig] = None
+    ) -> None:
+        # 1. Alias basic status/transcription
+        session.__dict__["call_status"] = session.status
+        session.__dict__["transcription"] = session.transcript
+        
+        # 2. Defaults for evaluation fields
+        session.__dict__["score"] = None
+        session.__dict__["score_max"] = None
+        session.__dict__["score_source"] = "none"
+        session.__dict__["evaluation_summary"] = None
+        session.__dict__["criteria_scores"] = []
+        session.__dict__["extraction_values"] = {}
+        session.__dict__["score_items"] = []
+        session.__dict__["non_score_items"] = []
+        session.__dict__["evaluation_json"] = {}
+        
+        session.__dict__["evaluation_config_id"] = None
+        session.__dict__["evaluation_config_name"] = None
+        session.__dict__["speech_structure_id"] = None
+        session.__dict__["speech_structure_name"] = None
+        
+        evaluation = session.evaluation
+        
+        # 3. Resolve evaluation_config_id
+        config_id = None
+        if evaluation and evaluation.evaluation_config_id:
+            config_id = evaluation.evaluation_config_id
+        elif session.simulation and session.simulation.evaluation_config_id:
+            config_id = session.simulation.evaluation_config_id
+            
+        # 4. Resolve Config and Speech Structure details
+        if config_id:
+            session.__dict__["evaluation_config_id"] = config_id
+            if not config:
+                stmt_cfg = select(TrainerEvaluationConfig).where(TrainerEvaluationConfig.config_id == config_id)
+                res_cfg = await db.execute(stmt_cfg)
+                config = res_cfg.scalars().first()
+                
+            if config:
+                session.__dict__["evaluation_config_name"] = config.name
+                session.__dict__["speech_structure_id"] = config.speech_structure_id
+                session.__dict__["speech_structure_name"] = config.speech_structure_name
+                
+        # 5. Fetch active criteria if not passed
+        if active_criteria is None and session.__dict__["speech_structure_id"]:
+            from app.models.criteria import PromptCriterion
+            stmt_crits = select(PromptCriterion).where(
+                PromptCriterion.prompt_id == session.__dict__["speech_structure_id"],
+                PromptCriterion.is_active == True,
+                PromptCriterion.deleted_at.is_(None)
+            ).order_by(PromptCriterion.order_index.asc().nullslast(), PromptCriterion.criterion_id.asc())
+            res_crits = await db.execute(stmt_crits)
+            active_criteria = list(res_crits.scalars().all())
+            
+        # 6. Map evaluation details
+        if evaluation:
+            result_json = evaluation.result_json or {}
+            session.__dict__["evaluation_json"] = result_json
+            session.__dict__["evaluation_summary"] = evaluation.summary
+            
+            # Map criteria_scores if we have active criteria
+            if active_criteria:
+                scores = TrainerService._map_trainer_criteria_scores(result_json, active_criteria)
+                session.__dict__["criteria_scores"] = scores
+                session.__dict__["score_items"] = [item for item in scores if item["is_score"]]
+                session.__dict__["non_score_items"] = [item for item in scores if not item["is_score"]]
+                session.__dict__["extraction_values"] = {item["output_key"]: item["value"] for item in scores if item["output_key"]}
+                
+            # Score resolution logic
+            if evaluation.score is not None:
+                session.__dict__["score"] = float(evaluation.score)
+                session.__dict__["score_max"] = 10
+                session.__dict__["score_source"] = "evaluation_score"
+            else:
+                # Calculate average of numeric score_1_10 criteria
+                score_items = session.__dict__["score_items"]
+                numeric_scores = [item["score"] for item in score_items if item["score"] is not None]
+                if numeric_scores:
+                    avg_score = sum(numeric_scores) / len(numeric_scores)
+                    session.__dict__["score"] = round(avg_score, 2)
+                    session.__dict__["score_max"] = 10
+                    session.__dict__["score_source"] = "criteria_average"
+                    
+        # 7. Check for completed_without_score status
+        if session.evaluation_status == "evaluated" and session.__dict__["score"] is None:
+            session.evaluation_status = "completed_without_score"
