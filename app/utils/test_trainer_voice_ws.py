@@ -945,6 +945,7 @@ class TestTrainerVoiceBargeInRecovery(unittest.IsolatedAsyncioTestCase):
         mock_ws.close = AsyncMock()
         mock_ws.client_state.name = "CONNECTED"
         mock_ws.scope = {"query_string": b"flow=session&session_id=14"}
+        mock_ws.headers = {"host": "test-host.com"}
         
         mock_gemini_ws = AsyncMock()
         mock_gemini_ws.send = AsyncMock()
@@ -958,23 +959,26 @@ class TestTrainerVoiceBargeInRecovery(unittest.IsolatedAsyncioTestCase):
                     "callSid": "CAa6e55255e7fd66dc881fdb04713110e3",
                 }
             })
-            await asyncio.sleep(0.05)
-            # 2. Media event (user speaking)
-            yield json.dumps({
-                "event": "media",
-                "media": {
-                    "track": "inbound",
-                    "payload": "f39/f39/f39/"
-                }
-            })
-            await asyncio.sleep(0.3)
+            # Wait for assistant to start speaking
+            await asyncio.sleep(0.2)
+            # 2. Yield 10 media events (total 200ms > 160ms VAD threshold)
+            for _ in range(10):
+                yield json.dumps({
+                    "event": "media",
+                    "media": {
+                        "track": "inbound",
+                        "payload": "f39/f39/f39/"
+                    }
+                })
+                await asyncio.sleep(0.02)
+            await asyncio.sleep(0.5)
             # 3. Stop event
             yield json.dumps({"event": "stop"})
             
         mock_ws.iter_text = mock_iter_text
         
         # Gemini messages
-        async def mock_gemini_iter():
+        async def mock_gemini_iter(*args, **kwargs):
             # setupComplete
             yield json.dumps({"setupComplete": {}})
             await asyncio.sleep(0.05)
@@ -1014,7 +1018,7 @@ class TestTrainerVoiceBargeInRecovery(unittest.IsolatedAsyncioTestCase):
         # Verify clear was sent to Twilio
         clear_sent = False
         for call in mock_ws.send_text.call_args_list:
-            if "clear" in call[0][0]:
+            if len(call[0]) > 0 and "clear" in str(call[0][0]):
                 clear_sent = True
         self.assertTrue(clear_sent)
         
