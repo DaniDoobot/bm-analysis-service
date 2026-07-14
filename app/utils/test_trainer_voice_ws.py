@@ -971,7 +971,18 @@ class TestTrainerVoiceBargeInRecovery(unittest.IsolatedAsyncioTestCase):
                     }
                 })
                 await asyncio.sleep(0.02)
-            await asyncio.sleep(0.5)
+            # Yield 40 silent media events to confirm silence/speech end (total 800ms > 500ms threshold)
+            for _ in range(40):
+                yield json.dumps({
+                    "event": "media",
+                    "media": {
+                        "track": "inbound",
+                        "payload": "f39/f39/f39/"
+                    }
+                })
+                await asyncio.sleep(0.02)
+            # Sleep long enough for watchdog loop to detect 1.5s of silence and nudge Gemini
+            await asyncio.sleep(1.8)
             # 3. Stop event
             yield json.dumps({"event": "stop"})
             
@@ -990,7 +1001,8 @@ class TestTrainerVoiceBargeInRecovery(unittest.IsolatedAsyncioTestCase):
                     }
                 }
             })
-            await asyncio.sleep(0.05)
+            # Wait for user speech to start/finish before sending interrupted
+            await asyncio.sleep(0.6)
             # serverContent interrupted (simulated server interruption)
             yield json.dumps({
                 "serverContent": {
@@ -1004,10 +1016,19 @@ class TestTrainerVoiceBargeInRecovery(unittest.IsolatedAsyncioTestCase):
         mock_connect = AsyncMock()
         mock_connect.__aenter__.return_value = mock_gemini_ws
         
+        # We want first 10 frames to have energy 500 (voice), then 40 frames to have energy 10 (silence)
+        energy_values = [500.0] * 10 + [10.0] * 100
+        energy_iter = iter(energy_values)
+        def mock_calculate_energy(*args, **kwargs):
+            try:
+                return next(energy_iter)
+            except StopIteration:
+                return 10.0
+                
         with patch("websockets.connect", return_value=mock_connect), \
              patch("app.routers.trainer_voice.start_twilio_recording", AsyncMock(return_value="rec_1")), \
              patch("app.routers.trainer_voice.decode_twilio_to_gemini", return_value=("DUMMY", None)), \
-             patch("app.routers.trainer_voice.calculate_pcm_energy", return_value=500.0), \
+             patch("app.routers.trainer_voice.calculate_pcm_energy", new=mock_calculate_energy), \
              patch("app.routers.trainer_voice.handle_roleplay_hangup", AsyncMock()) as mock_hangup:
             
             await media_stream(mock_ws, flow="session", session_id=14, db=self.db)
@@ -1030,7 +1051,7 @@ class TestTrainerVoiceBargeInRecovery(unittest.IsolatedAsyncioTestCase):
                 turns = payload["clientContent"].get("turns", [])
                 for turn in turns:
                     for part in turn.get("parts", []):
-                        if "Continua el roleplay" in part.get("text", ""):
+                        if "el roleplay respondiendo al" in part.get("text", ""):
                             nudge_sent = True
         self.assertTrue(nudge_sent)
 
