@@ -204,14 +204,80 @@ async def run(dry_run: bool = False) -> None:
             print("OK - No duplicate numeric codes detected among enabled agents.")
         print()
 
+async def verify() -> None:
+    from app.db import get_engine
+    from app.models.personalized_training import TrainingAgentSetting
+
+    engine = get_engine()
+    async with AsyncSession(engine, expire_on_commit=False) as db:
+        res = await db.execute(select(TrainingAgentSetting))
+        all_settings = {s.hubspot_owner_id: s for s in res.scalars().all()}
+
+        print("\n" + "=" * 65)
+        print("VERIFY AGENT CODES - Training Hub Voice")
+        print("=" * 65)
+        print(f"{'Initials':8}  {'Name':<28}  {'Expected':10}  {'Actual':10}  {'Status'}")
+        print("-" * 75)
+
+        failures = 0
+        for agent in AGENT_CODE_MAP:
+            oid = agent["hubspot_owner_id"]
+            setting = all_settings.get(oid)
+            expected_num = agent["training_numeric_code"]
+            expected_alpha = agent["training_code"]
+
+            # Skip checking Roberto Galán since he has no voice codes mapped
+            if not expected_num and not expected_alpha:
+                continue
+
+            if not setting:
+                print(f"{agent['agent_initials']:8}  {agent['agent_name']:<28}  {str(expected_num or '-'):10}  {'MISSING':10}  [FAIL]")
+                failures += 1
+                continue
+
+            match_num = setting.training_numeric_code == expected_num
+            match_alpha = setting.training_code == expected_alpha
+            match_enabled = setting.is_enabled is True
+            match_code_enabled = setting.training_code_enabled is True
+
+            status = "OK"
+            errors = []
+            if not match_num:
+                errors.append(f"num_mismatch: {setting.training_numeric_code} != {expected_num}")
+            if not match_alpha:
+                errors.append(f"alpha_mismatch: {setting.training_code} != {expected_alpha}")
+            if not match_enabled:
+                errors.append("disabled")
+            if not match_code_enabled:
+                errors.append("code_disabled")
+
+            if errors:
+                status = f"FAIL ({', '.join(errors)})"
+                failures += 1
+
+            print(f"{setting.agent_initials:8}  {setting.agent_name:<28}  {str(expected_num or '-'):10}  {str(setting.training_numeric_code or '-'):10}  [{status}]")
+
+        print("-" * 75)
+        if failures > 0:
+            print(f"\nVerification FAILED: {failures} misconfigured agents found.\n")
+            sys.exit(1)
+        else:
+            print("\nVerification SUCCESS: All agents correctly configured and enabled.\n")
+            sys.exit(0)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Sync training agent short codes.")
     parser.add_argument("--dry-run", action="store_true", help="Preview without writing")
+    parser.add_argument("--verify", action="store_true", help="Verify database agent configurations")
     args = parser.parse_args()
-    asyncio.run(run(dry_run=args.dry_run))
+
+    if args.verify:
+        asyncio.run(verify())
+    else:
+        asyncio.run(run(dry_run=args.dry_run))
 
 
 if __name__ == "__main__":
     main()
+
