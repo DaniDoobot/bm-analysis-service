@@ -609,9 +609,11 @@ class TestTrainerVoiceDetailedVAD(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(sessions), 2)
         
         # Verify eager loaded relations
-        self.assertEqual(sessions[0].simulation.simulation_id, 2)
-        self.assertIsNone(sessions[0].evaluation.score)
-        self.assertIsNone(sessions[1].evaluation)
+        sess_1 = next(s for s in sessions if s.session_id == s1.session_id)
+        sess_2 = next(s for s in sessions if s.session_id == s2.session_id)
+        self.assertEqual(sess_1.simulation.simulation_id, 2)
+        self.assertIsNone(sess_1.evaluation.score)
+        self.assertIsNone(sess_2.evaluation)
 
 
 
@@ -728,6 +730,150 @@ class TestTrainerVoiceV2(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sess.__dict__.get("simulation_code"), "SIM500")
             self.assertEqual(sess.__dict__.get("service_name"), "TestService999")
             self.assertEqual(sess.__dict__.get("agent_name"), "Agent Test 500")
+
+    @patch("app.services.trainer_service.TrainerService.download_trainer_recording_audio")
+    async def test_recording_audio_proxy_endpoint(self, mock_download):
+        """Test proxy recording-audio endpoint behaviour (404, 502, success)."""
+        from app.main import app
+        from app.dependencies import get_current_user
+        from httpx import AsyncClient
+        from app.models.users import User
+        from app.models.trainer import TrainerSession
+
+        admin_user = User(user_id=1, email="admin@test.com", role="admin")
+        app.dependency_overrides[get_current_user] = lambda: admin_user
+
+        mock_download.return_value = b"mp3_data"
+
+        from app.models.services import Service
+        from app.models.trainer import TrainerSimulation, TrainerSession
+
+        from app.db import AsyncSessionLocal
+        async with AsyncSessionLocal() as db:
+            svc = Service(service_id=1, service_key="test_svc_1", service_name="TestService1")
+            db.add(svc)
+            await db.flush()
+
+            sim = TrainerSimulation(
+                simulation_id=1,
+                code="SIM1",
+                name="Test Sim 1",
+                roleplay_prompt="Carmen es cliente.",
+                service_id=1
+            )
+            db.add(sim)
+            await db.flush()
+
+            s_no_rec = TrainerSession(
+                session_id=800,
+                agent_id="HUB_TEST_800",
+                agent_code="CODE800",
+                simulation_id=1,
+                service_id=1,
+                call_id="call_800",
+                status="completed",
+                evaluation_status="evaluated",
+                recording_url=None
+            )
+            db.add(s_no_rec)
+
+            s_rec = TrainerSession(
+                session_id=801,
+                agent_id="HUB_TEST_800",
+                agent_code="CODE800",
+                simulation_id=1,
+                service_id=1,
+                call_id="call_801",
+                status="completed",
+                evaluation_status="evaluated",
+                recording_url="http://twilio.com/rec801.mp3"
+            )
+            db.add(s_rec)
+            await db.commit()
+
+        from httpx import ASGITransport
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            res = await ac.get("/bm/trainer/sessions/800/recording-audio")
+            self.assertEqual(res.status_code, 404)
+            self.assertIn("Grabaci\u00f3n no disponible", res.json()["detail"])
+
+            res = await ac.get("/bm/trainer/sessions/801/recording-audio")
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.content, b"mp3_data")
+            self.assertEqual(res.headers["content-type"], "audio/mpeg")
+            self.assertEqual(res.headers["cache-control"], "private, no-store")
+
+            import httpx
+            req = httpx.Request("GET", "http://twilio.com/rec801.mp3")
+            resp = httpx.Response(401, request=req)
+            mock_download.side_effect = httpx.HTTPStatusError("Unauthorized", request=req, response=resp)
+            res = await ac.get("/bm/trainer/sessions/801/recording-audio")
+            self.assertEqual(res.status_code, 502)
+            self.assertIn("No se pudo recuperar la grabaci\u00f3n desde Twilio", res.json()["detail"])
+
+            res = await ac.get("/bm/trainer/sessions/9999/recording-audio")
+            self.assertEqual(res.status_code, 404)
+
+        app.dependency_overrides.clear()
+
+    async def test_session_detail_and_list_rewrites_recording_url(self):
+        """Test that get_session_detail and list_sessions rewrite raw Twilio URL to proxy endpoint."""
+        from app.main import app
+        from app.dependencies import get_current_user
+        from httpx import AsyncClient
+        from app.models.users import User
+        from app.models.trainer import TrainerSession
+
+        admin_user = User(user_id=1, email="admin@test.com", role="admin")
+        app.dependency_overrides[get_current_user] = lambda: admin_user
+
+        from app.models.services import Service
+        from app.models.trainer import TrainerSimulation, TrainerSession
+
+        from app.db import AsyncSessionLocal
+        async with AsyncSessionLocal() as db:
+            svc = Service(service_id=1, service_key="test_svc_1", service_name="TestService1")
+            db.add(svc)
+            await db.flush()
+
+            sim = TrainerSimulation(
+                simulation_id=1,
+                code="SIM1",
+                name="Test Sim 1",
+                roleplay_prompt="Carmen es cliente.",
+                service_id=1
+            )
+            db.add(sim)
+            await db.flush()
+
+            s_rec = TrainerSession(
+                session_id=802,
+                agent_id="HUB_TEST_802",
+                agent_code="CODE802",
+                simulation_id=1,
+                service_id=1,
+                call_id="call_802",
+                status="completed",
+                evaluation_status="evaluated",
+                recording_url="http://twilio.com/rec802.mp3"
+            )
+            db.add(s_rec)
+            await db.commit()
+
+        from httpx import ASGITransport
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            res = await ac.get("/bm/trainer/sessions/802")
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.json()["recording_url"], "/bm/trainer/sessions/802/recording-audio")
+
+            res = await ac.get("/bm/trainer/sessions")
+            self.assertEqual(res.status_code, 200)
+            sessions_list = res.json()["sessions"]
+            matched_session = next((s for s in sessions_list if s["session_id"] == 802), None)
+            self.assertIsNotNone(matched_session)
+            self.assertEqual(matched_session["recording_url"], "/bm/trainer/sessions/802/recording-audio")
+
+        app.dependency_overrides.clear()
 
 
 if __name__ == "__main__":

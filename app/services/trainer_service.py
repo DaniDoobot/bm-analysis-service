@@ -574,6 +574,16 @@ class TrainerService:
         return sess
 
 
+    @staticmethod
+    async def download_trainer_recording_audio(recording_url: str) -> bytes:
+        """Download trainer call recording audio using Twilio credentials."""
+        if not recording_url:
+            raise ValueError("recording_url is empty")
+        from app.services.twilio_service import TwilioService
+        twilio = TwilioService()
+        return await twilio.download_audio(recording_url)
+
+
     # ── Background Evaluation Execution ──────────────────────────────────────────
 
     @staticmethod
@@ -597,9 +607,7 @@ class TrainerService:
             if not transcript_text and sess.recording_url:
                 # Download and transcribe audio
                 logger.info("Downloading call audio for session %d from: %s", session_id, sess.recording_url)
-                from app.services.twilio_service import TwilioService
-                twilio = TwilioService()
-                audio_bytes = await twilio.download_audio(sess.recording_url)
+                audio_bytes = await TrainerService.download_trainer_recording_audio(sess.recording_url)
                 
                 logger.info("Transcribing call audio for session %d via Whisper...", session_id)
                 transcription_result = await openai_service.transcribe_audio(audio_bytes, filename="call.mp3")

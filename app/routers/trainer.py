@@ -344,6 +344,9 @@ async def list_sessions(
         max_score=max_score,
         limit=limit,
     )
+    for s in sessions:
+        if s.recording_url:
+            s.recording_url = f"/bm/trainer/sessions/{s.session_id}/recording-audio"
     return {"sessions": sessions, "total_count": total}
 
 
@@ -360,4 +363,71 @@ async def get_session_detail(
 
     # Enforce ownership check for non-admin agents
     enforce_agent_or_admin_ownership(current_user, sess.agent_id)
+    if sess.recording_url:
+        sess.recording_url = f"/bm/trainer/sessions/{sess.session_id}/recording-audio"
     return sess
+
+
+@router.get("/sessions/{session_id}/recording-audio")
+async def get_session_recording_audio(
+    session_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: AsyncSession = Depends(get_db),
+):
+    """Proxy endpoint to stream/download Twilio recordings securely without client auth prompts."""
+    sess = await TrainerService.get_session_detail(db, session_id)
+    if not sess:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Sesión no encontrada."
+        )
+
+    # Enforce ownership check for non-admin agents
+    enforce_agent_or_admin_ownership(current_user, sess.agent_id)
+
+    # Check database recording_url (wait, since get_session_detail rewrites recording_url, we need to inspect the db value or query it)
+    # Actually, get_session_detail rewrote sess.recording_url above!
+    # Let's query the raw recording_url from the DB to be safe or bypass get_session_detail's rewrite.
+    # To bypass, we can just select the session recording_url directly from db.
+    from sqlalchemy import select
+    from app.models.trainer import TrainerSession
+    stmt = select(TrainerSession.recording_url).where(TrainerSession.session_id == session_id)
+    res = await db.execute(stmt)
+    raw_recording_url = res.scalar()
+
+    if not raw_recording_url:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Grabación no disponible todavía"
+        )
+
+    import httpx
+    from fastapi import Response
+
+    try:
+        audio_bytes = await TrainerService.download_trainer_recording_audio(raw_recording_url)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code in (401, 403):
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="No se pudo recuperar la grabación desde Twilio"
+            )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Error al descargar la grabación desde Twilio: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"No se pudo recuperar la grabación: {str(e)}"
+        )
+
+    return Response(
+        content=audio_bytes,
+        media_type="audio/mpeg",
+        headers={
+            "Content-Type": "audio/mpeg",
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": f"inline; filename=session_{session_id}.mp3"
+        }
+    )
