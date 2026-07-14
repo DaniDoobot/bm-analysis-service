@@ -944,6 +944,7 @@ class TestTrainerVoiceBargeInRecovery(unittest.IsolatedAsyncioTestCase):
         mock_ws.send_text = AsyncMock()
         mock_ws.close = AsyncMock()
         mock_ws.client_state.name = "CONNECTED"
+        mock_ws.scope = {"query_string": b"flow=session&session_id=14"}
         
         mock_gemini_ws = AsyncMock()
         mock_gemini_ws.send = AsyncMock()
