@@ -113,7 +113,7 @@ async def run(dry_run: bool = False) -> None:
             if setting is None:
                 # Agent does not exist yet — create it
                 action = "CREATE"
-                print(f"{'–':>6}  {agent['agent_initials']:8}  {agent['agent_name']:<28}  {str(num_code or '–'):10}  {str(alpha_code or '–'):10}  {action}")
+                print(f"{'-':>6}  {agent['agent_initials']:8}  {agent['agent_name']:<28}  {str(num_code or '-'):10}  {str(alpha_code or '-'):10}  {action}")
                 if not dry_run:
                     new_s = TrainingAgentSetting(
                         hubspot_owner_id=oid,
@@ -134,9 +134,9 @@ async def run(dry_run: bool = False) -> None:
                 )
                 if needs_update:
                     action = (
-                        f"UPDATE  {setting.training_numeric_code or '–'} → {num_code or '–'}"
+                        f"UPDATE  {setting.training_numeric_code or '-'} -> {num_code or '-'}"
                     )
-                    print(f"{setting.setting_id:>6}  {setting.agent_initials:8}  {setting.agent_name:<28}  {str(num_code or '–'):10}  {str(alpha_code or '–'):10}  {action}")
+                    print(f"{setting.setting_id:>6}  {setting.agent_initials:8}  {setting.agent_name:<28}  {str(num_code or '-'):10}  {str(alpha_code or '-'):10}  {action}")
                     if not dry_run:
                         setting.training_numeric_code = num_code
                         setting.training_code = alpha_code
@@ -145,7 +145,7 @@ async def run(dry_run: bool = False) -> None:
                     updated += 1
                 else:
                     action = "OK (no change)"
-                    print(f"{setting.setting_id:>6}  {setting.agent_initials:8}  {setting.agent_name:<28}  {str(num_code or '–'):10}  {str(alpha_code or '–'):10}  {action}")
+                    print(f"{setting.setting_id:>6}  {setting.agent_initials:8}  {setting.agent_name:<28}  {str(num_code or '-'):10}  {str(alpha_code or '-'):10}  {action}")
                     skipped += 1
 
         print("-" * 85)
@@ -153,21 +153,21 @@ async def run(dry_run: bool = False) -> None:
 
         if not dry_run and (created > 0 or updated > 0):
             await db.commit()
-            print("✔ Changes committed to database.\n")
+            print("OK - Changes committed to database.\n")
 
         # ── 2. Print final state ────────────────────────────────────────────────
         print("\n" + "=" * 65)
-        print("FINAL STATE — Training Agent Code Map")
+        print("FINAL STATE - Training Agent Code Map")
         print("=" * 65)
         print(f"{'ID':>6}  {'Init':5}  {'Name':<28}  {'NumCode':10}  {'AlphaCode':10}  {'Enabled':8}  {'CodeEnabled'}")
         print("-" * 85)
         res2 = await db.execute(select(TrainingAgentSetting).order_by(TrainingAgentSetting.agent_initials))
         for s in res2.scalars().all():
-            enabled_flag = "✔" if s.is_enabled else "✗"
-            code_flag = "✔" if s.training_code_enabled else "✗"
+            enabled_flag = "Yes" if s.is_enabled else "No"
+            code_flag = "Yes" if s.training_code_enabled else "No"
             print(
                 f"{s.setting_id:>6}  {s.agent_initials:5}  {s.agent_name:<28}  "
-                f"{str(s.training_numeric_code or '–'):10}  {str(s.training_code or '–'):10}  "
+                f"{str(s.training_numeric_code or '-'):10}  {str(s.training_code or '-'):10}  "
                 f"{enabled_flag:8}  {code_flag}"
             )
         print()
@@ -187,10 +187,11 @@ async def run(dry_run: bool = False) -> None:
                 dups.add(c)
             seen.add(c)
         if dups:
-            print(f"⚠ WARNING: Duplicate numeric codes detected among enabled agents: {dups}")
+            print(f"WARNING: Duplicate numeric codes detected among enabled agents: {dups}")
         else:
-            print("✔ No duplicate numeric codes detected among enabled agents.")
+            print("OK - No duplicate numeric codes detected among enabled agents.")
         print()
+
 
 
 def main():

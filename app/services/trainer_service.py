@@ -487,9 +487,9 @@ class TrainerService:
         res = await db.execute(stmt)
         setting = res.scalars().first()
         if not setting:
-            # Build a compact code map for diagnostics (initials → numeric_code)
+            # Build a compact code map for diagnostics (initials -> numeric_code)
             code_map = ", ".join(
-                f"{s.agent_initials}→{s.training_numeric_code or '–'}"
+                f"{s.agent_initials}->{s.training_numeric_code or '-'}"
                 for s in active_with_codes
                 if s.training_numeric_code
             )
@@ -502,7 +502,7 @@ class TrainerService:
             return None
 
         logger.info(
-            "Training Hub agent validation OK: normalized_code=%s → agent=%s (%s)",
+            "Training Hub agent validation OK: normalized_code=%s -> agent=%s (%s)",
             cleaned, setting.agent_name, setting.agent_initials
         )
         return {
@@ -521,14 +521,15 @@ class TrainerService:
         agents = list(res.scalars().all())
         lines = []
         for s in agents:
-            code_part = s.training_numeric_code or "–"
-            alpha_part = s.training_code or "–"
-            enabled_flag = "✔" if s.training_code_enabled else "✗ (disabled)"
-            lines.append(f"  {s.agent_initials} → numeric={code_part}, alpha={alpha_part} [{enabled_flag}]")
+            code_part = s.training_numeric_code or "-"
+            alpha_part = s.training_code or "-"
+            enabled_flag = "active" if s.training_code_enabled else "disabled"
+            lines.append(f"  {s.agent_initials} -> numeric={code_part}, alpha={alpha_part} [{enabled_flag}]")
         if lines:
             logger.info("Training agent code map:\n%s", "\n".join(lines))
         else:
             logger.warning("Training agent code map: no agents found in bm_training_agent_settings")
+
 
 
     @staticmethod
