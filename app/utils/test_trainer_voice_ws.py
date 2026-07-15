@@ -875,6 +875,68 @@ class TestTrainerVoiceV2(unittest.IsolatedAsyncioTestCase):
 
         app.dependency_overrides.clear()
 
+    @patch("httpx.AsyncClient.get")
+    async def test_reconcile_trainer_sessions(self, mock_get):
+        """Test the reconcile_trainer_sessions administrative endpoint."""
+        from app.main import app
+        from app.dependencies import get_current_user
+        from httpx import AsyncClient, ASGITransport
+        from app.models.users import User
+        from app.models.trainer import TrainerSession
+        from app.db import AsyncSessionLocal
+
+        # Set up admin user
+        admin_user = User(user_id=1, email="admin@test.com", role="admin")
+        app.dependency_overrides[get_current_user] = lambda: admin_user
+
+        async with AsyncSessionLocal() as db:
+            s_reconcile = TrainerSession(
+                session_id=850,
+                agent_id="HUB_TEST_850",
+                agent_code="CODE850",
+                simulation_id=1,
+                service_id=1,
+                call_id="call_reconcile_850",
+                status="completed",
+                evaluation_status="completed_waiting_recording",
+                recording_url=None
+            )
+            db.add(s_reconcile)
+            await db.commit()
+
+        # Mock Twilio API response
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "recordings": [
+                {
+                    "sid": "REmock850",
+                    "status": "completed",
+                    "duration": "120",
+                    "uri": "/2010-04-01/Accounts/ACmock/Recordings/REmock850.json"
+                }
+            ]
+        }
+        mock_get.return_value = mock_response
+
+        # Mock evaluate_session_task to avoid running actual evaluation
+        with patch("app.services.trainer_service.TrainerService.evaluate_session_task") as mock_eval:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+                res = await ac.post("/bm/trainer/phone/sessions/reconcile")
+                self.assertEqual(res.status_code, 200)
+                data = res.json()
+                self.assertEqual(data["status"], "ok")
+                self.assertEqual(data["reconciled_count"], 1)
+                
+                # Check DB updated
+                async with AsyncSessionLocal() as db:
+                    s_updated = await db.get(TrainerSession, 850)
+                    self.assertEqual(s_updated.recording_url, "https://api.twilio.com/2010-04-01/Accounts/ACmock/Recordings/REmock850.wav")
+                    self.assertEqual(s_updated.evaluation_status, "evaluation_pending")
+
+        app.dependency_overrides.clear()
+
+
 
 class TestTrainerVoiceBargeInRecovery(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

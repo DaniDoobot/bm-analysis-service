@@ -9,14 +9,20 @@ class InternalRole(str, Enum):
 
 ROLE_MAPPINGS = {
     "admin": InternalRole.SUPER_ADMIN,
+    "administrador": InternalRole.SUPER_ADMIN,
     "superadmin": InternalRole.SUPER_ADMIN,
     "super_admin": InternalRole.SUPER_ADMIN,
+    
     "company_admin": InternalRole.COMPANY_ADMIN,
-    "administrador": InternalRole.COMPANY_ADMIN,
+    "admin_empresa": InternalRole.COMPANY_ADMIN,
+    "administrador_empresa": InternalRole.COMPANY_ADMIN,
+    
     "service_manager": InternalRole.SERVICE_MANAGER,
     "responsable_servicio": InternalRole.SERVICE_MANAGER,
+    
     "team_coordinator": InternalRole.TEAM_COORDINATOR,
     "coordinador_equipo": InternalRole.TEAM_COORDINATOR,
+    
     "agent": InternalRole.AGENT,
     "agente": InternalRole.AGENT,
 }

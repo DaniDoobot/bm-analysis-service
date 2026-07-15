@@ -79,7 +79,7 @@ class TestMultitenancyAuth(unittest.IsolatedAsyncioTestCase):
             # Super Admin (Legacy 'admin' role)
             self.u_super = User(username="super_admin", email="super@test.com", role="admin", password_hash="dummy")
             # Company Admin
-            self.u_comp = User(username="company_admin", email="company@test.com", role="administrador", company_id=self.c1.company_id, password_hash="dummy")
+            self.u_comp = User(username="company_admin", email="company@test.com", role="company_admin", company_id=self.c1.company_id, password_hash="dummy")
             # Service Manager
             self.u_mgr = User(username="srv_manager", email="mgr@test.com", role="responsable_servicio", company_id=self.c1.company_id, password_hash="dummy")
             # Team Coordinator
@@ -131,7 +131,11 @@ class TestMultitenancyAuth(unittest.IsolatedAsyncioTestCase):
         """1. Test role normalization helper mappings."""
         self.assertEqual(normalize_role("admin"), InternalRole.SUPER_ADMIN)
         self.assertEqual(normalize_role("super_admin"), InternalRole.SUPER_ADMIN)
-        self.assertEqual(normalize_role("administrador"), InternalRole.COMPANY_ADMIN)
+        self.assertEqual(normalize_role("administrador"), InternalRole.SUPER_ADMIN)
+        self.assertEqual(normalize_role("superadmin"), InternalRole.SUPER_ADMIN)
+        self.assertEqual(normalize_role("company_admin"), InternalRole.COMPANY_ADMIN)
+        self.assertEqual(normalize_role("admin_empresa"), InternalRole.COMPANY_ADMIN)
+        self.assertEqual(normalize_role("administrador_empresa"), InternalRole.COMPANY_ADMIN)
         self.assertEqual(normalize_role("responsable_servicio"), InternalRole.SERVICE_MANAGER)
         self.assertEqual(normalize_role("coordinador_equipo"), InternalRole.TEAM_COORDINATOR)
         self.assertEqual(normalize_role("agente"), InternalRole.AGENT)

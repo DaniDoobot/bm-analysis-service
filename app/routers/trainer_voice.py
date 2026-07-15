@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, or_, desc, func
 from sqlalchemy.orm import selectinload, joinedload
 
-from app.dependencies import get_db, get_current_user
+from app.dependencies import get_db, get_current_user, require_admin
 from app.models.users import User
 from app.models.personalized_training import TrainingAgentSetting
 from app.models.trainer import TrainerSimulation, TrainerSession, TrainerSimulationVersion
@@ -478,6 +478,90 @@ async def recording_completed(
     # Trigger evaluation logic
     await check_and_trigger_evaluation(db, sess.session_id)
     return {"status": "ok", "message": "processed"}
+
+
+@router.post("/sessions/reconcile")
+async def reconcile_trainer_sessions(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Reconcile trainer sessions stuck in 'completed_waiting_recording' by fetching recording from Twilio."""
+    # 1. Fetch sessions
+    stmt = select(TrainerSession).where(
+        and_(
+            TrainerSession.status == "completed",
+            TrainerSession.evaluation_status == "completed_waiting_recording",
+            TrainerSession.recording_url.is_(None)
+        )
+    )
+    res = await db.execute(stmt)
+    sessions = res.scalars().all()
+    
+    reconciled = []
+    failed = []
+    
+    account_sid = getattr(settings, "twilio_account_sid", None) or os.getenv("TWILIO_ACCOUNT_SID")
+    auth_token = getattr(settings, "twilio_auth_token", None) or os.getenv("TWILIO_AUTH_TOKEN")
+    
+    if not account_sid or not auth_token:
+        return {"status": "error", "message": "Twilio credentials not configured on server."}
+        
+    async with httpx.AsyncClient() as client:
+        for sess in sessions:
+            call_sid = sess.call_id
+            url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Calls/{call_sid}/Recordings.json"
+            try:
+                response = await client.get(url, auth=(account_sid, auth_token))
+                if response.status_code == 200:
+                    data = response.json()
+                    recordings = data.get("recordings", [])
+                    # Find a completed recording
+                    completed_rec = next((r for r in recordings if r.get("status") == "completed"), None)
+                    if completed_rec:
+                        rec_url = f"https://api.twilio.com{completed_rec.get('uri').replace('.json', '.wav')}"
+                        duration = completed_rec.get("duration")
+                        
+                        sess.recording_url = rec_url
+                        if duration and not sess.duration_seconds:
+                            sess.duration_seconds = int(duration)
+                        
+                        await db.commit()
+                        await db.refresh(sess)
+                        
+                        # Trigger evaluation (idempotent)
+                        await check_and_trigger_evaluation(db, sess.session_id)
+                        
+                        reconciled.append({
+                            "session_id": sess.session_id,
+                            "call_sid": call_sid,
+                            "recording_url": rec_url
+                        })
+                    else:
+                        failed.append({
+                            "session_id": sess.session_id,
+                            "call_sid": call_sid,
+                            "reason": "No completed recording found on Twilio for this call yet."
+                        })
+                else:
+                    failed.append({
+                        "session_id": sess.session_id,
+                        "call_sid": call_sid,
+                        "reason": f"Twilio API returned status {response.status_code}: {response.text}"
+                    })
+            except Exception as e:
+                failed.append({
+                    "session_id": sess.session_id,
+                    "call_sid": call_sid,
+                    "reason": f"Error querying Twilio API: {str(e)}"
+                })
+                
+    return {
+        "status": "ok",
+        "reconciled_count": len(reconciled),
+        "failed_count": len(failed),
+        "reconciled": reconciled,
+        "failed": failed
+    }
 
 
 # ── Audio Transcoding Math Helpers ────────────────────────────────────────────
