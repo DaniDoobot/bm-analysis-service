@@ -598,6 +598,9 @@ async def start_twilio_recording(call_sid: str, host: str) -> Optional[str]:
     """Instruct Twilio to start recording the call."""
     account_sid = getattr(settings, "twilio_account_sid", None) or os.getenv("TWILIO_ACCOUNT_SID")
     auth_token = getattr(settings, "twilio_auth_token", None) or os.getenv("TWILIO_AUTH_TOKEN")
+    
+    logger.info("start_twilio_recording: call_sid received = %s", call_sid)
+
     if not account_sid or not auth_token:
         logger.error("Twilio credentials not configured. Cannot record call.")
         return None
@@ -605,8 +608,20 @@ async def start_twilio_recording(call_sid: str, host: str) -> Optional[str]:
     url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Calls/{call_sid}/Recordings.json"
     auth = (account_sid, auth_token)
 
-    scheme = "https" if "localhost" not in host and "127.0.0.1" not in host else "http"
-    callback_url = f"{scheme}://{host}/bm/trainer/phone/recording-completed"
+    # Resolve callback URL using stable public URLs if configured
+    backend_url = (
+        getattr(settings, "backend_public_url", None)
+        or os.getenv("BACKEND_PUBLIC_URL")
+        or os.getenv("PUBLIC_BASE_URL")
+    )
+    if backend_url:
+        backend_url = backend_url.rstrip("/")
+        callback_url = f"{backend_url}/bm/trainer/phone/recording-completed"
+    else:
+        scheme = "https" if "localhost" not in host and "127.0.0.1" not in host else "http"
+        callback_url = f"{scheme}://{host}/bm/trainer/phone/recording-completed"
+
+    logger.info("start_twilio_recording: final Twilio URL = %s, RecordingStatusCallback = %s", url, callback_url)
 
     payload = {
         "RecordingStatusCallback": callback_url,
@@ -617,6 +632,13 @@ async def start_twilio_recording(call_sid: str, host: str) -> Optional[str]:
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(url, auth=auth, data=payload)
+            logger.info("start_twilio_recording: Twilio response status_code = %d", response.status_code)
+            
+            # Print summarized body
+            body_text = response.text
+            summary_body = body_text[:300] + "..." if len(body_text) > 300 else body_text
+            logger.info("start_twilio_recording: Twilio response body = %s", summary_body)
+
             response.raise_for_status()
             res_data = response.json()
             rec_sid = res_data.get("sid")
@@ -1027,6 +1049,16 @@ async def media_stream(
                                 if session_id is not None:
                                     host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"
                                     recording_sid = await start_twilio_recording(call_sid, host)
+                                    if not recording_sid:
+                                        # Twilio failed to start recording: mark session as recording_start_failed
+                                        async with AsyncSessionLocal() as db_fail:
+                                            stmt_fail = select(TrainerSession).where(TrainerSession.session_id == session_id)
+                                            res_fail = await db_fail.execute(stmt_fail)
+                                            sess_fail = res_fail.scalar()
+                                            if sess_fail:
+                                                sess_fail.evaluation_status = "recording_start_failed"
+                                                await db_fail.commit()
+                                                logger.warning("Trainer session %d marked as recording_start_failed because Twilio start_twilio_recording returned None.", session_id)
                                     call_start_time = datetime.now(timezone.utc)
                                     monitor_task = asyncio.create_task(
                                         duration_monitor_task(call_sid, stream_sid, gemini_ws, websocket, session_id)

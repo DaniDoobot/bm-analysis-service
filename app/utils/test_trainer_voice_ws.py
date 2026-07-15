@@ -936,6 +936,45 @@ class TestTrainerVoiceV2(unittest.IsolatedAsyncioTestCase):
 
         app.dependency_overrides.clear()
 
+    @patch("httpx.AsyncClient.post")
+    async def test_start_twilio_recording_uses_public_url(self, mock_post):
+        """Test that start_twilio_recording uses BACKEND_PUBLIC_URL or PUBLIC_BASE_URL to build callback URL."""
+        from app.routers.trainer_voice import start_twilio_recording
+        from app.config import get_settings
+        
+        # Set environment variable
+        os.environ["BACKEND_PUBLIC_URL"] = "https://speech-backend.doobot.ai"
+        
+        # Mock settings values directly
+        settings = get_settings()
+        old_sid = settings.twilio_account_sid
+        old_token = settings.twilio_auth_token
+        settings.twilio_account_sid = "ACmock"
+        settings.twilio_auth_token = "token_mock"
+
+        # Mock Twilio response
+        mock_response = MagicMock()
+        mock_response.status_code = 201
+        mock_response.json.return_value = {"sid": "REmock123"}
+        mock_post.return_value = mock_response
+
+        try:
+            # Execute
+            rec_sid = await start_twilio_recording("CA123", "localhost:8000")
+            self.assertEqual(rec_sid, "REmock123")
+
+            # Verify post payload
+            called_args, called_kwargs = mock_post.call_args
+            self.assertEqual(called_args[0], "https://api.twilio.com/2010-04-01/Accounts/ACmock/Calls/CA123/Recordings.json")
+            payload = called_kwargs["data"]
+            self.assertEqual(payload["RecordingStatusCallback"], "https://speech-backend.doobot.ai/bm/trainer/phone/recording-completed")
+        finally:
+            # Clean up
+            del os.environ["BACKEND_PUBLIC_URL"]
+            settings.twilio_account_sid = old_sid
+            settings.twilio_auth_token = old_token
+
+
 
 
 class TestTrainerVoiceBargeInRecovery(unittest.IsolatedAsyncioTestCase):
