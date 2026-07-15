@@ -36,6 +36,7 @@ from app.routers import (
     training_hub_voice,
     companies,
     teams,
+    admin_users,
 )
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -112,6 +113,7 @@ app.include_router(trainer_voice.router)
 app.include_router(training_hub_voice.router)
 app.include_router(companies.router)
 app.include_router(teams.router)
+app.include_router(admin_users.router)
 
 
 

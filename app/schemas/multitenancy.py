@@ -70,5 +70,6 @@ class TenantContextResponse(BaseModel):
     can_manage_company: bool
     can_manage_services: bool
     can_manage_teams: bool
+    can_manage_users: bool
 
     model_config = ConfigDict(from_attributes=True)

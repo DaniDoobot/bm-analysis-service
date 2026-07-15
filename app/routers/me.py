@@ -717,6 +717,7 @@ async def get_my_tenant_context(
     can_manage_company = is_super or role == InternalRole.COMPANY_ADMIN
     can_manage_services = is_super or role in (InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER)
     can_manage_teams = is_super or role in (InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR)
+    can_manage_users = is_super or role == InternalRole.COMPANY_ADMIN
 
     return TenantContextResponse(
         user_id=context.user_id,
@@ -734,5 +735,6 @@ async def get_my_tenant_context(
         can_manage_company=can_manage_company,
         can_manage_services=can_manage_services,
         can_manage_teams=can_manage_teams,
+        can_manage_users=can_manage_users,
     )
 

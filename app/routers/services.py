@@ -1,28 +1,64 @@
 """FastAPI router for Services."""
-from fastapi import APIRouter, Depends, HTTPException, status
+import re
+from typing import Annotated, Optional
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import get_db
+from app.dependencies import get_db, get_tenant_context
 from app.models.services import Service
 from app.models.typologies import Typology
 from app.models.prompts import Prompt, PromptBaseStructure
 from app.schemas.services import ServiceCreate, ServiceOut, ServiceUpdate
+from app.core.tenant_context import TenantContext
+from app.core.roles import InternalRole
 
 router = APIRouter(prefix="/bm/services", tags=["Services"])
 
 
 @router.get("", response_model=list[ServiceOut])
-async def list_services(db: AsyncSession = Depends(get_db)):
-    """Retrieve all services, sorted by service_id."""
-    stmt = select(Service).order_by(Service.service_id.asc())
+async def list_services(
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+    company_id: Optional[int] = Query(None),
+    is_active: Optional[bool] = Query(None),
+    include_inactive: bool = Query(True),
+    db: AsyncSession = Depends(get_db)
+):
+    """Retrieve all services accessible by the authenticated user's context, with optional filters."""
+    stmt = select(Service)
+
+    if not context.is_super_admin:
+        # Constrain to user's assigned company
+        stmt = stmt.where(Service.company_id == context.company_id)
+        if company_id is not None and company_id != context.company_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado a servicios de otra empresa."
+            )
+        # Limit to allowed services
+        if context.allowed_service_ids is not None:
+            stmt = stmt.where(Service.service_id.in_(context.allowed_service_ids))
+    else:
+        if company_id is not None:
+            stmt = stmt.where(Service.company_id == company_id)
+
+    if is_active is not None:
+        stmt = stmt.where(Service.is_active == is_active)
+    elif not include_inactive:
+        stmt = stmt.where(Service.is_active == True)
+
+    stmt = stmt.order_by(Service.service_id.asc())
     result = await db.execute(stmt)
     return result.scalars().all()
 
 
 @router.get("/{service_id}", response_model=ServiceOut)
-async def get_service(service_id: int, db: AsyncSession = Depends(get_db)):
-    """Retrieve details of a specific service."""
+async def get_service(
+    service_id: int,
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+    db: AsyncSession = Depends(get_db)
+):
+    """Retrieve details of a specific service with tenant checks."""
     stmt = select(Service).where(Service.service_id == service_id)
     result = await db.execute(stmt)
     service = result.scalars().first()
@@ -31,12 +67,67 @@ async def get_service(service_id: int, db: AsyncSession = Depends(get_db)):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Servicio con ID {service_id} no encontrado."
         )
+
+    # Permission check
+    if not context.is_super_admin:
+        if service.company_id != context.company_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado a servicios de otra empresa."
+            )
+        if context.allowed_service_ids is not None and service.service_id not in context.allowed_service_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes permisos para acceder a este servicio."
+            )
+
     return service
 
 
 @router.post("", response_model=ServiceOut, status_code=status.HTTP_201_CREATED)
-async def create_service(payload: ServiceCreate, db: AsyncSession = Depends(get_db)):
-    """Create a new service. Enforces unique service_key."""
+async def create_service(
+    payload: ServiceCreate,
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+    db: AsyncSession = Depends(get_db)
+):
+    """Create a new service. Enforces unique service_key and tenant constraints."""
+    if not payload.company_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="company_id es obligatorio para crear un servicio."
+        )
+    if not payload.service_key or not payload.service_key.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="service_key es obligatorio."
+        )
+    if not payload.service_name or not payload.service_name.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="service_name es obligatorio."
+        )
+
+    # Validate service_key slug format
+    if not re.match(r"^[a-zA-Z0-9_-]+$", payload.service_key):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="service_key debe ser un slug válido (letras, números, guiones y guiones bajos)."
+        )
+
+    # Validate creator permissions
+    if not context.is_super_admin:
+        if context.normalized_role != InternalRole.COMPANY_ADMIN:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Solo administradores de empresa pueden crear servicios."
+            )
+        if payload.company_id != context.company_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No puedes crear servicios en otra empresa."
+            )
+
+    # Enforce unique service_key constraint
     stmt = select(Service).where(Service.service_key == payload.service_key)
     res = await db.execute(stmt)
     if res.scalars().first():
@@ -46,6 +137,7 @@ async def create_service(payload: ServiceCreate, db: AsyncSession = Depends(get_
         )
 
     service = Service(
+        company_id=payload.company_id,
         service_key=payload.service_key,
         service_name=payload.service_name,
         description=payload.description,
@@ -57,11 +149,12 @@ async def create_service(payload: ServiceCreate, db: AsyncSession = Depends(get_
     return service
 
 
-@router.put("/{service_id}", response_model=ServiceOut)
-async def update_service(
-    service_id: int, payload: ServiceUpdate, db: AsyncSession = Depends(get_db)
+async def _do_update_service(
+    service_id: int,
+    payload: ServiceUpdate,
+    context: TenantContext,
+    db: AsyncSession
 ):
-    """Update details of an existing service."""
     stmt = select(Service).where(Service.service_id == service_id)
     result = await db.execute(stmt)
     service = result.scalars().first()
@@ -71,7 +164,44 @@ async def update_service(
             detail=f"Servicio con ID {service_id} no encontrado."
         )
 
+    # Permission check: super_admin, or company_admin of service company
+    if not context.is_super_admin:
+        if context.normalized_role != InternalRole.COMPANY_ADMIN or service.company_id != context.company_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes permisos para modificar este servicio."
+            )
+
+    if payload.company_id is not None:
+        if not context.is_super_admin and payload.company_id != context.company_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No puedes cambiar la empresa del servicio."
+            )
+        service.company_id = payload.company_id
+
+    if payload.service_key is not None:
+        if not payload.service_key.strip():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="service_key no puede estar vacío.")
+        if not re.match(r"^[a-zA-Z0-9_-]+$", payload.service_key):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="service_key debe ser un slug válido."
+            )
+        if payload.service_key != service.service_key:
+            # Enforce unique service_key
+            stmt_key = select(Service).where(Service.service_key == payload.service_key)
+            res_key = await db.execute(stmt_key)
+            if res_key.scalars().first():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Ya existe un servicio con la clave '{payload.service_key}'."
+                )
+            service.service_key = payload.service_key
+
     if payload.service_name is not None:
+        if not payload.service_name.strip():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="service_name no puede estar vacío.")
         service.service_name = payload.service_name
     if payload.description is not None:
         service.description = payload.description
@@ -81,6 +211,28 @@ async def update_service(
     await db.commit()
     await db.refresh(service)
     return service
+
+
+@router.put("/{service_id}", response_model=ServiceOut)
+async def update_service(
+    service_id: int,
+    payload: ServiceUpdate,
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+    db: AsyncSession = Depends(get_db)
+):
+    """Update details of an existing service (PUT)."""
+    return await _do_update_service(service_id, payload, context, db)
+
+
+@router.patch("/{service_id}", response_model=ServiceOut)
+async def patch_service(
+    service_id: int,
+    payload: ServiceUpdate,
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+    db: AsyncSession = Depends(get_db)
+):
+    """Update details of an existing service (PATCH)."""
+    return await _do_update_service(service_id, payload, context, db)
 
 
 @router.delete("/{service_id}", status_code=status.HTTP_200_OK)

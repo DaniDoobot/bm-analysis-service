@@ -8,6 +8,7 @@ class ServiceBase(BaseModel):
     service_name: str
     description: str | None = None
     is_active: bool = True
+    company_id: int | None = None
 
 
 class ServiceCreate(ServiceBase):
@@ -18,6 +19,8 @@ class ServiceUpdate(BaseModel):
     service_name: str | None = None
     description: str | None = None
     is_active: bool | None = None
+    service_key: str | None = None
+    company_id: int | None = None
 
 
 class ServiceOut(ServiceBase):
