@@ -1309,5 +1309,279 @@ class TestTrainerVoiceBargeInRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(nudge_sent)
 
 
+class TestTrainerVoiceGracefulHangup(unittest.IsolatedAsyncioTestCase):
+    """Tests verifying the graceful hangup mechanism when Gemini calls hangup_call tool."""
+
+    async def asyncSetUp(self):
+        engine = get_engine()
+        async with engine.begin() as conn:
+            await conn.execute(text("PRAGMA journal_mode=WAL;"))
+            await conn.run_sync(Base.metadata.drop_all)
+            await conn.run_sync(Base.metadata.create_all)
+            
+        # Create minimal DB setup
+        from app.models.services import Service
+        from app.models.trainer import TrainerSimulation, TrainerSession
+        from app.db import AsyncSessionLocal
+        
+        async with AsyncSessionLocal() as db:
+            svc = Service(service_id=1, service_key="test_svc_1", service_name="TestService1")
+            db.add(svc)
+            await db.flush()
+
+            sim = TrainerSimulation(
+                simulation_id=1,
+                code="SIM1",
+                name="Test Sim 1",
+                roleplay_prompt="Carmen es cliente.",
+                service_id=1
+            )
+            db.add(sim)
+            await db.flush()
+
+            sess = TrainerSession(
+                session_id=1,
+                agent_id="AGENT_1",
+                agent_code="CODE1",
+                simulation_id=1,
+                service_id=1,
+                call_id="call_1",
+                status="started",
+                evaluation_status="started",
+                recording_url=None
+            )
+            db.add(sess)
+            await db.commit()
+
+    async def asyncTearDown(self):
+        engine = get_engine()
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
+        await engine.dispose()
+
+    @patch("app.routers.trainer_voice.hangup_twilio_call")
+    @patch("app.routers.trainer_voice.handle_roleplay_hangup")
+    @patch("websockets.connect")
+    async def test_graceful_hangup_via_tool_call_completed(self, mock_ws_connect, mock_handle_hangup, mock_hangup_twilio):
+        """Test that hangup_call toolCall initiates graceful hangup and hangs up after turnComplete."""
+        from app.routers.trainer_voice import media_stream
+        from app.db import AsyncSessionLocal
+        
+        # Mock websockets client (Gemini side)
+        mock_gemini_ws = AsyncMock()
+        mock_gemini_ws.send = AsyncMock()
+        
+        # We simulate the events returned by Gemini
+        async def mock_gemini_iter(*args, **kwargs):
+            # 1. Send setupComplete
+            yield json.dumps({"setupComplete": {}})
+            await asyncio.sleep(0.1)
+            # 2. Send toolCall for hangup_call
+            yield json.dumps({
+                "toolCall": {
+                    "functionCalls": [{
+                        "id": "tool_call_grace",
+                        "name": "hangup_call",
+                        "args": {"reason": "exito_conversacional"}
+                    }]
+                }
+            })
+            await asyncio.sleep(0.1)
+            # 3. Send turnComplete indicating Gemini finished saying the farewell message
+            yield json.dumps({
+                "serverContent": {
+                    "turnComplete": True
+                }
+            })
+            # Let it wait briefly and stop the loop
+            await asyncio.sleep(0.1)
+            raise ValueError("stop_test")
+            
+        mock_gemini_ws.__aiter__ = mock_gemini_iter
+        
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__.return_value = mock_gemini_ws
+        mock_ws_connect.return_value = mock_connect
+
+        # Mock Twilio WebSocket client (FastAPI side)
+        mock_ws = AsyncMock()
+        mock_ws.accept = AsyncMock()
+        mock_ws.close = AsyncMock()
+        mock_ws.headers = {"host": "test-host.com"}
+        mock_ws.client_state = MagicMock()
+        mock_ws.client_state.name = "CONNECTED"
+        mock_ws.scope = {"query_string": b""}
+        
+        # We simulate the events received from Twilio
+        async def mock_iter_text():
+            yield json.dumps({"event": "connected"})
+            yield json.dumps({
+                "event": "start",
+                "start": {
+                    "streamSid": "stream_1",
+                    "callSid": "call_1",
+                    "customParameters": {
+                        "session_id": "1",
+                        "flow": "session"
+                    }
+                }
+            })
+            # Let it run
+            await asyncio.sleep(0.5)
+            raise ValueError("stop_test")
+        
+        mock_ws.iter_text = mock_iter_text
+        mock_ws.receive_text = AsyncMock(side_effect=[
+            json.dumps({"event": "connected"}),
+            json.dumps({
+                "event": "start",
+                "start": {
+                    "streamSid": "stream_1",
+                    "callSid": "call_1",
+                    "customParameters": {
+                        "session_id": "1",
+                        "flow": "session"
+                    }
+                }
+            })
+        ])
+        
+        with patch("app.routers.trainer_voice.start_twilio_recording", AsyncMock(return_value="rec_1")):
+            async with AsyncSessionLocal() as db:
+                try:
+                    await media_stream(mock_ws, flow=None, session_id=None, db=db)
+                except Exception as e:
+                    if "stop_test" not in str(e):
+                        raise
+                        
+        # 1. Verify toolResponse was sent with graceful_hangup_pending
+        tool_responses = []
+        for call in mock_gemini_ws.send.call_args_list:
+            payload = json.loads(call[0][0])
+            if "toolResponse" in payload:
+                tool_responses.extend(payload["toolResponse"]["functionResponses"])
+                
+        self.assertEqual(len(tool_responses), 1)
+        self.assertEqual(tool_responses[0]["id"], "tool_call_grace")
+        self.assertEqual(tool_responses[0]["name"], "hangup_call")
+        self.assertEqual(tool_responses[0]["response"]["result"], "graceful_hangup_pending")
+
+        # 2. Verify farewell message was sent to Gemini
+        farewell_sent = False
+        for call in mock_gemini_ws.send.call_args_list:
+            payload = json.loads(call[0][0])
+            if "clientContent" in payload:
+                turns = payload["clientContent"].get("turns", [])
+                for turn in turns:
+                    for part in turn.get("parts", []):
+                        if "La simulación ha terminado. Que tengas un buen día" in part.get("text", ""):
+                            farewell_sent = True
+                            
+        self.assertTrue(farewell_sent)
+
+        # 3. Verify real Twilio hangup was executed
+        mock_hangup_twilio.assert_called_once_with("call_1")
+        mock_handle_hangup.assert_any_call(1, "call_1", unittest.mock.ANY, "exito_conversacional")
+
+    @patch("app.routers.trainer_voice.hangup_twilio_call")
+    @patch("app.routers.trainer_voice.handle_roleplay_hangup")
+    @patch("websockets.connect")
+    async def test_graceful_hangup_timeout_fallback(self, mock_ws_connect, mock_handle_hangup, mock_hangup_twilio):
+        """Test that if turnComplete doesn't arrive, the 4-second timeout task triggers the real hangup."""
+        from app.routers.trainer_voice import media_stream
+        from app.db import AsyncSessionLocal
+        
+        # Mock websockets client (Gemini side)
+        mock_gemini_ws = AsyncMock()
+        mock_gemini_ws.send = AsyncMock()
+        
+        # We simulate Gemini sending setupComplete and then toolCall, but NO turnComplete
+        async def mock_gemini_iter(*args, **kwargs):
+            yield json.dumps({"setupComplete": {}})
+            await asyncio.sleep(0.1)
+            yield json.dumps({
+                "toolCall": {
+                    "functionCalls": [{
+                        "id": "tool_call_grace",
+                        "name": "hangup_call",
+                        "args": {"reason": "exito_conversacional"}
+                    }]
+                }
+            })
+            # Wait for timeout to fire (we'll mock asyncio.sleep so it's instant)
+            await asyncio.sleep(0.2)
+            raise ValueError("stop_test")
+            
+        mock_gemini_ws.__aiter__ = mock_gemini_iter
+        
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__.return_value = mock_gemini_ws
+        mock_ws_connect.return_value = mock_connect
+
+        # Mock Twilio WebSocket client (FastAPI side)
+        mock_ws = AsyncMock()
+        mock_ws.accept = AsyncMock()
+        mock_ws.close = AsyncMock()
+        mock_ws.headers = {"host": "test-host.com"}
+        mock_ws.client_state = MagicMock()
+        mock_ws.client_state.name = "CONNECTED"
+        mock_ws.scope = {"query_string": b""}
+        
+        # We simulate Twilio
+        async def mock_iter_text():
+            yield json.dumps({"event": "connected"})
+            yield json.dumps({
+                "event": "start",
+                "start": {
+                    "streamSid": "stream_1",
+                    "callSid": "call_1",
+                    "customParameters": {
+                        "session_id": "1",
+                        "flow": "session"
+                    }
+                }
+            })
+            await asyncio.sleep(0.5)
+            raise ValueError("stop_test")
+        
+        mock_ws.iter_text = mock_iter_text
+        mock_ws.receive_text = AsyncMock(side_effect=[
+            json.dumps({"event": "connected"}),
+            json.dumps({
+                "event": "start",
+                "start": {
+                    "streamSid": "stream_1",
+                    "callSid": "call_1",
+                    "customParameters": {
+                        "session_id": "1",
+                        "flow": "session"
+                    }
+                }
+            })
+        ])
+        
+        # Mock asyncio.sleep to complete instantly when sleeping for 4.0 seconds
+        orig_sleep = asyncio.sleep
+        async def mock_sleep(delay, result=None):
+            if delay == 4.0:
+                return await orig_sleep(0.01)
+            return await orig_sleep(delay)
+            
+        with patch("app.routers.trainer_voice.start_twilio_recording", AsyncMock(return_value="rec_1")), \
+             patch("asyncio.sleep", side_effect=mock_sleep):
+             
+            async with AsyncSessionLocal() as db:
+                try:
+                    await media_stream(mock_ws, flow=None, session_id=None, db=db)
+                except Exception as e:
+                    if "stop_test" not in str(e):
+                        raise
+                        
+        # Verify real Twilio hangup was executed by the timeout fallback
+        mock_hangup_twilio.assert_called_once_with("call_1")
+        mock_handle_hangup.assert_any_call(1, "call_1", unittest.mock.ANY, "exito_conversacional")
+
+
 if __name__ == "__main__":
     unittest.main()
+

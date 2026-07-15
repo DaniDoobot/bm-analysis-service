@@ -1002,6 +1002,8 @@ async def media_stream(
             redirected = False
             identified_agent_id = None
             identified_agent_code = None
+            pending_graceful_hangup = False
+            graceful_hangup_timer_task = None
             
             # VAD debug and block throttle variables
             media_events_total = 0
@@ -1050,6 +1052,31 @@ async def media_stream(
                 monitor_task = asyncio.create_task(
                     duration_monitor_task(call_sid, stream_sid, gemini_ws, websocket, session_id)
                 )
+
+            async def perform_actual_hangup():
+                nonlocal pending_graceful_hangup, call_active, graceful_hangup_timer_task
+                if not pending_graceful_hangup:
+                    return
+                pending_graceful_hangup = False
+                if graceful_hangup_timer_task and not graceful_hangup_timer_task.done():
+                    graceful_hangup_timer_task.cancel()
+                
+                # Perform the real hangup
+                logger.info("Trainer graceful hangup completed, hanging up Twilio call")
+                try:
+                    await hangup_twilio_call(call_sid)
+                except Exception as e_hang:
+                    logger.error("Error in hangup_twilio_call during graceful hangup: %s", e_hang)
+                try:
+                    await handle_roleplay_hangup(session_id, call_sid, call_start_time, "exito_conversacional")
+                except Exception as e_role:
+                    logger.error("Error in handle_roleplay_hangup during graceful hangup: %s", e_role)
+                call_active = False
+                try:
+                    if websocket.client_state.name != "DISCONNECTED":
+                        await websocket.close()
+                except Exception:
+                    pass
 
             # Concurrency loops
             async def twilio_to_gemini_loop():
@@ -1283,6 +1310,7 @@ async def media_stream(
                 nonlocal assistant_is_speaking, waiting_for_user_response, user_audio_seen_since_last_assistant_turn, initial_roleplay_prompt_sent
                 nonlocal last_assistant_turn_completed_at, discard_current_assistant_audio, last_blocked_log_time
                 nonlocal barge_in_active, barge_in_recovery_pending, assistant_audio_forwarding_enabled, last_user_speech_end_time, barge_in_time, nudge_triggered, call_active
+                nonlocal pending_graceful_hangup, graceful_hangup_timer_task
                 async for message in gemini_ws:
                     try:
                         data = json.loads(message)
@@ -1396,7 +1424,7 @@ async def media_stream(
                                         tool_resp = {
                                             "toolResponse": {
                                                 "functionResponses": [{
-                                                    "id": tool_call.get("id"),
+                                                    "id": fid,
                                                     "name": "hangup_call",
                                                     "response": {"result": "blocked_too_early", "instruction": "Continúa el roleplay. No cuelgues hasta que el agente haya tenido suficiente tiempo de interactuar."}
                                                 }]
@@ -1405,9 +1433,44 @@ async def media_stream(
                                         await gemini_ws.send(json.dumps(tool_resp))
                                         continue
                                     
-                                    await hangup_twilio_call(call_sid)
-                                    await handle_roleplay_hangup(session_id, call_sid, call_start_time, "exito_conversacional")
-                                    return
+                                    logger.info("Trainer graceful hangup requested")
+                                    
+                                    # Send toolResponse so Gemini continues execution
+                                    tool_resp = {
+                                        "toolResponse": {
+                                            "functionResponses": [{
+                                                "id": fid,
+                                                "name": "hangup_call",
+                                                "response": {"result": "graceful_hangup_pending"}
+                                            }]
+                                        }
+                                    }
+                                    await gemini_ws.send(json.dumps(tool_resp))
+
+                                    # Instruct Gemini to speak the closing phrase
+                                    hangup_msg = {
+                                        "clientContent": {
+                                            "turns": [{
+                                                "role": "user",
+                                                "parts": [{"text": "Di exactamente: 'La simulación ha terminado. Que tengas un buen día.'"}]
+                                            }],
+                                            "turnComplete": True
+                                        }
+                                    }
+                                    await gemini_ws.send(json.dumps(hangup_msg))
+                                    logger.info("Trainer graceful hangup closing message sent")
+                                    
+                                    pending_graceful_hangup = True
+                                    
+                                    # Schedule safety timeout fallback (4 seconds)
+                                    async def safety_timeout():
+                                        await asyncio.sleep(4.0)
+                                        if pending_graceful_hangup:
+                                            logger.info("Trainer graceful hangup timeout fallback, hanging up Twilio call")
+                                            await perform_actual_hangup()
+                                            
+                                    graceful_hangup_timer_task = asyncio.create_task(safety_timeout())
+                                    continue
 
                         elif "serverContent" in data:
                             # Check for server-side interruption event
@@ -1461,6 +1524,11 @@ async def media_stream(
                                 user_audio_seen_since_last_assistant_turn = False
                                 last_assistant_turn_completed_at = datetime.now(timezone.utc)
                                 discard_current_assistant_audio = False
+                                
+                                if pending_graceful_hangup:
+                                    logger.info("Trainer turn gate: assistant finished speaking final message, triggering graceful hangup")
+                                    await perform_actual_hangup()
+                                    return
                                 
                     except Exception as e_inner:
                         err_str = str(e_inner).lower()
