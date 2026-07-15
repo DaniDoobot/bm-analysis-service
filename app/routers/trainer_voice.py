@@ -734,7 +734,8 @@ async def handle_roleplay_hangup(
             # If call was extremely short (< 15 seconds) and ended without success, mark as failed
             if duration_seconds < 15 and reason != "exito_conversacional":
                 session.status = "failed"
-                session.evaluation_status = "failed"
+                if session.evaluation_status != "recording_start_failed":
+                    session.evaluation_status = "failed"
                 session.error_message = f"Call hung up too early. Duration: {int(duration_seconds)}s. Reason: {reason}."
                 session.ended_at = datetime.now(timezone.utc)
                 logger.warning(
@@ -746,11 +747,17 @@ async def handle_roleplay_hangup(
                 session.duration_seconds = int(duration_seconds)
                 session.ended_at = datetime.now(timezone.utc)
                 session.status = "completed"
-                session.evaluation_status = "completed_waiting_recording"
-                logger.info(
-                    "Trainer session %d completed. Duration: %ds. Waiting for recording webhook before evaluation.",
-                    session_id, duration_seconds
-                )
+                if session.evaluation_status != "recording_start_failed":
+                    session.evaluation_status = "completed_waiting_recording"
+                    logger.info(
+                        "Trainer session %d completed. Duration: %ds. Waiting for recording webhook before evaluation.",
+                        session_id, duration_seconds
+                    )
+                else:
+                    logger.info(
+                        "Trainer session %d completed. Duration: %ds. Retaining recording_start_failed status.",
+                        session_id, duration_seconds
+                    )
             await db.commit()
             
             # Trigger evaluation check if session is completed
@@ -1022,10 +1029,31 @@ async def media_stream(
             twilio_rate_state = None
             gemini_rate_state = None
             monitor_task = None
+            recording_started = False
+
+            # Early recording trigger (if parsed from early start event)
+            if session_id is not None and call_sid is not None and not recording_started:
+                recording_started = True
+                host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"
+                logger.info("About to start Twilio recording from start_event_custom_parameters (early): session_id=%d, call_sid=%s", session_id, call_sid)
+                recording_sid = await start_twilio_recording(call_sid, host)
+                if not recording_sid:
+                    async with AsyncSessionLocal() as db_fail:
+                        stmt_fail = select(TrainerSession).where(TrainerSession.session_id == session_id)
+                        res_fail = await db_fail.execute(stmt_fail)
+                        sess_fail = res_fail.scalar()
+                        if sess_fail:
+                            sess_fail.evaluation_status = "recording_start_failed"
+                            await db_fail.commit()
+                            logger.warning("Trainer session %d marked as recording_start_failed because Twilio start_twilio_recording returned None (early).", session_id)
+                call_start_time = datetime.now(timezone.utc)
+                monitor_task = asyncio.create_task(
+                    duration_monitor_task(call_sid, stream_sid, gemini_ws, websocket, session_id)
+                )
 
             # Concurrency loops
             async def twilio_to_gemini_loop():
-                nonlocal stream_sid, call_sid, call_start_time, recording_sid, monitor_task, twilio_rate_state
+                nonlocal stream_sid, call_sid, call_start_time, recording_sid, recording_started, monitor_task, twilio_rate_state
                 nonlocal waiting_for_user_response, user_audio_seen_since_last_assistant_turn
                 nonlocal last_assistant_turn_completed_at, speech_state, accumulated_voice_ms, consecutive_silent_ms
                 nonlocal assistant_is_speaking, discard_current_assistant_audio
@@ -1046,8 +1074,10 @@ async def media_stream(
                                 logger.info("Twilio stream start. stream_sid=%s, call_sid=%s", stream_sid, call_sid)
                                 
                                 # Start recording and duration monitor if we already have session_id
-                                if session_id is not None:
+                                if session_id is not None and not recording_started:
+                                    recording_started = True
                                     host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"
+                                    logger.info("About to start Twilio recording from start_event_custom_parameters (loop): session_id=%d, call_sid=%s", session_id, call_sid)
                                     recording_sid = await start_twilio_recording(call_sid, host)
                                     if not recording_sid:
                                         # Twilio failed to start recording: mark session as recording_start_failed
@@ -1058,7 +1088,7 @@ async def media_stream(
                                             if sess_fail:
                                                 sess_fail.evaluation_status = "recording_start_failed"
                                                 await db_fail.commit()
-                                                logger.warning("Trainer session %d marked as recording_start_failed because Twilio start_twilio_recording returned None.", session_id)
+                                                logger.warning("Trainer session %d marked as recording_start_failed because Twilio start_twilio_recording returned None (loop).", session_id)
                                     call_start_time = datetime.now(timezone.utc)
                                     monitor_task = asyncio.create_task(
                                         duration_monitor_task(call_sid, stream_sid, gemini_ws, websocket, session_id)

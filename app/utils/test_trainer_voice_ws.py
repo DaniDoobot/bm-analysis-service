@@ -975,6 +975,158 @@ class TestTrainerVoiceV2(unittest.IsolatedAsyncioTestCase):
             settings.twilio_auth_token = old_token
 
 
+    @patch("app.routers.trainer_voice.start_twilio_recording")
+    @patch("websockets.connect")
+    async def test_start_twilio_recording_via_start_event_custom_parameters_failed(self, mock_ws_connect, mock_start_rec):
+        """Test that start_twilio_recording is called via start event customParameters and sets status properly when it fails."""
+        from app.routers.trainer_voice import media_stream
+        from app.models.services import Service
+        from app.models.trainer import TrainerSimulation, TrainerSession
+        from app.db import AsyncSessionLocal
+
+        # Create session dependencies and session using unique IDs (99) to avoid collisions
+        async with AsyncSessionLocal() as db:
+            from app.models.services import Service
+            from app.models.trainer import TrainerSimulation
+
+            from sqlalchemy import select
+            res_svc = await db.execute(select(Service).where(Service.service_id == 99))
+            svc = res_svc.scalar()
+            if not svc:
+                svc = Service(service_id=99, service_key="test_svc_99", service_name="TestService99")
+                db.add(svc)
+                await db.flush()
+
+            res_sim = await db.execute(select(TrainerSimulation).where(TrainerSimulation.simulation_id == 99))
+            sim = res_sim.scalar()
+            if not sim:
+                sim = TrainerSimulation(
+                    simulation_id=99,
+                    code="SIM99",
+                    name="Test Sim 99",
+                    roleplay_prompt="Carmen es cliente.",
+                    service_id=99
+                )
+                db.add(sim)
+                await db.flush()
+
+            sess = TrainerSession(
+                session_id=899,
+                agent_id="HUB_TEST_899",
+                agent_code="CODE899",
+                simulation_id=99,
+                service_id=99,
+                call_id="call_899",
+                status="started",
+                evaluation_status="started",
+                recording_url=None
+            )
+            db.add(sess)
+            await db.commit()
+
+        # Mock websockets client (Gemini side)
+        mock_gemini_ws = AsyncMock()
+        mock_gemini_ws.send = AsyncMock()
+        
+        async def mock_gemini_iter(*args, **kwargs):
+            # Raise exception to break out of gemini loop
+            raise ValueError("stop_test")
+            yield None
+        mock_gemini_ws.__aiter__ = mock_gemini_iter
+        
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__.return_value = mock_gemini_ws
+        mock_ws_connect.return_value = mock_connect
+
+        # Mock Twilio WebSocket client (FastAPI side)
+        mock_ws = AsyncMock()
+        mock_ws.accept = AsyncMock()
+        mock_ws.close = AsyncMock()
+        mock_ws.headers = {"host": "test-host.com"}
+        mock_ws.client_state = MagicMock()
+        mock_ws.client_state.name = "CONNECTED"
+        mock_ws.scope = {"query_string": b""}
+        
+        # We simulate the events received from Twilio
+        async def mock_iter_text():
+            yield json.dumps({"event": "connected"})
+            yield json.dumps({
+                "event": "start",
+                "start": {
+                    "streamSid": "stream_899",
+                    "callSid": "call_899",
+                    "customParameters": {
+                        "session_id": "899",
+                        "flow": "session"
+                    }
+                }
+            })
+            # Let it run briefly and then raise exception to stop the test
+            await asyncio.sleep(0.1)
+            raise ValueError("stop_test")
+        
+        mock_ws.iter_text = mock_iter_text
+        # Stub receive_text (used during early start event check if flow/session_id not in query)
+        early_events = [
+            json.dumps({"event": "connected"}),
+            json.dumps({
+                "event": "start",
+                "start": {
+                    "streamSid": "stream_899",
+                    "callSid": "call_899",
+                    "customParameters": {
+                        "session_id": "899",
+                        "flow": "session"
+                    }
+                }
+            })
+        ]
+        early_iter = iter(early_events)
+        async def mock_receive_text():
+            try:
+                return next(early_iter)
+            except StopIteration:
+                raise ValueError("stop_test")
+        mock_ws.receive_text = mock_receive_text
+
+        # Mock start_twilio_recording to return None (failure)
+        mock_start_rec.return_value = None
+
+        # Execute media_stream directly
+        async with AsyncSessionLocal() as db:
+            try:
+                await media_stream(mock_ws, flow=None, session_id=None, db=db)
+            except Exception as e:
+                # We expect "stop_test" to exit the loop
+                if "stop_test" not in str(e):
+                    raise
+
+        # Check start_twilio_recording called exactly once with call_sid
+        mock_start_rec.assert_called_once_with("call_899", unittest.mock.ANY)
+
+        # Check database evaluation_status has been updated to recording_start_failed
+        async with AsyncSessionLocal() as db:
+            s_updated = await db.get(TrainerSession, 899)
+            self.assertEqual(s_updated.evaluation_status, "recording_start_failed")
+
+        # Reset session status to started to allow manual hangup check
+        async with AsyncSessionLocal() as db:
+            s_reset = await db.get(TrainerSession, 899)
+            s_reset.status = "started"
+            await db.commit()
+
+        # Now simulate hangup to verify handle_roleplay_hangup doesn't overwrite it
+        from app.routers.trainer_voice import handle_roleplay_hangup
+        from datetime import datetime, timezone, timedelta
+        await handle_roleplay_hangup(899, "call_899", datetime.now(timezone.utc) - timedelta(seconds=20), "websocket_close")
+
+        async with AsyncSessionLocal() as db:
+            s_after_hangup = await db.get(TrainerSession, 899)
+            self.assertEqual(s_after_hangup.evaluation_status, "recording_start_failed")
+            self.assertEqual(s_after_hangup.status, "completed")
+
+
+
 
 
 class TestTrainerVoiceBargeInRecovery(unittest.IsolatedAsyncioTestCase):
