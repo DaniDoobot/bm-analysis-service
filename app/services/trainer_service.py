@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.services import Service
 from app.models.prompts import Prompt, PromptVersion
+from app.models.criteria import PromptCriterion
 from app.models.trainer import (
     TrainerEvaluationConfig,
     TrainerSimulation,
@@ -774,7 +775,51 @@ class TrainerService:
                 except Exception:
                     logger.warning("Failed to parse evaluation score %s as decimal.", score_raw)
 
+            # Fallback: if no top-level score, compute average of score_1_10 criteria present in result_json
+            if score_decimal is None:
+                stmt_crits = select(PromptCriterion).where(
+                    PromptCriterion.prompt_id == cfg.speech_structure_id,
+                    PromptCriterion.is_active == True,
+                    PromptCriterion.deleted_at.is_(None),
+                    PromptCriterion.criterion_type == "score_1_10",
+                )
+                res_crits = await db.execute(stmt_crits)
+                score_crits = list(res_crits.scalars().all())
+                numeric_scores = []
+                for crit in score_crits:
+                    raw = parsed_res.get(crit.output_key)
+                    if raw is not None:
+                        try:
+                            numeric_scores.append(float(str(raw).replace("%", "").strip()))
+                        except (ValueError, TypeError):
+                            pass
+                if numeric_scores:
+                    avg = sum(numeric_scores) / len(numeric_scores)
+                    score_decimal = Decimal(str(round(avg, 2)))
+                    logger.info(
+                        "Session %d: no top-level score in AI response. "
+                        "Computed criteria average: %s (from %d criteria).",
+                        session_id, score_decimal, len(numeric_scores)
+                    )
+                else:
+                    logger.warning(
+                        "Session %d: no top-level score and no score_1_10 criteria found in result_json. "
+                        "Marking as completed_without_score.",
+                        session_id
+                    )
+
             summary = parsed_res.get("feedback") or parsed_res.get("summary")
+            # Fallback summary: try to collect criterion feedback fields if summary is absent
+            if not summary:
+                feedback_parts = [
+                    str(v).strip()
+                    for k, v in parsed_res.items()
+                    if (k.startswith("feedback_") or k.endswith("_feedback") or k.endswith("_fb"))
+                    and isinstance(v, str) and v.strip()
+                ]
+                if feedback_parts:
+                    summary = " ".join(feedback_parts[:3])
+
             strengths = parsed_res.get("puntos_fuertes") or parsed_res.get("strengths") or {}
             improvement = parsed_res.get("puntos_mejora") or parsed_res.get("improvement_points") or {}
 
@@ -790,8 +835,8 @@ class TrainerService:
                 improvement_points=improvement if isinstance(improvement, dict) else {"text": str(improvement)},
             )
             db.add(eval_record)
-            
-            # Update session status
+
+            # Update session evaluation_status
             if score_decimal is None:
                 sess.evaluation_status = "completed_without_score"
                 logger.warning("Session %d evaluated but completed without score.", session_id)
@@ -931,7 +976,6 @@ class TrainerService:
                     prompt_ids.add(cfg.speech_structure_id)
             criteria_map = {}
             if prompt_ids:
-                from app.models.criteria import PromptCriterion
                 stmt_crits = select(PromptCriterion).where(
                     PromptCriterion.prompt_id.in_(list(prompt_ids)),
                     PromptCriterion.is_active == True,
@@ -1144,7 +1188,6 @@ class TrainerService:
                 
         # 5. Fetch active criteria if not passed
         if active_criteria is None and session.__dict__["speech_structure_id"]:
-            from app.models.criteria import PromptCriterion
             stmt_crits = select(PromptCriterion).where(
                 PromptCriterion.prompt_id == session.__dict__["speech_structure_id"],
                 PromptCriterion.is_active == True,
