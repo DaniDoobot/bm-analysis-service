@@ -7,7 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import get_db, get_current_user
+from app.dependencies import get_db, get_current_user, get_tenant_context
+from app.core.tenant_context import TenantContext
+from app.schemas.multitenancy import TenantContextResponse
 from app.models.users import User, PasswordResetToken, UserAudit
 from app.schemas.users import (
     UserOut,
@@ -698,3 +700,39 @@ async def get_my_analysis_results(
         report_data = sanitize_report_for_agent(report_data)
         
     return report_data
+
+
+@router.get("/me/tenant-context", response_model=TenantContextResponse)
+async def get_my_tenant_context(
+    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+):
+    """Retrieve the current user's multi-tenant access context and permission flags."""
+    from app.core.roles import InternalRole
+
+    is_super = context.is_super_admin
+    role = context.normalized_role
+    
+    can_manage_companies = is_super
+    can_manage_company = is_super or role == InternalRole.COMPANY_ADMIN
+    can_manage_services = is_super or role in (InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER)
+    can_manage_teams = is_super or role in (InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR)
+
+    return TenantContextResponse(
+        user_id=context.user_id,
+        username=current_user.username,
+        email=current_user.email,
+        raw_role=context.raw_role,
+        normalized_role=role,
+        company_id=context.company_id,
+        company_name=context.company_name,
+        allowed_company_ids=context.allowed_company_ids,
+        allowed_service_ids=context.allowed_service_ids,
+        allowed_team_ids=context.allowed_team_ids,
+        is_super_admin=is_super,
+        can_manage_companies=can_manage_companies,
+        can_manage_company=can_manage_company,
+        can_manage_services=can_manage_services,
+        can_manage_teams=can_manage_teams,
+    )
+
