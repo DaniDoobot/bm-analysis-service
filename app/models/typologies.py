@@ -2,7 +2,7 @@
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Text, UniqueConstraint, func
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
 
@@ -11,6 +11,9 @@ class Typology(Base):
     __tablename__ = "bm_typologies"
 
     typology_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    company_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_companies.company_id", ondelete="CASCADE"), nullable=True
+    )
     service_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("bm_services.service_id", ondelete="CASCADE"), nullable=False
     )
@@ -25,6 +28,8 @@ class Typology(Base):
     updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+    company = relationship("Company")
 
     __table_args__ = (
         UniqueConstraint("service_id", "typology_key", name="uq_service_typology_key"),

@@ -23,7 +23,12 @@ class TrainingAgentSetting(Base):
     __tablename__ = "bm_training_agent_settings"
 
     setting_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    company_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_companies.company_id", ondelete="SET NULL"), nullable=True
+    )
     hubspot_owner_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False, index=True)
+
+    company = relationship("Company")
     agent_name: Mapped[str] = mapped_column(Text, nullable=False)
     agent_initials: Mapped[str] = mapped_column(Text, nullable=False)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
@@ -46,7 +51,16 @@ class TrainingRun(Base):
     __tablename__ = "bm_training_runs"
 
     training_run_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    company_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_companies.company_id", ondelete="SET NULL"), nullable=True
+    )
+    service_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_services.service_id", ondelete="SET NULL"), nullable=True
+    )
     period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    company = relationship("Company")
+    service = relationship("Service")
     period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[str] = mapped_column(Text, default="pending", server_default="'pending'", nullable=False)  # pending, running, completed, failed, partially_completed
     triggered_by: Mapped[str] = mapped_column(Text, default="manual", server_default="'manual'", nullable=False)  # scheduler, manual
@@ -79,14 +93,24 @@ class TrainingAgentReport(Base):
     training_run_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("bm_training_runs.training_run_id", ondelete="SET NULL"), nullable=True
     )
+    company_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_companies.company_id", ondelete="SET NULL"), nullable=True
+    )
+    service_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_services.service_id", ondelete="SET NULL"), nullable=True
+    )
     hubspot_owner_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+
+    company = relationship("Company")
+    service = relationship("Service")
     agent_initials: Mapped[str] = mapped_column(Text, nullable=False)
     
     period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     
     status: Mapped[str] = mapped_column(Text, default="pending", server_default="'pending'", nullable=False)  # pending, running, pending_approval, in_progress, completed, skipped, failed, superseded, archived, finalization_failed
+    cycle_mode: Mapped[str] = mapped_column(Text, default="automatic", server_default="'automatic'", nullable=False)
     skipped_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     
     evaluations_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
@@ -239,7 +263,12 @@ class TrainingEvaluationPrompt(Base):
     service_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("bm_services.service_id", ondelete="CASCADE"), nullable=False
     )
+    company_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_companies.company_id", ondelete="SET NULL"), nullable=True
+    )
     prompt_text: Mapped[str] = mapped_column(Text, nullable=False)
+
+    company = relationship("Company")
     version: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
     created_by: Mapped[str | None] = mapped_column(Text, nullable=True)

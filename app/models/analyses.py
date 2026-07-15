@@ -15,7 +15,7 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
 
@@ -24,6 +24,12 @@ class Analysis(Base):
     __tablename__ = "bm_analyses"
 
     analysis_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    company_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_companies.company_id", ondelete="SET NULL"), nullable=True
+    )
+    service_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_services.service_id", ondelete="SET NULL"), nullable=True
+    )
     analysis_type: Mapped[str | None] = mapped_column(Text, nullable=True)  # audio | text
     call_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     hubspot_url: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -40,6 +46,8 @@ class Analysis(Base):
     prompt_version_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("bm_prompt_versions.id", ondelete="SET NULL"), nullable=True
     )
+    company = relationship("Company")
+    service = relationship("Service")
     transcription: Mapped[str | None] = mapped_column(Text, nullable=True)
     transcription_provider: Mapped[str | None] = mapped_column(Text, nullable=True)
     transcription_model: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -76,6 +84,14 @@ class CallAnalysisCurrent(Base):
     latest_analysis_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("bm_analyses.analysis_id", ondelete="SET NULL"), nullable=True
     )
+    company_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_companies.company_id", ondelete="SET NULL"), nullable=True
+    )
+    service_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_services.service_id", ondelete="SET NULL"), nullable=True
+    )
+    company = relationship("Company")
+    service = relationship("Service")
     hubspot_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     call_direction: Mapped[str | None] = mapped_column(Text, nullable=True)
     call_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

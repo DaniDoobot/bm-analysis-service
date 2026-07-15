@@ -30,6 +30,11 @@ class Prompt(Base):
     base_structure_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     service_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("bm_services.service_id"), nullable=True)
     service = relationship("Service", lazy="joined")
+    company_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_companies.company_id", ondelete="SET NULL"), nullable=True
+    )
+    company = relationship("Company")
+    is_global: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
     owner_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("bm_users.user_id", ondelete="RESTRICT"), nullable=True)
 
     # Archiving and Soft Delete support
@@ -85,6 +90,11 @@ class PromptBaseStructure(Base):
     created_by_email: Mapped[str | None] = mapped_column(Text, nullable=True)
     service_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("bm_services.service_id"), nullable=True)
     service = relationship("Service", lazy="joined")
+    company_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_companies.company_id", ondelete="SET NULL"), nullable=True
+    )
+    company = relationship("Company")
+    is_global: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
     owner_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("bm_users.user_id", ondelete="RESTRICT"), nullable=True)
 
 

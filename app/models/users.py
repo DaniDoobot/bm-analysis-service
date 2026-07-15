@@ -4,7 +4,7 @@ from typing import Any
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
 
@@ -13,10 +13,13 @@ class User(Base):
     __tablename__ = "bm_users"
 
     user_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    company_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("bm_companies.company_id", ondelete="SET NULL"), nullable=True)
     username: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     email: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     name: Mapped[str | None] = mapped_column(Text, nullable=True)
     role: Mapped[str] = mapped_column(Text, default="agent", nullable=False)
+    
+    company = relationship("Company")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     hubspot_owner_id: Mapped[str | None] = mapped_column(Text, nullable=True, unique=True)
     agent_initials: Mapped[str | None] = mapped_column(Text, nullable=True)

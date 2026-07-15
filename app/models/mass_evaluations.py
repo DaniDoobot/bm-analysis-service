@@ -27,9 +27,18 @@ class MassEvaluationJob(Base):
     __tablename__ = "bm_mass_evaluation_jobs"
 
     job_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    company_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_companies.company_id", ondelete="SET NULL"), nullable=True
+    )
+    service_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_services.service_id", ondelete="SET NULL"), nullable=True
+    )
     job_name: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+
+    company = relationship("Company")
+    service = relationship("Service")
 
     # execution source: on_demand vs automation
     execution_source: Mapped[str] = mapped_column(Text, default="on_demand", server_default="'on_demand'")
@@ -94,7 +103,16 @@ class MassEvaluationRun(Base):
 
     run_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     job_id: Mapped[int] = mapped_column(Integer, ForeignKey("bm_mass_evaluation_jobs.job_id", ondelete="CASCADE"), nullable=False)
+    company_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_companies.company_id", ondelete="SET NULL"), nullable=True
+    )
+    service_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_services.service_id", ondelete="SET NULL"), nullable=True
+    )
     trigger_type: Mapped[str] = mapped_column(Text, nullable=False)  # manual, scheduled
+
+    company = relationship("Company")
+    service = relationship("Service")
 
     # execution source: on_demand vs automation
     execution_source: Mapped[str] = mapped_column(Text, default="on_demand", server_default="'on_demand'")
@@ -127,6 +145,11 @@ class MassEvaluationResult(Base):
     mass_analysis_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     run_id: Mapped[int] = mapped_column(Integer, ForeignKey("bm_mass_evaluation_runs.run_id", ondelete="CASCADE"), nullable=False)
     job_id: Mapped[int] = mapped_column(Integer, ForeignKey("bm_mass_evaluation_jobs.job_id", ondelete="CASCADE"), nullable=False)
+    company_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_companies.company_id", ondelete="SET NULL"), nullable=True
+    )
+
+    company = relationship("Company")
 
     # execution source: on_demand vs automation
     execution_source: Mapped[str] = mapped_column(Text, default="on_demand", server_default="'on_demand'")

@@ -25,8 +25,15 @@ from app.models.trainer import (
     TrainerSession,
     TrainerEvaluation,
 )
+from app.models.companies import Company
+from app.models.teams import Team, UserServiceAssociation, UserTeamAssociation, AgentTeamAssociation
 
 __all__ = [
+    "Company",
+    "Team",
+    "UserServiceAssociation",
+    "UserTeamAssociation",
+    "AgentTeamAssociation",
     "Prompt",
     "PromptVersion",
     "PromptBaseStructure",

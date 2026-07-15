@@ -24,6 +24,9 @@ class TrainerEvaluationConfig(Base):
     __tablename__ = "bm_trainer_evaluation_configs"
 
     config_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    company_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_companies.company_id", ondelete="RESTRICT"), nullable=True
+    )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     service_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("bm_services.service_id", ondelete="RESTRICT"), nullable=False
@@ -42,6 +45,7 @@ class TrainerEvaluationConfig(Base):
     )
 
     service = relationship("Service", lazy="joined")
+    company = relationship("Company")
     speech_structure = relationship("Prompt", lazy="joined")
 
     @property
@@ -65,6 +69,9 @@ class TrainerSimulation(Base):
     __tablename__ = "bm_trainer_simulations"
 
     simulation_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    company_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_companies.company_id", ondelete="RESTRICT"), nullable=True
+    )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     code: Mapped[str] = mapped_column(Text, unique=True, nullable=False, index=True)
     service_id: Mapped[int] = mapped_column(
@@ -88,6 +95,7 @@ class TrainerSimulation(Base):
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     service = relationship("Service", lazy="joined")
+    company = relationship("Company")
     evaluation_config = relationship("TrainerEvaluationConfig", lazy="joined")
     versions = relationship("TrainerSimulationVersion", back_populates="simulation", cascade="all, delete-orphan")
 
@@ -128,6 +136,9 @@ class TrainerSession(Base):
     )
     agent_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     agent_code: Mapped[str] = mapped_column(Text, nullable=False)
+    company_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_companies.company_id", ondelete="RESTRICT"), nullable=True
+    )
     service_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("bm_services.service_id", ondelete="RESTRICT"), nullable=False
     )
@@ -152,6 +163,7 @@ class TrainerSession(Base):
     simulation = relationship("TrainerSimulation")
     simulation_version = relationship("TrainerSimulationVersion")
     service = relationship("Service")
+    company = relationship("Company")
     evaluation = relationship("TrainerEvaluation", back_populates="session", uselist=False)
 
 
