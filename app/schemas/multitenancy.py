@@ -32,15 +32,53 @@ class TeamBase(BaseModel):
 class TeamCreate(TeamBase):
     pass
 
-class TeamUpdate(BaseModel):
+class AdminTeamCreate(BaseModel):
     team_name: str
+    company_id: int
+    service_id: int
+
+class TeamUpdate(BaseModel):
+    """Update schema: all fields optional to allow partial updates."""
+    team_name: Optional[str] = None
+    is_active: Optional[bool] = None
 
 class TeamResponse(TeamBase):
     team_id: int
+    is_active: bool = True
     created_at: datetime
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+class AdminTeamResponse(BaseModel):
+    """Enriched team response for admin views (includes denormalized names and counts)."""
+    team_id: int
+    team_name: str
+    company_id: int
+    company_name: Optional[str] = None
+    service_id: int
+    service_name: Optional[str] = None
+    is_active: bool = True
+    agent_count: int = 0
+    coordinator_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+class AdminTeamMemberResponse(BaseModel):
+    """Summary of a user who is a team member (agent or coordinator)."""
+    user_id: int
+    username: str
+    email: str
+    name: Optional[str] = None
+    role: str
+    normalized_role: Optional[str] = None
+    hubspot_owner_id: Optional[str] = None
+    agent_initials: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
 
 
 class UserSummaryResponse(BaseModel):
