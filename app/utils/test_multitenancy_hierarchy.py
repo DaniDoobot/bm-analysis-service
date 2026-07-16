@@ -316,6 +316,152 @@ class TestMultitenancyHierarchy(unittest.IsolatedAsyncioTestCase):
             res_get2 = await ac.get(f"/bm/admin/users/{self.coor_id}/teams")
             self.assertEqual(len(res_get2.json()), 0)
 
+    async def test_role_options(self):
+        """7. Test Role Options retrieval and company admin filtering."""
+        engine = get_engine()
+        async with AsyncSession(engine) as db:
+            u_super = await db.get(User, self.super_id)
+            u_comp = await db.get(User, self.comp_id)
+
+        # Super admin gets all options
+        app.dependency_overrides[get_current_user] = lambda: u_super
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            res = await ac.get("/bm/admin/users/role-options")
+            self.assertEqual(res.status_code, 200)
+            opts = res.json()
+            values = [o["value"] for o in opts]
+            self.assertIn("super_admin", values)
+            self.assertIn("company_admin", values)
+            self.assertIn("agente", values)
+
+        # Company admin gets options except super_admin
+        app.dependency_overrides[get_current_user] = lambda: u_comp
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            res = await ac.get("/bm/admin/users/role-options")
+            self.assertEqual(res.status_code, 200)
+            opts = res.json()
+            values = [o["value"] for o in opts]
+            self.assertNotIn("super_admin", values)
+            self.assertIn("company_admin", values)
+            self.assertIn("agente", values)
+
+    async def test_create_user_success_and_restrictions(self):
+        """8. Test creation of users with hierarchical roles, uniqueness checks and permission scopes."""
+        engine = get_engine()
+        async with AsyncSession(engine) as db:
+            u_super = await db.get(User, self.super_id)
+            u_comp = await db.get(User, self.comp_id)
+
+        # A. Super admin creates super_admin (company_id forced to None)
+        app.dependency_overrides[get_current_user] = lambda: u_super
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            payload = {
+                "username": "new_super",
+                "email": "new_super@test.com",
+                "role": "super_admin",
+                "company_id": 99,  # Should be ignored and set to None
+                "name": "New Super Admin"
+            }
+            res = await ac.post("/bm/admin/users", json=payload)
+            self.assertEqual(res.status_code, 201)
+            user_data = res.json()
+            self.assertIsNone(user_data["company_id"])
+            self.assertEqual(user_data["username"], "new_super")
+            self.assertNotIn("password_hash", user_data)
+
+            # B. Super admin creates company_admin
+            payload = {
+                "username": "new_comp_admin",
+                "email": "new_comp_admin@test.com",
+                "role": "company_admin",
+                "company_id": self.company1_id
+            }
+            res = await ac.post("/bm/admin/users", json=payload)
+            self.assertEqual(res.status_code, 201)
+            self.assertEqual(res.json()["company_id"], self.company1_id)
+
+            # C. Non-superadmin role requires company_id
+            payload_bad_comp = {
+                "username": "no_comp",
+                "email": "nocomp@test.com",
+                "role": "agente"
+            }
+            res_bad = await ac.post("/bm/admin/users", json=payload_bad_comp)
+            self.assertEqual(res_bad.status_code, 400)
+            self.assertIn("company_id", res_bad.json()["detail"])
+
+        # D. Company admin restrictions
+        app.dependency_overrides[get_current_user] = lambda: u_comp
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            # Cannot create super_admin
+            payload = {
+                "username": "comp_creating_super",
+                "email": "comp_super@test.com",
+                "role": "super_admin"
+            }
+            res = await ac.post("/bm/admin/users", json=payload)
+            self.assertEqual(res.status_code, 403)
+
+            # Cannot create user in company 2
+            payload = {
+                "username": "comp_creating_gesdent",
+                "email": "comp_gesdent@test.com",
+                "role": "agente",
+                "company_id": self.company2_id
+            }
+            res = await ac.post("/bm/admin/users", json=payload)
+            self.assertEqual(res.status_code, 403)
+
+            # Can create agente in company 1
+            payload = {
+                "username": "new_agent_ok",
+                "email": "agent_ok@test.com",
+                "role": "agente",
+                "company_id": self.company1_id
+            }
+            res = await ac.post("/bm/admin/users", json=payload)
+            self.assertEqual(res.status_code, 201)
+
+            # Email uniqueness check
+            payload_dup_email = {
+                "username": "another_uname",
+                "email": "agent_ok@test.com",
+                "role": "agente",
+                "company_id": self.company1_id
+            }
+            res_dup = await ac.post("/bm/admin/users", json=payload_dup_email)
+            self.assertEqual(res_dup.status_code, 400)
+            self.assertIn("ya está en uso", res_dup.json()["detail"])
+
+    async def test_patch_user_transitions(self):
+        """9. Test transition validations and cleanup during PATCH update."""
+        engine = get_engine()
+        async with AsyncSession(engine) as db:
+            u_super = await db.get(User, self.super_id)
+            u_agent = await db.get(User, self.agent_id)
+
+        app.dependency_overrides[get_current_user] = lambda: u_super
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            # A. Change agent to super_admin (should automatically clear company_id)
+            res = await ac.patch(f"/bm/admin/users/{self.agent_id}", json={"role": "super_admin"})
+            self.assertEqual(res.status_code, 200)
+            self.assertIsNone(res.json()["company_id"])
+
+            # B. Change super_admin back to agent (requires company_id)
+            res_bad = await ac.patch(f"/bm/admin/users/{self.agent_id}", json={"role": "agente"})
+            self.assertEqual(res_bad.status_code, 400)
+            self.assertIn("company_id", res_bad.json()["detail"])
+
+            # C. Now supply company_id -> should succeed
+            res_ok = await ac.patch(f"/bm/admin/users/{self.agent_id}", json={"role": "agente", "company_id": self.company1_id})
+            self.assertEqual(res_ok.status_code, 200)
+            self.assertEqual(res_ok.json()["company_id"], self.company1_id)
+
+            # D. Degrade/deactivate the last active super_admin is blocked
+            res_degrade = await ac.patch(f"/bm/admin/users/{self.super_id}", json={"role": "agente", "company_id": self.company1_id})
+            self.assertEqual(res_degrade.status_code, 400)
+            self.assertIn("Super Administrador activo", res_degrade.json()["detail"])
+
 
 if __name__ == "__main__":
     unittest.main()

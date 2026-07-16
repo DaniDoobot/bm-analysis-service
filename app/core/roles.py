@@ -25,6 +25,8 @@ ROLE_MAPPINGS = {
     
     "agent": InternalRole.AGENT,
     "agente": InternalRole.AGENT,
+    "user": InternalRole.AGENT,
+    "usuario": InternalRole.AGENT,
 }
 
 def normalize_role(raw_role: str) -> InternalRole:

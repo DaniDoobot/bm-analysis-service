@@ -2,7 +2,7 @@
 import logging
 import re
 from typing import Annotated, List, Optional
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,12 +13,14 @@ from app.models.companies import Company
 from app.models.services import Service
 from app.models.teams import Team, UserServiceAssociation, UserTeamAssociation, AgentTeamAssociation
 from app.core.tenant_context import TenantContext
-from app.core.roles import InternalRole, normalize_role
+from app.core.roles import InternalRole, normalize_role, ROLE_MAPPINGS
 from app.schemas.services import ServiceOut
 from app.schemas.multitenancy import TeamResponse
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/bm/admin/users", tags=["Admin Users"])
+
+EMAIL_REGEX = re.compile(r"^[^@]+@[^@]+\.[^@]+$")
 
 
 class AdminUserResponse(BaseModel):
@@ -39,12 +41,32 @@ class AdminUserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class AdminUserCreatePayload(BaseModel):
+    username: str
+    email: str
+    name: Optional[str] = None
+    role: str
+    company_id: Optional[int] = None
+    is_active: bool = True
+    hubspot_owner_id: Optional[str] = None
+    agent_initials: Optional[str] = None
+
+
 class AdminUserUpdatePayload(BaseModel):
     name: Optional[str] = None
     email: Optional[str] = None
     is_active: Optional[bool] = None
     company_id: Optional[int] = None
     role: Optional[str] = None
+
+
+class RoleOption(BaseModel):
+    value: str
+    label: str
+    requires_company: bool
+    global_field: bool = Field(default=False, serialization_alias="global")
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 @router.get("", response_model=List[AdminUserResponse])
@@ -175,6 +197,174 @@ async def list_users(
     return res_list
 
 
+@router.post("", response_model=AdminUserResponse, status_code=status.HTTP_201_CREATED)
+async def create_user(
+    payload: AdminUserCreatePayload,
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+    db: Annotated[AsyncSession, Depends(get_db)]
+):
+    """Create a new administrative user with hierarchical roles and tenant compliance."""
+    import secrets
+    from app.utils.security import hash_password
+    from datetime import datetime, timezone, timedelta
+
+    actor_role = context.normalized_role
+    if actor_role not in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Se requiere rol Administrador de Empresa o Super Administrador."
+        )
+
+    val = payload.role.strip().lower()
+    if val not in ROLE_MAPPINGS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Rol no válido: '{payload.role}'."
+        )
+    target_role_norm = ROLE_MAPPINGS[val]
+
+    if actor_role == InternalRole.COMPANY_ADMIN and target_role_norm == InternalRole.SUPER_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permisos para crear un Super Administrador."
+        )
+
+    company_id = payload.company_id
+    if target_role_norm == InternalRole.SUPER_ADMIN:
+        company_id = None
+    else:
+        if company_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Se requiere especificar un company_id para roles que no sean super_admin."
+            )
+        
+        if actor_role == InternalRole.COMPANY_ADMIN and company_id != context.company_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Solo puedes crear usuarios dentro de tu propia empresa."
+            )
+        
+        comp_stmt = select(Company).where(Company.company_id == company_id)
+        comp_res = await db.execute(comp_stmt)
+        if not comp_res.scalars().first():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="La empresa especificada no existe."
+            )
+
+    username = payload.username.strip()
+    if not username:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El nombre de usuario (username) es requerido y no puede estar vacío."
+        )
+
+    email = payload.email.strip().lower()
+    if not EMAIL_REGEX.match(email):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El correo electrónico especificado no es válido."
+        )
+
+    uname_stmt = select(User).where(User.username == username)
+    uname_res = await db.execute(uname_stmt)
+    if uname_res.scalars().first():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"El nombre de usuario '{username}' ya está en uso."
+        )
+
+    email_stmt = select(User).where(User.email == email)
+    email_res = await db.execute(email_stmt)
+    if email_res.scalars().first():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"El correo electrónico '{email}' ya está en uso."
+        )
+
+    temp_pass = secrets.token_urlsafe(32)
+    pass_hash = hash_password(temp_pass)
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+
+    new_user = User(
+        username=username,
+        email=email,
+        name=payload.name.strip() if payload.name else None,
+        role=payload.role,
+        is_active=payload.is_active,
+        company_id=company_id,
+        hubspot_owner_id=payload.hubspot_owner_id.strip() if payload.hubspot_owner_id else None,
+        agent_initials=payload.agent_initials.strip() if payload.agent_initials else None,
+        password_hash=pass_hash,
+        must_reset_password=True,
+        reset_token=token,
+        reset_token_expires_at=expires_at
+    )
+    db.add(new_user)
+    await db.commit()
+    await db.refresh(new_user)
+
+    logger.info("Actor (user_id=%s) CREATED administrative user %s (id=%s)", context.user_id, new_user.email, new_user.user_id)
+
+    comp_name = None
+    if new_user.company_id:
+        comp_stmt = select(Company.company_name).where(Company.company_id == new_user.company_id)
+        comp_res = await db.execute(comp_stmt)
+        comp_name = comp_res.scalar()
+
+    return AdminUserResponse(
+        user_id=new_user.user_id,
+        username=new_user.username,
+        email=new_user.email,
+        name=new_user.name,
+        role=new_user.role,
+        normalized_role=target_role_norm.value,
+        company_id=new_user.company_id,
+        company_name=comp_name,
+        is_active=new_user.is_active,
+        hubspot_owner_id=new_user.hubspot_owner_id,
+        agent_initials=new_user.agent_initials,
+        allowed_service_ids=[],
+        allowed_team_ids=[]
+    )
+
+
+@router.get("/role-options", response_model=List[RoleOption])
+async def get_role_options(
+    context: Annotated[TenantContext, Depends(get_tenant_context)]
+):
+    """Retrieve available role options for the UI based on actor permissions."""
+    actor_role = context.normalized_role
+    if actor_role not in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado."
+        )
+
+    options = [
+        {"value": "super_admin", "label": "Superadministrador", "requires_company": False, "global_field": True},
+        {"value": "company_admin", "label": "Administrador de empresa", "requires_company": True, "global_field": False},
+        {"value": "responsable_servicio", "label": "Responsable de servicio", "requires_company": True, "global_field": False},
+        {"value": "coordinador_equipo", "label": "Coordinador de equipo", "requires_company": True, "global_field": False},
+        {"value": "agente", "label": "Agente", "requires_company": True, "global_field": False},
+        {"value": "usuario", "label": "Usuario", "requires_company": True, "global_field": False}
+    ]
+
+    if actor_role == InternalRole.COMPANY_ADMIN:
+        options = [opt for opt in options if opt["value"] != "super_admin"]
+
+    return [
+        RoleOption(
+            value=opt["value"],
+            label=opt["label"],
+            requires_company=opt["requires_company"],
+            global_field=opt["global_field"]
+        ) for opt in options
+    ]
+
+
 @router.patch("/{user_id}", response_model=AdminUserResponse)
 async def update_user(
     user_id: int,
@@ -183,7 +373,6 @@ async def update_user(
     db: Annotated[AsyncSession, Depends(get_db)]
 ):
     """Update details of a user, enforcing multi-tenant security rules."""
-    # Fetch target user
     stmt = select(User).where(User.user_id == user_id)
     res = await db.execute(stmt)
     user = res.scalars().first()
@@ -193,29 +382,50 @@ async def update_user(
             detail="Usuario no encontrado."
         )
 
-    # Actor must be super_admin or company_admin
     if context.normalized_role not in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: Se requiere rol Administrador de Empresa o Super Administrador."
         )
 
+    # 1. Determine target role and company after update to validate constraints
+    target_role = payload.role if payload.role is not None else user.role
+    val = target_role.strip().lower()
+    if val not in ROLE_MAPPINGS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Rol no válido: '{target_role}'."
+        )
+    target_role_norm = ROLE_MAPPINGS[val]
+
+    # Prevent deactivating/degrading the last active super_admin
+    is_target_active_super = user.is_active and normalize_role(user.role) == InternalRole.SUPER_ADMIN
+    would_deactivate = payload.is_active is False
+    would_degrade = is_target_active_super and payload.role is not None and normalize_role(payload.role) != InternalRole.SUPER_ADMIN
+    if is_target_active_super and (would_deactivate or would_degrade):
+        all_users_stmt = select(User).where(User.is_active == True)
+        all_res = await db.execute(all_users_stmt)
+        active_users = all_res.scalars().all()
+        active_supers_count = sum(1 for u in active_users if normalize_role(u.role) == InternalRole.SUPER_ADMIN)
+        if active_supers_count <= 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No se puede desactivar o degradar al único Super Administrador activo del sistema."
+            )
+
     # If actor is company_admin:
     if context.normalized_role == InternalRole.COMPANY_ADMIN:
-        # User must belong to actor's company
         if user.company_id != context.company_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="No tienes permisos para modificar usuarios de otra empresa."
             )
-        # Cannot change company_id
         if payload.company_id is not None and payload.company_id != context.company_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="No tienes permisos para cambiar la empresa del usuario."
             )
-        # Cannot assign super_admin role
-        if payload.role is not None and normalize_role(payload.role) == InternalRole.SUPER_ADMIN:
+        if target_role_norm == InternalRole.SUPER_ADMIN:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="No puedes asignar el rol de Super Administrador."
@@ -233,7 +443,6 @@ async def update_user(
                     detail="No puedes cambiar o degradar tu propio rol."
                 )
     else:
-        # Superadmin can do everything, but validate target company exists if provided
         if payload.company_id is not None:
             comp_stmt = select(Company).where(Company.company_id == payload.company_id)
             comp_res = await db.execute(comp_stmt)
@@ -243,6 +452,18 @@ async def update_user(
                     detail="La empresa especificada no existe."
                 )
 
+    # Determine final company_id to write
+    if target_role_norm == InternalRole.SUPER_ADMIN:
+        user.company_id = None
+    else:
+        resolved_company_id = payload.company_id if payload.company_id is not None else user.company_id
+        if resolved_company_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Se requiere especificar un company_id para roles que no sean super_admin."
+            )
+        user.company_id = resolved_company_id
+
     # Perform update fields
     if payload.name is not None:
         user.name = payload.name.strip()
@@ -250,7 +471,6 @@ async def update_user(
     if payload.email is not None:
         email_str = payload.email.strip().lower()
         if email_str != user.email:
-            # Check unique email constraint
             email_stmt = select(User).where(User.email == email_str)
             email_res = await db.execute(email_stmt)
             if email_res.scalars().first():
@@ -262,9 +482,6 @@ async def update_user(
 
     if payload.is_active is not None:
         user.is_active = payload.is_active
-
-    if payload.company_id is not None:
-        user.company_id = payload.company_id
 
     if payload.role is not None:
         user.role = payload.role
