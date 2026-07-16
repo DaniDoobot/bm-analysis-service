@@ -562,16 +562,18 @@ async def list_prompts(
     return out
 
 
-async def get_active_prompt(db: AsyncSession, prompt_type: str) -> dict | None:
-    """Return the active prompt for a given type with its current version."""
-    result = await db.execute(
-        select(Prompt).where(
-            Prompt.prompt_type == prompt_type,
-            Prompt.is_active == True,
-            Prompt.is_archived == False,
-            Prompt.deleted_at == None,
-        ).order_by(Prompt.prompt_id.desc()).limit(1)
+async def get_active_prompt(db: AsyncSession, prompt_type: str, service_id: int | None = None) -> dict | None:
+    """Return the active prompt for a given type with its current version, optionally filtered by service_id."""
+    stmt = select(Prompt).where(
+        Prompt.prompt_type == prompt_type,
+        Prompt.is_active == True,
+        Prompt.is_archived == False,
+        Prompt.deleted_at == None,
     )
+    if service_id is not None:
+        stmt = stmt.where(Prompt.service_id == service_id)
+        
+    result = await db.execute(stmt.order_by(Prompt.prompt_id.desc()).limit(1))
     p = result.scalars().first()
     if not p:
         return None
@@ -930,14 +932,17 @@ async def activate_version(db: AsyncSession, version_id: int) -> PromptVersion |
     )
     version.is_current = True
 
-    # Get parent prompt and set it active, deactivating other prompts of the same type
     prompt_res = await db.execute(select(Prompt).where(Prompt.prompt_id == version.prompt_id))
     prompt_obj = prompt_res.scalars().first()
     if prompt_obj:
         prompt_obj.is_active = True
         await db.execute(
             update(Prompt)
-            .where(Prompt.prompt_type == prompt_obj.prompt_type, Prompt.prompt_id != prompt_obj.prompt_id)
+            .where(
+                Prompt.prompt_type == prompt_obj.prompt_type,
+                Prompt.service_id == prompt_obj.service_id,
+                Prompt.prompt_id != prompt_obj.prompt_id
+            )
             .values(is_active=False)
         )
 
@@ -1093,16 +1098,21 @@ async def create_prompt_from_base(db: AsyncSession, body: CreateFromBaseRequest)
         base_structure_key=struct.structure_key,
         base_structure_name=struct.structure_name,
         service_id=struct.service_id,
+        company_id=struct.company_id,
         owner_user_id=body.owner_user_id,
     )
     db.add(new_prompt)
     await db.flush()
 
-    # If explicitly requested to activate, deactivate all other prompts of the same type
+    # If explicitly requested to activate, deactivate all other prompts of the same type WITHIN THE SAME SERVICE
     if body.activate:
         await db.execute(
             update(Prompt)
-            .where(Prompt.prompt_type == body.prompt_type, Prompt.prompt_id != new_prompt.prompt_id)
+            .where(
+                Prompt.prompt_type == body.prompt_type,
+                Prompt.service_id == new_prompt.service_id,
+                Prompt.prompt_id != new_prompt.prompt_id
+            )
             .values(is_active=False)
         )
 

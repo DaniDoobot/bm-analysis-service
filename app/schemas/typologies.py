@@ -5,11 +5,13 @@ from pydantic import BaseModel, ConfigDict
 
 class TypologyBase(BaseModel):
     service_id: int
+    company_id: int | None = None
     typology_key: str
     typology_name: str
     description: str | None = None
     sort_order: int = 100
     is_active: bool = True
+
 
 
 class TypologyCreate(TypologyBase):

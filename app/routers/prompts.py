@@ -7,8 +7,11 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import get_db, get_current_user, require_admin
+from app.dependencies import get_db, get_current_user, require_admin, get_tenant_context
 from app.models.users import User
+from app.models.services import Service
+from app.core.tenant_context import TenantContext
+from app.core.roles import InternalRole
 from app.services.auth_service import (
     get_effective_structure_permission,
     require_structure_view,
@@ -83,6 +86,7 @@ class AssignBaseStructureRequest(BaseModel):
 async def list_prompts(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     type: Annotated[str | None, Query(description="audio | text")] = None,
     base_structure_id: Annotated[int | None, Query(description="Filter by base structure ID")] = None,
     base_structure_key: Annotated[str | None, Query(description="Filter by base structure Key")] = None,
@@ -90,8 +94,9 @@ async def list_prompts(
     include_archived: Annotated[bool, Query(description="Include archived structures")] = False,
 ):
     """Return all prompts with their current version (if any), with optional filtering."""
-    if getattr(current_user, "role", "agent").lower() == "agent":
-        raise HTTPException(status_code=403, detail="Los agentes no tienen acceso a las estructuras.")
+    role = context.normalized_role
+    if role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+        raise HTTPException(status_code=403, detail="Los agentes y coordinadores no tienen acceso a las estructuras.")
 
     prompts = await prompts_service.list_prompts(
         db,
@@ -142,13 +147,45 @@ async def get_active_prompt(
     type: Annotated[str, Query(description="audio | text")],
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    service_id: Annotated[int | None, Query(description="Scope active prompt to this service ID")] = None,
 ):
-    """Return the active prompt for the given type including current version text."""
-    if getattr(current_user, "role", "agent").lower() == "agent":
-        raise HTTPException(status_code=403, detail="Los agentes no tienen acceso a las estructuras.")
-    result = await prompts_service.get_active_prompt(db, prompt_type=type)
+    """Return the active prompt for the given type and service, including current version text."""
+    context = await TenantContext.build(current_user, db)
+    role = context.normalized_role
+    
+    if role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+        raise HTTPException(status_code=403, detail="Los agentes y coordinadores no tienen acceso a las estructuras.")
+
+    resolved_service_id = service_id
+    if resolved_service_id is not None:
+        if not context.is_super_admin:
+            s_stmt = select(Service).where(Service.service_id == resolved_service_id)
+            if role == InternalRole.COMPANY_ADMIN:
+                s_stmt = s_stmt.where(Service.company_id == context.company_id)
+            elif role == InternalRole.SERVICE_MANAGER:
+                s_stmt = s_stmt.where(Service.service_id.in_(context.allowed_service_ids))
+            s_res = await db.execute(s_stmt)
+            if not s_res.scalar():
+                raise HTTPException(status_code=403, detail="No tienes permisos para ver el prompt activo de este servicio.")
+    else:
+        if context.is_super_admin:
+            s_stmt = select(Service.service_id).limit(1)
+            s_res = await db.execute(s_stmt)
+            resolved_service_id = s_res.scalar()
+        elif role == InternalRole.COMPANY_ADMIN:
+            s_stmt = select(Service.service_id).where(Service.company_id == context.company_id).limit(1)
+            s_res = await db.execute(s_stmt)
+            resolved_service_id = s_res.scalar()
+        elif role == InternalRole.SERVICE_MANAGER:
+            if context.allowed_service_ids:
+                resolved_service_id = context.allowed_service_ids[0]
+                
+    if resolved_service_id is None:
+        raise HTTPException(status_code=400, detail="No se pudo determinar el servicio para resolver el prompt activo.")
+
+    result = await prompts_service.get_active_prompt(db, prompt_type=type, service_id=resolved_service_id)
     if not result:
-        raise HTTPException(status_code=404, detail=f"No active prompt found for type '{type}'")
+        raise HTTPException(status_code=404, detail=f"No active prompt found for type '{type}' and service {resolved_service_id}")
     
     # Check permissions dynamically
     pid = result["prompt_id"]
@@ -258,12 +295,14 @@ def _base_structure_detail_out(struct) -> dict:
 async def list_prompt_base_structures(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     type: Annotated[str | None, Query(description="audio | text")] = None,
     include_archived: Annotated[bool, Query(description="Include inactive/archived structures")] = False,
 ):
     """Return active base structures by default; pass include_archived=true to see all."""
-    if getattr(current_user, "role", "agent").lower() == "agent":
-        raise HTTPException(status_code=403, detail="Los agentes no tienen acceso a las estructuras.")
+    role = context.normalized_role
+    if role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+        raise HTTPException(status_code=403, detail="Los agentes y coordinadores no tienen acceso a las estructuras.")
 
     structures = await prompts_service.list_base_structures(db, prompt_type=type, include_archived=include_archived)
     

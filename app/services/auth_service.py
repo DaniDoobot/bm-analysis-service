@@ -9,6 +9,8 @@ from app.config import get_settings
 from app.dependencies import get_db, get_current_user
 from app.models.users import User
 from app.models.prompts import Prompt, PromptBaseStructure, StructurePermission, StructurePermissionAudit
+from app.core.tenant_context import TenantContext
+from app.core.roles import InternalRole
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +48,7 @@ async def get_effective_structure_permission(
 ) -> dict:
     """
     Dynamically resolve structure permissions for a user based on role, ownership,
-    manual sharing, and inheritance (for base structures).
+    manual sharing, inheritance (for base structures), and multi-tenant hierarchy (company_id / service_id).
     """
     # Normalize structure type
     if structure_type == "prompt":
@@ -54,32 +56,35 @@ async def get_effective_structure_permission(
     elif structure_type == "prompt-base-structure":
         structure_type = "base"
 
-    # 1. Normalize roles. Exclude agents completely.
-    user_role = getattr(user, "role", "agent").lower()
-    
-    if user_role == "agent":
-        return {
-            "is_admin": False,
-            "is_owner": False,
-            "manual_permission": "none",
-            "inherited_permission": "none",
-            "effective_permission": "none",
-            "can_view": False,
-            "can_use": False,
-            "can_edit": False,
-            "can_share": False,
-            "can_delete": False,
-            "can_transfer": False,
-            "can_duplicate": False,
-            "can_archive": False,
-            "can_restore": False,
-            "access_source": "none"
-        }
-    
-    is_admin = user_role in ("admin", "administrador")
+    # Build Tenant Context
+    context = await TenantContext.build(user, db)
+    role = context.normalized_role
 
-    # 2. Check Ownership and existence (ALWAYS done regardless of feature flag)
+    no_access_dict = {
+        "is_admin": False,
+        "is_owner": False,
+        "manual_permission": "none",
+        "inherited_permission": "none",
+        "effective_permission": "none",
+        "can_view": False,
+        "can_use": False,
+        "can_edit": False,
+        "can_share": False,
+        "can_delete": False,
+        "can_transfer": False,
+        "can_duplicate": False,
+        "can_archive": False,
+        "can_restore": False,
+        "access_source": "none"
+    }
+
+    # 1. Normalize roles. Exclude agents and team coordinators completely from structure management/viewing
+    if role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+        return no_access_dict
+
+    # 2. Fetch structure and verify existence
     is_owner = False
+    obj = None
     if structure_type == "base":
         stmt = select(PromptBaseStructure).where(PromptBaseStructure.id == structure_id)
         res = await db.execute(stmt)
@@ -98,6 +103,22 @@ async def get_effective_structure_permission(
         owner_id = obj.owner_user_id
         if owner_id == user.user_id:
             is_owner = True
+
+    # 3. Multi-tenant hierarchy enforcement
+    if not context.is_super_admin:
+        is_global = getattr(obj, "is_global", False)
+        # If it is not a global structure, restrict by company
+        if not is_global:
+            # Check company
+            if obj.company_id != context.company_id:
+                return no_access_dict
+            
+            # Check service scope for service managers
+            if role == InternalRole.SERVICE_MANAGER:
+                if context.allowed_service_ids is None or obj.service_id not in context.allowed_service_ids:
+                    return no_access_dict
+
+    is_admin = context.is_super_admin or role == InternalRole.COMPANY_ADMIN
 
     settings = get_settings()
     if not settings.enable_structure_permissions:
