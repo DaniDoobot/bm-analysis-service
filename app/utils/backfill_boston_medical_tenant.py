@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import asyncio
 import os
 import sys
@@ -12,6 +12,7 @@ from app.models.companies import Company
 from app.models.users import User
 from app.models.services import Service
 from app.models.teams import Team
+from app.core.roles import normalize_role, InternalRole
 
 async def run_backfill(mode: str):
     async with AsyncSessionLocal() as db:
@@ -42,16 +43,35 @@ async def run_backfill(mode: str):
         boston_id = boston_medical.company_id
 
         # 2. Users Backfill
-        users_stmt = select(User).where(User.company_id == None)
+        users_stmt = select(User)
         users_res = await db.execute(users_stmt)
-        users_null = users_res.scalars().all()
-        print(f"Found {len(users_null)} users without company_id")
+        all_users = users_res.scalars().all()
 
-        if users_null:
-            for u in users_null:
+        users_to_assign = []
+        super_admins_to_detach = []
+
+        for u in all_users:
+            norm_r = normalize_role(u.role)
+            if norm_r == InternalRole.SUPER_ADMIN:
+                if u.company_id is not None:
+                    super_admins_to_detach.append(u)
+            else:
+                if u.company_id is None:
+                    users_to_assign.append(u)
+
+        print(f"Found {len(users_to_assign)} non-superadmin users to assign to Boston Medical")
+        if users_to_assign:
+            for u in users_to_assign:
                 print(f"  - User: username={u.username}, email={u.email} -> will assign to Boston Medical")
                 if mode == "--apply":
                     u.company_id = boston_id
+
+        print(f"Found {len(super_admins_to_detach)} super_admin users to detach from company")
+        if super_admins_to_detach:
+            for u in super_admins_to_detach:
+                print(f"  - User: username={u.username}, email={u.email} -> will detach from company (set company_id = None)")
+                if mode == "--apply":
+                    u.company_id = None
 
         # 3. Services Backfill
         services_stmt = select(Service).where(Service.company_id == None)
@@ -91,12 +111,21 @@ async def verify_backfill():
         print("Starting verification checks...")
         inconsistencies = []
 
-        # Check NULL company_id
-        res_usr = await db.execute(select(User).where(User.company_id == None))
-        users_null = res_usr.scalars().all()
-        if users_null:
-            inconsistencies.append(f"{len(users_null)} users have NULL company_id")
+        # Load all users to check tenancy compliance
+        users_stmt = select(User)
+        users_res = await db.execute(users_stmt)
+        all_users = users_res.scalars().all()
 
+        for u in all_users:
+            norm_r = normalize_role(u.role)
+            if norm_r == InternalRole.SUPER_ADMIN:
+                if u.company_id is not None:
+                    inconsistencies.append(f"Super admin user '{u.username}' (role: {u.role}) has company_id {u.company_id} (expected NULL)")
+            else:
+                if u.company_id is None:
+                    inconsistencies.append(f"Non-superadmin user '{u.username}' (role: {u.role}) has NULL company_id")
+
+        # Check NULL company_id in services & teams
         res_svc = await db.execute(select(Service).where(Service.company_id == None))
         services_null = res_svc.scalars().all()
         if services_null:
