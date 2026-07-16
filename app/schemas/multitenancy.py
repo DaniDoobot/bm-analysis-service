@@ -1,7 +1,25 @@
+import re
 from datetime import datetime
 from typing import List, Optional
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 from app.core.roles import InternalRole
+
+_SLUG_REGEX = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+
+def _validate_company_key(v: str) -> str:
+    """Validates that company_key is a valid slug: lowercase letters, digits, hyphens, underscores.
+    Must start with a letter or digit. No spaces or special characters."""
+    if not v or not v.strip():
+        raise ValueError("La clave de empresa no puede estar vacía.")
+    v = v.strip().lower()
+    if not _SLUG_REGEX.match(v):
+        raise ValueError(
+            "La clave de empresa solo puede contener letras minúsculas, números, guiones (-) y guiones bajos (_), "
+            "y debe empezar por letra o número."
+        )
+    return v
+
 
 class CompanyBase(BaseModel):
     company_name: str
@@ -9,12 +27,38 @@ class CompanyBase(BaseModel):
     is_active: bool = True
 
 class CompanyCreate(CompanyBase):
-    pass
+    @field_validator("company_key")
+    @classmethod
+    def validate_key(cls, v: str) -> str:
+        return _validate_company_key(v)
+
+    @field_validator("company_name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("El nombre de empresa no puede estar vacío.")
+        return v.strip()
 
 class CompanyUpdate(BaseModel):
     company_name: Optional[str] = None
     company_key: Optional[str] = None
     is_active: Optional[bool] = None
+
+    @field_validator("company_key")
+    @classmethod
+    def validate_key(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        return _validate_company_key(v)
+
+    @field_validator("company_name")
+    @classmethod
+    def validate_name(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        if not v.strip():
+            raise ValueError("El nombre de empresa no puede estar vacío.")
+        return v.strip()
 
 class CompanyResponse(CompanyBase):
     company_id: int
@@ -22,6 +66,21 @@ class CompanyResponse(CompanyBase):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+class AdminCompanyResponse(BaseModel):
+    """Enriched company response for admin views with resource counts."""
+    company_id: int
+    company_name: str
+    company_key: str
+    is_active: bool
+    services_count: int = 0
+    users_count: int = 0
+    teams_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
 
 
 class TeamBase(BaseModel):
