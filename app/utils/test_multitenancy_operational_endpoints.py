@@ -290,6 +290,20 @@ class TestMultitenancyOperationalEndpoints(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(any(a["hubspot_owner_id"] == "boston_owner" for a in res_ag.json()))
             self.assertTrue(any(a["hubspot_owner_id"] == "gesdent_owner" for a in res_ag.json()))
 
+            # test period=30d
+            res_ag_30d = await ac.get("/bm/agents?period=30d")
+            self.assertEqual(res_ag_30d.status_code, 200)
+            boston_agent_30d = next(a for a in res_ag_30d.json() if a["hubspot_owner_id"] == "boston_owner")
+            self.assertEqual(boston_agent_30d["total_analyses"], 1)
+            self.assertEqual(boston_agent_30d["total_analyses_scope"], "filtered")
+            self.assertEqual(boston_agent_30d["total_analyses_period"], "30d")
+
+            # test period=24h (both calls are older, should return agents with 0 total_analyses)
+            res_ag_24h = await ac.get("/bm/agents?period=24h")
+            self.assertEqual(res_ag_24h.status_code, 200)
+            self.assertTrue(len(res_ag_24h.json()) > 0)
+            self.assertTrue(all(a["total_analyses"] == 0 for a in res_ag_24h.json()))
+
         # 2. Boston Company Admin
         self._override_user(self.boston_admin_id)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:

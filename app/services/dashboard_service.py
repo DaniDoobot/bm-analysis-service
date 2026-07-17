@@ -841,12 +841,23 @@ async def get_agents_list(
     db: AsyncSession,
     service_id: int | None = None,
     service_key: str | None = None,
+    period: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    type: str | None = None,
     context: TenantContext | None = None,
 ) -> list[dict[str, Any]]:
     """Return agents list with metrics calculated from bm_mass_evaluation_results only."""
     from app.models.mass_evaluations import MassEvaluationResult
 
-    # 1. Per-agent aggregates (count + last timestamp)
+    # 1. Resolve timeframe
+    if period or date_from or date_to:
+        dt_from, dt_to, _ = resolve_date_range(date_from, date_to, period, default_period="30d")
+    else:
+        dt_from = None
+        dt_to = None
+
+    # 2. Per-agent aggregates (count + last timestamp)
     agg_stmt = select(
         MassEvaluationResult.hubspot_owner_id,
         MassEvaluationResult.agent_name,
@@ -870,7 +881,22 @@ async def get_agents_list(
             agg_stmt = agg_stmt.where(MassEvaluationResult.service_id == service_id)
     elif service_key is not None:
         agg_stmt = agg_stmt.where(MassEvaluationResult.service_key == service_key)
-        
+
+    if dt_from:
+        agg_stmt = agg_stmt.where(
+            func.coalesce(
+                MassEvaluationResult.call_timestamp,
+                MassEvaluationResult.analysis_timestamp,
+            ) >= dt_from
+        )
+    if dt_to:
+        agg_stmt = agg_stmt.where(
+            func.coalesce(
+                MassEvaluationResult.call_timestamp,
+                MassEvaluationResult.analysis_timestamp,
+            ) <= dt_to
+        )
+
     agg_stmt = agg_stmt.group_by(
         MassEvaluationResult.hubspot_owner_id,
         MassEvaluationResult.agent_name,
@@ -885,7 +911,7 @@ async def get_agents_list(
         if oid not in db_stats or r.total_analyses > db_stats[oid].total_analyses:
             db_stats[oid] = r
 
-    # 2. Fetch result_json to compute avg_evaluacion_global in Python
+    # 3. Fetch result_json to compute avg_evaluacion_global in Python
     rj_stmt = select(
         MassEvaluationResult.hubspot_owner_id,
         MassEvaluationResult.result_json,
@@ -907,7 +933,22 @@ async def get_agents_list(
             rj_stmt = rj_stmt.where(MassEvaluationResult.service_id == service_id)
     elif service_key is not None:
         rj_stmt = rj_stmt.where(MassEvaluationResult.service_key == service_key)
-        
+
+    if dt_from:
+        rj_stmt = rj_stmt.where(
+            func.coalesce(
+                MassEvaluationResult.call_timestamp,
+                MassEvaluationResult.analysis_timestamp,
+            ) >= dt_from
+        )
+    if dt_to:
+        rj_stmt = rj_stmt.where(
+            func.coalesce(
+                MassEvaluationResult.call_timestamp,
+                MassEvaluationResult.analysis_timestamp,
+            ) <= dt_to
+        )
+
     rj_res = await db.execute(rj_stmt)
     owner_evals: dict[str, list[float]] = {}
     for r in rj_res.fetchall():
@@ -935,6 +976,8 @@ async def get_agents_list(
             "total_analyses": to_float(stats.total_analyses) if stats else 0.0,
             "last_analysis_at": last_at,
             "avg_evaluacion_global": avg_eval,
+            "total_analyses_scope": "filtered" if (period or date_from or date_to) else "historical",
+            "total_analyses_period": period or "custom",
         }
 
     results = []

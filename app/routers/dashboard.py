@@ -132,6 +132,10 @@ async def list_agents(
     context: Annotated[TenantContext, Depends(get_tenant_context)],
     service_id: Annotated[int | None, Query(description="Filter by service ID")] = None,
     service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
+    period: Annotated[str | None, Query(description="Filter by period (e.g., 24h, 7d, 30d)")] = None,
+    date_from: Annotated[str | None, Query(description="Start date (ISO or YYYY-MM-DD)")] = None,
+    date_to: Annotated[str | None, Query(description="End date (ISO or YYYY-MM-DD)")] = None,
+    type: Annotated[str | None, Query(description="Filter by analysis type (kept for compatibility)")] = None,
 ):
     """
     Get all active call center agents with their accumulated real metrics.
@@ -141,6 +145,10 @@ async def list_agents(
             db,
             service_id=service_id,
             service_key=service_key,
+            period=period,
+            date_from=date_from,
+            date_to=date_to,
+            type=type,
             context=context,
         )
         return data
