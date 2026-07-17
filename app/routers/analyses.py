@@ -6,7 +6,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import get_db
+from app.dependencies import get_db, get_tenant_context
+from app.core.tenant_context import TenantContext
 from app.schemas.analyses import AnalysisDetailResponse, AnalysisListItem
 from app.services import analyses_service
 
@@ -17,6 +18,7 @@ router = APIRouter(prefix="/bm", tags=["Analyses"])
 @router.get("/analyses", response_model=list[AnalysisListItem])
 async def list_analyses(
     db: Annotated[AsyncSession, Depends(get_db)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     type: Annotated[str | None, Query(description="audio | text")] = None,
     call_id: Annotated[str | None, Query()] = None,
     agent: Annotated[str | None, Query()] = None,
@@ -53,12 +55,14 @@ async def list_analyses(
         offset=offset,
         global_score_min=global_score_min,
         global_score_max=global_score_max,
+        context=context,
     )
 
 
 @router.get("/analyses/current", response_model=list[AnalysisListItem])
 async def list_analyses_current(
     db: Annotated[AsyncSession, Depends(get_db)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     type: Annotated[str | None, Query(description="audio | text")] = None,
     call_id: Annotated[str | None, Query()] = None,
     agent: Annotated[str | None, Query()] = None,
@@ -94,12 +98,14 @@ async def list_analyses_current(
         offset=offset,
         global_score_min=global_score_min,
         global_score_max=global_score_max,
+        context=context,
     )
 
 
 @router.get("/analyses/history", response_model=list[AnalysisListItem])
 async def list_analyses_history(
     db: Annotated[AsyncSession, Depends(get_db)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     type: Annotated[str | None, Query(description="audio | text")] = None,
     call_id: Annotated[str | None, Query()] = None,
     agent: Annotated[str | None, Query()] = None,
@@ -135,12 +141,14 @@ async def list_analyses_history(
         offset=offset,
         global_score_min=global_score_min,
         global_score_max=global_score_max,
+        context=context,
     )
 
 
 @router.get("/analysis-detail", response_model=AnalysisDetailResponse)
 async def analysis_detail(
     db: Annotated[AsyncSession, Depends(get_db)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     analysis_id: Annotated[int | None, Query()] = None,
     call_id: Annotated[str | None, Query()] = None,
     type: Annotated[str | None, Query()] = None,
@@ -156,6 +164,7 @@ async def analysis_detail(
         analysis_id=analysis_id,
         call_id=call_id,
         analysis_type=type,
+        context=context,
     )
     if not result:
         raise HTTPException(status_code=404, detail="Analysis not found")

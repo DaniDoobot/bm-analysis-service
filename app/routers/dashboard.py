@@ -7,7 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import get_db, get_current_user
+from app.dependencies import get_db, get_current_user, get_tenant_context
+from app.core.tenant_context import TenantContext, InternalRole
 from app.models.users import User
 from app.services.dashboard_service import (
     get_dashboard_summary,
@@ -27,6 +28,7 @@ router = APIRouter(prefix="/bm", tags=["Dashboard & Analytics"])
 @router.get("/dashboard/summary")
 async def dashboard_summary(
     db: Annotated[AsyncSession, Depends(get_db)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     type: Annotated[str, Query(description="audio | text")] = "audio",
     period: Annotated[str, Query(description="24h | 7d | 30d")] = "24h",
     service_id: Annotated[int | None, Query(description="Filter by service ID")] = None,
@@ -60,6 +62,7 @@ async def dashboard_summary(
             duration_max_seconds=duration_max_seconds,
             avg_score_min=avg_score_min,
             avg_score_max=avg_score_max,
+            context=context,
         )
         return data
     except Exception as e:
@@ -70,6 +73,7 @@ async def dashboard_summary(
 @router.get("/dashboard/agents-comparison", response_model=AgentComparisonResponse)
 async def agents_comparison(
     db: Annotated[AsyncSession, Depends(get_db)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     hubspot_owner_ids: Annotated[str | None, Query(description="Comma-separated HubSpot owner IDs")] = None,
     service_id: Annotated[int | None, Query(description="Filter by service ID")] = None,
     service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
@@ -114,6 +118,7 @@ async def agents_comparison(
             duration_max_seconds=duration_max_seconds,
             avg_score_min=avg_score_min,
             avg_score_max=avg_score_max,
+            context=context,
         )
         return data
     except Exception as e:
@@ -124,6 +129,7 @@ async def agents_comparison(
 @router.get("/agents")
 async def list_agents(
     db: Annotated[AsyncSession, Depends(get_db)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     service_id: Annotated[int | None, Query(description="Filter by service ID")] = None,
     service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
 ):
@@ -135,6 +141,7 @@ async def list_agents(
             db,
             service_id=service_id,
             service_key=service_key,
+            context=context,
         )
         return data
     except Exception as e:
@@ -151,7 +158,7 @@ def resolve_agent_owner_id(user: User) -> str | None:
 @router.get("/agents/{hubspot_owner_id}/evolution", response_model=AgentEvolutionResponse)
 async def agent_evolution(
     hubspot_owner_id: str,
-    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
     type: Annotated[str, Query(description="audio | text")] = "audio",
     period: Annotated[str, Query(description="24h | 7d | 30d | 90d | all")] = "30d",
@@ -171,23 +178,11 @@ async def agent_evolution(
     Get chronological performance, trends, strengths, weaknesses,
     and evolution timelines for a specific agent.
     """
-    normalized_role = (current_user.role or "").strip().lower()
-    is_admin = normalized_role in {"admin", "administrador"}
-    is_agent = normalized_role in {"agent", "agente"}
-
-    if not is_admin and not is_agent:
+    if context.allowed_agent_ids is not None and hubspot_owner_id not in context.allowed_agent_ids:
         raise HTTPException(
             status_code=403,
-            detail="No autorizado para este rol."
+            detail="No tienes permiso para consultar la evolución de este agente."
         )
-
-    if not is_admin: # is_agent
-        resolved_id = resolve_agent_owner_id(current_user)
-        if not resolved_id or resolved_id != hubspot_owner_id:
-            raise HTTPException(
-                status_code=403,
-                detail="No tienes permiso para consultar la evolución de este agente."
-            )
             
     try:
         typo_ids = None
@@ -209,6 +204,7 @@ async def agent_evolution(
             duration_max_seconds=duration_max_seconds,
             avg_score_min=avg_score_min,
             avg_score_max=avg_score_max,
+            context=context,
         )
         return data
     except Exception as e:
@@ -219,6 +215,7 @@ async def agent_evolution(
 @router.get("/dashboard/objections")
 async def objections_breakdown(
     db: Annotated[AsyncSession, Depends(get_db)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     type: Annotated[str, Query(description="audio | text")] = "audio",
     period: Annotated[str, Query(description="24h | 7d | 30d | 90d | all")] = "7d",
     agent_id: Annotated[str | None, Query(description="hubspot_owner_id")] = None,
@@ -256,6 +253,7 @@ async def objections_breakdown(
             duration_max_seconds=duration_max_seconds,
             avg_score_min=avg_score_min,
             avg_score_max=avg_score_max,
+            context=context,
         )
         return data
     except Exception as e:
@@ -265,7 +263,7 @@ async def objections_breakdown(
 
 @router.get("/me/evolution", response_model=AgentEvolutionResponse)
 async def get_my_evolution(
-    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
     email: Annotated[str | None, Query(description="For backwards compatibility, ignored for agents")] = None,
     type: Annotated[str, Query(description="audio | text")] = "audio",
@@ -285,32 +283,36 @@ async def get_my_evolution(
     """
     Get chronological performance evolution metrics specifically for the logged-in agent.
     """
-    normalized_role = (current_user.role or "").strip().lower()
-    is_admin = normalized_role in {"admin", "administrador"}
-    is_agent = normalized_role in {"agent", "agente"}
-
-    if not is_admin and not is_agent:
-        raise HTTPException(
-            status_code=403,
-            detail="No autorizado para este rol."
-        )
-
+    # Use context's normalized role and fields instead of legacy strings
+    is_admin = context.is_super_admin or context.normalized_role == InternalRole.COMPANY_ADMIN
+    
+    # We resolve the email owner_id if it's admin, else we use context.allowed_agent_ids
     if is_admin:
         if email:
             owner_id = resolve_owner_id_by_email(email)
         else:
-            owner_id = resolve_agent_owner_id(current_user)
+            # Fallback to current user's owner ID
+            current_user = await db.get(User, context.user_id)
+            owner_id = resolve_agent_owner_id(current_user) if current_user else None
         if not owner_id:
             raise HTTPException(
                 status_code=400,
                 detail="Debes especificar un agente válido (vía email u owner_id asignado)."
             )
-    else: # is_agent
-        owner_id = resolve_agent_owner_id(current_user)
+    else:
+        # For restricted roles (managers, coordinators, agents), we use their own assigned owner_id
+        current_user = await db.get(User, context.user_id)
+        owner_id = resolve_agent_owner_id(current_user) if current_user else None
         if not owner_id:
             raise HTTPException(
                 status_code=403,
                 detail="No hay agente asociado a este usuario."
+            )
+        # Check permissions explicitly
+        if context.allowed_agent_ids is not None and owner_id not in context.allowed_agent_ids:
+            raise HTTPException(
+                status_code=403,
+                detail="No tienes permiso para consultar la evolución de este agente."
             )
 
     try:
@@ -333,6 +335,7 @@ async def get_my_evolution(
             duration_max_seconds=duration_max_seconds,
             avg_score_min=avg_score_min,
             avg_score_max=avg_score_max,
+            context=context,
         )
         return data
     except Exception as e:
@@ -388,12 +391,13 @@ async def get_my_agent_details(
 async def get_latest_analysis_detail(
     identifier: str,
     db: Annotated[AsyncSession, Depends(get_db)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
 ):
     """
     Get the full detail of a single MassEvaluationResult by ID or call_id.
     """
     try:
-        data = await get_mass_result_detail(db, identifier)
+        data = await get_mass_result_detail(db, identifier, context=context)
         if not data:
             raise HTTPException(
                 status_code=404,

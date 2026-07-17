@@ -7,6 +7,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.tenant_context import TenantContext
+
 from app.models.analyses import Analysis, AnalysisResult, CallAnalysisCurrent
 from app.schemas.analyses import AnalysisDetailResponse
 from app.services.analysis_results_mapper import group_results, build_summary
@@ -52,6 +54,7 @@ async def list_analyses(
     offset: int = 0,
     global_score_min: float | None = None,
     global_score_max: float | None = None,
+    context: TenantContext | None = None,
 ) -> list[CallAnalysisCurrent]:
     """List analyses from bm_call_analysis_current with optional filters."""
     query = select(CallAnalysisCurrent)
@@ -59,6 +62,13 @@ async def list_analyses(
     # Exclude test records from all listings and metrics
     query = query.where(~CallAnalysisCurrent.call_id.like("TEST_%"))
     query = query.where(CallAnalysisCurrent.hubspot_owner_id != "test_owner")
+
+    if context:
+        query = query.where(CallAnalysisCurrent.company_id.in_(context.allowed_company_ids))
+        if context.allowed_service_ids is not None:
+            query = query.where(CallAnalysisCurrent.service_id.in_(context.allowed_service_ids))
+        if context.allowed_agent_ids is not None:
+            query = query.where(CallAnalysisCurrent.hubspot_owner_id.in_(context.allowed_agent_ids))
 
     if analysis_type:
         query = query.where(CallAnalysisCurrent.analysis_type == analysis_type)
@@ -107,6 +117,7 @@ async def list_analyses_history(
     offset: int = 0,
     global_score_min: float | None = None,
     global_score_max: float | None = None,
+    context: TenantContext | None = None,
 ) -> list[Analysis]:
     """List all historical analyses from bm_analyses (history) with optional filters."""
     query = select(Analysis)
@@ -114,6 +125,13 @@ async def list_analyses_history(
     # Exclude test records from all listings and metrics
     query = query.where(~Analysis.call_id.like("TEST_%"))
     query = query.where(Analysis.hubspot_owner_id != "test_owner")
+
+    if context:
+        query = query.where(Analysis.company_id.in_(context.allowed_company_ids))
+        if context.allowed_service_ids is not None:
+            query = query.where(Analysis.service_id.in_(context.allowed_service_ids))
+        if context.allowed_agent_ids is not None:
+            query = query.where(Analysis.hubspot_owner_id.in_(context.allowed_agent_ids))
 
     if analysis_type:
         query = query.where(Analysis.analysis_type == analysis_type)
@@ -152,28 +170,45 @@ async def get_analysis_detail(
     analysis_id: int | None = None,
     call_id: str | None = None,
     analysis_type: str | None = None,
+    context: TenantContext | None = None,
 ) -> AnalysisDetailResponse | None:
     """Get full analysis detail by analysis_id or by call_id+type."""
 
     analysis: Analysis | None = None
 
     if analysis_id:
-        result = await db.execute(
-            select(Analysis).where(Analysis.analysis_id == analysis_id)
-        )
+        stmt = select(Analysis).where(Analysis.analysis_id == analysis_id)
+        if context:
+            stmt = stmt.where(Analysis.company_id.in_(context.allowed_company_ids))
+            if context.allowed_service_ids is not None:
+                stmt = stmt.where(Analysis.service_id.in_(context.allowed_service_ids))
+            if context.allowed_agent_ids is not None:
+                stmt = stmt.where(Analysis.hubspot_owner_id.in_(context.allowed_agent_ids))
+        result = await db.execute(stmt)
         analysis = result.scalars().first()
     elif call_id:
         # Resolve latest_analysis_id from current table
         q = select(CallAnalysisCurrent).where(CallAnalysisCurrent.call_id == call_id)
         if analysis_type:
             q = q.where(CallAnalysisCurrent.analysis_type == analysis_type)
+        if context:
+            q = q.where(CallAnalysisCurrent.company_id.in_(context.allowed_company_ids))
+            if context.allowed_service_ids is not None:
+                q = q.where(CallAnalysisCurrent.service_id.in_(context.allowed_service_ids))
+            if context.allowed_agent_ids is not None:
+                q = q.where(CallAnalysisCurrent.hubspot_owner_id.in_(context.allowed_agent_ids))
         q = q.limit(1)
         cur_result = await db.execute(q)
         current = cur_result.scalars().first()
         if current and current.latest_analysis_id:
-            a_result = await db.execute(
-                select(Analysis).where(Analysis.analysis_id == current.latest_analysis_id)
-            )
+            stmt = select(Analysis).where(Analysis.analysis_id == current.latest_analysis_id)
+            if context:
+                stmt = stmt.where(Analysis.company_id.in_(context.allowed_company_ids))
+                if context.allowed_service_ids is not None:
+                    stmt = stmt.where(Analysis.service_id.in_(context.allowed_service_ids))
+                if context.allowed_agent_ids is not None:
+                    stmt = stmt.where(Analysis.hubspot_owner_id.in_(context.allowed_agent_ids))
+            a_result = await db.execute(stmt)
             analysis = a_result.scalars().first()
 
     if not analysis:

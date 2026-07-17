@@ -1,9 +1,11 @@
 """FastAPI router for Service Evolution dashboard."""
 import logging
+from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import get_db
+from app.dependencies import get_db, get_tenant_context
+from app.core.tenant_context import TenantContext
 from app.schemas.service_evolution import (
     ServiceEvolutionResponse,
     ServiceListItem,
@@ -18,6 +20,7 @@ router = APIRouter(prefix="/bm/service-evolution", tags=["Service Evolution"])
 
 @router.get("/services", response_model=list[ServiceListItem])
 async def get_services(
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     date_from: str | None = Query(None, description="Fecha de inicio (ISO 8601 o YYYY-MM-DD) para filtrar recuento de llamadas"),
     date_to: str | None = Query(None, description="Fecha de fin (ISO 8601 o YYYY-MM-DD) para filtrar recuento de llamadas"),
     db: AsyncSession = Depends(get_db)
@@ -27,7 +30,7 @@ async def get_services(
     Useful for populating service selectors.
     """
     try:
-        return await ServiceEvolutionService.get_services(db, date_from=date_from, date_to=date_to)
+        return await ServiceEvolutionService.get_services(db, date_from=date_from, date_to=date_to, context=context)
     except Exception as e:
         logger.error("Error fetching services for evolution dashboard: %s", e, exc_info=True)
         raise HTTPException(
@@ -38,6 +41,7 @@ async def get_services(
 
 @router.get("/criteria", response_model=list[CriterionListItem])
 async def get_criteria(
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     service_id: int | None = Query(None, description="Filtrar criterios aplicados a un servicio específico"),
     date_from: str | None = Query(None, description="Fecha de inicio (ISO 8601 o YYYY-MM-DD) para filtrar recuento de criterios"),
     date_to: str | None = Query(None, description="Fecha de fin (ISO 8601 o YYYY-MM-DD) para filtrar recuento de criterios"),
@@ -48,7 +52,7 @@ async def get_criteria(
     Useful for selecting criteria to graph/analyze.
     """
     try:
-        return await ServiceEvolutionService.get_criteria(db, service_id=service_id, date_from=date_from, date_to=date_to)
+        return await ServiceEvolutionService.get_criteria(db, service_id=service_id, date_from=date_from, date_to=date_to, context=context)
     except Exception as e:
         logger.error("Error fetching criteria for evolution dashboard: %s", e, exc_info=True)
         raise HTTPException(
@@ -59,6 +63,7 @@ async def get_criteria(
 
 @router.get("", response_model=ServiceEvolutionResponse)
 async def get_evolution(
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     service_id: int | None = Query(None, description="Filtrar por ID del servicio"),
     service_key: str | None = Query(None, description="Filtrar por clave del servicio"),
     date_from: str | None = Query(None, description="Fecha de inicio (ISO 8601 o YYYY-MM-DD)"),
@@ -90,6 +95,15 @@ async def get_evolution(
     if typology_ids and typology_ids.strip():
         typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
 
+    if context.allowed_agent_ids is not None:
+        if agent_owner_id:
+            if agent_owner_id not in context.allowed_agent_ids:
+                raise HTTPException(
+                    status_code=403,
+                    detail="No tienes permiso para consultar la evolución de este agente."
+                )
+        # If they are restricted and no agent_owner_id is set, it will be filtered by context.allowed_agent_ids in the service layer
+
     try:
         return await ServiceEvolutionService.get_evolution(
             db,
@@ -106,6 +120,7 @@ async def get_evolution(
             duration_max_seconds=duration_max_seconds,
             avg_score_min=avg_score_min,
             avg_score_max=avg_score_max,
+            context=context,
         )
     except Exception as e:
         logger.error("Error generating service evolution: %s", e, exc_info=True)

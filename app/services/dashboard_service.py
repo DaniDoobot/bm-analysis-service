@@ -13,6 +13,7 @@ from app.models.mass_evaluations import MassEvaluationResult, MassEvaluationCrit
 from app.models.services import Service
 from app.models.typologies import Typology
 from app.utils.hubspot_owners import resolve_agent_display, resolve_owner_name, OWNER_TO_NAME
+from app.core.tenant_context import TenantContext
 
 logger = logging.getLogger(__name__)
 
@@ -448,6 +449,7 @@ async def get_dashboard_summary(
     duration_max_seconds: int | None = None,
     avg_score_min: float | None = None,
     avg_score_max: float | None = None,
+    context: TenantContext | None = None,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     
@@ -493,6 +495,13 @@ async def get_dashboard_summary(
     stmt = select(MassEvaluationResult).where(
         MassEvaluationResult.status == "completed"
     )
+    if context:
+        stmt = stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+        if context.allowed_service_ids is not None:
+            stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
+        if context.allowed_agent_ids is not None:
+            stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(context.allowed_agent_ids))
+
     if start_anterior:
         stmt = stmt.where(
             func.coalesce(
@@ -508,7 +517,12 @@ async def get_dashboard_summary(
             ) <= end_actual
         )
     if service_id is not None:
-        stmt = stmt.where(MassEvaluationResult.service_id == service_id)
+        # Check service_id permissions if context is present
+        if context and context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+            # Force empty result if not allowed
+            stmt = stmt.where(MassEvaluationResult.service_id == -1)
+        else:
+            stmt = stmt.where(MassEvaluationResult.service_id == service_id)
     elif service_key is not None:
         stmt = stmt.where(MassEvaluationResult.service_key == service_key)
 
@@ -640,8 +654,16 @@ async def get_dashboard_summary(
         Typology.is_active == True,
         Service.is_active == True
     )
+    if context:
+        typo_stmt = typo_stmt.where(Service.company_id.in_(context.allowed_company_ids))
+        if context.allowed_service_ids is not None:
+            typo_stmt = typo_stmt.where(Service.service_id.in_(context.allowed_service_ids))
+
     if service_id is not None:
-        typo_stmt = typo_stmt.where(Typology.service_id == service_id)
+        if context and context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+            typo_stmt = typo_stmt.where(Typology.service_id == -1)
+        else:
+            typo_stmt = typo_stmt.where(Typology.service_id == service_id)
     elif service_key is not None:
         typo_stmt = typo_stmt.where(Service.service_key == service_key)
 
@@ -818,7 +840,8 @@ async def get_dashboard_summary(
 async def get_agents_list(
     db: AsyncSession,
     service_id: int | None = None,
-    service_key: str | None = None
+    service_key: str | None = None,
+    context: TenantContext | None = None,
 ) -> list[dict[str, Any]]:
     """Return agents list with metrics calculated from bm_mass_evaluation_results only."""
     from app.models.mass_evaluations import MassEvaluationResult
@@ -833,8 +856,18 @@ async def get_agents_list(
         MassEvaluationResult.status == "completed",
         MassEvaluationResult.hubspot_owner_id.is_not(None),
     )
+    if context:
+        agg_stmt = agg_stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+        if context.allowed_service_ids is not None:
+            agg_stmt = agg_stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
+        if context.allowed_agent_ids is not None:
+            agg_stmt = agg_stmt.where(MassEvaluationResult.hubspot_owner_id.in_(context.allowed_agent_ids))
+
     if service_id is not None:
-        agg_stmt = agg_stmt.where(MassEvaluationResult.service_id == service_id)
+        if context and context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+            agg_stmt = agg_stmt.where(MassEvaluationResult.service_id == -1)
+        else:
+            agg_stmt = agg_stmt.where(MassEvaluationResult.service_id == service_id)
     elif service_key is not None:
         agg_stmt = agg_stmt.where(MassEvaluationResult.service_key == service_key)
         
@@ -860,8 +893,18 @@ async def get_agents_list(
         MassEvaluationResult.status == "completed",
         MassEvaluationResult.hubspot_owner_id.is_not(None),
     )
+    if context:
+        rj_stmt = rj_stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+        if context.allowed_service_ids is not None:
+            rj_stmt = rj_stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
+        if context.allowed_agent_ids is not None:
+            rj_stmt = rj_stmt.where(MassEvaluationResult.hubspot_owner_id.in_(context.allowed_agent_ids))
+
     if service_id is not None:
-        rj_stmt = rj_stmt.where(MassEvaluationResult.service_id == service_id)
+        if context and context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+            rj_stmt = rj_stmt.where(MassEvaluationResult.service_id == -1)
+        else:
+            rj_stmt = rj_stmt.where(MassEvaluationResult.service_id == service_id)
     elif service_key is not None:
         rj_stmt = rj_stmt.where(MassEvaluationResult.service_key == service_key)
         
@@ -897,10 +940,14 @@ async def get_agents_list(
     results = []
     # 3. Known mapping first (always shown even with 0 evaluations)
     for oid, name in OWNER_TO_NAME.items():
+        if context and context.allowed_agent_ids is not None and oid not in context.allowed_agent_ids:
+            continue
         results.append(_fmt(db_stats.get(oid), oid, name))
 
     # 4. Extra agents found only in mass eval results
     for oid in db_stats:
+        if context and context.allowed_agent_ids is not None and oid not in context.allowed_agent_ids:
+            continue
         if oid not in OWNER_TO_NAME:
             row = db_stats[oid]
             disp_name = row.agent_name or oid
@@ -930,6 +977,7 @@ async def get_agent_evolution(
     duration_max_seconds: int | None = None,
     avg_score_min: float | None = None,
     avg_score_max: float | None = None,
+    context: TenantContext | None = None,
 ) -> dict[str, Any]:
     """Evolution metrics from bm_mass_evaluation_results only."""
     from app.models.mass_evaluations import MassEvaluationResult
@@ -944,6 +992,14 @@ async def get_agent_evolution(
         MassEvaluationResult.hubspot_owner_id == hubspot_owner_id,
         MassEvaluationResult.status == "completed",
     )
+    if context:
+        stmt = stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+        if context.allowed_service_ids is not None:
+            stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
+        if context.allowed_agent_ids is not None and hubspot_owner_id not in context.allowed_agent_ids:
+            # Force empty result if agent is not allowed
+            stmt = stmt.where(MassEvaluationResult.hubspot_owner_id == "-1")
+
     if dt_from:
         stmt = stmt.where(
             func.coalesce(
@@ -959,7 +1015,10 @@ async def get_agent_evolution(
             ) <= dt_to
         )
     if service_id is not None:
-        stmt = stmt.where(MassEvaluationResult.service_id == service_id)
+        if context and context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+            stmt = stmt.where(MassEvaluationResult.service_id == -1)
+        else:
+            stmt = stmt.where(MassEvaluationResult.service_id == service_id)
     elif service_key is not None:
         stmt = stmt.where(MassEvaluationResult.service_key == service_key)
     if prompt_version_id is not None:
@@ -1232,6 +1291,7 @@ async def get_objections_breakdown(
     duration_max_seconds: int | None = None,
     avg_score_min: float | None = None,
     avg_score_max: float | None = None,
+    context: TenantContext | None = None,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     
@@ -1240,6 +1300,22 @@ async def get_objections_breakdown(
     stmt = select(MassEvaluationResult).where(
         MassEvaluationResult.status == "completed"
     )
+    if context:
+        stmt = stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+        if context.allowed_service_ids is not None:
+            stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
+        if context.allowed_agent_ids is not None:
+            if agent_id:
+                if agent_id not in context.allowed_agent_ids:
+                    stmt = stmt.where(MassEvaluationResult.hubspot_owner_id == "-1")
+                else:
+                    stmt = stmt.where(MassEvaluationResult.hubspot_owner_id == agent_id)
+            else:
+                stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(context.allowed_agent_ids))
+    else:
+        if agent_id:
+            stmt = stmt.where(MassEvaluationResult.hubspot_owner_id == agent_id)
+
     if dt_from:
         stmt = stmt.where(
             func.coalesce(
@@ -1255,11 +1331,12 @@ async def get_objections_breakdown(
             ) <= dt_to
         )
     if service_id is not None:
-        stmt = stmt.where(MassEvaluationResult.service_id == service_id)
+        if context and context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+            stmt = stmt.where(MassEvaluationResult.service_id == -1)
+        else:
+            stmt = stmt.where(MassEvaluationResult.service_id == service_id)
     elif service_key is not None:
         stmt = stmt.where(MassEvaluationResult.service_key == service_key)
-    if agent_id:
-        stmt = stmt.where(MassEvaluationResult.hubspot_owner_id == agent_id)
 
     if typology_ids:
         stmt = stmt.where(MassEvaluationResult.typology_id.in_(typology_ids))
@@ -1405,19 +1482,36 @@ async def get_objections_breakdown(
     }
 
 
-async def get_mass_result_detail(db: AsyncSession, identifier: str) -> dict[str, Any] | None:
+async def get_mass_result_detail(
+    db: AsyncSession,
+    identifier: str,
+    context: TenantContext | None = None,
+) -> dict[str, Any] | None:
     """Retrieve full detail of a single MassEvaluationResult by ID or call_id."""
     row = None
     try:
         id_val = int(identifier)
         stmt = select(MassEvaluationResult).where(MassEvaluationResult.mass_analysis_id == id_val)
+        if context:
+            stmt = stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+            if context.allowed_service_ids is not None:
+                stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
+            if context.allowed_agent_ids is not None:
+                stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(context.allowed_agent_ids))
         res = await db.execute(stmt)
         row = res.scalars().first()
     except ValueError:
         pass
         
     if not row:
-        stmt = select(MassEvaluationResult).where(MassEvaluationResult.call_id == identifier).order_by(MassEvaluationResult.mass_analysis_id.desc())
+        stmt = select(MassEvaluationResult).where(MassEvaluationResult.call_id == identifier)
+        if context:
+            stmt = stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+            if context.allowed_service_ids is not None:
+                stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
+            if context.allowed_agent_ids is not None:
+                stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(context.allowed_agent_ids))
+        stmt = stmt.order_by(MassEvaluationResult.mass_analysis_id.desc())
         res = await db.execute(stmt)
         row = res.scalars().first()
         
@@ -1535,6 +1629,7 @@ async def get_agents_comparison(
     duration_max_seconds: int | None = None,
     avg_score_min: float | None = None,
     avg_score_max: float | None = None,
+    context: TenantContext | None = None,
 ) -> dict[str, Any]:
     """Retrieve multi-agent comparison analytics using MassEvaluationResult."""
     now = datetime.now(timezone.utc)
@@ -1603,13 +1698,33 @@ async def get_agents_comparison(
     stmt = select(MassEvaluationResult).where(
         MassEvaluationResult.status == "completed"
     )
+    if context:
+        stmt = stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+        if context.allowed_service_ids is not None:
+            stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
+        if context.allowed_agent_ids is not None:
+            if hubspot_owner_ids:
+                allowed_requested = [oid for oid in hubspot_owner_ids if oid in context.allowed_agent_ids]
+                if not allowed_requested:
+                    stmt = stmt.where(MassEvaluationResult.hubspot_owner_id == "-1")
+                else:
+                    stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(allowed_requested))
+            else:
+                stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(context.allowed_agent_ids))
+    else:
+        if hubspot_owner_ids:
+            stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(hubspot_owner_ids))
+
     if start_anterior:
         stmt = stmt.where(MassEvaluationResult.call_timestamp >= start_anterior)
     if end_actual:
         stmt = stmt.where(MassEvaluationResult.call_timestamp <= end_actual)
         
     if service_id is not None:
-        stmt = stmt.where(MassEvaluationResult.service_id == service_id)
+        if context and context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+            stmt = stmt.where(MassEvaluationResult.service_id == -1)
+        else:
+            stmt = stmt.where(MassEvaluationResult.service_id == service_id)
     elif service_key is not None:
         stmt = stmt.where(MassEvaluationResult.service_key == service_key)
         
@@ -1619,9 +1734,6 @@ async def get_agents_comparison(
         stmt = stmt.where(MassEvaluationResult.typology_id == typology_id)
     elif typology_key is not None:
         stmt = stmt.where(MassEvaluationResult.typology_key == typology_key)
-        
-    if hubspot_owner_ids:
-        stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(hubspot_owner_ids))
 
     if duration_min_seconds is not None:
         stmt = stmt.where(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)

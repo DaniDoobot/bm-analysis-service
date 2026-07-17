@@ -5,13 +5,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import get_db, require_admin
+from app.dependencies import get_db, get_tenant_context
+from app.core.tenant_context import TenantContext
+from app.core.roles import InternalRole
 from app.models.users import User
 from app.models.mass_evaluations import MassEvaluationResult, MassEvaluationCriterionResult
-from app.models.analyses import AnalysisCriterionResult
+from app.models.analyses import Analysis, AnalysisCriterionResult
 from app.schemas.analytics import (
     AnalyticsItem,
     AgentInfo,
@@ -22,6 +24,20 @@ from app.schemas.analytics import (
 )
 from app.services.dashboard_service import resolve_date_range, extract_score_from_mass
 from app.utils.hubspot_owners import resolve_owner_name
+
+def _format_int_list(lst) -> str:
+    if not lst:
+        return "(-1)"
+    return f"({','.join(str(int(x)) for x in lst)})"
+
+def _format_str_list(lst) -> str:
+    if not lst:
+        return "('-1')"
+    safe_vals = []
+    for x in lst:
+        clean = str(x).replace("'", "''")
+        safe_vals.append(f"'{clean}'")
+    return f"({','.join(safe_vals)})"
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/bm", tags=["Analytics V2"])
@@ -86,7 +102,7 @@ def normalize_key(raw_key: str) -> str:
     }
     return special_mappings.get(s, s)
 
-async def get_all_metrics(db: AsyncSession) -> list[dict]:
+async def get_all_metrics(db: AsyncSession, context: TenantContext | None = None) -> list[dict]:
     metrics = list(BASE_METRICS)
     existing_keys = {m["key"] for m in metrics}
     
@@ -95,7 +111,16 @@ async def get_all_metrics(db: AsyncSession) -> list[dict]:
             MassEvaluationCriterionResult.criterion_key,
             func.max(MassEvaluationCriterionResult.criterion_name).label("name"),
             func.max(MassEvaluationCriterionResult.criterion_type).label("type")
-        ).where(MassEvaluationCriterionResult.criterion_key != None).group_by(MassEvaluationCriterionResult.criterion_key)
+        ).join(
+            MassEvaluationResult, MassEvaluationCriterionResult.mass_analysis_id == MassEvaluationResult.mass_analysis_id
+        ).where(
+            MassEvaluationCriterionResult.criterion_key != None
+        )
+        if context:
+            stmt1 = stmt1.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+            if context.allowed_service_ids is not None:
+                stmt1 = stmt1.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
+        stmt1 = stmt1.group_by(MassEvaluationCriterionResult.criterion_key)
         res1 = await db.execute(stmt1)
         rows1 = res1.all()
     except Exception as e:
@@ -107,7 +132,16 @@ async def get_all_metrics(db: AsyncSession) -> list[dict]:
             AnalysisCriterionResult.criterion_key,
             func.max(AnalysisCriterionResult.criterion_name).label("name"),
             func.max(AnalysisCriterionResult.criterion_type).label("type")
-        ).where(AnalysisCriterionResult.criterion_key != None).group_by(AnalysisCriterionResult.criterion_key)
+        ).join(
+            Analysis, AnalysisCriterionResult.analysis_id == Analysis.analysis_id
+        ).where(
+            AnalysisCriterionResult.criterion_key != None
+        )
+        if context:
+            stmt2 = stmt2.where(Analysis.company_id.in_(context.allowed_company_ids))
+            if context.allowed_service_ids is not None:
+                stmt2 = stmt2.where(Analysis.service_id.in_(context.allowed_service_ids))
+        stmt2 = stmt2.group_by(AnalysisCriterionResult.criterion_key)
         res2 = await db.execute(stmt2)
         rows2 = res2.all()
     except Exception as e:
@@ -278,11 +312,16 @@ def extract_metric_value(r: MassEvaluationResult, criteria: list[MassEvaluationC
     }
 )
 async def get_analytics_items(
-    current_user: Annotated[User, Depends(require_admin)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: Annotated[AsyncSession, Depends(get_db)]
 ):
     """Retrieve the catalogue of compared metrics available in Analytics v2."""
-    return await get_all_metrics(db)
+    if context.normalized_role == InternalRole.AGENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Se requiere rol de nivel superior."
+        )
+    return await get_all_metrics(db, context=context)
 
 
 @router.get(
@@ -296,7 +335,7 @@ async def get_analytics_items(
     }
 )
 async def get_agents_comparison(
-    current_user: Annotated[User, Depends(require_admin)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
     date_from: Annotated[str | None, Query(description="Start date (ISO or YYYY-MM-DD)")] = None,
     date_to: Annotated[str | None, Query(description="End date (ISO or YYYY-MM-DD)")] = None,
@@ -316,12 +355,22 @@ async def get_agents_comparison(
     Retrieve agents performance comparison breakdown.
     Optimized to run exactly two SQL queries to avoid N+1 issues.
     """
+    if context.normalized_role == InternalRole.AGENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Se requiere rol de nivel superior."
+        )
     try:
         # 1. Resolve timeframe
         dt_from, dt_to, _ = resolve_date_range(date_from, date_to, period=None, default_period="30d")
         
         # 2. Build Mass Evaluation Results filter query
         stmt = select(MassEvaluationResult).where(MassEvaluationResult.status == "completed")
+        
+        stmt = stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+        if context.allowed_service_ids is not None:
+            stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
+            
         if dt_from:
             stmt = stmt.where(
                 func.coalesce(
@@ -337,7 +386,10 @@ async def get_agents_comparison(
                 ) <= dt_to
             )
         if service_id is not None:
-            stmt = stmt.where(MassEvaluationResult.service_id == service_id)
+            if context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+                stmt = stmt.where(MassEvaluationResult.service_id == -1)
+            else:
+                stmt = stmt.where(MassEvaluationResult.service_id == service_id)
         elif service_key is not None:
             stmt = stmt.where(MassEvaluationResult.service_key == service_key)
 
@@ -361,8 +413,18 @@ async def get_agents_comparison(
             stmt = stmt.where(MassEvaluationResult.evaluacion_global <= score_max_scaled)
 
         owner_ids = parse_list_param(agent_owner_ids) + parse_list_param(agent_owner_ids_bracket)
-        if owner_ids:
-            stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(owner_ids))
+        if context.allowed_agent_ids is not None:
+            if owner_ids:
+                allowed_requested = [oid for oid in owner_ids if oid in context.allowed_agent_ids]
+                if not allowed_requested:
+                    stmt = stmt.where(MassEvaluationResult.hubspot_owner_id == "-1")
+                else:
+                    stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(allowed_requested))
+            else:
+                stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(context.allowed_agent_ids))
+        else:
+            if owner_ids:
+                stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(owner_ids))
 
         # Query Results
         res = await db.execute(stmt)
@@ -398,7 +460,7 @@ async def get_agents_comparison(
         ]
 
         # 5. Filter items catalogue
-        all_metrics = await get_all_metrics(db)
+        all_metrics = await get_all_metrics(db, context=context)
         keys_to_use = parse_list_param(item_keys) + parse_list_param(item_keys_bracket)
         if keys_to_use:
             items_to_use = [item for item in all_metrics if item["key"] in keys_to_use]
@@ -459,7 +521,7 @@ async def get_agents_comparison(
     }
 )
 async def get_items_evolution(
-    current_user: Annotated[User, Depends(require_admin)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
     date_from: Annotated[str | None, Query(description="Start date (ISO or YYYY-MM-DD)")] = None,
     date_to: Annotated[str | None, Query(description="End date (ISO or YYYY-MM-DD)")] = None,
@@ -480,6 +542,11 @@ async def get_items_evolution(
     Retrieve chronological evolution timeline for chosen analytics metrics.
     Grouped by time intervals (hour, day, or week).
     """
+    if context.normalized_role == InternalRole.AGENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Se requiere rol de nivel superior."
+        )
     try:
         # 1. Resolve timeframe
         dt_from, dt_to, recommended_bucket = resolve_date_range(date_from, date_to, period=None, default_period="30d")
@@ -487,6 +554,11 @@ async def get_items_evolution(
 
         # 2. Build Mass Evaluation Results filter query
         stmt = select(MassEvaluationResult).where(MassEvaluationResult.status == "completed")
+        
+        stmt = stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+        if context.allowed_service_ids is not None:
+            stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
+            
         if dt_from:
             stmt = stmt.where(
                 func.coalesce(
@@ -502,7 +574,10 @@ async def get_items_evolution(
                 ) <= dt_to
             )
         if service_id is not None:
-            stmt = stmt.where(MassEvaluationResult.service_id == service_id)
+            if context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+                stmt = stmt.where(MassEvaluationResult.service_id == -1)
+            else:
+                stmt = stmt.where(MassEvaluationResult.service_id == service_id)
         elif service_key is not None:
             stmt = stmt.where(MassEvaluationResult.service_key == service_key)
 
@@ -526,8 +601,18 @@ async def get_items_evolution(
             stmt = stmt.where(MassEvaluationResult.evaluacion_global <= score_max_scaled)
 
         owner_ids = parse_list_param(agent_owner_ids) + parse_list_param(agent_owner_ids_bracket)
-        if owner_ids:
-            stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(owner_ids))
+        if context.allowed_agent_ids is not None:
+            if owner_ids:
+                allowed_requested = [oid for oid in owner_ids if oid in context.allowed_agent_ids]
+                if not allowed_requested:
+                    stmt = stmt.where(MassEvaluationResult.hubspot_owner_id == "-1")
+                else:
+                    stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(allowed_requested))
+            else:
+                stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(context.allowed_agent_ids))
+        else:
+            if owner_ids:
+                stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(owner_ids))
 
         # Query Results
         res = await db.execute(stmt)
@@ -561,7 +646,7 @@ async def get_items_evolution(
             buckets_map.setdefault(b_key, []).append(r)
 
         # 5. Filter items catalogue
-        all_metrics = await get_all_metrics(db)
+        all_metrics = await get_all_metrics(db, context=context)
         keys_to_use = parse_list_param(item_keys) + parse_list_param(item_keys_bracket)
         if keys_to_use:
             items_to_use = [item for item in all_metrics if item["key"] in keys_to_use]
@@ -619,8 +704,8 @@ async def get_items_evolution(
 
 @router.get("/filter-options")
 async def get_filter_options(
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     service_id: Annotated[int | None, Query(description="Filter active typologies by service ID")] = None,
-    current_user: Annotated[User, Depends(require_admin)] = None,
     db: Annotated[AsyncSession, Depends(get_db)] = None,
 ):
     """
@@ -628,12 +713,19 @@ async def get_filter_options(
     """
     try:
         # 1. Fetch active typologies per service
-        typo_query = "SELECT t.typology_id, t.typology_key, t.typology_name, t.service_id, s.service_key FROM bm_typologies t JOIN bm_services s ON t.service_id = s.service_id WHERE t.is_active = true"
+        typo_query = f"SELECT t.typology_id, t.typology_key, t.typology_name, t.service_id, s.service_key FROM bm_typologies t JOIN bm_services s ON t.service_id = s.service_id WHERE t.is_active = true AND s.company_id IN {_format_int_list(context.allowed_company_ids)}"
+        params = {}
+        if context.allowed_service_ids is not None:
+            typo_query += f" AND t.service_id IN {_format_int_list(context.allowed_service_ids)}"
+            
         if service_id is not None:
-            typo_query += " AND t.service_id = :service_id"
-            typo_res = await db.execute(text(typo_query), {"service_id": service_id})
-        else:
-            typo_res = await db.execute(text(typo_query))
+            if context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+                typo_query += " AND t.service_id = -1"
+            else:
+                typo_query += " AND t.service_id = :service_id"
+                params["service_id"] = service_id
+
+        typo_res = await db.execute(text(typo_query), params)
             
         typologies_list = []
         for row in typo_res.fetchall():
@@ -646,7 +738,14 @@ async def get_filter_options(
             })
 
         # 2. Fetch min and max call duration
-        dur_res = await db.execute(text("SELECT MIN(call_duration_seconds), MAX(call_duration_seconds) FROM bm_mass_evaluation_results WHERE status = 'completed'"))
+        dur_query = f"SELECT MIN(call_duration_seconds), MAX(call_duration_seconds) FROM bm_mass_evaluation_results WHERE status = 'completed' AND company_id IN {_format_int_list(context.allowed_company_ids)}"
+        dur_params = {}
+        if context.allowed_service_ids is not None:
+            dur_query += f" AND service_id IN {_format_int_list(context.allowed_service_ids)}"
+        if context.allowed_agent_ids is not None:
+            dur_query += f" AND hubspot_owner_id IN {_format_str_list(context.allowed_agent_ids)}"
+            
+        dur_res = await db.execute(text(dur_query), dur_params)
         dur_row = dur_res.fetchone()
         
         min_seconds = 0

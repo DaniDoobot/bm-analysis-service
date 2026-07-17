@@ -3,6 +3,7 @@ import logging
 from datetime import datetime
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.tenant_context import TenantContext
 from app.schemas.service_evolution import (
     ServiceEvolutionResponse,
     ServiceEvolutionFilters,
@@ -16,6 +17,39 @@ from app.schemas.service_evolution import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _format_int_list(lst) -> str:
+    if not lst:
+        return "(-1)"
+    return f"({','.join(str(int(x)) for x in lst)})"
+
+def _format_str_list(lst) -> str:
+    if not lst:
+        return "('-1')"
+    safe_vals = []
+    for x in lst:
+        clean = str(x).replace("'", "''")
+        safe_vals.append(f"'{clean}'")
+    return f"({','.join(safe_vals)})"
+
+
+def clean_sql(query: str, dialect_name: str) -> str:
+    if dialect_name != "sqlite":
+        return query
+    # Apply SQLite syntax replacements
+    query = query.replace("r.result_json->>'evaluacion_global'", "json_extract(r.result_json, '$.evaluacion_global')")
+    query = query.replace("result_json->>'evaluacion_global'", "json_extract(result_json, '$.evaluacion_global')")
+    query = query.replace("::numeric", "")
+    query = query.replace("::int", "")
+    query = query.replace("::text", "")
+    query = query.replace("::date", "")
+    query = query.replace("timestamptz", "datetime")
+    query = query.replace("date_trunc('week', r.call_timestamp)", "DATE(r.call_timestamp, 'weekday 0', '-6 days')")
+    query = query.replace("date_trunc('month', r.call_timestamp)", "DATE(r.call_timestamp, 'start of month')")
+    query = query.replace("r.created_at::date", "DATE(r.created_at)")
+    query = query.replace("r.call_timestamp::date", "DATE(r.call_timestamp)")
+    return query
 
 
 def parse_date_bounds(date_from: str | None, date_to: str | None) -> tuple[datetime | None, datetime | None]:
@@ -66,6 +100,7 @@ class ServiceEvolutionService:
         db: AsyncSession,
         date_from: str | None = None,
         date_to: str | None = None,
+        context: TenantContext | None = None,
     ) -> list[ServiceListItem]:
         """
         GET /bm/service-evolution/services
@@ -77,7 +112,17 @@ class ServiceEvolutionService:
             date_from, parsed_date_from, date_to, parsed_date_to
         )
 
-        query = text("""
+        where_clause = "WHERE s.is_active = true"
+        params = {
+            "date_from": parsed_date_from,
+            "date_to": parsed_date_to,
+        }
+        if context:
+            where_clause += f" AND s.company_id IN {_format_int_list(context.allowed_company_ids)}"
+            if context.allowed_service_ids is not None:
+                where_clause += f" AND s.service_id IN {_format_int_list(context.allowed_service_ids)}"
+
+        raw_sql = f"""
             SELECT 
                 s.service_id,
                 s.service_key,
@@ -90,15 +135,13 @@ class ServiceEvolutionService:
               AND r.status = 'completed'
               AND (CAST(:date_from AS timestamptz) IS NULL OR r.created_at >= CAST(:date_from AS timestamptz))
               AND (CAST(:date_to AS timestamptz) IS NULL OR r.created_at <= CAST(:date_to AS timestamptz))
-            WHERE s.is_active = true
+            {where_clause}
             GROUP BY s.service_id, s.service_key, s.service_name
             ORDER BY s.service_name;
-        """)
+        """
         
-        result = await db.execute(query, {
-            "date_from": parsed_date_from,
-            "date_to": parsed_date_to,
-        })
+        dialect_name = db.get_bind().dialect.name
+        result = await db.execute(text(clean_sql(raw_sql, dialect_name)), params)
         rows = result.fetchall()
         
         services_list = []
@@ -119,6 +162,7 @@ class ServiceEvolutionService:
         service_id: int | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
+        context: TenantContext | None = None,
     ) -> list[CriterionListItem]:
         """
         GET /bm/service-evolution/criteria
@@ -130,7 +174,28 @@ class ServiceEvolutionService:
             service_id, date_from, parsed_date_from, date_to, parsed_date_to
         )
 
-        query = text("""
+        where_clause = "WHERE r.status = 'completed'"
+        params = {
+            "service_id": service_id,
+            "date_from": parsed_date_from,
+            "date_to": parsed_date_to,
+        }
+        if context:
+            where_clause += f" AND r.company_id IN {_format_int_list(context.allowed_company_ids)}"
+            if context.allowed_service_ids is not None:
+                where_clause += f" AND r.service_id IN {_format_int_list(context.allowed_service_ids)}"
+            if context.allowed_agent_ids is not None:
+                where_clause += f" AND r.hubspot_owner_id IN {_format_str_list(context.allowed_agent_ids)}"
+
+        if service_id is not None:
+            if context and context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+                where_clause += " AND r.service_id = -1"
+            else:
+                where_clause += " AND r.service_id = :service_id"
+        else:
+            where_clause += " AND (CAST(:service_id AS integer) IS NULL OR r.service_id = CAST(:service_id AS integer))"
+
+        raw_sql = f"""
             SELECT 
                 c.criterion_key,
                 MAX(c.criterion_name) AS criterion_name,
@@ -138,19 +203,15 @@ class ServiceEvolutionService:
                 COUNT(CASE WHEN c.is_applicable = true THEN 1 END) AS total_applicable
             FROM bm_mass_evaluation_criterion_results c
             JOIN bm_mass_evaluation_results r ON c.mass_analysis_id = r.mass_analysis_id
-            WHERE r.status = 'completed'
-              AND (CAST(:service_id AS integer) IS NULL OR r.service_id = CAST(:service_id AS integer))
+            {where_clause}
               AND (CAST(:date_from AS timestamptz) IS NULL OR r.created_at >= CAST(:date_from AS timestamptz))
               AND (CAST(:date_to AS timestamptz) IS NULL OR r.created_at <= CAST(:date_to AS timestamptz))
             GROUP BY c.criterion_key
             ORDER BY total_applicable DESC;
-        """)
+        """
         
-        result = await db.execute(query, {
-            "service_id": service_id,
-            "date_from": parsed_date_from,
-            "date_to": parsed_date_to,
-        })
+        dialect_name = db.get_bind().dialect.name
+        result = await db.execute(text(clean_sql(raw_sql, dialect_name)), params)
         rows = result.fetchall()
         
         criteria_list = []
@@ -179,6 +240,7 @@ class ServiceEvolutionService:
         duration_max_seconds: int | None = None,
         avg_score_min: float | None = None,
         avg_score_max: float | None = None,
+        context: TenantContext | None = None,
     ) -> ServiceEvolutionResponse:
         """
         GET /bm/service-evolution
@@ -211,6 +273,8 @@ class ServiceEvolutionService:
             date_from, parsed_date_from, date_to, parsed_date_to
         )
 
+        dialect_name = db.get_bind().dialect.name
+
         # 1. Resolve effective service name
         service_name = None
         if service_id:
@@ -224,6 +288,12 @@ class ServiceEvolutionService:
             if s_row:
                 service_name = s_row[0]
                 service_id = s_row[1]
+
+        if context:
+            if service_id is not None:
+                if context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+                    service_id = -1
+                    service_name = None
 
         filters = ServiceEvolutionFilters(
             service_id=service_id,
@@ -249,6 +319,30 @@ class ServiceEvolutionService:
 
         extra_sql = ""
         extra_sql_left_join = ""
+        typo_extra_where = ""
+
+        if context:
+            extra_sql += f" AND r.company_id IN {_format_int_list(context.allowed_company_ids)}"
+            extra_sql_left_join += f" AND r.company_id IN {_format_int_list(context.allowed_company_ids)}"
+            
+            if context.allowed_service_ids is not None:
+                extra_sql += f" AND r.service_id IN {_format_int_list(context.allowed_service_ids)}"
+                extra_sql_left_join += f" AND r.service_id IN {_format_int_list(context.allowed_service_ids)}"
+                
+            if context.allowed_agent_ids is not None:
+                if agent_owner_id:
+                    if agent_owner_id not in context.allowed_agent_ids:
+                        extra_sql += " AND r.hubspot_owner_id = '-1'"
+                        extra_sql_left_join += " AND r.hubspot_owner_id = '-1'"
+                else:
+                    extra_sql += f" AND r.hubspot_owner_id IN {_format_str_list(context.allowed_agent_ids)}"
+                    extra_sql_left_join += f" AND r.hubspot_owner_id IN {_format_str_list(context.allowed_agent_ids)}"
+
+            typo_extra_where += f" AND t.service_id IN (SELECT service_id FROM bm_services WHERE company_id IN {_format_int_list(context.allowed_company_ids)}"
+            if context.allowed_service_ids is not None:
+                typo_extra_where += f" AND service_id IN {_format_int_list(context.allowed_service_ids)}"
+            typo_extra_where += ")"
+
         if typology_ids:
             ids_str = ",".join(str(tid) for tid in typology_ids)
             extra_sql += f" AND r.typology_id IN ({ids_str})"
@@ -275,7 +369,7 @@ class ServiceEvolutionService:
         # with the dynamic-criteria system), compute it as the mean of all score_1_10 applicable
         # criterion_results, excluding non-qualitative keys (percentages, raw numbers, text, booleans).
 
-        summary_query = text(f"""
+        raw_summary_sql = f"""
             SELECT 
                 COUNT(DISTINCT r.mass_analysis_id) AS total_calls,
                 AVG({_EG_EXPR}) AS avg_evaluacion_global,
@@ -293,8 +387,8 @@ class ServiceEvolutionService:
               AND (CAST(:typology_key AS text) IS NULL OR r.typology_key = CAST(:typology_key AS text))
               AND (CAST(:agent_owner_id AS text) IS NULL OR r.hubspot_owner_id = CAST(:agent_owner_id AS text))
               {extra_sql}
-        """)
-        sum_res = await db.execute(summary_query, params)
+        """
+        sum_res = await db.execute(text(clean_sql(raw_summary_sql, dialect_name)), params)
         sum_row = sum_res.fetchone()
         
         total_calls = 0
@@ -319,7 +413,7 @@ class ServiceEvolutionService:
         # 3. Get Main Typology
         main_typo = None
         if total_calls > 0:
-            mt_query = text(f"""
+            raw_mt_sql = f"""
                 SELECT 
                     r.typology_name
                 FROM bm_mass_evaluation_results r
@@ -334,8 +428,8 @@ class ServiceEvolutionService:
                 GROUP BY r.typology_name
                 ORDER BY COUNT(*) DESC
                 LIMIT 1;
-            """)
-            mt_res = await db.execute(mt_query, params)
+            """
+            mt_res = await db.execute(text(clean_sql(raw_mt_sql, dialect_name)), params)
             mt_row = mt_res.fetchone()
             if mt_row:
                 main_typo = mt_row[0]
@@ -365,7 +459,7 @@ class ServiceEvolutionService:
         #   5=avg_sentiment, 6=avg_empatia, 7=avg_simpatia,
         #   8=avg_claridad, 9=avg_procedimiento, 10=avg_saludo_inicio, 11=avg_n3_preguntas,
         #   12=avg_gestion_objeciones, 13=avg_propension, 14=cierre_cita_rate
-        series_query = text(f"""
+        raw_series_sql = f"""
             SELECT 
                 {period_expr} AS period,
                 r.service_id,
@@ -393,10 +487,10 @@ class ServiceEvolutionService:
               AND (CAST(:agent_owner_id AS text) IS NULL OR r.hubspot_owner_id = CAST(:agent_owner_id AS text))
               {extra_sql}
             GROUP BY period, r.service_id, r.service_name
-            ORDER BY period ASC, service_name ASC;
-        """)
+            ORDER BY period ASC, r.service_name ASC;
+        """
         
-        series_res = await db.execute(series_query, params)
+        series_res = await db.execute(text(clean_sql(raw_series_sql, dialect_name)), params)
         series_rows = series_res.fetchall()
         
         series_list = []
@@ -422,7 +516,7 @@ class ServiceEvolutionService:
 
         # 5. Get Typology split
         # Query 1: Active typologies from bm_typologies + LEFT JOIN call statistics
-        active_typo_query = text(f"""
+        raw_active_typo_sql = f"""
             SELECT 
                 t.typology_id,
                 t.typology_key,
@@ -442,12 +536,13 @@ class ServiceEvolutionService:
             LEFT JOIN bm_mass_evaluation_criterion_results c 
                 ON r.mass_analysis_id = c.mass_analysis_id
             WHERE t.is_active = true
+              {typo_extra_where}
               AND (CAST(:service_id AS integer) IS NULL OR t.service_id = CAST(:service_id AS integer))
               AND (CAST(:typology_key AS text) IS NULL OR t.typology_key = CAST(:typology_key AS text))
             GROUP BY t.typology_id, t.typology_key, t.typology_name, t.sort_order
             ORDER BY t.sort_order ASC, t.typology_id ASC;
-        """)
-        active_typo_res = await db.execute(active_typo_query, params)
+        """
+        active_typo_res = await db.execute(text(clean_sql(raw_active_typo_sql, dialect_name)), params)
         active_typo_rows = active_typo_res.fetchall()
         
         by_typology = []
@@ -464,7 +559,7 @@ class ServiceEvolutionService:
         # Query 2: Unclassified/unlisted calls
         # Only run if typology_key is either None or "unclassified"
         if typology_key is None or typology_key.lower() == "unclassified":
-            unclass_query = text(f"""
+            raw_unclass_sql = f"""
                 SELECT 
                     COUNT(DISTINCT r.mass_analysis_id) AS total_calls,
                     AVG({_EG_EXPR}) AS avg_evaluacion_global,
@@ -481,14 +576,15 @@ class ServiceEvolutionService:
                   AND (
                     r.typology_key IS NULL 
                     OR r.typology_key NOT IN (
-                        SELECT typology_key 
-                        FROM bm_typologies 
-                        WHERE is_active = true 
-                          AND (CAST(:service_id AS integer) IS NULL OR service_id = CAST(:service_id AS integer))
+                        SELECT t.typology_key 
+                        FROM bm_typologies t 
+                        WHERE t.is_active = true 
+                          {typo_extra_where}
+                          AND (CAST(:service_id AS integer) IS NULL OR t.service_id = CAST(:service_id AS integer))
                     )
                   );
-            """)
-            unclass_res = await db.execute(unclass_query, params)
+            """
+            unclass_res = await db.execute(text(clean_sql(raw_unclass_sql, dialect_name)), params)
             unclass_row = unclass_res.fetchone()
             
             if unclass_row and unclass_row[0] > 0:
@@ -502,7 +598,7 @@ class ServiceEvolutionService:
                 ))
 
         # 6. Get Agent split
-        agent_query = text(f"""
+        raw_agent_sql = f"""
             SELECT 
                 r.hubspot_owner_id AS agent_owner_id,
                 COALESCE(r.agent_name, 'Unknown') AS agent_name,
@@ -522,8 +618,8 @@ class ServiceEvolutionService:
               {extra_sql}
             GROUP BY r.hubspot_owner_id, r.agent_name
             ORDER BY total_calls DESC;
-        """)
-        agent_res = await db.execute(agent_query, params)
+        """
+        agent_res = await db.execute(text(clean_sql(raw_agent_sql, dialect_name)), params)
         agent_rows = agent_res.fetchall()
         by_agent = []
         for row in agent_rows:
@@ -537,7 +633,7 @@ class ServiceEvolutionService:
             ))
 
         # 7. Get Criteria Ranking
-        ranking_query = text(f"""
+        raw_ranking_sql = f"""
             SELECT 
                 c.criterion_key,
                 MAX(c.criterion_name) AS criterion_name,
@@ -557,8 +653,8 @@ class ServiceEvolutionService:
               {extra_sql}
             GROUP BY c.criterion_key
             ORDER BY avg_value DESC;
-        """)
-        rank_res = await db.execute(ranking_query, params)
+        """
+        rank_res = await db.execute(text(clean_sql(raw_ranking_sql, dialect_name)), params)
         rank_rows = rank_res.fetchall()
         criteria_ranking = []
         for row in rank_rows:

@@ -7,12 +7,21 @@ from datetime import datetime, timezone, timedelta
 # Add workspace directory to path
 sys.path.append(".")
 
+# SQLite Type Compilers for Compatibility
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.dialects.postgresql import JSONB
+
+@compiles(JSONB, "sqlite")
+def compile_jsonb_sqlite(type_, compiler, **kw):
+    return "JSON"
+
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.main import app
-from app.db import get_engine, enforce_destructive_safety
+from app.db import get_engine, enforce_destructive_safety, Base
 from app.models.users import User
+from app.models.companies import Company
 from app.models.mass_evaluations import (
     MassEvaluationJob,
     MassEvaluationRun,
@@ -24,6 +33,8 @@ from app.utils.security import create_access_token, hash_password
 async def test_analytics_v2_workflow():
     enforce_destructive_safety(is_test=True)
     engine = get_engine()
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
     async with AsyncSession(engine, expire_on_commit=False) as db:
         print("=== INICIANDO PRUEBAS INTEGRADAS DE ANALYTICS V2 ===")
 
@@ -33,13 +44,20 @@ async def test_analytics_v2_workflow():
         await db.execute(delete(MassEvaluationRun).where(MassEvaluationRun.trigger_type == "test_analytics"))
         await db.execute(delete(MassEvaluationJob).where(MassEvaluationJob.job_name == "Analytics Test Job"))
         await db.execute(delete(User).where(User.username.in_(["test_analytics_admin", "test_analytics_agent"])))
+        await db.execute(delete(Company).where(Company.company_key == "boston-medical"))
         await db.commit()
 
-        # 2. Seed Users
+        # 2. Seed Company & Users
+        company = Company(company_name="Boston Medical", company_key="boston-medical", is_active=True)
+        db.add(company)
+        await db.commit()
+        await db.refresh(company)
+
         admin_user = User(
             username="test_analytics_admin",
             email="analytics_admin@boston.es",
             role="administrador",
+            company_id=company.company_id,
             is_active=True,
             password_hash=hash_password("adminpass123")
         )
@@ -47,6 +65,7 @@ async def test_analytics_v2_workflow():
             username="test_analytics_agent",
             email="analytics_agent@boston.es",
             role="agente",
+            company_id=company.company_id,
             hubspot_owner_id="99999999", # Luci test ID
             is_active=True,
             password_hash=hash_password("agentpass123")
@@ -80,6 +99,7 @@ async def test_analytics_v2_workflow():
         # 4. Seed Results and Criteria
         # Result 1: Luci (owner 99999999), Global 8.0, 5 days ago
         res1 = MassEvaluationResult(
+            company_id=company.company_id,
             run_id=run.run_id,
             job_id=job.job_id,
             call_id="call_test_1",
@@ -96,6 +116,7 @@ async def test_analytics_v2_workflow():
         )
         # Result 2: Luci, Global 6.0, 2 days ago
         res2 = MassEvaluationResult(
+            company_id=company.company_id,
             run_id=run.run_id,
             job_id=job.job_id,
             call_id="call_test_2",
@@ -112,6 +133,7 @@ async def test_analytics_v2_workflow():
         )
         # Result 3: Cristina (owner 99999998), Global 9.0, 1 day ago
         res3 = MassEvaluationResult(
+            company_id=company.company_id,
             run_id=run.run_id,
             job_id=job.job_id,
             call_id="call_test_3",
@@ -135,16 +157,19 @@ async def test_analytics_v2_workflow():
         # Criteria Results
         # Res 1 criteria: empatia=9.0, claridad=8.0, cierre_cita=True
         c1_emp = MassEvaluationCriterionResult(
+            id=1,
             mass_analysis_id=res1.mass_analysis_id, run_id=run.run_id, job_id=job.job_id,
             call_id="call_test_1", criterion_key="empatia", criterion_type="score_1_10",
             numeric_value=9.0, is_applicable=True
         )
         c1_cla = MassEvaluationCriterionResult(
+            id=2,
             mass_analysis_id=res1.mass_analysis_id, run_id=run.run_id, job_id=job.job_id,
             call_id="call_test_1", criterion_key="claridad", criterion_type="score_1_10",
             numeric_value=8.0, is_applicable=True
         )
         c1_cie = MassEvaluationCriterionResult(
+            id=3,
             mass_analysis_id=res1.mass_analysis_id, run_id=run.run_id, job_id=job.job_id,
             call_id="call_test_1", criterion_key="cierre_cita", criterion_type="boolean",
             boolean_value=True, is_applicable=True
@@ -152,16 +177,19 @@ async def test_analytics_v2_workflow():
 
         # Res 2 criteria: empatia=5.0, claridad=None (not applicable), cierre_cita=False
         c2_emp = MassEvaluationCriterionResult(
+            id=4,
             mass_analysis_id=res2.mass_analysis_id, run_id=run.run_id, job_id=job.job_id,
             call_id="call_test_2", criterion_key="empatia", criterion_type="score_1_10",
             numeric_value=5.0, is_applicable=True
         )
         c2_cla = MassEvaluationCriterionResult(
+            id=5,
             mass_analysis_id=res2.mass_analysis_id, run_id=run.run_id, job_id=job.job_id,
             call_id="call_test_2", criterion_key="claridad", criterion_type="score_1_10",
             numeric_value=None, is_applicable=False # Not applicable!
         )
         c2_cie = MassEvaluationCriterionResult(
+            id=6,
             mass_analysis_id=res2.mass_analysis_id, run_id=run.run_id, job_id=job.job_id,
             call_id="call_test_2", criterion_key="cierre_cita", criterion_type="boolean",
             boolean_value=False, is_applicable=True
@@ -169,11 +197,13 @@ async def test_analytics_v2_workflow():
 
         # Res 3 criteria: empatia=10.0, claridad=9.0, cierre_cita=None
         c3_emp = MassEvaluationCriterionResult(
+            id=7,
             mass_analysis_id=res3.mass_analysis_id, run_id=run.run_id, job_id=job.job_id,
             call_id="call_test_3", criterion_key="empatia", criterion_type="score_1_10",
             numeric_value=10.0, is_applicable=True
         )
         c3_cla = MassEvaluationCriterionResult(
+            id=8,
             mass_analysis_id=res3.mass_analysis_id, run_id=run.run_id, job_id=job.job_id,
             call_id="call_test_3", criterion_key="claridad", criterion_type="score_1_10",
             numeric_value=9.0, is_applicable=True
@@ -315,8 +345,16 @@ async def test_analytics_v2_workflow():
             await db.execute(delete(MassEvaluationRun).where(MassEvaluationRun.trigger_type == "test_analytics"))
             await db.execute(delete(MassEvaluationJob).where(MassEvaluationJob.job_name == "Analytics Test Job"))
             await db.execute(delete(User).where(User.username.in_(["test_analytics_admin", "test_analytics_agent"])))
+            await db.execute(delete(Company).where(Company.company_key == "boston-medical"))
             await db.commit()
             print("=== TODAS LAS PRUEBAS DE ANALYTICS V2 HAN PASADO CON ÉXITO ===")
+
+    await engine.dispose()
+    if os.path.exists("local_test.db"):
+        try:
+            os.remove("local_test.db")
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     asyncio.run(test_analytics_v2_workflow())
