@@ -170,9 +170,40 @@ async def save_analysis(
     # ── Strip legacy keys from result ─────────────────────────────────────
     clean_result = _strip_legacy_keys(result_json)
 
+    # ── Resolve company_id and service_id dynamically ────────────────────
+    prompt_id = prompt_metadata.get("prompt_id")
+    resolved_service_id = None
+    resolved_company_id = None
+    if prompt_id:
+        from app.models.prompts import Prompt
+        p_stmt = select(Prompt.company_id, Prompt.service_id).where(Prompt.prompt_id == prompt_id)
+        p_res = await db.execute(p_stmt)
+        p_row = p_res.fetchone()
+        if p_row:
+            resolved_company_id = p_row[0]
+            resolved_service_id = p_row[1]
+
+    if not resolved_company_id and owner_id:
+        from app.models.users import User
+        u_stmt = select(User.company_id).where(User.hubspot_owner_id == owner_id)
+        u_res = await db.execute(u_stmt)
+        resolved_company_id = u_res.scalar()
+
+    if not resolved_service_id:
+        from app.models.services import Service
+        s_stmt = select(Service.service_id, Service.company_id).where(Service.service_key == "front")
+        s_res = await db.execute(s_stmt)
+        s_row = s_res.fetchone()
+        if s_row:
+            resolved_service_id = s_row[0]
+            if not resolved_company_id:
+                resolved_company_id = s_row[1]
+
     try:
         # ── 1. Insert bm_analyses ──────────────────────────────────────────
         analysis = Analysis(
+            company_id=resolved_company_id,
+            service_id=resolved_service_id,
             analysis_type=analysis_type,
             call_id=call_id,
             hubspot_url=call_metadata.get("hubspot_url"),
@@ -208,16 +239,13 @@ async def save_analysis(
             from app.models.services import Service
             from app.models.typologies import Typology
 
-            p_stmt = select(Prompt.service_id, Prompt.base_structure_id).where(Prompt.prompt_id == prompt_id)
-            p_res = await db.execute(p_stmt)
-            p_row = p_res.fetchone()
-            service_id = p_row[0] if p_row else None
-            base_structure_id = p_row[1] if p_row else None
-
-            if not service_id:
-                s_stmt = select(Service.service_id).where(Service.service_key == "front")
-                s_res = await db.execute(s_stmt)
-                service_id = s_res.scalar()
+            service_id = resolved_service_id
+            base_structure_id = None
+            if prompt_id:
+                from app.models.prompts import Prompt
+                p_stmt = select(Prompt.base_structure_id).where(Prompt.prompt_id == prompt_id)
+                p_res = await db.execute(p_stmt)
+                base_structure_id = p_res.scalar()
 
             active_typologies = []
             if base_structure_id:
@@ -331,6 +359,8 @@ async def _upsert_current(
         call_id=analysis.call_id,
         analysis_type=analysis.analysis_type,
         latest_analysis_id=analysis.analysis_id,
+        company_id=analysis.company_id,
+        service_id=analysis.service_id,
         hubspot_url=analysis.hubspot_url,
         call_direction=analysis.call_direction,
         call_timestamp=analysis.call_timestamp,
@@ -352,6 +382,8 @@ async def _upsert_current(
         index_elements=["call_id", "analysis_type"],
         set_={
             "latest_analysis_id": stmt.excluded.latest_analysis_id,
+            "company_id": stmt.excluded.company_id,
+            "service_id": stmt.excluded.service_id,
             "hubspot_url": stmt.excluded.hubspot_url,
             "call_direction": stmt.excluded.call_direction,
             "call_timestamp": stmt.excluded.call_timestamp,

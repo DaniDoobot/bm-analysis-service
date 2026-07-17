@@ -1374,27 +1374,20 @@ async def init_db():
                     {"front_id": front_service_id}
                 )
 
-                # Backfill: associate all existing criteria with all active typologies of the service front
-                # Retrieve all active criteria
-                c_stmt = select(PromptCriterion.criterion_id)
-                c_res = await db.execute(c_stmt)
-                all_c_ids = c_res.scalars().all()
-                for c_id in all_c_ids:
-                    for t_id in typology_ids:
-                        assoc_stmt = select(PromptCriterionTypology).where(
-                            PromptCriterionTypology.criterion_id == c_id,
-                            PromptCriterionTypology.typology_id == t_id
-                        )
-                        assoc_res = await db.execute(assoc_stmt)
-                        existing_assoc = assoc_res.scalars().first()
-                        if not existing_assoc:
-                            new_assoc = PromptCriterionTypology(
-                                criterion_id=c_id,
-                                typology_id=t_id
-                            )
-                            db.add(new_assoc)
+                # Backfill: associate all existing criteria with all active typologies of the service front (safe & concurrent-proof)
+                await db.execute(text("""
+                    INSERT INTO bm_prompt_criterion_typologies (criterion_id, typology_id)
+                    SELECT c.criterion_id, t.typology_id
+                    FROM bm_prompt_criteria c
+                    CROSS JOIN (
+                        SELECT typology_id 
+                        FROM bm_typologies 
+                        WHERE service_id = :front_id AND is_active = true
+                    ) t
+                    ON CONFLICT (criterion_id, typology_id) DO NOTHING
+                """), {"front_id": front_service_id})
                 await db.flush()
-                logger.info("Backfilled %d criteria associations for retrocompatibility.", len(all_c_ids))
+                logger.info("Atomic backfill of criteria associations completed successfully.")
 
             # Populate boston_medical_audio dynamic base prompt if possible
             boston_audio_struct = DEFAULT_STRUCTURES[0]
@@ -1470,15 +1463,33 @@ async def init_db():
                     db.add(new_struct)
                     logger.info("Inserting default structure base: %s", key)
             
-            # 3. Cleanup duplicate active prompts of the same type prudently
-            for p_type in ["audio", "text"]:
-                stmt = select(Prompt).where(Prompt.prompt_type == p_type, Prompt.is_active == True)
+            # 3. Cleanup duplicate active prompts of the same type, service, and company prudently
+            dup_stmt = (
+                select(Prompt.prompt_type, Prompt.service_id, Prompt.company_id)
+                .where(Prompt.is_active == True)
+                .group_by(Prompt.prompt_type, Prompt.service_id, Prompt.company_id)
+                .having(text("COUNT(*) > 1"))
+            )
+            dup_res = await db.execute(dup_stmt)
+            dup_groups = dup_res.all()
+            
+            for p_type, service_id, company_id in dup_groups:
+                stmt = select(Prompt).where(
+                    Prompt.prompt_type == p_type,
+                    Prompt.service_id == service_id,
+                    Prompt.is_active == True
+                )
+                if company_id is None:
+                    stmt = stmt.where(Prompt.company_id.is_(None))
+                else:
+                    stmt = stmt.where(Prompt.company_id == company_id)
+                    
                 res = await db.execute(stmt)
                 active_prompts = res.scalars().all()
                 if len(active_prompts) > 1:
                     logger.warning(
-                        "Found %d active prompts for type '%s' in database. Performing cleanup...",
-                        len(active_prompts), p_type
+                        "Found %d active prompts for type '%s', service_id %s, company_id %s. Performing cleanup...",
+                        len(active_prompts), p_type, service_id, company_id
                     )
                     
                     target_active = None
@@ -1497,23 +1508,22 @@ async def init_db():
                             if dt is None:
                                 return (datetime.min.replace(tzinfo=timezone.utc), p.prompt_id)
                             if dt.tzinfo is None:
-                                dt = dt.replace(tzinfo=timezone.utc)
+                                return (dt.replace(tzinfo=timezone.utc), p.prompt_id)
                             else:
-                                dt = dt.astimezone(timezone.utc)
-                            return (dt, p.prompt_id)
+                                return (dt.astimezone(timezone.utc), p.prompt_id)
                         
                         sorted_prompts = sorted(active_prompts, key=get_sort_key, reverse=True)
                         target_active = sorted_prompts[0]
                     
-                    logger.info("Selected prompt ID %d ('%s') to REMAIN ACTIVE.", target_active.prompt_id, target_active.prompt_name)
+                    logger.info("Selected prompt ID %d ('%s') for service_id %s, company_id %s to REMAIN ACTIVE.", target_active.prompt_id, target_active.prompt_name, service_id, company_id)
                     
                     # Deactivate the others
                     for p in active_prompts:
                         if p.prompt_id != target_active.prompt_id:
                             p.is_active = False
                             logger.info(
-                                "Deactivating duplicate active prompt: ID %d, Name '%s' (type '%s')",
-                                p.prompt_id, p.prompt_name, p_type
+                                "Deactivating duplicate active prompt: ID %d, Name '%s' (type '%s', service_id %s, company_id %s)",
+                                p.prompt_id, p.prompt_name, p_type, service_id, company_id
                             )
             # Clean up duplicate is_current prompt versions
             logger.info("Cleaning up duplicate is_current prompt versions...")

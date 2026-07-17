@@ -2,6 +2,9 @@
 import asyncio
 import os
 import sys
+# Force DATABASE_URL to a safe local SQLite DB before any app modules are loaded
+os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///analytics_v2_test.db"
+
 from datetime import datetime, timezone, timedelta
 
 # Add workspace directory to path

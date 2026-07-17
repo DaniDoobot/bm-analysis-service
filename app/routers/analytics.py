@@ -702,6 +702,7 @@ async def get_items_evolution(
 
 
 
+@router.get("/analytics/filter-options")
 @router.get("/filter-options")
 async def get_filter_options(
     context: Annotated[TenantContext, Depends(get_tenant_context)],
