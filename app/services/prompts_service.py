@@ -993,30 +993,32 @@ def generate_base_prompt_skeleton(service_name: str | None, typologies: list) ->
         "- No incluyas comentarios fuera del JSON.",
         "- El formato de salida debe ser exactamente el especificado al final del prompt.",
         "",
-        "### DEFINICIÓN DE TIPOS DE LLAMADA",
-        "El analizador clasifica cada llamada en un único tipo_llamada. Devuelve la clave exacta de la tipología. Está prohibido inventar tipologías.",
-        "",
-        "Tipos permitidos:"
+        "### DEFINICIÓN DE TIPOS DE LLAMADA"
     ]
     
     if typologies:
+        lines.extend([
+            "El analizador clasifica cada llamada en un único tipo_llamada. Devuelve la clave exacta de la tipología. Está prohibido inventar tipologías.",
+            "",
+            "Tipos permitidos:"
+        ])
         for t in typologies:
             desc = getattr(t, "description", None) or getattr(t, "typology_name", None) or getattr(t, "typology_key", "")
             lines.append(f"- {t.typology_key}: {desc}")
     else:
-        lines.append("- (Sin tipologías definidas)")
+        lines.append("No hay tipologías definidas para esta estructura base.")
         
     lines.extend([
         "",
-        "### PRIORIDADES EN CASO DE CONFLICTO",
-        "Si una llamada cumple varias tipologías, aplica este orden:"
+        "### PRIORIDADES EN CASO DE CONFLICTO"
     ])
     
     if typologies:
+        lines.append("Si una llamada cumple varias tipologías, aplica este orden:")
         for idx, t in enumerate(typologies, start=1):
             lines.append(f"{idx}. {t.typology_key}")
     else:
-        lines.append("1. (Sin tipologías definidas)")
+        lines.append("No hay prioridades de tipologías definidas para esta estructura base.")
         
     return "\n".join(lines)
 

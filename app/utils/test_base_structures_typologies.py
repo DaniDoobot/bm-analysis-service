@@ -140,8 +140,10 @@ class TestBaseStructuresTypologies(unittest.IsolatedAsyncioTestCase):
         data = res.json()
         base_prompt = data.get("base_prompt") or data.get("structure", {}).get("base_prompt")
         self.assertIn("### CONTEXTO", base_prompt)
-        self.assertIn("- (Sin tipologías definidas)", base_prompt)
-        self.assertNotIn("citacion:", base_prompt)
+        self.assertIn("No hay tipologías definidas para esta estructura base.", base_prompt)
+        self.assertIn("No hay prioridades de tipologías definidas para esta estructura base.", base_prompt)
+        for forbidden in ["cita:", "confirmacion:", "cancelacion:", "reagendo:", "falta:", "otros:"]:
+            self.assertNotIn(forbidden, base_prompt)
 
     # ── 3. Estructura específica asociada a base sin tipologías muestra 0 tipologías ──
 

@@ -40,58 +40,38 @@ def sanitize_legacy_typologies_block(
         return ""
 
     if not active_typologies:
-        # Fallback to Front desk typologies as custom Mock classes
-        class MockTypology:
-            def __init__(self, key, name, desc):
-                self.typology_key = key
-                self.typology_name = name
-                self.description = desc
-        active_typologies = [
-            MockTypology("cita", "Cita", "El paciente solicita agendar una nueva cita."),
-            MockTypology("confirmacion", "Confirmación", "El paciente confirma la asistencia a una cita agendada."),
-            MockTypology("cancelacion", "Cancelación", "El paciente cancela la cita agendada."),
-            MockTypology("reagendo", "Reagendo", "El paciente reagenda la cita para otra fecha."),
-            MockTypology("falta", "Falta", "El paciente no asistió a su cita agendada."),
-            MockTypology("otros", "Otros", "Cualquier otra consulta, reclamo o duda.")
-        ]
+        dynamic_section = (
+            "### DEFINICIÓN DE TIPOS DE LLAMADA\n"
+            "No hay tipologías definidas para esta estructura base.\n\n"
+            "### PRIORIDADES EN CASO DE CONFLICTO\n"
+            "No hay prioridades de tipologías definidas para esta estructura base.\n\n"
+        )
+    else:
+        # Build the new dynamic typologies section
+        bullet_lines = []
+        active_keys = set()
+        for t in active_typologies:
+            t_key = getattr(t, "typology_key", None) or getattr(t, "key", None)
+            if t_key:
+                active_keys.add(t_key)
+                desc = getattr(t, "description", None) or f"Llamada clasificada como {getattr(t, 'typology_name', t_key)}."
+                bullet_lines.append(f"- {t_key}: {desc}")
 
-    # Build the new dynamic typologies section
-    bullet_lines = []
-    active_keys = set()
-    for t in active_typologies:
-        t_key = getattr(t, "typology_key", None) or getattr(t, "key", None)
-        if t_key:
-            active_keys.add(t_key)
-            desc = getattr(t, "description", None) or f"Llamada clasificada como {getattr(t, 'typology_name', t_key)}."
-            bullet_lines.append(f"- {t_key}: {desc}")
+        priority_lines = []
+        for idx, t in enumerate(active_typologies, 1):
+            t_key = getattr(t, "typology_key", None) or getattr(t, "key", None)
+            if t_key:
+                priority_lines.append(f"{idx}. {t_key}")
 
-    # Build priorities dynamically based on active typologies
-    priority_order = ["transferencia", "intento_contacto", "falta", "reagendo", "cancelacion", "confirmacion", "cita", "otros"]
-    active_priorities = [pk for pk in priority_order if pk in active_keys]
-    priority_descriptions = {
-        "transferencia": "si la llamada la gestionan dos agentes debido a un traspaso/derivación.",
-        "intento_contacto": "si no llega a mantenerse una conversación útil por falta de disponibilidad del paciente (ej. está ocupado, pide que le llamen después, etc.).",
-        "falta": "si la llamada deriva de una no asistencia/ausencia previa a una cita agendada.",
-        "reagendo": "si se reprograma o cambia de fecha/hora una cita médica que ya existía.",
-        "cancelacion": "si se anula definitivamente una cita agendada sin acordar una nueva fecha.",
-        "confirmacion": "si el paciente únicamente confirma su asistencia a una cita agendada (sin reprogramar).",
-        "cita": "si se crea o agenda una cita médica nueva por primera vez.",
-        "otros": "si no encaja en ninguna de las tipologías anteriores."
-    }
-    priority_lines = []
-    for idx, pk in enumerate(active_priorities, 1):
-        desc = priority_descriptions.get(pk, "si aplica esta tipología.")
-        priority_lines.append(f"{idx}. {pk}: {desc}")
-
-    dynamic_section = (
-        "### DEFINICIÓN DE TIPOS DE LLAMADA\n"
-        "El analizador clasifica cada llamada en un único tipo_llamada. Debes evaluar y elegir estrictamente una de las claves permitidas. Devuelve tipo_llamada usando la clave exacta de la tipología (no el nombre visible). Está expresamente prohibido inventar tipologías.\n\n"
-        "Tipos permitidos:\n" +
-        "\n".join(bullet_lines) + "\n\n"
-        "### PRIORIDADES EN CASO DE CONFLICTO\n"
-        "Si una llamada cumple con características de múltiples tipologías o hay dudas sobre cuál elegir, aplica estrictamente este orden de prioridad decreciente (de mayor a menor importancia):\n" +
-        "\n".join(priority_lines) + "\n\n"
-    )
+        dynamic_section = (
+            "### DEFINICIÓN DE TIPOS DE LLAMADA\n"
+            "El analizador clasifica cada llamada en un único tipo_llamada. Debes evaluar y elegir estrictamente una de las claves permitidas. Devuelve tipo_llamada usando la clave exacta de la tipología (no el nombre visible). Está expresamente prohibido inventar tipologías.\n\n"
+            "Tipos permitidos:\n" +
+            "\n".join(bullet_lines) + "\n\n"
+            "### PRIORIDADES EN CASO DE CONFLICTO\n"
+            "Si una llamada cumple con características de múltiples tipologías o hay dudas sobre cuál elegir, aplica estrictamente este orden de prioridad decreciente (de mayor a menor importancia):\n" +
+            "\n".join(priority_lines) + "\n\n"
+        )
     # 1. Regex to find markdown headers related to call types/typologies
     import re
     header_pattern = re.compile(
