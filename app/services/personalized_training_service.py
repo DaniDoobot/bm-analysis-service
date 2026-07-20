@@ -3180,29 +3180,40 @@ class PersonalizedTrainingService:
     async def create_manual_cycles(
         db: AsyncSession,
         hubspot_owner_ids: List[str],
-        objectives: List[str],
         title: Optional[str] = "Ciclo manual",
+        general_objectives: Optional[List[str]] = None,
+        specific_objectives: Optional[List[str]] = None,
         service_id: Optional[int] = None,
         approved_by_user_id: int = 1,
         created_by_email: Optional[str] = None
     ) -> List[TrainingAgentReport]:
         """
         Creates manual training cycles for one or multiple agents.
+
+        - general_objectives: stored in general_objectives_json (may be empty).
+        - specific_objectives: stored in specific_objectives_json (may be empty).
+        - title is only used as the cycle summary/title, never injected as a general objective.
         """
         from app.models.personalized_training import TrainingAgentReport, TrainingAgentSetting
         from app.models.users import User
 
         created_reports = []
         cycle_title = title or "Ciclo manual"
-        
-        gen_objs = [{"title": cycle_title, "description": cycle_title}]
+
+        # Build general objectives list (empty if none provided)
+        gen_objs = [
+            {"title": f"Objetivo general {idx}", "description": obj_text}
+            for idx, obj_text in enumerate(general_objectives or [], 1)
+        ]
+
+        # Build specific objectives list (empty if none provided)
         spec_objs = [
             {
-                "title": f"Objetivo {idx}",
+                "title": f"Objetivo específico {idx}",
                 "description": obj_text,
                 "specific_behavior_to_improve": obj_text
             }
-            for idx, obj_text in enumerate(objectives, 1)
+            for idx, obj_text in enumerate(specific_objectives or [], 1)
         ]
 
         now_utc = datetime.now(timezone.utc)

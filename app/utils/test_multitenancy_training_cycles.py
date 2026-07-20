@@ -767,6 +767,95 @@ class TestMultitenancyTrainingCycles(unittest.IsolatedAsyncioTestCase):
             prompts = list((await db.execute(stmt_p)).scalars().all())
             self.assertEqual(len(prompts), 4)
 
+    # ── Objective separation tests ───────────────────────────────────────────
+
+    async def test_manual_cycle_general_and_specific_objectives_stored_separately(self):
+        """general_objectives and specific_objectives are stored in separate JSON fields."""
+        res = await self.client.post(
+            "/bm/training/admin/manual-cycle",
+            json={
+                "hubspot_owner_ids": ["boston_owner_1"],
+                "title": "Ciclo separado",
+                "service_id": 1,
+                "general_objectives": ["Mejorar empatía con el paciente"],
+                "specific_objectives": ["Reducir tiempo de espera", "Confirmar citas en primera llamada"]
+            },
+            headers={"Authorization": f"Bearer {self.t_boston_admin}"}
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(len(data), 1)
+        report_id = data[0]["training_report_id"]
+
+        async with AsyncSession(self.session_factory) as db:
+            rep = await db.get(TrainingAgentReport, report_id)
+            self.assertIsNotNone(rep)
+            # Check general objectives
+            gen_objs = rep.general_objectives_json or []
+            self.assertEqual(len(gen_objs), 1)
+            self.assertIn("Mejorar empatía con el paciente", gen_objs[0]["description"])
+            # Check specific objectives
+            spec_objs = rep.specific_objectives_json or []
+            self.assertEqual(len(spec_objs), 2)
+            spec_descriptions = [o["description"] for o in spec_objs]
+            self.assertIn("Reducir tiempo de espera", spec_descriptions)
+            self.assertIn("Confirmar citas en primera llamada", spec_descriptions)
+
+    async def test_manual_cycle_title_not_in_general_objectives(self):
+        """The cycle title must NOT be injected as a general objective."""
+        cycle_title = "Mi Título Especial de Ciclo"
+        res = await self.client.post(
+            "/bm/training/admin/manual-cycle",
+            json={
+                "hubspot_owner_ids": ["boston_owner_1"],
+                "title": cycle_title,
+                "service_id": 1,
+                "specific_objectives": ["Objetivo específico A"]
+            },
+            headers={"Authorization": f"Bearer {self.t_boston_admin}"}
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        report_id = data[0]["training_report_id"]
+
+        async with AsyncSession(self.session_factory) as db:
+            rep = await db.get(TrainingAgentReport, report_id)
+            gen_objs = rep.general_objectives_json or []
+            # General objectives must be empty (no title injected)
+            self.assertEqual(len(gen_objs), 0,
+                msg=f"Expected 0 general objectives but got {len(gen_objs)}: {gen_objs}")
+            # Title only appears in summary_general, not as an objective
+            self.assertIn(cycle_title, rep.summary_general or "")
+
+    async def test_manual_cycle_legacy_objectives_treated_as_specific(self):
+        """Legacy 'objectives' field is treated as specific_objectives when no gen/spec provided."""
+        res = await self.client.post(
+            "/bm/training/admin/manual-cycle",
+            json={
+                "hubspot_owner_ids": ["boston_owner_1"],
+                "title": "Ciclo legacy",
+                "service_id": 1,
+                "objectives": ["Legacy objetivo 1", "Legacy objetivo 2"]
+            },
+            headers={"Authorization": f"Bearer {self.t_boston_admin}"}
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        report_id = data[0]["training_report_id"]
+
+        async with AsyncSession(self.session_factory) as db:
+            rep = await db.get(TrainingAgentReport, report_id)
+            # General objectives must be empty
+            gen_objs = rep.general_objectives_json or []
+            self.assertEqual(len(gen_objs), 0,
+                msg=f"Legacy mode: expected 0 general objectives but got {len(gen_objs)}: {gen_objs}")
+            # Specific objectives must contain the legacy items
+            spec_objs = rep.specific_objectives_json or []
+            self.assertEqual(len(spec_objs), 2)
+            spec_descriptions = [o["description"] for o in spec_objs]
+            self.assertIn("Legacy objetivo 1", spec_descriptions)
+            self.assertIn("Legacy objetivo 2", spec_descriptions)
+
 
 if __name__ == "__main__":
     import asyncio

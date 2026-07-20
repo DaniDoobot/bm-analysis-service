@@ -379,6 +379,21 @@ class ApproveCycleResponse(BaseModel):
 class ManualCycleCreateRequest(BaseModel):
     """Payload para la creación de un ciclo de entrenamiento manual."""
     hubspot_owner_ids: List[str] = Field(..., description="Lista de IDs de agentes para los que crear el ciclo.")
-    objectives: List[str] = Field(..., description="Lista de objetivos manuales comunes.")
-    title: Optional[str] = Field(default="Ciclo manual", description="Título del ciclo manual.")
+    title: Optional[str] = Field(default="Ciclo manual", description="Título/resumen del ciclo manual.")
     service_id: Optional[int] = Field(default=None, description="ID del servicio asociado opcional.")
+
+    # Preferred fields (new)
+    general_objectives: Optional[List[str]] = Field(
+        default=None,
+        description="Objetivos generales del ciclo manual."
+    )
+    specific_objectives: Optional[List[str]] = Field(
+        default=None,
+        description="Objetivos específicos del ciclo manual."
+    )
+
+    # Legacy field — if general_objectives/specific_objectives are absent, treat as specific_objectives
+    objectives: Optional[List[str]] = Field(
+        default=None,
+        description="[Legacy] Lista de objetivos; se tratan como objetivos específicos si no llegan general_objectives/specific_objectives."
+    )

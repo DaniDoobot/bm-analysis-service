@@ -502,11 +502,20 @@ async def create_manual_cycle(
                 )
 
     try:
+        # Resolve general_objectives / specific_objectives with legacy fallback
+        # If neither general_objectives nor specific_objectives are provided,
+        # treat legacy 'objectives' as specific_objectives for backward compatibility.
+        use_general = payload.general_objectives
+        use_specific = payload.specific_objectives
+        if use_general is None and use_specific is None and payload.objectives:
+            use_specific = payload.objectives
+
         reports = await PersonalizedTrainingService.create_manual_cycles(
             db=db,
             hubspot_owner_ids=payload.hubspot_owner_ids,
-            objectives=payload.objectives,
             title=payload.title,
+            general_objectives=use_general,
+            specific_objectives=use_specific,
             service_id=payload.service_id,
             approved_by_user_id=context.user_id,
             created_by_email=context.user_email
