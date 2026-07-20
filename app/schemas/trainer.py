@@ -23,6 +23,7 @@ class TrainerEvaluationConfigUpdate(BaseModel):
 
 class TrainerEvaluationConfigResponse(BaseModel):
     config_id: int
+    company_id: Optional[int] = None
     name: str
     service_id: int
     service_name: Optional[str] = None
@@ -64,6 +65,7 @@ class TrainerSimulationUpdate(BaseModel):
 
 class TrainerSimulationResponse(BaseModel):
     simulation_id: int
+    company_id: Optional[int] = None
     name: str
     code: str
     service_id: int
@@ -103,6 +105,7 @@ class TrainerEvaluationResponse(BaseModel):
 
 class TrainerSessionResponse(BaseModel):
     session_id: int
+    company_id: Optional[int] = None
     simulation_id: int
     simulation_version_id: Optional[int] = None
     agent_id: str

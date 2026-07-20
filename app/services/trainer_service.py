@@ -50,9 +50,16 @@ class TrainerService:
         if prompt.service_id != payload.service_id:
             raise ValueError("La estructura base seleccionada no pertenece al mismo servicio.")
 
+        # Resolve company_id from service
+        from app.models.services import Service
+        stmt_svc = select(Service.company_id).where(Service.service_id == payload.service_id)
+        res_svc = await db.execute(stmt_svc)
+        company_id = res_svc.scalar()
+
         config = TrainerEvaluationConfig(
             name=payload.name,
             service_id=payload.service_id,
+            company_id=company_id,
             speech_structure_id=payload.speech_structure_id,
             extra_instructions=payload.extra_instructions,
             is_active=payload.is_active,
@@ -95,12 +102,20 @@ class TrainerService:
 
     @staticmethod
     async def list_evaluation_configs(
-        db: AsyncSession, service_id: Optional[int] = None, is_active: Optional[bool] = None
+        db: AsyncSession,
+        service_id: Optional[int] = None,
+        is_active: Optional[bool] = None,
+        company_ids: Optional[List[int]] = None,
+        allowed_service_ids: Optional[List[int]] = None,
     ) -> List[TrainerEvaluationConfig]:
         stmt = select(TrainerEvaluationConfig)
         filters = []
         if service_id is not None:
             filters.append(TrainerEvaluationConfig.service_id == service_id)
+        if allowed_service_ids is not None:
+            filters.append(TrainerEvaluationConfig.service_id.in_(allowed_service_ids))
+        if company_ids is not None:
+            filters.append(TrainerEvaluationConfig.company_id.in_(company_ids))
         if is_active is not None:
             filters.append(TrainerEvaluationConfig.is_active == is_active)
         if filters:
@@ -158,10 +173,17 @@ class TrainerService:
             if cfg.service_id != payload.service_id:
                 raise ValueError("La configuración de evaluación seleccionada no pertenece al mismo servicio.")
 
+        # Resolve company_id from service
+        from app.models.services import Service
+        stmt_svc = select(Service.company_id).where(Service.service_id == payload.service_id)
+        res_svc = await db.execute(stmt_svc)
+        company_id = res_svc.scalar()
+
         sim = TrainerSimulation(
             name=payload.name,
             code=payload.code.strip(),
             service_id=payload.service_id,
+            company_id=company_id,
             evaluation_config_id=payload.evaluation_config_id,
             roleplay_prompt=payload.roleplay_prompt,
             objective=payload.objective,
@@ -347,6 +369,7 @@ class TrainerService:
             name=f"{sim.name} (Copia)",
             code=new_code,
             service_id=sim.service_id,
+            company_id=sim.company_id,
             evaluation_config_id=sim.evaluation_config_id,
             roleplay_prompt=sim.roleplay_prompt,
             objective=sim.objective,
@@ -372,11 +395,17 @@ class TrainerService:
         status: Optional[str] = None,
         search: Optional[str] = None,
         code: Optional[str] = None,
+        company_ids: Optional[List[int]] = None,
+        allowed_service_ids: Optional[List[int]] = None,
     ) -> List[TrainerSimulation]:
         stmt = select(TrainerSimulation)
         filters = []
         if service_id is not None:
             filters.append(TrainerSimulation.service_id == service_id)
+        if allowed_service_ids is not None:
+            filters.append(TrainerSimulation.service_id.in_(allowed_service_ids))
+        if company_ids is not None:
+            filters.append(TrainerSimulation.company_id.in_(company_ids))
         if status is not None:
             filters.append(TrainerSimulation.status == status)
         if code is not None:
@@ -882,6 +911,9 @@ class TrainerService:
         min_score: Optional[Decimal] = None,
         max_score: Optional[Decimal] = None,
         limit: int = 100,
+        company_ids: Optional[List[int]] = None,
+        allowed_service_ids: Optional[List[int]] = None,
+        agent_ids: Optional[List[str]] = None,
     ) -> tuple[List[TrainerSession], int]:
         stmt = select(TrainerSession).join(TrainerSimulation, TrainerSession.simulation_id == TrainerSimulation.simulation_id)
         
@@ -889,8 +921,14 @@ class TrainerService:
         filters = []
         if agent_id:
             filters.append(TrainerSession.agent_id == agent_id)
+        if agent_ids is not None:
+            filters.append(TrainerSession.agent_id.in_(agent_ids))
         if service_id is not None:
             filters.append(TrainerSession.service_id == service_id)
+        if allowed_service_ids is not None:
+            filters.append(TrainerSession.service_id.in_(allowed_service_ids))
+        if company_ids is not None:
+            filters.append(TrainerSession.company_id.in_(company_ids))
         if simulation_id is not None:
             filters.append(TrainerSession.simulation_id == simulation_id)
         if status:
