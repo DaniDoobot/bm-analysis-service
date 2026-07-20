@@ -143,7 +143,49 @@ async def update_base_structure_typologies(
             )
         )
 
+    # Update base_prompt skeleton if empty or default template
+    from app.services.prompts_service import generate_base_prompt_skeleton
+    service_name = struct.service.service_name if struct.service else None
+    if not struct.base_prompt or not struct.base_prompt.strip() or struct.base_prompt.startswith("### CONTEXTO"):
+        struct.base_prompt = generate_base_prompt_skeleton(service_name, typos if unique_ids else [])
+
     await db.commit()
     await db.refresh(struct)
     
     return await _get_base_structure_nested_dict(db, struct, current_user)
+
+
+@router.delete("/{id}")
+async def delete_base_structure(
+    id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    confirm: bool = False,
+    force: bool = False,
+):
+    """Delete base structure (Super Admin or Company Admin in scope). Checks for dependencies."""
+    role = context.normalized_role
+    if role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Los agentes y coordinadores no tienen acceso para eliminar estructuras."
+        )
+
+    struct = await db.get(PromptBaseStructure, id)
+    if not struct:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Estructura base con ID {id} no encontrada."
+        )
+
+    _verify_base_structure_tenant_access(struct, context)
+
+    from app.services.prompts_service import delete_base_structure as svc_delete
+    from fastapi.responses import JSONResponse
+    
+    result = await svc_delete(db, id, confirm=confirm or force)
+    if not result.get("deleted") and result.get("has_dependencies"):
+        return JSONResponse(status_code=status.HTTP_409_CONFLICT, content=result)
+
+    return {"ok": True, "message": f"Estructura base {id} eliminada correctamente.", "details": result}

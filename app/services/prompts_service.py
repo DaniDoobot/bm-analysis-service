@@ -368,7 +368,7 @@ async def sync_prompt_text_with_active_criteria(
         )
         typologies = t_res.scalars().all()
 
-    if not typologies and service_id:
+    elif service_id:
         t_res = await db.execute(
             select(Typology)
             .where(Typology.service_id == service_id, Typology.is_active == True)
@@ -975,14 +975,77 @@ async def get_base_structure(db: AsyncSession, structure_id: int) -> PromptBaseS
     return result.scalars().first()
 
 
+def generate_base_prompt_skeleton(service_name: str | None, typologies: list) -> str:
+    """Generates standard prompt skeleton based on associated typologies."""
+    service_name_str = service_name or "General"
+    
+    lines = [
+        "### CONTEXTO",
+        f"Eres un modelo experto en análisis de llamadas del servicio {service_name_str}. Tu tarea es analizar las llamadas siguiendo criterios de calidad y extracción de datos explícitos.",
+        "",
+        "### TAREA",
+        "Analiza la llamada y responde exclusivamente con un JSON siguiendo el formato y las reglas indicadas. Evalúa el desempeño del agente según los criterios definidos. Extrae datos solo si aparecen explícitamente. Si un dato no aplica o no se puede evaluar, usa null.",
+        "",
+        "### REGLAS GENERALES",
+        "- Sigue estrictamente las definiciones y criterios activos listados a continuación.",
+        "- No inventes ni omitas criterios.",
+        "- Para criterios category/boolean, usa solo valores permitidos.",
+        "- No incluyas comentarios fuera del JSON.",
+        "- El formato de salida debe ser exactamente el especificado al final del prompt.",
+        "",
+        "### DEFINICIÓN DE TIPOS DE LLAMADA",
+        "El analizador clasifica cada llamada en un único tipo_llamada. Devuelve la clave exacta de la tipología. Está prohibido inventar tipologías.",
+        "",
+        "Tipos permitidos:"
+    ]
+    
+    if typologies:
+        for t in typologies:
+            desc = getattr(t, "description", None) or getattr(t, "typology_name", None) or getattr(t, "typology_key", "")
+            lines.append(f"- {t.typology_key}: {desc}")
+    else:
+        lines.append("- (Sin tipologías definidas)")
+        
+    lines.extend([
+        "",
+        "### PRIORIDADES EN CASO DE CONFLICTO",
+        "Si una llamada cumple varias tipologías, aplica este orden:"
+    ])
+    
+    if typologies:
+        for idx, t in enumerate(typologies, start=1):
+            lines.append(f"{idx}. {t.typology_key}")
+    else:
+        lines.append("1. (Sin tipologías definidas)")
+        
+    return "\n".join(lines)
+
+
 async def create_base_structure(db: AsyncSession, body: PromptBaseStructureCreate) -> PromptBaseStructure:
     """Create a new prompt base structure."""
+    service_name = None
+    if body.service_id:
+        from app.models.services import Service
+        s_res = await db.execute(select(Service.service_name).where(Service.service_id == body.service_id))
+        service_name = s_res.scalar()
+
+    # Fetch initial typologies if provided
+    typologies = []
+    if body.typology_ids:
+        from app.models.typologies import Typology
+        t_res = await db.execute(select(Typology).where(Typology.typology_id.in_(body.typology_ids)))
+        typologies = list(t_res.scalars().all())
+
+    base_prompt = body.base_prompt
+    if not base_prompt or not base_prompt.strip():
+        base_prompt = generate_base_prompt_skeleton(service_name, typologies)
+
     new_struct = PromptBaseStructure(
         structure_key=body.structure_key,
         structure_name=body.structure_name,
         description=body.description,
         prompt_type="text", # Normalizamos a 'text' para que todas las estructuras base sean de texto
-        base_prompt=body.base_prompt,
+        base_prompt=base_prompt,
         default_criteria=None, # Discarded for simplified structures (no items)
         is_active=True,
         created_by=body.created_by,
@@ -991,6 +1054,14 @@ async def create_base_structure(db: AsyncSession, body: PromptBaseStructureCreat
         owner_user_id=body.owner_user_id,
     )
     db.add(new_struct)
+    await db.flush()
+
+    if body.typology_ids:
+        from app.models.prompts import BaseStructureTypology
+        for tid in body.typology_ids:
+            db.add(BaseStructureTypology(base_structure_id=new_struct.id, typology_id=tid))
+        await db.flush()
+
     await db.commit()
     await db.refresh(new_struct)
     return new_struct
@@ -1037,9 +1108,57 @@ async def update_base_structure(
         )
         return struct
     except Exception as e:
+        logger.error("Failed to update base structure ID %d: %s", structure_id, e)
         await db.rollback()
-        logger.error("Error updating base structure ID %d: %s", structure_id, e, exc_info=True)
-        raise e
+        raise
+
+
+async def delete_base_structure(
+    db: AsyncSession,
+    structure_id: int,
+    confirm: bool = False
+) -> dict:
+    """
+    Deletes a base structure.
+    If confirm=False and there are dependent specific structures (prompts), returns dependency info.
+    If confirm=True or 0 dependencies, deletes the base structure and cascade-deletes dependent prompts.
+    """
+    stmt = select(PromptBaseStructure).where(PromptBaseStructure.id == structure_id)
+    res = await db.execute(stmt)
+    struct = res.scalars().first()
+    if not struct:
+        return {"found": False, "deleted": False}
+
+    # Find dependent prompts
+    from sqlalchemy import delete
+    from app.models.prompts import Prompt, BaseStructureTypology
+    p_stmt = select(Prompt).where(Prompt.base_structure_id == structure_id)
+    p_res = await db.execute(p_stmt)
+    dependent_prompts = list(p_res.scalars().all())
+
+    if dependent_prompts and not confirm:
+        dep_list = [{"prompt_id": p.prompt_id, "prompt_name": p.prompt_name} for p in dependent_prompts]
+        return {
+            "found": True,
+            "deleted": False,
+            "has_dependencies": True,
+            "dependencies_count": len(dependent_prompts),
+            "dependent_prompts": dep_list,
+            "message": f"La estructura base no se puede eliminar directamente porque tiene {len(dependent_prompts)} estructuras específicas vinculadas."
+        }
+
+    # If confirm=True or 0 dependencies: delete dependent prompts
+    for p in dependent_prompts:
+        await db.delete(p)
+
+    # Delete BaseStructureTypology records
+    await db.execute(delete(BaseStructureTypology).where(BaseStructureTypology.base_structure_id == structure_id))
+
+    # Delete base structure
+    await db.delete(struct)
+    await db.commit()
+
+    return {"found": True, "deleted": True, "has_dependencies": bool(dependent_prompts)}
 
 
 async def assign_base_structure(db: AsyncSession, prompt_id: int, base_structure_id: int) -> dict[str, Any]:
@@ -1416,7 +1535,7 @@ async def sanitize_prompt_text_for_preview(db: AsyncSession, prompt_id: int, pro
         t_res = await db.execute(t_stmt)
         typologies = t_res.scalars().all()
         
-    if not typologies and service_id:
+    elif service_id:
         t_stmt = select(Typology).where(
             Typology.service_id == service_id,
             Typology.is_active == True

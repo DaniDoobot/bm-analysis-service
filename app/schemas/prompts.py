@@ -200,12 +200,13 @@ class PromptBaseStructureCreate(BaseModel):
     structure_name: str
     description: str | None = None
     prompt_type: str = "text"
-    base_prompt: str
+    base_prompt: str | None = None
     default_criteria: list[dict[str, Any]] | None = None
     created_by: str | None = None
     created_by_email: str | None = None
     service_id: int | None = None
     owner_user_id: int | None = None
+    typology_ids: list[int] | None = None
 
 
 class PromptBaseStructureUpdate(BaseModel):

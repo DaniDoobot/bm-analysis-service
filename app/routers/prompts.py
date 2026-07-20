@@ -2,7 +2,7 @@
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -464,6 +464,36 @@ async def update_prompt_base_structure(
     
     s_dict = _base_structure_detail_out(struct)
     return await _enrich_structure_response(db, current_user, "base", struct.id, struct.owner_user_id, s_dict)
+
+
+@router.delete("/prompt-base-structures/{id}")
+async def delete_prompt_base_structure(
+    id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+    confirm: bool = False,
+    force: bool = False,
+):
+    """Delete a prompt base structure with dependency check."""
+    role = context.normalized_role
+    if role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+        raise HTTPException(status_code=403, detail="Los agentes y coordinadores no tienen acceso para eliminar estructuras.")
+
+    struct = await db.get(PromptBaseStructure, id)
+    if not struct:
+        raise HTTPException(status_code=404, detail=f"Base structure {id} not found.")
+
+    from app.routers.base_structures import _verify_base_structure_tenant_access
+    _verify_base_structure_tenant_access(struct, context)
+
+    from fastapi.responses import JSONResponse
+    result = await prompts_service.delete_base_structure(db, id, confirm=confirm or force)
+    if not result.get("deleted") and result.get("has_dependencies"):
+        return JSONResponse(status_code=status.HTTP_409_CONFLICT, content=result)
+
+    await log_audit(db, current_user.user_id, "delete", "base", id)
+    return {"ok": True, "message": f"Estructura base {id} eliminada correctamente.", "details": result}
 
 
 @router.post("/prompts/create-from-base", response_model=CreateFromBaseResponse)
