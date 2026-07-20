@@ -248,7 +248,12 @@ class MassEvaluationService:
     _running_tasks: set[asyncio.Task] = set()
 
     @staticmethod
-    async def create_job(db: AsyncSession, payload: MassEvaluationJobCreate) -> MassEvaluationJob:
+    async def create_job(
+        db: AsyncSession,
+        payload: MassEvaluationJobCreate,
+        company_id: int | None = None,
+        service_id: int | None = None,
+    ) -> MassEvaluationJob:
         # Validate Prompt State
         stmt = select(Prompt).where(Prompt.prompt_id == payload.prompt_id)
         res = await db.execute(stmt)
@@ -300,7 +305,16 @@ class MassEvaluationService:
         job_data.pop("allow_inactive_prompt", None)
         job_data.pop("test_mode", None)
 
+        # Resolve company/service from prompt or override
+        target_company_id = company_id or prompt.company_id
+        target_service_id = service_id or prompt.service_id
+
+        if not target_company_id or not target_service_id:
+            raise ValueError("No se pudo determinar la empresa o el servicio para el job.")
+
         job = MassEvaluationJob(**job_data)
+        job.company_id = target_company_id
+        job.service_id = target_service_id
         
         # Defensive safety cap on max_calls
         if job.max_calls is None or job.max_calls <= 0:
@@ -411,16 +425,26 @@ class MassEvaluationService:
         return True
 
     @staticmethod
-    async def list_jobs(db: AsyncSession, limit: int = 100, execution_source: str = "on_demand") -> list[MassEvaluationJob]:
+    async def list_jobs(
+        db: AsyncSession,
+        limit: int = 100,
+        execution_source: str = "on_demand",
+        company_ids: list[int] | None = None,
+        service_ids: list[int] | None = None,
+    ) -> list[MassEvaluationJob]:
         stmt = (
             select(MassEvaluationJob)
             .where(
                 MassEvaluationJob.is_active == True,
                 MassEvaluationJob.execution_source == execution_source
             )
-            .order_by(desc(MassEvaluationJob.job_id))
-            .limit(limit)
         )
+        if service_ids is not None:
+            stmt = stmt.where(MassEvaluationJob.service_id.in_(service_ids))
+        elif company_ids:
+            stmt = stmt.where(MassEvaluationJob.company_id.in_(company_ids))
+
+        stmt = stmt.order_by(desc(MassEvaluationJob.job_id)).limit(limit)
         res = await db.execute(stmt)
         return list(res.scalars().all())
 
@@ -575,6 +599,8 @@ class MassEvaluationService:
         # Create Run record
         run = MassEvaluationRun(
             job_id=job_id,
+            company_id=job.company_id,
+            service_id=job.service_id,
             trigger_type=trigger_type,
             status="running",
             started_at=datetime.now(timezone.utc),
@@ -858,6 +884,7 @@ class MassEvaluationService:
                                 "prompt_snapshot": prompt_snapshot,
                                 "status": "skipped",
                                 "error_message": "No recording URL present.",
+                                "company_id": job.company_id,
                                 "service_id": service_id,
                                 "service_key": service_key,
                                 "service_name": service_name,
@@ -1066,6 +1093,7 @@ class MassEvaluationService:
                                 "items_json": items,
                                 "evaluacion_global": eval_decimal,
                                 "hubspot_metadata": call,
+                                "company_id": job.company_id,
                                 "service_id": service_id,
                                 "service_key": service_key,
                                 "service_name": service_name,
@@ -1140,6 +1168,7 @@ class MassEvaluationService:
                                 "prompt_snapshot": prompt_snapshot,
                                 "status": "failed",
                                 "error_message": str(e_call),
+                                "company_id": job.company_id,
                                 "service_id": service_id,
                                 "service_key": service_key,
                                 "service_name": service_name,
@@ -1281,13 +1310,24 @@ class MassEvaluationService:
                     logger.error("Failed to mark run as failed in database: %s", e_inner)
 
     @staticmethod
-    async def list_runs(db: AsyncSession, job_id: int | None = None, status: str | None = None, limit: int = 100) -> list[MassEvaluationRun]:
+    async def list_runs(
+        db: AsyncSession,
+        job_id: int | None = None,
+        status: str | None = None,
+        limit: int = 100,
+        company_ids: list[int] | None = None,
+        service_ids: list[int] | None = None,
+    ) -> list[MassEvaluationRun]:
         stmt = select(MassEvaluationRun)
         filters = []
         if job_id is not None:
             filters.append(MassEvaluationRun.job_id == job_id)
         if status is not None:
             filters.append(MassEvaluationRun.status == status)
+        if service_ids is not None:
+            filters.append(MassEvaluationRun.service_id.in_(service_ids))
+        elif company_ids:
+            filters.append(MassEvaluationRun.company_id.in_(company_ids))
             
         if filters:
             stmt = stmt.where(and_(*filters))
@@ -1338,6 +1378,9 @@ class MassEvaluationService:
         typology_ids: list[int] | None = None,
         duration_min_seconds: int | None = None,
         duration_max_seconds: int | None = None,
+        company_ids: list[int] | None = None,
+        service_ids: list[int] | None = None,
+        allowed_agent_ids: list[str] | None = None,
     ) -> list[MassEvaluationResult]:
         stmt = select(MassEvaluationResult)
         filters = []
@@ -1380,6 +1423,14 @@ class MassEvaluationService:
         if duration_max_seconds is not None:
             filters.append(MassEvaluationResult.call_duration_seconds <= duration_max_seconds)
             
+        # Multitenancy filters
+        if allowed_agent_ids is not None:
+            filters.append(MassEvaluationResult.hubspot_owner_id.in_(allowed_agent_ids))
+        if service_ids is not None:
+            filters.append(MassEvaluationResult.service_id.in_(service_ids))
+        elif company_ids:
+            filters.append(MassEvaluationResult.company_id.in_(company_ids))
+            
         if filters:
             stmt = stmt.where(and_(*filters))
             
@@ -1408,6 +1459,9 @@ class MassEvaluationService:
         typology_ids: list[int] | None = None,
         duration_min_seconds: int | None = None,
         duration_max_seconds: int | None = None,
+        company_ids: list[int] | None = None,
+        service_ids: list[int] | None = None,
+        allowed_agent_ids: list[str] | None = None,
     ) -> int:
         from sqlalchemy import func
         stmt = select(func.count(MassEvaluationResult.mass_analysis_id))
@@ -1450,6 +1504,14 @@ class MassEvaluationService:
             filters.append(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
         if duration_max_seconds is not None:
             filters.append(MassEvaluationResult.call_duration_seconds <= duration_max_seconds)
+            
+        # Multitenancy filters
+        if allowed_agent_ids is not None:
+            filters.append(MassEvaluationResult.hubspot_owner_id.in_(allowed_agent_ids))
+        if service_ids is not None:
+            filters.append(MassEvaluationResult.service_id.in_(service_ids))
+        elif company_ids:
+            filters.append(MassEvaluationResult.company_id.in_(company_ids))
             
         if filters:
             stmt = stmt.where(and_(*filters))
@@ -1913,9 +1975,22 @@ class MassEvaluationService:
         return res.scalars().first()
 
     @staticmethod
-    async def list_automations(db: AsyncSession, limit: int = 100) -> list[MassAnalysisAutomation]:
+    async def list_automations(
+        db: AsyncSession,
+        limit: int = 100,
+        company_ids: list[int] | None = None,
+        service_ids: list[int] | None = None,
+    ) -> list[MassAnalysisAutomation]:
         """List all active automation configurations."""
-        stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.is_active == True).order_by(desc(MassAnalysisAutomation.automation_id)).limit(limit)
+        from app.models.services import Service
+        stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.is_active == True)
+        
+        if service_ids is not None:
+            stmt = stmt.where(MassAnalysisAutomation.service_id.in_(service_ids))
+        elif company_ids:
+            stmt = stmt.join(Service, Service.service_id == MassAnalysisAutomation.service_id).where(Service.company_id.in_(company_ids))
+
+        stmt = stmt.order_by(desc(MassAnalysisAutomation.automation_id)).limit(limit)
         res = await db.execute(stmt)
         return list(res.scalars().all())
 

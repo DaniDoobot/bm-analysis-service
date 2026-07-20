@@ -215,6 +215,8 @@ class MassEvaluationJobResponse(BaseModel):
     updated_at: datetime
     created_by: str | None
     created_by_email: str | None
+    company_id: int | None = None
+    service_id: int | None = None
 
     # HTML Input Compatible String format fields / Aliases:
     search_date_from: str | None = None
@@ -323,6 +325,8 @@ class MassEvaluationRunResponse(BaseModel):
     error_message: str | None
     run_summary: dict[str, Any] | None
     created_at: datetime
+    company_id: int | None = None
+    service_id: int | None = None
 
     class Config:
         from_attributes = True
@@ -349,6 +353,7 @@ class MassEvaluationResultResponse(BaseModel):
     prompt_snapshot: str
     
     # Service and typology snapshot
+    company_id: int | None = None
     service_id: int | None = None
     service_key: str | None = None
     service_name: str | None = None
@@ -427,8 +432,8 @@ class MassAnalysisAutomationResponse(BaseModel):
     is_active: bool
     interval_minutes: int
     lookback_minutes: int
-    delay_minutes: int
     service_id: int | None
+    company_id: int | None = None
     prompt_id: int
     prompt_version_id: int | None
     job_id: int | None

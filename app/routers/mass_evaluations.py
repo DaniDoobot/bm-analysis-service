@@ -3,10 +3,15 @@ from datetime import datetime
 from typing import Any, Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import get_db, get_current_user
+from app.dependencies import get_db, get_current_user, get_tenant_context
+from app.core.tenant_context import TenantContext
+from app.core.roles import InternalRole
 from app.models.users import User
+from app.models.prompts import Prompt
+from app.models.services import Service
 from app.utils.hubspot_owners import resolve_owner_id_by_email
 from app.schemas.mass_evaluations import (
     MassEvaluationJobCreate,
@@ -33,35 +38,99 @@ router = APIRouter(prefix="/bm", tags=["Mass Evaluations"])
 @router.get("/mass-evaluation-jobs", response_model=list[MassEvaluationJobResponse])
 async def list_jobs(
     limit: int = Query(100, ge=1, le=1000),
+    context: TenantContext = Depends(get_tenant_context),
     db: AsyncSession = Depends(get_db)
 ):
     """List all active mass evaluation jobs."""
-    return await MassEvaluationService.list_jobs(db, limit=limit)
+    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para ver jobs masivos."
+        )
+    return await MassEvaluationService.list_jobs(
+        db,
+        limit=limit,
+        company_ids=context.allowed_company_ids,
+        service_ids=context.allowed_service_ids
+    )
 
 
 @router.get("/mass-evaluation-jobs/{job_id}", response_model=MassEvaluationJobResponse)
 async def get_job(
     job_id: int,
+    context: TenantContext = Depends(get_tenant_context),
     db: AsyncSession = Depends(get_db)
 ):
     """Retrieve details of a single mass evaluation job."""
+    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para acceder a este job."
+        )
     job = await MassEvaluationService.get_job(db, job_id=job_id)
     if not job:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Job ID {job_id} not found."
         )
+    if not context.is_super_admin:
+        if job.company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: este job pertenece a otra empresa."
+            )
+        if context.allowed_service_ids is not None and job.service_id not in context.allowed_service_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: este job pertenece a un servicio no asignado."
+            )
     return job
 
 
 @router.post("/mass-evaluation-jobs", response_model=MassEvaluationJobResponse, status_code=status.HTTP_201_CREATED)
 async def create_job(
     payload: MassEvaluationJobCreate,
+    context: TenantContext = Depends(get_tenant_context),
     db: AsyncSession = Depends(get_db)
 ):
     """Create a new mass evaluation job."""
+    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para crear jobs masivos."
+        )
+
+    # Validate Prompt ownership
+    stmt = select(Prompt).where(Prompt.prompt_id == payload.prompt_id)
+    res = await db.execute(stmt)
+    prompt = res.scalars().first()
+    if not prompt:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"La estructura con ID {payload.prompt_id} no existe."
+        )
+
+    if not context.is_super_admin:
+        if prompt.company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: la estructura seleccionada pertenece a otra empresa."
+            )
+        if context.allowed_service_ids is not None and prompt.service_id not in context.allowed_service_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: la estructura seleccionada pertenece a un servicio no asignado."
+            )
+
     try:
-        return await MassEvaluationService.create_job(db, payload=payload)
+        comp_id = prompt.company_id or context.company_id
+        serv_id = prompt.service_id
+        return await MassEvaluationService.create_job(
+            db,
+            payload=payload,
+            company_id=comp_id,
+            service_id=serv_id
+        )
     except ValueError as ve:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -78,17 +147,57 @@ async def create_job(
 async def update_job(
     job_id: int,
     payload: MassEvaluationJobUpdate,
+    context: TenantContext = Depends(get_tenant_context),
     db: AsyncSession = Depends(get_db)
 ):
     """Update an existing mass evaluation job."""
-    try:
-        job = await MassEvaluationService.update_job(db, job_id=job_id, payload=payload)
-        if not job:
+    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para modificar jobs masivos."
+        )
+    job = await MassEvaluationService.get_job(db, job_id=job_id)
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job ID {job_id} not found."
+        )
+    if not context.is_super_admin:
+        if job.company_id not in context.allowed_company_ids:
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Job ID {job_id} not found."
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: este job pertenece a otra empresa."
             )
-        return job
+        if context.allowed_service_ids is not None and job.service_id not in context.allowed_service_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: este job pertenece a un servicio no asignado."
+            )
+
+    if payload.prompt_id is not None:
+        stmt = select(Prompt).where(Prompt.prompt_id == payload.prompt_id)
+        res = await db.execute(stmt)
+        new_prompt = res.scalars().first()
+        if not new_prompt:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"El prompt ID {payload.prompt_id} no existe."
+            )
+        if not context.is_super_admin:
+            if new_prompt.company_id not in context.allowed_company_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: el nuevo prompt pertenece a otra empresa."
+                )
+            if context.allowed_service_ids is not None and new_prompt.service_id not in context.allowed_service_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: el nuevo prompt pertenece a un servicio no asignado."
+                )
+
+    try:
+        updated_job = await MassEvaluationService.update_job(db, job_id=job_id, payload=payload)
+        return updated_job
     except ValueError as ve:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -105,15 +214,33 @@ async def update_job(
 async def delete_job(
     job_id: int,
     soft_delete: bool = Query(True),
+    context: TenantContext = Depends(get_tenant_context),
     db: AsyncSession = Depends(get_db)
 ):
     """Soft delete (deactivate) or hard delete a mass evaluation job."""
-    success = await MassEvaluationService.delete_job(db, job_id=job_id, soft_delete=soft_delete)
-    if not success:
+    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para borrar jobs masivos."
+        )
+    job = await MassEvaluationService.get_job(db, job_id=job_id)
+    if not job:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Job ID {job_id} not found."
         )
+    if not context.is_super_admin:
+        if job.company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: este job pertenece a otra empresa."
+            )
+        if context.allowed_service_ids is not None and job.service_id not in context.allowed_service_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: este job pertenece a un servicio no asignado."
+            )
+    success = await MassEvaluationService.delete_job(db, job_id=job_id, soft_delete=soft_delete)
     return {"ok": True, "message": f"Job {job_id} deleted successfully."}
 
 
@@ -139,12 +266,36 @@ async def run_due_jobs_endpoint(
 async def run_job(
     job_id: int,
     payload: MassEvaluationJobManualRunRequest = MassEvaluationJobManualRunRequest(),
+    context: TenantContext = Depends(get_tenant_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Trigger immediate execution of a mass evaluation job.
     Supports dry run mode to inspect HubSpot calls found without launching analysis.
     """
+    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para ejecutar jobs masivos."
+        )
+    job = await MassEvaluationService.get_job(db, job_id=job_id)
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job ID {job_id} not found."
+        )
+    if not context.is_super_admin:
+        if job.company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: este job pertenece a otra empresa."
+            )
+        if context.allowed_service_ids is not None and job.service_id not in context.allowed_service_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: este job pertenece a un servicio no asignado."
+            )
+
     if payload.dry_run:
         try:
             return await MassEvaluationService.dry_run_job(
@@ -178,7 +329,6 @@ async def run_job(
                 "run": run
             }
         except ValueError as ve:
-            # Handles active execution locks or job not found
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=str(ve)
@@ -197,33 +347,106 @@ async def list_runs(
     job_id: int | None = Query(None),
     status: str | None = Query(None),
     limit: int = Query(100, ge=1, le=1000),
+    context: TenantContext = Depends(get_tenant_context),
     db: AsyncSession = Depends(get_db)
 ):
     """List mass evaluation executions, optionally filtering by job and status."""
-    return await MassEvaluationService.list_runs(db, job_id=job_id, status=status, limit=limit)
+    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para ver ejecuciones masivas."
+        )
+
+    if job_id is not None:
+        job = await MassEvaluationService.get_job(db, job_id=job_id)
+        if not job:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job ID {job_id} not found."
+            )
+        if not context.is_super_admin:
+            if job.company_id not in context.allowed_company_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: este job pertenece a otra empresa."
+                )
+            if context.allowed_service_ids is not None and job.service_id not in context.allowed_service_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: este job pertenece a un servicio no asignado."
+                )
+
+    return await MassEvaluationService.list_runs(
+        db,
+        job_id=job_id,
+        status=status,
+        limit=limit,
+        company_ids=context.allowed_company_ids,
+        service_ids=context.allowed_service_ids
+    )
 
 
 @router.get("/mass-evaluation-runs/{run_id}", response_model=MassEvaluationRunResponse)
 async def get_run(
     run_id: int,
+    context: TenantContext = Depends(get_tenant_context),
     db: AsyncSession = Depends(get_db)
 ):
     """Get details and summary stats of a single mass evaluation run."""
+    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para acceder a este run."
+        )
     run = await MassEvaluationService.get_run(db, run_id=run_id)
     if not run:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Run ID {run_id} not found."
         )
+    if not context.is_super_admin:
+        if run.company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: este run pertenece a otra empresa."
+            )
+        if context.allowed_service_ids is not None and run.service_id not in context.allowed_service_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: este run pertenece a un servicio no asignado."
+            )
     return run
 
 
 @router.post("/mass-evaluation-runs/{run_id}/cancel", response_model=MassEvaluationRunResponse)
 async def cancel_run(
     run_id: int,
+    context: TenantContext = Depends(get_tenant_context),
     db: AsyncSession = Depends(get_db)
 ):
     """Cancel a running mass evaluation run cooperatively."""
+    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para cancelar ejecuciones masivas."
+        )
+    run = await MassEvaluationService.get_run(db, run_id=run_id)
+    if not run:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Run ID {run_id} not found."
+        )
+    if not context.is_super_admin:
+        if run.company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: este run pertenece a otra empresa."
+            )
+        if context.allowed_service_ids is not None and run.service_id not in context.allowed_service_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: este run pertenece a un servicio no asignado."
+            )
     try:
         return await MassEvaluationService.cancel_run(db, run_id=run_id)
     except ValueError as ve:
@@ -243,7 +466,7 @@ def resolve_agent_owner_id(user: User) -> str | None:
 
 @router.get("/me/analysis-results", response_model=PagedMassEvaluationResultResponse)
 async def get_my_analysis_results(
-    current_user: Annotated[User, Depends(get_current_user)],
+    context: TenantContext = Depends(get_tenant_context),
     run_id: int | None = Query(None),
     job_id: int | None = Query(None),
     agent_owner_id: str | None = Query(None, description="For backwards compatibility, ignored for agents"),
@@ -264,25 +487,27 @@ async def get_my_analysis_results(
     db: AsyncSession = Depends(get_db)
 ):
     """List detailed mass analysis call results for the logged-in agent with filters."""
-    normalized_role = (current_user.role or "").strip().lower()
-    is_admin = normalized_role in {"admin", "administrador"}
-    is_agent = normalized_role in {"agent", "agente"}
-
-    if not is_admin and not is_agent:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No autorizado para este rol."
-        )
-
-    if is_admin:
-        effective_owner_id = agent_owner_id or resolve_agent_owner_id(current_user)
-    else: # is_agent
-        effective_owner_id = resolve_agent_owner_id(current_user)
+    # Enforce agent scope
+    if context.normalized_role == InternalRole.AGENT:
+        effective_owner_id = context.allowed_agent_ids[0] if context.allowed_agent_ids else None
         if not effective_owner_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="No hay agente asociado a este usuario."
             )
+        if agent_owner_id and agent_owner_id != effective_owner_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes permiso para ver resultados de este agente."
+            )
+    else:
+        effective_owner_id = agent_owner_id
+        if effective_owner_id and context.allowed_agent_ids is not None:
+            if effective_owner_id not in context.allowed_agent_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="No tienes permiso para ver resultados de este agente."
+                )
 
     if global_score_min is not None and global_score_max is not None:
         if global_score_min > global_score_max:
@@ -291,10 +516,17 @@ async def get_my_analysis_results(
                 detail="global_score_min cannot be greater than global_score_max",
             )
 
-    # 1. Get total count for metadata
     typo_ids = None
     if typology_ids and typology_ids.strip():
         typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
+
+    # Validate query service_id if provided
+    if service_id is not None and context.allowed_service_ids is not None:
+        if service_id not in context.allowed_service_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes acceso al servicio seleccionado."
+            )
 
     total = await MassEvaluationService.count_results(
         db,
@@ -313,9 +545,11 @@ async def get_my_analysis_results(
         typology_ids=typo_ids,
         duration_min_seconds=duration_min_seconds,
         duration_max_seconds=duration_max_seconds,
+        company_ids=context.allowed_company_ids,
+        service_ids=context.allowed_service_ids,
+        allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None
     )
 
-    # 2. Retrieve items page
     from app.utils.visual_formatters import build_items_visual
     results = await MassEvaluationService.list_results(
         db,
@@ -336,6 +570,9 @@ async def get_my_analysis_results(
         typology_ids=typo_ids,
         duration_min_seconds=duration_min_seconds,
         duration_max_seconds=duration_max_seconds,
+        company_ids=context.allowed_company_ids,
+        service_ids=context.allowed_service_ids,
+        allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None
     )
     
     items_out = []
@@ -356,7 +593,7 @@ async def get_my_analysis_results(
 
 @router.get("/mass-evaluation-results", response_model=list[MassEvaluationResultResponse])
 async def list_results(
-    current_user: Annotated[User, Depends(get_current_user)],
+    context: TenantContext = Depends(get_tenant_context),
     run_id: int | None = Query(None),
     job_id: int | None = Query(None),
     agent_owner_id: str | None = Query(None),
@@ -376,30 +613,40 @@ async def list_results(
     db: AsyncSession = Depends(get_db)
 ):
     """List detailed mass analysis call results with advanced filtering options."""
-    normalized_role = (current_user.role or "").strip().lower()
-    is_admin = normalized_role in {"admin", "administrador"}
-    is_agent = normalized_role in {"agent", "agente"}
-
-    if not is_admin and not is_agent:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No autorizado para este rol."
-        )
-
-    if not is_admin: # is_agent
-        resolved_id = resolve_agent_owner_id(current_user)
-        if not resolved_id:
+    if context.normalized_role == InternalRole.AGENT:
+        effective_owner_id = context.allowed_agent_ids[0] if context.allowed_agent_ids else None
+        if not effective_owner_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="No hay agente asociado a este usuario."
             )
-        agent_owner_id = resolved_id
+        if agent_owner_id and agent_owner_id != effective_owner_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes permiso para ver resultados de este agente."
+            )
+    else:
+        effective_owner_id = agent_owner_id
+        if effective_owner_id and context.allowed_agent_ids is not None:
+            if effective_owner_id not in context.allowed_agent_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="No tienes permiso para ver resultados de este agente."
+                )
 
     if global_score_min is not None and global_score_max is not None:
         if global_score_min > global_score_max:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="global_score_min cannot be greater than global_score_max",
+            )
+
+    # Validate query service_id if provided
+    if service_id is not None and context.allowed_service_ids is not None:
+        if service_id not in context.allowed_service_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes acceso al servicio seleccionado."
             )
 
     from app.utils.visual_formatters import build_items_visual
@@ -411,7 +658,7 @@ async def list_results(
         db,
         run_id=run_id,
         job_id=job_id,
-        agent_owner_id=agent_owner_id,
+        agent_owner_id=effective_owner_id,
         call_id=call_id,
         date_from=date_from,
         date_to=date_to,
@@ -425,11 +672,13 @@ async def list_results(
         typology_ids=typo_ids,
         duration_min_seconds=duration_min_seconds,
         duration_max_seconds=duration_max_seconds,
+        company_ids=context.allowed_company_ids,
+        service_ids=context.allowed_service_ids,
+        allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None
     )
     
     out = []
     for r in results:
-        # Avoid relying on model_validator, build response model explicitly
         d = MassEvaluationResultResponse.model_validate(r)
         d.items_visual = build_items_visual(r.items_json)
         if d.execution_source is None:
@@ -438,11 +687,10 @@ async def list_results(
     return out
 
 
-
 @router.get("/mass-evaluation-results/{mass_analysis_id}", response_model=MassEvaluationResultResponse)
 async def get_result(
     mass_analysis_id: int,
-    current_user: Annotated[User, Depends(get_current_user)],
+    context: TenantContext = Depends(get_tenant_context),
     db: AsyncSession = Depends(get_db)
 ):
     """Retrieve full analysis result and normalized prompt snapshot elements of a call."""
@@ -454,22 +702,22 @@ async def get_result(
             detail=f"Mass analysis result ID {mass_analysis_id} not found."
         )
 
-    normalized_role = (current_user.role or "").strip().lower()
-    is_admin = normalized_role in {"admin", "administrador"}
-    is_agent = normalized_role in {"agent", "agente"}
-
-    if not is_admin and not is_agent:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No autorizado para este rol."
-        )
-
-    if not is_admin: # is_agent
-        resolved_id = resolve_agent_owner_id(current_user)
-        if not resolved_id or result.hubspot_owner_id != resolved_id:
+    # Scoping validation
+    if not context.is_super_admin:
+        if result.company_id not in context.allowed_company_ids:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="No tienes permiso para ver este análisis."
+                detail="Acceso denegado: este resultado pertenece a otra empresa."
+            )
+        if context.allowed_service_ids is not None and result.service_id not in context.allowed_service_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: este resultado pertenece a un servicio no asignado."
+            )
+        if context.allowed_agent_ids is not None and result.hubspot_owner_id not in context.allowed_agent_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: no tienes permisos sobre el agente de este resultado."
             )
 
     d = MassEvaluationResultResponse.model_validate(result)
@@ -503,33 +751,113 @@ async def backfill_mass_criterion_typologies(
 @router.get("/mass-analysis/automations", response_model=list[MassAnalysisAutomationResponse])
 async def list_automations(
     limit: int = Query(100, ge=1, le=1000),
+    context: TenantContext = Depends(get_tenant_context),
     db: AsyncSession = Depends(get_db)
 ):
     """List all active automation configurations."""
-    return await MassEvaluationService.list_automations(db, limit=limit)
+    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para gestionar automatizaciones."
+        )
+    return await MassEvaluationService.list_automations(
+        db,
+        limit=limit,
+        company_ids=context.allowed_company_ids,
+        service_ids=context.allowed_service_ids
+    )
 
 
 @router.get("/mass-analysis/automations/{automation_id}", response_model=MassAnalysisAutomationResponse)
 async def get_automation(
     automation_id: int,
+    context: TenantContext = Depends(get_tenant_context),
     db: AsyncSession = Depends(get_db)
 ):
     """Retrieve details of a single automation configuration."""
+    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para gestionar automatizaciones."
+        )
     automation = await MassEvaluationService.get_automation(db, automation_id=automation_id)
     if not automation:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Automation configuration ID {automation_id} not found."
         )
+
+    # Scoping validation
+    if not context.is_super_admin:
+        if context.allowed_service_ids is not None:
+            if automation.service_id not in context.allowed_service_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: esta automatización pertenece a un servicio no asignado."
+                )
+        else:
+            stmt_svc = select(Service.company_id).where(Service.service_id == automation.service_id)
+            res_svc = await db.execute(stmt_svc)
+            svc_comp_id = res_svc.scalar()
+            if svc_comp_id not in context.allowed_company_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: esta automatización pertenece a otra empresa."
+                )
+
     return automation
 
 
 @router.post("/mass-analysis/automations", response_model=MassAnalysisAutomationResponse, status_code=status.HTTP_201_CREATED)
 async def create_automation(
     payload: MassAnalysisAutomationCreate,
+    context: TenantContext = Depends(get_tenant_context),
     db: AsyncSession = Depends(get_db)
 ):
     """Create a new automation configuration."""
+    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para crear automatizaciones."
+        )
+
+    # Scoping validation
+    if not context.is_super_admin:
+        if context.allowed_service_ids is not None:
+            if payload.service_id not in context.allowed_service_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: servicio no asignado."
+                )
+        else:
+            stmt_svc = select(Service.company_id).where(Service.service_id == payload.service_id)
+            res_svc = await db.execute(stmt_svc)
+            svc_comp_id = res_svc.scalar()
+            if svc_comp_id not in context.allowed_company_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: servicio de otra empresa."
+                )
+
+        stmt_p = select(Prompt).where(Prompt.prompt_id == payload.prompt_id)
+        res_p = await db.execute(stmt_p)
+        prompt = res_p.scalars().first()
+        if not prompt:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Estructura seleccionada no existe."
+            )
+        if prompt.company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: la estructura pertenece a otra empresa."
+            )
+        if context.allowed_service_ids is not None and prompt.service_id not in context.allowed_service_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: la estructura pertenece a un servicio no asignado."
+            )
+
     try:
         return await MassEvaluationService.create_automation(db, payload=payload)
     except ValueError as ve:
@@ -548,46 +876,144 @@ async def create_automation(
 async def update_automation(
     automation_id: int,
     payload: MassAnalysisAutomationUpdate,
+    context: TenantContext = Depends(get_tenant_context),
     db: AsyncSession = Depends(get_db)
 ):
     """Update an automation configuration."""
-    automation = await MassEvaluationService.update_automation(db, automation_id=automation_id, payload=payload)
-    if not automation:
+    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Automation configuration ID {automation_id} not found."
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para modificar automatizaciones."
         )
-    return automation
-
-
-@router.delete("/mass-analysis/automations/{automation_id}", status_code=status.HTTP_200_OK)
-async def delete_automation(
-    automation_id: int,
-    soft: bool = True,
-    db: AsyncSession = Depends(get_db)
-):
-    """Deactivate or delete an automation configuration."""
-    success = await MassEvaluationService.delete_automation(db, automation_id=automation_id, soft_delete=soft)
-    if not success:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Automation configuration ID {automation_id} not found."
-        )
-    return {"message": f"Automation configuration ID {automation_id} successfully deleted."}
-
-
-@router.post("/mass-analysis/automations/{automation_id}/run-now", response_model=MassAnalysisAutomationRunResponse)
-async def run_automation_now(
-    automation_id: int,
-    db: AsyncSession = Depends(get_db)
-):
-    """Trigger an automation execution run immediately."""
     automation = await MassEvaluationService.get_automation(db, automation_id=automation_id)
     if not automation:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Automation configuration ID {automation_id} not found."
         )
+
+    # Scoping validation
+    if not context.is_super_admin:
+        if context.allowed_service_ids is not None:
+            if automation.service_id not in context.allowed_service_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: esta automatización pertenece a un servicio no asignado."
+                )
+        else:
+            stmt_svc = select(Service.company_id).where(Service.service_id == automation.service_id)
+            res_svc = await db.execute(stmt_svc)
+            svc_comp_id = res_svc.scalar()
+            if svc_comp_id not in context.allowed_company_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: esta automatización pertenece a otra empresa."
+                )
+
+    if payload.prompt_id is not None:
+        stmt_p = select(Prompt).where(Prompt.prompt_id == payload.prompt_id)
+        res_p = await db.execute(stmt_p)
+        prompt = res_p.scalars().first()
+        if not prompt:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Estructura seleccionada no existe."
+            )
+        if not context.is_super_admin:
+            if prompt.company_id not in context.allowed_company_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: la estructura pertenece a otra empresa."
+                )
+            if context.allowed_service_ids is not None and prompt.service_id not in context.allowed_service_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: la estructura pertenece a un servicio no asignado."
+                )
+
+    updated = await MassEvaluationService.update_automation(db, automation_id=automation_id, payload=payload)
+    return updated
+
+
+@router.delete("/mass-analysis/automations/{automation_id}", status_code=status.HTTP_200_OK)
+async def delete_automation(
+    automation_id: int,
+    soft: bool = True,
+    context: TenantContext = Depends(get_tenant_context),
+    db: AsyncSession = Depends(get_db)
+):
+    """Deactivate or delete an automation configuration."""
+    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para borrar automatizaciones."
+        )
+    automation = await MassEvaluationService.get_automation(db, automation_id=automation_id)
+    if not automation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Automation configuration ID {automation_id} not found."
+        )
+
+    # Scoping validation
+    if not context.is_super_admin:
+        if context.allowed_service_ids is not None:
+            if automation.service_id not in context.allowed_service_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: esta automatización pertenece a un servicio no asignado."
+                )
+        else:
+            stmt_svc = select(Service.company_id).where(Service.service_id == automation.service_id)
+            res_svc = await db.execute(stmt_svc)
+            svc_comp_id = res_svc.scalar()
+            if svc_comp_id not in context.allowed_company_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: esta automatización pertenece a otra empresa."
+                )
+
+    await MassEvaluationService.delete_automation(db, automation_id=automation_id, soft_delete=soft)
+    return {"message": f"Automation configuration ID {automation_id} successfully deleted."}
+
+
+@router.post("/mass-analysis/automations/{automation_id}/run-now", response_model=MassAnalysisAutomationRunResponse)
+async def run_automation_now(
+    automation_id: int,
+    context: TenantContext = Depends(get_tenant_context),
+    db: AsyncSession = Depends(get_db)
+):
+    """Trigger an automation execution run immediately."""
+    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para ejecutar automatizaciones."
+        )
+    automation = await MassEvaluationService.get_automation(db, automation_id=automation_id)
+    if not automation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Automation configuration ID {automation_id} not found."
+        )
+
+    # Scoping validation
+    if not context.is_super_admin:
+        if context.allowed_service_ids is not None:
+            if automation.service_id not in context.allowed_service_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: esta automatización pertenece a un servicio no asignado."
+                )
+        else:
+            stmt_svc = select(Service.company_id).where(Service.service_id == automation.service_id)
+            res_svc = await db.execute(stmt_svc)
+            svc_comp_id = res_svc.scalar()
+            if svc_comp_id not in context.allowed_company_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: esta automatización pertenece a otra empresa."
+                )
+
     try:
         return await MassEvaluationService.run_automation_run(db, automation=automation, trigger_type="manual")
     except ValueError as ve:
@@ -606,13 +1032,38 @@ async def run_automation_now(
 async def list_automation_runs(
     automation_id: int,
     limit: int = Query(100, ge=1, le=1000),
+    context: TenantContext = Depends(get_tenant_context),
     db: AsyncSession = Depends(get_db)
 ):
     """List execution logs / runs for a given automation configuration."""
+    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para gestionar automatizaciones."
+        )
     automation = await MassEvaluationService.get_automation(db, automation_id=automation_id)
     if not automation:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Automation configuration ID {automation_id} not found."
         )
+
+    # Scoping validation
+    if not context.is_super_admin:
+        if context.allowed_service_ids is not None:
+            if automation.service_id not in context.allowed_service_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: esta automatización pertenece a un servicio no asignado."
+                )
+        else:
+            stmt_svc = select(Service.company_id).where(Service.service_id == automation.service_id)
+            res_svc = await db.execute(stmt_svc)
+            svc_comp_id = res_svc.scalar()
+            if svc_comp_id not in context.allowed_company_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: esta automatización pertenece a otra empresa."
+                )
+
     return await MassEvaluationService.list_automation_runs(db, automation_id=automation_id, limit=limit)
