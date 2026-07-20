@@ -54,9 +54,9 @@ class NotableDataDetail(BaseModel):
 class GeneralObjectiveDetail(BaseModel):
     title: str
     description: str
-    rationale: str
-    expected_behavior: str
-    success_indicators: List[str]
+    rationale: Optional[str] = ""
+    expected_behavior: Optional[str] = ""
+    success_indicators: Optional[List[str]] = Field(default_factory=list)
     status: Optional[str] = None
     is_evaluated: Optional[bool] = False
     score: Optional[float] = None
@@ -69,9 +69,9 @@ class GeneralObjectiveDetail(BaseModel):
 class SpecificObjectiveDetail(BaseModel):
     title: str
     description: str
-    related_criteria: List[str]
-    specific_behavior_to_improve: str
-    success_indicators: List[str]
+    related_criteria: Optional[List[str]] = Field(default_factory=list)
+    specific_behavior_to_improve: Optional[str] = ""
+    success_indicators: Optional[List[str]] = Field(default_factory=list)
     status: Optional[str] = None
     is_evaluated: Optional[bool] = False
     score: Optional[float] = None
@@ -90,7 +90,7 @@ class SimulationPromptOut(BaseModel):
     prompt_number: int
     title: str
     scenario_type: str
-    objective_focus_json: Optional[List[str]] = Field(default_factory=list)
+    objective_focus_json: Optional[Any] = Field(default=None)
     linked_general_objectives: Optional[List[str]] = Field(default_factory=list)
     linked_specific_objectives: Optional[List[str]] = Field(default_factory=list)
     objective_summary: Optional[str] = None
@@ -374,3 +374,11 @@ class ApproveCycleResponse(BaseModel):
     approved_by_user_id: int
     prompts_generated: int
     message: str
+
+
+class ManualCycleCreateRequest(BaseModel):
+    """Payload para la creación de un ciclo de entrenamiento manual."""
+    hubspot_owner_ids: List[str] = Field(..., description="Lista de IDs de agentes para los que crear el ciclo.")
+    objectives: List[str] = Field(..., description="Lista de objetivos manuales comunes.")
+    title: Optional[str] = Field(default="Ciclo manual", description="Título del ciclo manual.")
+    service_id: Optional[int] = Field(default=None, description="ID del servicio asociado opcional.")

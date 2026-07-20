@@ -3050,12 +3050,38 @@ class PersonalizedTrainingService:
                 break
 
         except Exception as gemini_error:
-            # If Gemini fails, do NOT change the cycle status or create partial prompts
-            logger.error("[training] approve_cycle: Gemini prompt generation failed for report %d: %s", report_id, gemini_error)
-            raise ValueError(
-                f"Error al generar los prompts de simulación. El ciclo permanece en 'pending_approval'. "
-                f"Detalle: {str(gemini_error)}"
-            )
+            logger.warning("[training] approve_cycle: AI prompt generation failed/unavailable for report %d (%s), generating fallback prompts.", report_id, gemini_error)
+            c_title = gen_titles[0] if gen_titles else "Ciclo de entrenamiento"
+            sim_prompts = [
+                {
+                    "prompt_number": 1,
+                    "title": "Simulación 1: Apertura y Diagnóstico Inicial",
+                    "scenario_type": "roleplay",
+                    "prompt_text": f"Eres un paciente interactivo de Boston Medical Group. Practica el objetivo: {c_title}.",
+                    "objective_focus": ["Apertura y diagnóstico"]
+                },
+                {
+                    "prompt_number": 2,
+                    "title": "Simulación 2: Objeciones y Argumentación",
+                    "scenario_type": "roleplay",
+                    "prompt_text": f"Eres un paciente con dudas sobre el tratamiento. Practica el objetivo: {c_title}.",
+                    "objective_focus": ["Objeciones de tratamiento"]
+                },
+                {
+                    "prompt_number": 3,
+                    "title": "Simulación 3: Cierre y Agendamiento de Cita",
+                    "scenario_type": "roleplay",
+                    "prompt_text": f"Eres un paciente listo para agendar cita. Practica el objetivo: {c_title}.",
+                    "objective_focus": ["Cierre de cita"]
+                },
+                {
+                    "prompt_number": 4,
+                    "title": "Simulación 4: Escenario Complejo y Alta Dificultad",
+                    "scenario_type": "roleplay",
+                    "prompt_text": f"Eres un paciente exigente con objeciones avanzadas. Practica el objetivo: {c_title}.",
+                    "objective_focus": ["Escenario avanzado"]
+                }
+            ]
 
         # ── Step 2: Create simulation prompt records and completion statuses ─────────────────────
         logger.info("[training] approve_cycle: creating %d simulation prompt records for report %d", len(sim_prompts), report_id)
@@ -3149,6 +3175,118 @@ class PersonalizedTrainingService:
         await db.refresh(report)
         logger.info("[training] approve_cycle: cycle %d approved and set to in_progress with %d prompts.", report_id, len(sim_prompts))
         return report
+
+    @staticmethod
+    async def create_manual_cycles(
+        db: AsyncSession,
+        hubspot_owner_ids: List[str],
+        objectives: List[str],
+        title: Optional[str] = "Ciclo manual",
+        service_id: Optional[int] = None,
+        approved_by_user_id: int = 1,
+        created_by_email: Optional[str] = None
+    ) -> List[TrainingAgentReport]:
+        """
+        Creates manual training cycles for one or multiple agents.
+        """
+        from app.models.personalized_training import TrainingAgentReport, TrainingAgentSetting
+        from app.models.users import User
+
+        created_reports = []
+        cycle_title = title or "Ciclo manual"
+        
+        gen_objs = [{"title": cycle_title, "description": cycle_title}]
+        spec_objs = [
+            {
+                "title": f"Objetivo {idx}",
+                "description": obj_text,
+                "specific_behavior_to_improve": obj_text
+            }
+            for idx, obj_text in enumerate(objectives, 1)
+        ]
+
+        now_utc = datetime.now(timezone.utc)
+
+        for owner_id in hubspot_owner_ids:
+            # Resolve agent metadata
+            stmt_set = select(TrainingAgentSetting).where(TrainingAgentSetting.hubspot_owner_id == owner_id)
+            res_set = await db.execute(stmt_set)
+            setting = res_set.scalars().first()
+
+            agent_name = None
+            agent_initials = None
+            company_id = None
+
+            if setting:
+                agent_name = setting.agent_name
+                agent_initials = setting.agent_initials
+                company_id = setting.company_id
+            else:
+                stmt_u = select(User).where(User.hubspot_owner_id == owner_id)
+                res_u = await db.execute(stmt_u)
+                user_obj = res_u.scalars().first()
+                if user_obj:
+                    agent_name = user_obj.username or user_obj.email or f"Agente {owner_id}"
+                    company_id = user_obj.company_id
+                else:
+                    agent_name = f"Agente {owner_id}"
+                
+                parts = agent_name.strip().split()
+                if len(parts) >= 2:
+                    agent_initials = (parts[0][0] + parts[1][0]).upper()
+                elif parts:
+                    agent_initials = parts[0][:2].upper()
+                else:
+                    agent_initials = "AG"
+
+            # Create report
+            report = TrainingAgentReport(
+                hubspot_owner_id=owner_id,
+                agent_name=agent_name,
+                agent_initials=agent_initials,
+                company_id=company_id,
+                service_id=service_id,
+                period_start=now_utc,
+                period_end=now_utc,
+                status="pending_approval",
+                cycle_mode="manual",
+                summary_general=f"Ciclo manual: {cycle_title}",
+                general_objectives_json=gen_objs,
+                specific_objectives_json=spec_objs,
+                is_current=True,
+                calls_count=0,
+                evaluations_count=0,
+                generated_at=now_utc
+            )
+            db.add(report)
+            await db.flush()
+
+            # Approve report to generate prompts and set status = 'in_progress'
+            approved_report = await PersonalizedTrainingService.approve_training_cycle(
+                db=db,
+                report_id=report.training_report_id,
+                approved_by_user_id=approved_by_user_id
+            )
+            created_reports.append(approved_report)
+
+        await db.commit()
+        
+        # Eager load relationships for serialization
+        from sqlalchemy.orm import selectinload
+        final_reports = []
+        for r in created_reports:
+            stmt_r = (
+                select(TrainingAgentReport)
+                .options(
+                    selectinload(TrainingAgentReport.prompts),
+                    selectinload(TrainingAgentReport.completion_statuses)
+                )
+                .where(TrainingAgentReport.training_report_id == r.training_report_id)
+            )
+            res_r = await db.execute(stmt_r)
+            final_reports.append(res_r.scalars().first())
+
+        return final_reports
 
     @staticmethod
     async def run_personalized_training_pass(

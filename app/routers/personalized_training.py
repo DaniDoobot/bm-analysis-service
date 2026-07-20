@@ -25,6 +25,7 @@ from app.schemas.personalized_training import (
     CyclesTeamSummaryResponse,
     UpdateCycleObjectivesPayload,
     ApproveCycleResponse,
+    ManualCycleCreateRequest,
 )
 from app.services.personalized_training_service import PersonalizedTrainingService
 
@@ -445,6 +446,79 @@ async def trigger_manual_generation(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Fallo al ejecutar la generación manual: {str(e)}"
+        )
+
+
+@router.post("/admin/manual-cycle", response_model=List[TrainingAgentReportOut])
+async def create_manual_cycle(
+    payload: ManualCycleCreateRequest,
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Crea un ciclo de entrenamiento manual para uno o varios agentes.
+    """
+    if context.normalized_role == InternalRole.AGENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Los agentes no pueden crear ciclos manuales."
+        )
+
+    if not payload.hubspot_owner_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Debe proporcionar al menos un ID de agente."
+        )
+
+    # Atomic scope validation against TenantContext before creating any DB objects
+    if context.allowed_agent_ids is not None:
+        for oid in payload.hubspot_owner_ids:
+            if oid not in context.allowed_agent_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Acceso denegado: No tienes permiso para crear ciclos manuales para el agente {oid}."
+                )
+
+    if not context.is_super_admin and context.allowed_company_ids:
+        from app.models.personalized_training import TrainingAgentSetting
+        stmt_sets = select(TrainingAgentSetting.company_id, TrainingAgentSetting.hubspot_owner_id).where(
+            TrainingAgentSetting.hubspot_owner_id.in_(payload.hubspot_owner_ids)
+        )
+        res_sets = await db.execute(stmt_sets)
+        found_settings = {row.hubspot_owner_id: row.company_id for row in res_sets.all()}
+
+        stmt_users = select(User.company_id, User.hubspot_owner_id).where(
+            User.hubspot_owner_id.in_(payload.hubspot_owner_ids)
+        )
+        res_users = await db.execute(stmt_users)
+        found_users = {row.hubspot_owner_id: row.company_id for row in res_users.all()}
+
+        for oid in payload.hubspot_owner_ids:
+            cid = found_settings.get(oid) or found_users.get(oid)
+            if cid is not None and cid not in context.allowed_company_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Acceso denegado: El agente {oid} pertenece a otra empresa."
+                )
+
+    try:
+        reports = await PersonalizedTrainingService.create_manual_cycles(
+            db=db,
+            hubspot_owner_ids=payload.hubspot_owner_ids,
+            objectives=payload.objectives,
+            title=payload.title,
+            service_id=payload.service_id,
+            approved_by_user_id=context.user_id,
+            created_by_email=context.user_email
+        )
+        return reports
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error al crear ciclo manual: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al crear ciclo manual: {str(e)}"
         )
 
 

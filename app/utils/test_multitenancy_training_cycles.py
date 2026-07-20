@@ -664,6 +664,109 @@ class TestMultitenancyTrainingCycles(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(res.status_code, 403)
 
+    # ── Manual Cycle Creation Endpoints ─────────────────────────────────────
+
+    async def test_manual_cycle_company_admin_creates_cycles_for_company_agents(self):
+        res = await self.client.post(
+            "/bm/training/admin/manual-cycle",
+            json={
+                "hubspot_owner_ids": ["boston_owner_1", "boston_owner_2"],
+                "objectives": ["Mejorar cierre de cita", "Manejo de objeciones de precio"],
+                "title": "Ciclo Manual Masivo Boston",
+                "service_id": 1
+            },
+            headers={"Authorization": f"Bearer {self.t_boston_admin}"}
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(len(data), 2)
+        owners = {r["hubspot_owner_id"] for r in data}
+        self.assertEqual(owners, {"boston_owner_1", "boston_owner_2"})
+        for r in data:
+            self.assertEqual(r["status"], "in_progress")
+            self.assertIn("Ciclo Manual Masivo Boston", r["summary_general"])
+
+    async def test_manual_cycle_team_coordinator_creates_cycle_for_team_agent(self):
+        res = await self.client.post(
+            "/bm/training/admin/manual-cycle",
+            json={
+                "hubspot_owner_ids": ["boston_owner_1"],
+                "objectives": ["Optimizar empatía inicial"],
+                "title": "Ciclo Manual Equipo",
+                "service_id": 1
+            },
+            headers={"Authorization": f"Bearer {self.t_boston_coor}"}
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["hubspot_owner_id"], "boston_owner_1")
+        self.assertEqual(data[0]["status"], "in_progress")
+
+    async def test_manual_cycle_team_coordinator_out_of_scope_agent_returns_403_and_no_partial_creation(self):
+        # Count reports before request
+        async with AsyncSession(self.session_factory) as db:
+            from sqlalchemy import select, func
+            r_before = (await db.execute(select(func.count(TrainingAgentReport.training_report_id)))).scalar()
+
+        # boston_coor tries to include boston_owner_2 (outside Team 1)
+        res = await self.client.post(
+            "/bm/training/admin/manual-cycle",
+            json={
+                "hubspot_owner_ids": ["boston_owner_1", "boston_owner_2"],
+                "objectives": ["Objetivo no permitido"],
+                "title": "Ciclo Parcial Fallido"
+            },
+            headers={"Authorization": f"Bearer {self.t_boston_coor}"}
+        )
+        self.assertEqual(res.status_code, 403)
+
+        # Verify no partial creation in DB
+        async with AsyncSession(self.session_factory) as db:
+            r_after = (await db.execute(select(func.count(TrainingAgentReport.training_report_id)))).scalar()
+            self.assertEqual(r_before, r_after)
+
+    async def test_manual_cycle_agent_role_returns_403(self):
+        res = await self.client.post(
+            "/bm/training/admin/manual-cycle",
+            json={
+                "hubspot_owner_ids": ["boston_owner_1"],
+                "objectives": ["Self objective"],
+                "title": "Intento de Agente"
+            },
+            headers={"Authorization": f"Bearer {self.t_boston_agent1}"}
+        )
+        self.assertEqual(res.status_code, 403)
+
+    async def test_manual_cycle_creates_report_and_four_prompts_per_agent(self):
+        res = await self.client.post(
+            "/bm/training/admin/manual-cycle",
+            json={
+                "hubspot_owner_ids": ["gesdent_owner"],
+                "objectives": ["Pauta de objeción clínicas", "Estructura de saludo"],
+                "title": "Ciclo Manual GesDent",
+                "service_id": 2
+            },
+            headers={"Authorization": f"Bearer {self.t_super}"}
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(len(data), 1)
+        report_id = data[0]["training_report_id"]
+
+        # Verify DB records
+        async with AsyncSession(self.session_factory) as db:
+            from sqlalchemy import select
+            rep = await db.get(TrainingAgentReport, report_id)
+            self.assertIsNotNone(rep)
+            self.assertEqual(rep.status, "in_progress")
+            self.assertEqual(rep.cycle_mode, "manual")
+
+            # Verify exactly 4 simulation prompts were generated
+            stmt_p = select(TrainingSimulationPrompt).where(TrainingSimulationPrompt.training_report_id == report_id)
+            prompts = list((await db.execute(stmt_p)).scalars().all())
+            self.assertEqual(len(prompts), 4)
+
 
 if __name__ == "__main__":
     import asyncio
