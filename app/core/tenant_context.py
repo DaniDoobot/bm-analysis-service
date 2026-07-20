@@ -11,6 +11,7 @@ from app.core.roles import InternalRole, normalize_role
 
 class TenantContext(BaseModel):
     user_id: int
+    user_email: Optional[str] = None
     raw_role: str
     normalized_role: InternalRole
     is_super_admin: bool
@@ -61,6 +62,7 @@ class TenantContext(BaseModel):
             # Superadmin no tiene restricciones
             return cls(
                 user_id=user.user_id,
+                user_email=user.email,
                 raw_role=user.role,
                 normalized_role=norm_role,
                 is_super_admin=True,
@@ -76,6 +78,7 @@ class TenantContext(BaseModel):
             # Un usuario no-superadmin sin empresa asignada no tiene accesos
             return cls(
                 user_id=user.user_id,
+                user_email=user.email,
                 raw_role=user.role,
                 normalized_role=norm_role,
                 is_super_admin=False,
@@ -145,6 +148,7 @@ class TenantContext(BaseModel):
 
         return cls(
             user_id=user.user_id,
+            user_email=user.email,
             raw_role=user.role,
             normalized_role=norm_role,
             is_super_admin=False,

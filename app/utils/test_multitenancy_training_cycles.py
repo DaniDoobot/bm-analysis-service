@@ -475,6 +475,195 @@ class TestMultitenancyTrainingCycles(unittest.IsolatedAsyncioTestCase):
         res = await self.client.get("/bm/training/admin/evaluations/2", headers={"Authorization": f"Bearer {self.t_boston_admin}"})
         self.assertEqual(res.status_code, 403)
 
+    # ── Test WRITE Endpoints Scoping ──────────────────────────────────────────
+
+    async def test_update_agent_setting_scoping(self):
+        # Boston admin can modify Boston setting -> 200
+        res = await self.client.patch(
+            "/bm/training/admin/settings/boston_owner_1",
+            json={"is_enabled": False},
+            headers={"Authorization": f"Bearer {self.t_boston_admin}"}
+        )
+        self.assertEqual(res.status_code, 200)
+
+        # Boston admin cannot modify GesDent setting -> 403
+        res = await self.client.patch(
+            "/bm/training/admin/settings/gesdent_owner",
+            json={"is_enabled": False},
+            headers={"Authorization": f"Bearer {self.t_boston_admin}"}
+        )
+        self.assertEqual(res.status_code, 403)
+
+        # Coordinator gets 403
+        res = await self.client.patch(
+            "/bm/training/admin/settings/boston_owner_1",
+            json={"is_enabled": False},
+            headers={"Authorization": f"Bearer {self.t_boston_coor}"}
+        )
+        self.assertEqual(res.status_code, 403)
+
+        # Agent gets 403
+        res = await self.client.patch(
+            "/bm/training/admin/settings/boston_owner_1",
+            json={"is_enabled": False},
+            headers={"Authorization": f"Bearer {self.t_boston_agent1}"}
+        )
+        self.assertEqual(res.status_code, 403)
+
+    async def test_update_scheduler_settings_scoping(self):
+        # Super admin can update scheduler settings -> 200
+        res = await self.client.patch(
+            "/bm/training/admin/scheduler-settings",
+            json={"is_enabled": False, "interval_days": 7, "lookback_days": 7},
+            headers={"Authorization": f"Bearer {self.t_super}"}
+        )
+        self.assertEqual(res.status_code, 200)
+
+        # Boston admin cannot update scheduler settings -> 403
+        res = await self.client.patch(
+            "/bm/training/admin/scheduler-settings",
+            json={"is_enabled": False, "interval_days": 7, "lookback_days": 7},
+            headers={"Authorization": f"Bearer {self.t_boston_admin}"}
+        )
+        self.assertEqual(res.status_code, 403)
+
+    async def test_generate_scoping(self):
+        # Boston admin can generate for Boston agent -> 200
+        res = await self.client.post(
+            "/bm/training/admin/generate",
+            json={
+                "hubspot_owner_ids": ["boston_owner_1"],
+                "period_start": (datetime.now(timezone.utc) - timedelta(days=14)).isoformat(),
+                "period_end": datetime.now(timezone.utc).isoformat(),
+                "force_regenerate": True
+            },
+            headers={"Authorization": f"Bearer {self.t_boston_admin}"}
+        )
+        self.assertEqual(res.status_code, 200)
+
+        # Boston admin cannot generate for GesDent agent -> 403
+        res = await self.client.post(
+            "/bm/training/admin/generate",
+            json={
+                "hubspot_owner_ids": ["gesdent_owner"],
+                "period_start": (datetime.now(timezone.utc) - timedelta(days=14)).isoformat(),
+                "period_end": datetime.now(timezone.utc).isoformat(),
+                "force_regenerate": True
+            },
+            headers={"Authorization": f"Bearer {self.t_boston_admin}"}
+        )
+        self.assertEqual(res.status_code, 403)
+
+        # Coordinator gets 403
+        res = await self.client.post(
+            "/bm/training/admin/generate",
+            json={
+                "hubspot_owner_ids": ["boston_owner_1"]
+            },
+            headers={"Authorization": f"Bearer {self.t_boston_coor}"}
+        )
+        self.assertEqual(res.status_code, 403)
+
+    async def test_archive_report_scoping(self):
+        # Boston admin can archive Boston report 1 -> 200
+        res = await self.client.post(
+            "/bm/training/admin/reports/1/archive",
+            headers={"Authorization": f"Bearer {self.t_boston_admin}"}
+        )
+        self.assertEqual(res.status_code, 200)
+
+        # Boston admin cannot archive GesDent report 3 -> 403
+        res = await self.client.post(
+            "/bm/training/admin/reports/3/archive",
+            headers={"Authorization": f"Bearer {self.t_boston_admin}"}
+        )
+        self.assertEqual(res.status_code, 403)
+
+        # Coordinator gets 403
+        res = await self.client.post(
+            "/bm/training/admin/reports/1/archive",
+            headers={"Authorization": f"Bearer {self.t_boston_coor}"}
+        )
+        self.assertEqual(res.status_code, 403)
+
+    async def test_update_cycle_objectives_scoping(self):
+        # Boston admin can patch Boston report 2 objectives (pending approval) -> 200
+        res = await self.client.patch(
+            "/bm/training/admin/reports/2/objectives",
+            json={
+                "general_objectives_json": [{"title": "Obj gen", "description": "Desc", "rationale": "Rat", "expected_behavior": "Beh", "success_indicators": ["Ind"]}],
+                "specific_objectives_json": [{"title": "Obj spec", "description": "Desc", "related_criteria": ["crit"], "specific_behavior_to_improve": "Beh", "success_indicators": ["Ind"]}]
+            },
+            headers={"Authorization": f"Bearer {self.t_boston_admin}"}
+        )
+        self.assertEqual(res.status_code, 200)
+
+        # Boston admin cannot patch GesDent report 3 -> 403
+        res = await self.client.patch(
+            "/bm/training/admin/reports/3/objectives",
+            json={
+                "general_objectives_json": [],
+                "specific_objectives_json": []
+            },
+            headers={"Authorization": f"Bearer {self.t_boston_admin}"}
+        )
+        self.assertEqual(res.status_code, 403)
+
+        # Coordinator gets 403
+        res = await self.client.patch(
+            "/bm/training/admin/reports/2/objectives",
+            json={
+                "general_objectives_json": [],
+                "specific_objectives_json": []
+            },
+            headers={"Authorization": f"Bearer {self.t_boston_coor}"}
+        )
+        self.assertEqual(res.status_code, 403)
+
+    async def test_approve_cycle_scoping(self):
+        # Boston admin can approve Boston report 2 -> 200
+        res = await self.client.post(
+            "/bm/training/admin/reports/2/approve",
+            headers={"Authorization": f"Bearer {self.t_boston_admin}"}
+        )
+        self.assertEqual(res.status_code, 200)
+
+        # Boston admin cannot approve GesDent report 3 -> 403
+        res = await self.client.post(
+            "/bm/training/admin/reports/3/approve",
+            headers={"Authorization": f"Bearer {self.t_boston_admin}"}
+        )
+        self.assertEqual(res.status_code, 403)
+
+        # Coordinator gets 403
+        res = await self.client.post(
+            "/bm/training/admin/reports/2/approve",
+            headers={"Authorization": f"Bearer {self.t_boston_coor}"}
+        )
+        self.assertEqual(res.status_code, 403)
+
+    async def test_hard_delete_report_scoping(self):
+        # Boston admin can hard-delete Boston report 2 -> 200
+        res = await self.client.delete(
+            "/bm/training/admin/reports/2/hard-delete",
+            headers={"Authorization": f"Bearer {self.t_boston_admin}"}
+        )
+        self.assertEqual(res.status_code, 200)
+
+        # Boston admin cannot hard-delete GesDent report 3 -> 403
+        res = await self.client.delete(
+            "/bm/training/admin/reports/3/hard-delete",
+            headers={"Authorization": f"Bearer {self.t_boston_admin}"}
+        )
+        self.assertEqual(res.status_code, 403)
+
+        # Coordinator gets 403
+        res = await self.client.delete(
+            "/bm/training/admin/reports/2/hard-delete",
+            headers={"Authorization": f"Bearer {self.t_boston_coor}"}
+        )
+        self.assertEqual(res.status_code, 403)
+
 
 if __name__ == "__main__":
     import asyncio

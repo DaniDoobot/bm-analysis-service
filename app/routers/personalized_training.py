@@ -80,6 +80,45 @@ def sanitize_report_for_agent(report: dict) -> dict:
     return report
 
 
+async def verify_report_write_scope(
+    db: AsyncSession,
+    training_report_id: int,
+    context: TenantContext
+) -> TrainingAgentReport:
+    """Verifies that a report exists and the user has permission to write/mutate it."""
+    if context.normalized_role in [InternalRole.AGENT, InternalRole.TEAM_COORDINATOR]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Se requiere rol de administración."
+        )
+
+    stmt_rep = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == training_report_id)
+    res_rep = await db.execute(stmt_rep)
+    report = res_rep.scalars().first()
+    if not report:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Informe de entrenamiento ID {training_report_id} no encontrado."
+        )
+
+    if not context.is_super_admin:
+        # Check company scoping
+        if report.company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: El informe pertenece a otra empresa."
+            )
+        # Check agent scoping (Service Managers)
+        if context.allowed_agent_ids is not None:
+            if report.hubspot_owner_id not in context.allowed_agent_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: No tienes permisos sobre el agente de este informe."
+                )
+
+    return report
+
+
 # ── Admin Endpoints ──────────────────────────────────────────────────────────
 
 @router.get("/admin/settings", response_model=List[TrainingAgentSettingOut])
@@ -110,11 +149,50 @@ async def list_agent_settings(
 async def update_agent_setting(
     hubspot_owner_id: str,
     payload: TrainingAgentSettingUpdate,
-    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: AsyncSession = Depends(get_db)
 ):
-    """Update training setting for an agent (enable/disable) (Admin only)."""
-    enforce_admin_role(current_user)
+    """Update training setting for an agent (enable/disable) (Admin/Company Admin/Service Manager)."""
+    if context.normalized_role in [InternalRole.AGENT, InternalRole.TEAM_COORDINATOR]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Se requiere rol de administración."
+        )
+
+    # 1. Enforce agent-level restriction if manager/coordinator
+    if context.allowed_agent_ids is not None:
+        if hubspot_owner_id not in context.allowed_agent_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: No tienes permisos para gestionar este agente."
+            )
+
+    # 2. Resolve existing setting or agent's company to validate company scoping
+    from app.models.personalized_training import TrainingAgentSetting
+    stmt = select(TrainingAgentSetting).where(TrainingAgentSetting.hubspot_owner_id == hubspot_owner_id)
+    res = await db.execute(stmt)
+    existing = res.scalars().first()
+
+    resolved_company_id = None
+    if existing:
+        resolved_company_id = existing.company_id
+    else:
+        # Resolve company from User table
+        stmt_u = select(User.company_id).where(User.hubspot_owner_id == hubspot_owner_id)
+        res_u = await db.execute(stmt_u)
+        resolved_company_id = res_u.scalar()
+
+    if resolved_company_id is None and not context.is_super_admin:
+        resolved_company_id = context.company_id
+
+    # Enforce company scoping
+    if not context.is_super_admin:
+        if resolved_company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: El agente pertenece a otra empresa."
+            )
+
     try:
         setting = await PersonalizedTrainingService.update_agent_setting(
             db=db,
@@ -124,7 +202,8 @@ async def update_agent_setting(
             agent_initials=payload.agent_initials,
             training_code=payload.training_code,
             training_numeric_code=payload.training_numeric_code,
-            training_code_enabled=payload.training_code_enabled
+            training_code_enabled=payload.training_code_enabled,
+            company_id=resolved_company_id
         )
         if not setting:
             raise HTTPException(
@@ -220,11 +299,15 @@ async def get_scheduler_settings(
 @router.patch("/admin/scheduler-settings", response_model=TrainingSchedulerSettingOut)
 async def update_scheduler_settings(
     payload: TrainingSchedulerSettingPatch,
-    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: AsyncSession = Depends(get_db)
 ):
-    """Modify the persistent personalized training scheduler configuration (Admin only)."""
-    enforce_admin_role(current_user)
+    """Modify the persistent personalized training scheduler configuration (Super Admin only)."""
+    if not context.is_super_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Se requiere rol Super Administrador para editar los ajustes globales del scheduler."
+        )
     
     from app.config import get_settings
     settings = get_settings()
@@ -234,7 +317,7 @@ async def update_scheduler_settings(
         is_enabled=payload.is_enabled,
         interval_days=payload.interval_days,
         lookback_days=payload.lookback_days,
-        updated_by_email=current_user.email
+        updated_by_email=context.user_email
     )
     
     runtime_enabled = settings.enable_training_scheduler
@@ -309,11 +392,41 @@ async def get_agent_detail_admin(
 @router.post("/admin/generate", response_model=TrainingRunResponse)
 async def trigger_manual_generation(
     payload: ManualGeneratePayload,
-    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: AsyncSession = Depends(get_db)
 ):
-    """Trigger manual personalized training generation for one or more agents (Admin only)."""
-    enforce_admin_role(current_user)
+    """Trigger manual personalized training generation for one or more agents."""
+    if context.normalized_role in [InternalRole.AGENT, InternalRole.TEAM_COORDINATOR]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Se requiere rol de administración."
+        )
+
+    # Validate agent scoping if owner IDs were explicitly requested
+    if payload.hubspot_owner_ids:
+        # Enforce agent ID restrictions (Service Managers)
+        if context.allowed_agent_ids is not None:
+            for oid in payload.hubspot_owner_ids:
+                if oid not in context.allowed_agent_ids:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail=f"No tienes permiso para generar entrenamiento para el agente {oid}."
+                    )
+        # Enforce company restrictions (Company Admins)
+        if not context.is_super_admin:
+            stmt_u = select(User.company_id).where(User.hubspot_owner_id.in_(payload.hubspot_owner_ids))
+            res_u = await db.execute(stmt_u)
+            companies = list(res_u.scalars().all())
+            for cid in companies:
+                if cid not in context.allowed_company_ids:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Acceso denegado: Uno o más agentes pertenecen a otra empresa."
+                    )
+
+    company_ids = context.allowed_company_ids if not context.is_super_admin else None
+    allowed_agent_ids = context.allowed_agent_ids if not context.is_super_admin else None
+
     try:
         run = await PersonalizedTrainingService.run_personalized_training_pass(
             db=db,
@@ -321,8 +434,10 @@ async def trigger_manual_generation(
             period_start=payload.period_start,
             period_end=payload.period_end,
             triggered_by="manual",
-            created_by_email=current_user.email,
-            force_regenerate=payload.force_regenerate
+            created_by_email=context.user_email,
+            force_regenerate=payload.force_regenerate,
+            company_ids=company_ids,
+            allowed_agent_ids=allowed_agent_ids
         )
         return run
     except Exception as e:
@@ -513,11 +628,11 @@ async def get_report_by_id(
 @router.post("/admin/reports/{training_report_id}/archive", response_model=TrainingAgentReportOut)
 async def archive_training_report(
     training_report_id: int,
-    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: AsyncSession = Depends(get_db)
 ):
-    """Soft-delete / archive a training report so it no longer counts in active/pending stats (Admin only)."""
-    enforce_admin_role(current_user)
+    """Soft-delete / archive a training report so it no longer counts in active/pending stats (Admin/Company Admin/Service Manager)."""
+    await verify_report_write_scope(db, training_report_id, context)
     report = await PersonalizedTrainingService.archive_report(db, report_id=training_report_id)
     if not report:
         raise HTTPException(
@@ -531,15 +646,11 @@ async def archive_training_report(
 async def update_cycle_objectives(
     training_report_id: int,
     payload: UpdateCycleObjectivesPayload,
-    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: AsyncSession = Depends(get_db)
 ):
-    """Edit general and/or specific objectives of a training cycle in 'pending_approval' status (Admin only).
-    
-    Validates that specific objectives are qualitative and do not contain percentage-based phrasing.
-    Only cycles in 'pending_approval' status can be edited.
-    """
-    enforce_admin_role(current_user)
+    """Edit general and/or specific objectives of a training cycle in 'pending_approval' status (Admin/Company Admin/Service Manager)."""
+    await verify_report_write_scope(db, training_report_id, context)
     try:
         report = await PersonalizedTrainingService.update_cycle_objectives(
             db=db,
@@ -566,25 +677,16 @@ async def update_cycle_objectives(
 @router.post("/admin/reports/{training_report_id}/approve", response_model=ApproveCycleResponse)
 async def approve_training_cycle(
     training_report_id: int,
-    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: AsyncSession = Depends(get_db)
 ):
-    """Approve a training cycle in 'pending_approval' status (Admin only).
-    
-    This endpoint:
-    - Validates objectives are qualitative (no percentages).
-    - Generates the 4 simulation prompts and completion status records.
-    - Deactivates any previous in_progress cycle for the same agent.
-    - Transitions the cycle to 'in_progress', making it visible to the agent.
-    
-    Idempotent: re-approving an already in_progress cycle returns the current state.
-    """
-    enforce_admin_role(current_user)
+    """Approve a training cycle in 'pending_approval' status (Admin/Company Admin/Service Manager)."""
+    await verify_report_write_scope(db, training_report_id, context)
     try:
         report = await PersonalizedTrainingService.approve_training_cycle(
             db=db,
             report_id=training_report_id,
-            approved_by_user_id=current_user.user_id,
+            approved_by_user_id=context.user_id,
         )
         # Count prompts created
         from sqlalchemy import func as sqlfunc
@@ -622,11 +724,11 @@ async def approve_training_cycle(
 @router.delete("/admin/reports/{training_report_id}/hard-delete")
 async def hard_delete_training_report(
     training_report_id: int,
-    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: AsyncSession = Depends(get_db)
 ):
-    """Hard-delete a training report and all its prompts and completions from the database (Admin only)."""
-    enforce_admin_role(current_user)
+    """Hard-delete a training report and all its prompts and completions from the database (Admin/Company Admin/Service Manager)."""
+    await verify_report_write_scope(db, training_report_id, context)
     success = await PersonalizedTrainingService.hard_delete_report(db, report_id=training_report_id)
     if not success:
         raise HTTPException(

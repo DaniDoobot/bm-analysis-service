@@ -69,7 +69,8 @@ class PersonalizedTrainingService:
         agent_initials: Optional[str] = None,
         training_code: Optional[str] = None,
         training_numeric_code: Optional[str] = None,
-        training_code_enabled: Optional[bool] = None
+        training_code_enabled: Optional[bool] = None,
+        company_id: Optional[int] = None
     ) -> Optional[TrainingAgentSetting]:
         """Update an agent setting. Dynamically creates it if it doesn't exist yet."""
         stmt = select(TrainingAgentSetting).where(TrainingAgentSetting.hubspot_owner_id == hubspot_owner_id)
@@ -84,7 +85,8 @@ class PersonalizedTrainingService:
                 hubspot_owner_id=hubspot_owner_id,
                 agent_name=agent_name,
                 agent_initials=agent_initials,
-                is_enabled=is_enabled if is_enabled is not None else True
+                is_enabled=is_enabled if is_enabled is not None else True,
+                company_id=company_id
             )
             db.add(setting)
         else:
@@ -3156,7 +3158,9 @@ class PersonalizedTrainingService:
         period_end: Optional[datetime] = None,
         triggered_by: str = "manual",
         created_by_email: Optional[str] = None,
-        force_regenerate: bool = False
+        force_regenerate: bool = False,
+        company_ids: Optional[List[int]] = None,
+        allowed_agent_ids: Optional[List[str]] = None
     ) -> TrainingRun:
         """
         Executes a global run for a group of agents.
@@ -3170,15 +3174,13 @@ class PersonalizedTrainingService:
             period_start = period_end - timedelta(days=14) + timedelta(seconds=1)
 
         # Select target agents
-        if hubspot_owner_ids:
-            stmt_set = select(TrainingAgentSetting).where(
-                and_(
-                    TrainingAgentSetting.hubspot_owner_id.in_(hubspot_owner_ids),
-                    TrainingAgentSetting.is_enabled == True
-                )
-            )
-        else:
-            stmt_set = select(TrainingAgentSetting).where(TrainingAgentSetting.is_enabled == True)
+        stmt_set = select(TrainingAgentSetting).where(TrainingAgentSetting.is_enabled == True)
+        if hubspot_owner_ids is not None:
+            stmt_set = stmt_set.where(TrainingAgentSetting.hubspot_owner_id.in_(hubspot_owner_ids))
+        if company_ids is not None:
+            stmt_set = stmt_set.where(TrainingAgentSetting.company_id.in_(company_ids))
+        if allowed_agent_ids is not None:
+            stmt_set = stmt_set.where(TrainingAgentSetting.hubspot_owner_id.in_(allowed_agent_ids))
 
         res_set = await db.execute(stmt_set)
         active_settings = res_set.scalars().all()
