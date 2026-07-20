@@ -45,9 +45,18 @@ def edit_distance(s1: str, s2: str) -> int:
 class PersonalizedTrainingService:
 
     @staticmethod
-    async def get_agent_settings(db: AsyncSession) -> List[TrainingAgentSetting]:
-        """List all agent settings, ordered by agent name."""
-        stmt = select(TrainingAgentSetting).order_by(TrainingAgentSetting.agent_name.asc())
+    async def get_agent_settings(
+        db: AsyncSession,
+        company_ids: Optional[List[int]] = None,
+        allowed_agent_ids: Optional[List[str]] = None
+    ) -> List[TrainingAgentSetting]:
+        """List all agent settings, ordered by agent name, filtered by multitenant scope."""
+        stmt = select(TrainingAgentSetting)
+        if company_ids is not None:
+            stmt = stmt.where(TrainingAgentSetting.company_id.in_(company_ids))
+        if allowed_agent_ids is not None:
+            stmt = stmt.where(TrainingAgentSetting.hubspot_owner_id.in_(allowed_agent_ids))
+        stmt = stmt.order_by(TrainingAgentSetting.agent_name.asc())
         res = await db.execute(stmt)
         return list(res.scalars().all())
 
@@ -214,9 +223,15 @@ class PersonalizedTrainingService:
         return settings
 
     @staticmethod
-    async def get_agent_overview(db: AsyncSession) -> List[dict]:
-        """Returns the overview list of all agents for the admin tracking dashboard."""
-        settings = await PersonalizedTrainingService.get_agent_settings(db)
+    async def get_agent_overview(
+        db: AsyncSession,
+        company_ids: Optional[List[int]] = None,
+        allowed_agent_ids: Optional[List[str]] = None
+    ) -> List[dict]:
+        """Returns the overview list of all agents for the admin tracking dashboard, filtered by scope."""
+        settings = await PersonalizedTrainingService.get_agent_settings(
+            db, company_ids=company_ids, allowed_agent_ids=allowed_agent_ids
+        )
         overview = []
 
         for s in settings:
@@ -1104,14 +1119,22 @@ class PersonalizedTrainingService:
         return mapped
 
     @staticmethod
-    async def get_agent_detail(db: AsyncSession, hubspot_owner_id: str, include_archived: bool = False, include_pending_approval: bool = False) -> Optional[dict]:
-        """Returns detailed personalized training information for a specific agent.
+    async def get_agent_detail(
+        db: AsyncSession,
+        hubspot_owner_id: str,
+        include_archived: bool = False,
+        include_pending_approval: bool = False,
+        company_ids: Optional[List[int]] = None
+    ) -> Optional[dict]:
+        """Returns detailed personalized training information for a specific agent, filtered by company scope.
         
         Args:
             include_pending_approval: If True, includes cycles in pending_approval status
                                       in current_report. Set to True for admin endpoints.
         """
         stmt_set = select(TrainingAgentSetting).where(TrainingAgentSetting.hubspot_owner_id == hubspot_owner_id)
+        if company_ids is not None:
+            stmt_set = stmt_set.where(TrainingAgentSetting.company_id.in_(company_ids))
         res_set = await db.execute(stmt_set)
         setting = res_set.scalars().first()
 
@@ -1206,7 +1229,11 @@ class PersonalizedTrainingService:
         }
 
     @staticmethod
-    async def get_cycles_team_summary(db: AsyncSession) -> dict:
+    async def get_cycles_team_summary(
+        db: AsyncSession,
+        company_ids: Optional[List[int]] = None,
+        allowed_agent_ids: Optional[List[str]] = None
+    ) -> dict:
         """
         Computes team-wide training metrics for administrators.
 
@@ -1216,7 +1243,13 @@ class PersonalizedTrainingService:
         """
         # 1. Fetch ALL agent settings regardless of is_enabled
         # is_enabled only controls generation of new cycles, NOT dashboard visibility
-        settings_stmt = select(TrainingAgentSetting).order_by(TrainingAgentSetting.agent_name.asc())
+        settings_stmt = select(TrainingAgentSetting)
+        if company_ids is not None:
+            settings_stmt = settings_stmt.where(TrainingAgentSetting.company_id.in_(company_ids))
+        if allowed_agent_ids is not None:
+            settings_stmt = settings_stmt.where(TrainingAgentSetting.hubspot_owner_id.in_(allowed_agent_ids))
+        settings_stmt = settings_stmt.order_by(TrainingAgentSetting.agent_name.asc())
+
         res_settings = await db.execute(settings_stmt)
         all_settings = list(res_settings.scalars().all())
 
@@ -1873,9 +1906,18 @@ class PersonalizedTrainingService:
         }
 
     @staticmethod
-    async def get_report_by_id(db: AsyncSession, report_id: int) -> Optional[dict]:
-        """Returns details for a specific report ID."""
+    async def get_report_by_id(
+        db: AsyncSession,
+        report_id: int,
+        company_ids: Optional[List[int]] = None,
+        allowed_agent_ids: Optional[List[str]] = None
+    ) -> Optional[dict]:
+        """Returns details for a specific report ID, filtered by company and agent scope."""
         stmt = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == report_id)
+        if company_ids is not None:
+            stmt = stmt.where(TrainingAgentReport.company_id.in_(company_ids))
+        if allowed_agent_ids is not None:
+            stmt = stmt.where(TrainingAgentReport.hubspot_owner_id.in_(allowed_agent_ids))
         res = await db.execute(stmt)
         report = res.scalars().first()
 

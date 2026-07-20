@@ -11,6 +11,7 @@ class TrainingAgentSettingBase(BaseModel):
     hubspot_owner_id: str
     agent_name: str
     agent_initials: str
+    company_id: Optional[int] = None
     is_enabled: bool = True
     training_code: Optional[str] = None
     training_numeric_code: Optional[str] = None
@@ -133,6 +134,8 @@ class CompletionStatusOut(BaseModel):
 class TrainingAgentReportBase(BaseModel):
     training_report_id: int
     training_run_id: Optional[int] = None
+    company_id: Optional[int] = None
+    service_id: Optional[int] = None
     hubspot_owner_id: str
     agent_name: str
     agent_initials: str

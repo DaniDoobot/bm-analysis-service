@@ -6,7 +6,9 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import get_db, get_current_user
+from app.dependencies import get_db, get_current_user, get_tenant_context
+from app.core.tenant_context import TenantContext
+from app.core.roles import InternalRole
 from app.models.users import User
 from app.models.personalized_training import TrainingAgentReport, TrainingAgentSetting
 from app.schemas.personalized_training import (
@@ -82,12 +84,26 @@ def sanitize_report_for_agent(report: dict) -> dict:
 
 @router.get("/admin/settings", response_model=List[TrainingAgentSettingOut])
 async def list_agent_settings(
-    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: AsyncSession = Depends(get_db)
 ):
-    """List all personalized training settings for agents (Admin only)."""
-    enforce_admin_role(current_user)
-    return await PersonalizedTrainingService.get_agent_settings(db)
+    """List all personalized training settings for agents (Admin/Company Admin/Service Manager/Team Coordinator)."""
+    if context.normalized_role == InternalRole.AGENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Se requiere rol de administración."
+        )
+
+    company_ids = context.allowed_company_ids if not context.is_super_admin else None
+    allowed_agent_ids = None
+    if context.normalized_role in [InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR]:
+        allowed_agent_ids = context.allowed_agent_ids or []
+
+    return await PersonalizedTrainingService.get_agent_settings(
+        db,
+        company_ids=company_ids,
+        allowed_agent_ids=allowed_agent_ids
+    )
 
 
 @router.patch("/admin/settings/{hubspot_owner_id}", response_model=TrainingAgentSettingOut)
@@ -122,31 +138,63 @@ async def update_agent_setting(
 
 @router.get("/admin/agents-overview", response_model=List[AgentOverviewItem])
 async def list_agents_overview(
-    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: AsyncSession = Depends(get_db)
 ):
-    """Overview list of all active agents and their current training statuses (Admin only)."""
-    enforce_admin_role(current_user)
-    return await PersonalizedTrainingService.get_agent_overview(db)
+    """Overview list of all active agents and their current training statuses."""
+    if context.normalized_role == InternalRole.AGENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Se requiere rol de administración."
+        )
+
+    company_ids = context.allowed_company_ids if not context.is_super_admin else None
+    allowed_agent_ids = None
+    if context.normalized_role in [InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR]:
+        allowed_agent_ids = context.allowed_agent_ids or []
+
+    return await PersonalizedTrainingService.get_agent_overview(
+        db,
+        company_ids=company_ids,
+        allowed_agent_ids=allowed_agent_ids
+    )
 
 
 @router.get("/admin/cycles-summary", response_model=CyclesTeamSummaryResponse)
 async def get_team_cycles_summary(
-    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: AsyncSession = Depends(get_db)
 ):
-    """Get team-wide training metrics, aggregates and priority targets (Admin only)."""
-    enforce_admin_role(current_user)
-    return await PersonalizedTrainingService.get_cycles_team_summary(db)
+    """Get team-wide training metrics, aggregates and priority targets."""
+    if context.normalized_role == InternalRole.AGENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Se requiere rol de administración."
+        )
+
+    company_ids = context.allowed_company_ids if not context.is_super_admin else None
+    allowed_agent_ids = None
+    if context.normalized_role in [InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR]:
+        allowed_agent_ids = context.allowed_agent_ids or []
+
+    return await PersonalizedTrainingService.get_cycles_team_summary(
+        db,
+        company_ids=company_ids,
+        allowed_agent_ids=allowed_agent_ids
+    )
 
 
 @router.get("/admin/scheduler-settings", response_model=TrainingSchedulerSettingOut)
 async def get_scheduler_settings(
-    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: AsyncSession = Depends(get_db)
 ):
-    """Retrieve the persistent personalized training scheduler configuration (Admin only)."""
-    enforce_admin_role(current_user)
+    """Retrieve the persistent personalized training scheduler configuration (Super Admin only)."""
+    if not context.is_super_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Se requiere rol Super Administrador para ver los ajustes globales del scheduler."
+        )
     
     from app.config import get_settings
     settings = get_settings()
@@ -207,24 +255,39 @@ async def update_scheduler_settings(
 @router.get("/admin/agents/{hubspot_owner_id}", response_model=AgentDetailResponse)
 async def get_agent_detail_admin(
     hubspot_owner_id: str,
-    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     include_archived: bool = Query(False),
     db: AsyncSession = Depends(get_db)
 ):
-    """Full detail of an agent's training, objectives, prompts, history and progress (Admin only).
-    Includes cycles in pending_approval status so admins can review and edit before approving.
-    """
-    enforce_admin_role(current_user)
+    """Full detail of an agent's training, objectives, prompts, history and progress (Admin only)."""
+    if context.normalized_role == InternalRole.AGENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Se requiere rol de administración."
+        )
+
+    # Validamos permisos sobre el hubspot_owner_id solicitado
+    if context.allowed_agent_ids is not None:
+        if hubspot_owner_id not in context.allowed_agent_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: No tienes permisos para acceder a este agente."
+            )
+
+    company_ids = context.allowed_company_ids if not context.is_super_admin else None
+
     try:
         detail = await PersonalizedTrainingService.get_agent_detail(
-            db, hubspot_owner_id=hubspot_owner_id,
+            db, 
+            hubspot_owner_id=hubspot_owner_id,
             include_archived=include_archived,
-            include_pending_approval=True  # Admins see pending_approval cycles
+            include_pending_approval=True,
+            company_ids=company_ids
         )
         if not detail:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Agente {hubspot_owner_id} no encontrado en configuraciones."
+                detail=f"Agente {hubspot_owner_id} no encontrado en configuraciones o sin acceso."
             )
         # Manually validate with Pydantic to catch serialization errors before returning
         AgentDetailResponse.model_validate(detail)
@@ -274,17 +337,24 @@ async def trigger_manual_generation(
 
 @router.get("/me/current", response_model=TrainingAgentReportOut)
 async def get_my_current_training(
-    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: AsyncSession = Depends(get_db)
 ):
     """Retrieve the current training report, prompts and progress for the authenticated agent."""
-    if not current_user.hubspot_owner_id:
+    hubspot_owner_id = context.allowed_agent_ids[0] if context.allowed_agent_ids else None
+    if not hubspot_owner_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Tu cuenta de usuario no está asociada a ningún HubSpot Owner ID de agente."
         )
-    
-    detail = await PersonalizedTrainingService.get_agent_detail(db, hubspot_owner_id=current_user.hubspot_owner_id)
+
+    company_ids = context.allowed_company_ids if not context.is_super_admin else None
+
+    detail = await PersonalizedTrainingService.get_agent_detail(
+        db,
+        hubspot_owner_id=hubspot_owner_id,
+        company_ids=company_ids
+    )
     if not detail or not detail.get("current_report"):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -295,18 +365,26 @@ async def get_my_current_training(
 
 @router.get("/me/history", response_model=List[TrainingAgentReportBase])
 async def get_my_training_history(
-    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     include_archived: bool = Query(False),
     db: AsyncSession = Depends(get_db)
 ):
     """Retrieve the list of historical training reports for the authenticated agent."""
-    if not current_user.hubspot_owner_id:
+    hubspot_owner_id = context.allowed_agent_ids[0] if context.allowed_agent_ids else None
+    if not hubspot_owner_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Tu cuenta de usuario no está asociada a ningún HubSpot Owner ID de agente."
         )
-    
-    detail = await PersonalizedTrainingService.get_agent_detail(db, hubspot_owner_id=current_user.hubspot_owner_id, include_archived=include_archived)
+
+    company_ids = context.allowed_company_ids if not context.is_super_admin else None
+
+    detail = await PersonalizedTrainingService.get_agent_detail(
+        db,
+        hubspot_owner_id=hubspot_owner_id,
+        include_archived=include_archived,
+        company_ids=company_ids
+    )
     if not detail:
         return []
     return detail["history"]
@@ -315,28 +393,29 @@ async def get_my_training_history(
 @router.get("/me/reports/{training_report_id}", response_model=TrainingAgentReportOut)
 async def get_my_historical_report(
     training_report_id: int,
-    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: AsyncSession = Depends(get_db)
 ):
     """Retrieve details of a specific historical training report for the authenticated agent."""
-    if not current_user.hubspot_owner_id:
+    hubspot_owner_id = context.allowed_agent_ids[0] if context.allowed_agent_ids else None
+    if not hubspot_owner_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Tu cuenta de usuario no está asociada a ningún HubSpot Owner ID de agente."
         )
 
-    report_details = await PersonalizedTrainingService.get_report_by_id(db, report_id=training_report_id)
+    company_ids = context.allowed_company_ids if not context.is_super_admin else None
+
+    report_details = await PersonalizedTrainingService.get_report_by_id(
+        db,
+        report_id=training_report_id,
+        company_ids=company_ids,
+        allowed_agent_ids=[hubspot_owner_id]
+    )
     if not report_details:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Informe de entrenamiento ID {training_report_id} no encontrado."
-        )
-
-    # Ownership check
-    if current_user.role not in ["admin", "administrador"] and report_details["hubspot_owner_id"] != current_user.hubspot_owner_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No tienes permisos para ver el informe de entrenamiento de otro agente."
+            detail=f"Informe de entrenamiento ID {training_report_id} no encontrado o sin acceso."
         )
 
     return sanitize_report_for_agent(report_details)
@@ -347,19 +426,31 @@ async def get_my_historical_report(
 @router.get("/agents/{hubspot_owner_id}/current", response_model=TrainingAgentReportOut)
 async def get_agent_current_training(
     hubspot_owner_id: str,
-    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: AsyncSession = Depends(get_db)
 ):
-    """Retrieve the current training report, prompts and progress for a specific agent (Ownership enforced)."""
-    enforce_agent_or_admin_ownership(current_user, hubspot_owner_id)
-    detail = await PersonalizedTrainingService.get_agent_detail(db, hubspot_owner_id=hubspot_owner_id)
+    """Retrieve the current training report, prompts and progress for a specific agent."""
+    if context.allowed_agent_ids is not None:
+        if hubspot_owner_id not in context.allowed_agent_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes permiso para ver el entrenamiento de otros agentes."
+            )
+
+    company_ids = context.allowed_company_ids if not context.is_super_admin else None
+
+    detail = await PersonalizedTrainingService.get_agent_detail(
+        db,
+        hubspot_owner_id=hubspot_owner_id,
+        company_ids=company_ids
+    )
     if not detail or not detail.get("current_report"):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"No se encontró ningún informe de entrenamiento actual para el agente {hubspot_owner_id}."
         )
     report_data = detail["current_report"]
-    if current_user.role not in ["admin", "administrador"]:
+    if context.normalized_role == InternalRole.AGENT:
         report_data = sanitize_report_for_agent(report_data)
     return report_data
 
@@ -367,13 +458,26 @@ async def get_agent_current_training(
 @router.get("/agents/{hubspot_owner_id}/history", response_model=List[TrainingAgentReportBase])
 async def get_agent_training_history(
     hubspot_owner_id: str,
-    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     include_archived: bool = Query(False),
     db: AsyncSession = Depends(get_db)
 ):
-    """Retrieve all historical training reports for a specific agent (Ownership enforced)."""
-    enforce_agent_or_admin_ownership(current_user, hubspot_owner_id)
-    detail = await PersonalizedTrainingService.get_agent_detail(db, hubspot_owner_id=hubspot_owner_id, include_archived=include_archived)
+    """Retrieve all historical training reports for a specific agent."""
+    if context.allowed_agent_ids is not None:
+        if hubspot_owner_id not in context.allowed_agent_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes permiso para ver el entrenamiento de otros agentes."
+            )
+
+    company_ids = context.allowed_company_ids if not context.is_super_admin else None
+
+    detail = await PersonalizedTrainingService.get_agent_detail(
+        db,
+        hubspot_owner_id=hubspot_owner_id,
+        include_archived=include_archived,
+        company_ids=company_ids
+    )
     if not detail:
         return []
     return detail["history"]
@@ -382,18 +486,26 @@ async def get_agent_training_history(
 @router.get("/reports/{training_report_id}", response_model=TrainingAgentReportOut)
 async def get_report_by_id(
     training_report_id: int,
-    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: AsyncSession = Depends(get_db)
 ):
-    """Retrieve detail of a specific training report by ID (Ownership enforced)."""
-    report_details = await PersonalizedTrainingService.get_report_by_id(db, report_id=training_report_id)
+    """Retrieve detail of a specific training report by ID."""
+    company_ids = context.allowed_company_ids if not context.is_super_admin else None
+    allowed_agent_ids = context.allowed_agent_ids if not context.is_super_admin else None
+
+    report_details = await PersonalizedTrainingService.get_report_by_id(
+        db,
+        report_id=training_report_id,
+        company_ids=company_ids,
+        allowed_agent_ids=allowed_agent_ids
+    )
     if not report_details:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Informe de entrenamiento ID {training_report_id} no encontrado."
+            detail=f"Informe de entrenamiento ID {training_report_id} no encontrado o sin acceso."
         )
-    enforce_agent_or_admin_ownership(current_user, report_details["hubspot_owner_id"])
-    if current_user.role not in ["admin", "administrador"]:
+
+    if context.normalized_role == InternalRole.AGENT:
         report_details = sanitize_report_for_agent(report_details)
     return report_details
 
@@ -527,14 +639,14 @@ async def hard_delete_training_report(
 @router.get("/admin/evaluations/{evaluation_id}")
 async def get_evaluation_detail(
     evaluation_id: int,
-    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: AsyncSession = Depends(get_db),
 ):
     """
     Returns the full detail of a training call evaluation, including score,
     feedback, transcription (formatted as conversation turns), and the
     result_json criteria checklist.
-    Accessible by admins and by the agent who owns the evaluation.
+    Accessible by authorized administrators, managers, coordinators, and the owner agent.
     """
     from app.models.personalized_training import TrainingCallEvaluation, TrainingCallSession
 
@@ -546,12 +658,24 @@ async def get_evaluation_detail(
         raise HTTPException(status_code=404, detail=f"Evaluación {evaluation_id} no encontrada.")
 
     # Ownership check: admin can see all; agents can only see their own
-    if current_user.role not in ["admin", "administrador"]:
+    if not context.is_super_admin:
         stmt_sess = select(TrainingCallSession).where(TrainingCallSession.session_id == ev.session_id)
         res_sess = await db.execute(stmt_sess)
         session = res_sess.scalars().first()
-        if not session or session.agent_id != (current_user.hubspot_owner_id or ""):
+        if not session:
             raise HTTPException(status_code=403, detail="No tienes acceso a esta evaluación.")
+        
+        if context.allowed_agent_ids is not None:
+            if session.agent_id not in context.allowed_agent_ids:
+                raise HTTPException(status_code=403, detail="No tienes acceso a esta evaluación.")
+
+        if context.allowed_company_ids:
+            # Check company
+            stmt_rep = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == session.cycle_id)
+            res_rep = await db.execute(stmt_rep)
+            rep = res_rep.scalars().first()
+            if not rep or rep.company_id not in context.allowed_company_ids:
+                raise HTTPException(status_code=403, detail="No tienes acceso a esta evaluación.")
 
     # Parse transcription into conversation turns for easy rendering
     turns = []
