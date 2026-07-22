@@ -48,6 +48,7 @@ async def list_analyses(
     agent: str | None = None,
     tipo_llamada: str | None = None,
     prompt_id: int | None = None,
+    service_id: int | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
     limit: int = 100,
@@ -85,6 +86,8 @@ async def list_analyses(
         query = query.where(CallAnalysisCurrent.tipo_llamada == tipo_llamada)
     if prompt_id is not None:
         query = query.where(CallAnalysisCurrent.prompt_id == prompt_id)
+    if service_id is not None:
+        query = query.where(CallAnalysisCurrent.service_id == service_id)
     
     parsed_date_from = parse_date_bound(date_from, is_end_of_day=False)
     if parsed_date_from:
@@ -116,6 +119,7 @@ async def list_analyses_history(
     agent: str | None = None,
     tipo_llamada: str | None = None,
     prompt_id: int | None = None,
+    service_id: int | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
     limit: int = 100,
@@ -153,6 +157,8 @@ async def list_analyses_history(
         query = query.where(Analysis.tipo_llamada == tipo_llamada)
     if prompt_id is not None:
         query = query.where(Analysis.prompt_id == prompt_id)
+    if service_id is not None:
+        query = query.where(Analysis.service_id == service_id)
     parsed_date_from = parse_date_bound(date_from, is_end_of_day=False)
     if parsed_date_from:
         query = query.where(Analysis.created_at >= parsed_date_from)

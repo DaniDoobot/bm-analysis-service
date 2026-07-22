@@ -402,6 +402,94 @@ class TestAudioUploadAnalysis(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(err_json["ok"])
                 self.assertIn("No hay estructura activa para llamadas en el servicio seleccionado", err_json["error_message"])
 
+    async def test_analyses_history_and_current_service_filtering(self):
+        """Test GET /bm/analyses/history and /bm/analyses/current filter by service_id and prompt_id."""
+        from app.core.tenant_context import TenantContext
+        from app.core.roles import InternalRole
+        from app.dependencies import get_tenant_context
+        super_ctx = TenantContext(
+            user_id=1,
+            user_email="super@test.com",
+            role="admin",
+            raw_role="admin",
+            normalized_role=InternalRole.SUPER_ADMIN,
+            is_super_admin=True,
+            allowed_company_ids=[1],
+        )
+        app.dependency_overrides[get_current_user] = lambda: self.super_user
+        app.dependency_overrides[get_tenant_context] = lambda: super_ctx
+        from app.models.analyses import Analysis, CallAnalysisCurrent
+
+        # Create service 3 ("Asesores Comerciales") and prompt 55
+        async with AsyncSession(self.session_factory) as db:
+            s3 = Service(service_id=3, service_name="Asesores Comerciales", service_key="asesores-comerciales", company_id=1)
+            db.add(s3)
+            await db.flush()
+
+            p55 = Prompt(prompt_id=55, prompt_name="Pruebas ESIC", prompt_type="audio", service_id=3, is_active=True)
+            db.add(p55)
+            await db.flush()
+
+            # Insert an Analysis for service 3, prompt 55
+            a1 = Analysis(
+                analysis_id=179,
+                company_id=1,
+                service_id=3,
+                prompt_id=55,
+                call_id="call_svc3_p55",
+                analysis_type="audio",
+                status="completed",
+                agente_telefonico="Carlos",
+            )
+            db.add(a1)
+
+            from app.models.analyses import CallAnalysisCurrent
+            cur1 = CallAnalysisCurrent(
+                call_id="call_svc3_p55",
+                analysis_type="audio",
+                latest_analysis_id=179,
+                company_id=1,
+                service_id=3,
+                prompt_id=55,
+                agente_telefonico="Carlos",
+                status="completed"
+            )
+            db.add(cur1)
+            await db.commit()
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            # 1. history?service_id=3 returns analysis of service_id=3
+            res = await ac.get("/bm/analyses/history?service_id=3")
+            self.assertEqual(res.status_code, 200)
+            data = res.json()
+            self.assertEqual(len(data), 1)
+            self.assertEqual(data[0]["service_id"], 3)
+            self.assertEqual(data[0]["service_name"], "Asesores Comerciales")
+            self.assertEqual(data[0]["prompt_id"], 55)
+
+            # 2. history?service_id=1 does NOT return analysis of service_id=3
+            res_s1 = await ac.get("/bm/analyses/history?service_id=1")
+            self.assertEqual(res_s1.status_code, 200)
+            data_s1 = res_s1.json()
+            svc3_items = [item for item in data_s1 if item.get("service_id") == 3]
+            self.assertEqual(len(svc3_items), 0)
+
+            # 3. history?service_id=3&prompt_id=55 returns the correct analysis
+            res_combo = await ac.get("/bm/analyses/history?service_id=3&prompt_id=55")
+            self.assertEqual(res_combo.status_code, 200)
+            data_combo = res_combo.json()
+            self.assertEqual(len(data_combo), 1)
+            self.assertEqual(data_combo[0]["analysis_id"], 179)
+            self.assertEqual(data_combo[0]["service_name"], "Asesores Comerciales")
+
+            # 4. current?service_id=3 works the same
+            res_cur = await ac.get("/bm/analyses/current?service_id=3")
+            self.assertEqual(res_cur.status_code, 200)
+            data_cur = res_cur.json()
+            self.assertEqual(len(data_cur), 1)
+            self.assertEqual(data_cur[0]["service_id"], 3)
+            self.assertEqual(data_cur[0]["service_name"], "Asesores Comerciales")
+
 
 if __name__ == "__main__":
     unittest.main()
