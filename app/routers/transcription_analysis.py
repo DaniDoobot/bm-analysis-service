@@ -130,6 +130,7 @@ async def test_analysis_by_call_id(
             call_id=body.call_id,
             transcription=None,
             custom_prompt_text=custom_prompt,
+            service_id=body.service_id,
         )
     except Exception as exc:
         logger.error(
@@ -175,6 +176,7 @@ async def test_analysis_by_audio_upload(
     file: UploadFile = File(...),
     custom_prompt: Optional[str] = Form(None),
     prompt: Optional[str] = Form(None),
+    service_id: Optional[int] = Form(None),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -266,6 +268,7 @@ async def test_analysis_by_audio_upload(
             call_id=dummy_call_id,
             transcription=transcription,
             custom_prompt_text=resolved_prompt,
+            service_id=service_id,
         )
     except Exception as exc:
         logger.error(

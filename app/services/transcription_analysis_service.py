@@ -48,6 +48,7 @@ async def analyze_transcription_pipeline(
     prompt_version_id: int | None = None,
     metadata: dict[str, Any] | None = None,
     custom_prompt_text: str | None = None,
+    service_id: int | None = None,
 ) -> dict[str, Any]:
     """
     Core pipeline to analyze an existing transcription.
@@ -152,16 +153,29 @@ async def analyze_transcription_pipeline(
         prompt_content = v.prompt
 
     else:
-        # No explicit prompt_id → default to the active "audio" prompt.
-        # This is the canonical prompt for Boston Medical (45 criteria, correct categories).
-        active_prompt = await get_active_prompt(db, "audio")
+        # No explicit prompt_id → resolve the active "audio" prompt.
+        # If service_id is provided, scope to that service so Test Análisis uses
+        # the correct structure for the selected service.
+        active_prompt = await get_active_prompt(db, "audio", service_id=service_id)
 
         if not active_prompt:
-            # Only fall back to "text" if there is genuinely no audio prompt
+            if service_id:
+                # Service was explicitly requested but has no active audio prompt
+                return {
+                    "ok": False,
+                    "status": "error",
+                    "stage": "validation",
+                    "error_message": (
+                        f"No hay estructura activa para llamadas en el servicio seleccionado "
+                        f"(service_id={service_id}, type=audio). "
+                        f"Activa una estructura en ese servicio antes de analizar."
+                    ),
+                }
+            # Only fall back to "text" when no service was specified
             logger.info(
                 "No active audio prompt found; falling back to text prompt for transcription analysis."
             )
-            active_prompt = await get_active_prompt(db, "text")
+            active_prompt = await get_active_prompt(db, "text", service_id=service_id)
 
         if not active_prompt:
             return {

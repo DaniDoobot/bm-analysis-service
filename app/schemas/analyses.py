@@ -146,6 +146,7 @@ class TestAnalysisByCallIdRequest(BaseModel):
     call_id: str
     custom_prompt: str | None = None
     prompt: str | None = None
+    service_id: int | None = None
 
 
 

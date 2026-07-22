@@ -258,6 +258,97 @@ class TestAudioUploadAnalysis(unittest.IsolatedAsyncioTestCase):
             mock_tw.download_audio.assert_called_once()
             mock_transcribe.assert_called_once()
 
+    @patch("app.services.openai_service.transcribe_audio", new_callable=AsyncMock)
+    @patch("app.services.openai_service.complete_text", new_callable=AsyncMock)
+    async def test_by_call_id_with_specific_service_id(self, mock_complete, mock_transcribe):
+        """Test by-call-id resolves prompt scoped to service_id."""
+        app.dependency_overrides[get_current_user] = lambda: self.super_user
+
+        # Create a second service (Asesores, service_id=2) and its active audio prompt
+        async with AsyncSession(self.session_factory) as db:
+            s2 = Service(service_id=2, service_name="Asesores", service_key="asesores", company_id=1)
+            db.add(s2)
+            await db.flush()
+
+            p2 = Prompt(prompt_id=2, prompt_name="Asesores Audio Prompt", prompt_type="audio", service_id=2, is_active=True)
+            db.add(p2)
+            await db.flush()
+
+            pv2 = PromptVersion(
+                id=2,
+                prompt_id=2,
+                version_label="v1.0",
+                prompt="### FORMATO DE RESPUESTA\nDevuelve JSON de Asesores.",
+                is_current=True,
+                is_archived=False
+            )
+            db.add(pv2)
+            await db.commit()
+
+        mock_transcribe.return_value = {"text": "Audio transcrito Asesores."}
+        mock_complete.return_value = """{
+            "tipo_llamada": "cita",
+            "evaluacion_global": 8.0,
+            "empatia": 8.0,
+            "simpatia": 8.0,
+            "claridad": 8.0,
+            "procedimiento": 8.0,
+            "agente_telefonico": "Juan",
+            "objeciones": "Ninguna",
+            "propension": "Alta",
+            "sentiment": "positivo"
+        }"""
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            # 1. Test specifying service_id=2 resolves prompt for service 2
+            req_body = {
+                "call_id": "call_service_2",
+                "service_id": 2
+            }
+            with patch("app.services.hubspot_service.HubSpotService") as mock_hs_cls, \
+                 patch("app.services.twilio_service.TwilioService") as mock_tw_cls:
+                mock_hs = MagicMock()
+                mock_hs.get_call = AsyncMock(return_value={"recording_url": "http://audio.url"})
+                mock_hs_cls.return_value = mock_hs
+
+                mock_tw = MagicMock()
+                mock_tw.download_audio = AsyncMock(return_value=b"audio bytes")
+                mock_tw_cls.return_value = mock_tw
+
+                res = await ac.post("/bm/test-analysis/by-call-id", json=req_body)
+                self.assertEqual(res.status_code, 200)
+                res_json = res.json()
+                self.assertTrue(res_json["ok"])
+
+                # Verify saved analysis record in DB linked to prompt_id 2
+                async with AsyncSession(self.session_factory) as db:
+                    from app.models.analyses import Analysis
+                    stmt = select(Analysis).where(Analysis.call_id == "call_service_2")
+                    analysis_rec = (await db.execute(stmt)).scalars().first()
+                    self.assertIsNotNone(analysis_rec)
+                    self.assertEqual(analysis_rec.prompt_id, 2)
+
+            # 2. Test requesting non-existent prompt service_id=99 returns clear error
+            req_body_err = {
+                "call_id": "call_service_99",
+                "service_id": 99
+            }
+            with patch("app.services.hubspot_service.HubSpotService") as mock_hs_cls, \
+                 patch("app.services.twilio_service.TwilioService") as mock_tw_cls:
+                mock_hs = MagicMock()
+                mock_hs.get_call = AsyncMock(return_value={"recording_url": "http://audio.url"})
+                mock_hs_cls.return_value = mock_hs
+
+                mock_tw = MagicMock()
+                mock_tw.download_audio = AsyncMock(return_value=b"audio bytes")
+                mock_tw_cls.return_value = mock_tw
+
+                res_err = await ac.post("/bm/test-analysis/by-call-id", json=req_body_err)
+                self.assertEqual(res_err.status_code, 422)
+                err_json = res_err.json()
+                self.assertFalse(err_json["ok"])
+                self.assertIn("No hay estructura activa para llamadas en el servicio seleccionado", err_json["error_message"])
+
 
 if __name__ == "__main__":
     unittest.main()
