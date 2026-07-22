@@ -444,6 +444,8 @@ async def analyze_transcription_pipeline(
     # ── 5. Persist ────────────────────────────────────────────────────────
     call_metadata: dict[str, Any] = dict(metadata or {})
     call_metadata["call_id"] = call_id
+    if service_id is not None:
+        call_metadata.setdefault("service_id", service_id)
     # Ensure run_ts is always a timezone-aware datetime, never a string
     call_metadata.setdefault("run_ts", now)
 
@@ -477,6 +479,13 @@ async def analyze_transcription_pipeline(
         }
 
     # ── 6. Build response ─────────────────────────────────────────────────
+    resolved_service_name = None
+    if analysis_record.service_id:
+        from app.models.services import Service
+        s_obj = await db.get(Service, analysis_record.service_id)
+        if s_obj:
+            resolved_service_name = s_obj.service_name
+
     summary = {
         "tipo_llamada": parsed.get("tipo_llamada"),
         "evaluacion_global": parsed.get("evaluacion_global"),
@@ -496,6 +505,8 @@ async def analyze_transcription_pipeline(
         "message": "Análisis por transcripción completado y guardado en base de datos",
         "call_id": call_id,
         "analysis_id": analysis_record.analysis_id,
+        "service_id": analysis_record.service_id,
+        "service_name": resolved_service_name,
         "summary": summary,
         "result": parsed,
     }

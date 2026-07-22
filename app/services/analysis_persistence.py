@@ -172,16 +172,26 @@ async def save_analysis(
 
     # ── Resolve company_id and service_id dynamically ────────────────────
     prompt_id = prompt_metadata.get("prompt_id")
-    resolved_service_id = None
-    resolved_company_id = None
-    if prompt_id:
-        from app.models.prompts import Prompt
-        p_stmt = select(Prompt.company_id, Prompt.service_id).where(Prompt.prompt_id == prompt_id)
-        p_res = await db.execute(p_stmt)
-        p_row = p_res.fetchone()
-        if p_row:
-            resolved_company_id = p_row[0]
-            resolved_service_id = p_row[1]
+    resolved_service_id = call_metadata.get("service_id")
+    resolved_company_id = call_metadata.get("company_id")
+
+    if not resolved_service_id or not resolved_company_id:
+        if prompt_id:
+            from app.models.prompts import Prompt
+            p_stmt = select(Prompt.company_id, Prompt.service_id).where(Prompt.prompt_id == prompt_id)
+            p_res = await db.execute(p_stmt)
+            p_row = p_res.fetchone()
+            if p_row:
+                if not resolved_company_id:
+                    resolved_company_id = p_row[0]
+                if not resolved_service_id:
+                    resolved_service_id = p_row[1]
+
+    if resolved_service_id and not resolved_company_id:
+        from app.models.services import Service
+        s_stmt = select(Service.company_id).where(Service.service_id == resolved_service_id)
+        s_res = await db.execute(s_stmt)
+        resolved_company_id = s_res.scalar()
 
     if not resolved_company_id and owner_id:
         from app.models.users import User

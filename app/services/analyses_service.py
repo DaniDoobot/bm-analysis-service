@@ -4,7 +4,7 @@ Analyses service — listing and detail queries.
 import logging
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.tenant_context import TenantContext
@@ -61,7 +61,12 @@ async def list_analyses(
 
     # Exclude test records from all listings and metrics
     query = query.where(~CallAnalysisCurrent.call_id.like("TEST_%"))
-    query = query.where(CallAnalysisCurrent.hubspot_owner_id != "test_owner")
+    query = query.where(
+        or_(
+            CallAnalysisCurrent.hubspot_owner_id != "test_owner",
+            CallAnalysisCurrent.hubspot_owner_id.is_(None)
+        )
+    )
 
     if context and not context.is_super_admin:
         query = query.where(CallAnalysisCurrent.company_id.in_(context.allowed_company_ids))
@@ -124,7 +129,12 @@ async def list_analyses_history(
 
     # Exclude test records from all listings and metrics
     query = query.where(~Analysis.call_id.like("TEST_%"))
-    query = query.where(Analysis.hubspot_owner_id != "test_owner")
+    query = query.where(
+        or_(
+            Analysis.hubspot_owner_id != "test_owner",
+            Analysis.hubspot_owner_id.is_(None)
+        )
+    )
 
     if context and not context.is_super_admin:
         query = query.where(Analysis.company_id.in_(context.allowed_company_ids))
@@ -334,6 +344,26 @@ async def enrich_analyses(db: AsyncSession, items: list[Any]) -> list[Any]:
                 "typology_name": m['typology_name']
             }
 
+    # Pre-fetch Service details for all service_ids present in items or criterion results
+    all_service_ids = {getattr(item, 'service_id', None) for item in items if getattr(item, 'service_id', None)}
+    for s_info in service_typology_map.values():
+        if s_info.get("service_id"):
+            all_service_ids.add(s_info["service_id"])
+
+    service_db_map = {}
+    if all_service_ids:
+        from app.models.services import Service
+        s_res = await db.execute(
+            select(Service.service_id, Service.service_key, Service.service_name)
+            .where(Service.service_id.in_(all_service_ids))
+        )
+        for row in s_res.fetchall():
+            m = row._mapping
+            service_db_map[m["service_id"]] = {
+                "service_key": m["service_key"],
+                "service_name": m["service_name"]
+            }
+
     typology_mapping = {
         "cita": "Cita",
         "confirmacion": "Confirmación",
@@ -386,9 +416,16 @@ async def enrich_analyses(db: AsyncSession, items: list[Any]) -> list[Any]:
         aid = getattr(item, 'analysis_id', None) or getattr(item, 'latest_analysis_id', None)
         s_data = service_typology_map.get(aid) if aid else None
         
-        s_id = s_data["service_id"] if s_data else None
-        s_key = s_data["service_key"] if s_data else None
-        s_name = s_data["service_name"] if s_data else None
+        s_id = getattr(item, 'service_id', None) or (s_data["service_id"] if s_data else None)
+        s_key = (s_data["service_key"] if s_data else None)
+        s_name = (s_data["service_name"] if s_data else None)
+
+        if s_id and s_id in service_db_map:
+            if not s_key:
+                s_key = service_db_map[s_id]["service_key"]
+            if not s_name:
+                s_name = service_db_map[s_id]["service_name"]
+
         t_id = s_data["typology_id"] if s_data else None
         t_key = s_data["typology_key"] if s_data else None
         t_name = s_data["typology_name"] if s_data else None

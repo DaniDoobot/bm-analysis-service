@@ -320,15 +320,68 @@ class TestAudioUploadAnalysis(unittest.IsolatedAsyncioTestCase):
                 res_json = res.json()
                 self.assertTrue(res_json["ok"])
 
-                # Verify saved analysis record in DB linked to prompt_id 2
+                # Requirement 3 check: response includes service_id and service_name
+                self.assertEqual(res_json["service_id"], 2)
+                self.assertEqual(res_json["service_name"], "Asesores")
+
+                # Requirement 1 & 2 check: verify saved Analysis and CallAnalysisCurrent records in DB
                 async with AsyncSession(self.session_factory) as db:
-                    from app.models.analyses import Analysis
+                    from app.models.analyses import Analysis, CallAnalysisCurrent
                     stmt = select(Analysis).where(Analysis.call_id == "call_service_2")
                     analysis_rec = (await db.execute(stmt)).scalars().first()
                     self.assertIsNotNone(analysis_rec)
                     self.assertEqual(analysis_rec.prompt_id, 2)
+                    self.assertEqual(analysis_rec.service_id, 2)
+                    self.assertEqual(analysis_rec.company_id, 1)
 
-            # 2. Test requesting non-existent prompt service_id=99 returns clear error
+                    stmt_cur = select(CallAnalysisCurrent).where(CallAnalysisCurrent.call_id == "call_service_2")
+                    cur_rec = (await db.execute(stmt_cur)).scalars().first()
+                    self.assertIsNotNone(cur_rec)
+                    self.assertEqual(cur_rec.service_id, 2)
+                    self.assertEqual(cur_rec.company_id, 1)
+
+                # Requirement 4 check: history / list endpoints return service_name and service_id
+                from app.core.tenant_context import TenantContext
+                from app.core.roles import InternalRole
+                from app.services import analyses_service
+
+                super_ctx = TenantContext(
+                    user_id=1,
+                    user_email="super@test.com",
+                    role="admin",
+                    raw_role="admin",
+                    normalized_role=InternalRole.SUPER_ADMIN,
+                    is_super_admin=True,
+                )
+
+                async with AsyncSession(self.session_factory) as db:
+                    history_items = await analyses_service.list_analyses_history(
+                        db, call_id="call_service_2", context=super_ctx
+                    )
+                    self.assertEqual(len(history_items), 1)
+                    self.assertEqual(history_items[0].service_id, 2)
+                    self.assertEqual(history_items[0].service_name, "Asesores")
+
+                    detail = await analyses_service.get_analysis_detail(
+                        db, call_id="call_service_2", context=super_ctx
+                    )
+                    self.assertIsNotNone(detail)
+                    self.assertEqual(detail.analysis.service_id, 2)
+                    self.assertEqual(detail.analysis.service_name, "Asesores")
+
+            # 2. Test audio-upload with service_id saves service_id and returns service_name
+            audio_bytes = io.BytesIO(b"ID3fake_mp3_data")
+            files = {"file": ("test_service_2.mp3", audio_bytes, "audio/mpeg")}
+            data = {"service_id": 2}
+
+            res_upload = await ac.post("/bm/test-analysis/by-audio-upload", files=files, data=data)
+            self.assertEqual(res_upload.status_code, 200)
+            upload_json = res_upload.json()
+            self.assertTrue(upload_json["ok"])
+            self.assertEqual(upload_json["service_id"], 2)
+            self.assertEqual(upload_json["service_name"], "Asesores")
+
+            # 3. Test requesting non-existent prompt service_id=99 returns clear error
             req_body_err = {
                 "call_id": "call_service_99",
                 "service_id": 99
