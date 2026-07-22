@@ -109,6 +109,32 @@ class TestMultitenancyUsers(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         app.dependency_overrides.clear()
 
+    async def test_login_company_admin_returns_normalized_role_and_company_info(self):
+        """Verify POST /bm/auth/login for company_admin succeeds without MissingGreenlet and returns company info."""
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            res = await ac.post("/bm/auth/login", json={"username": "adminboston_test@test.com", "password": "pass123"})
+            self.assertEqual(res.status_code, 200, msg=f"Login failed: {res.text}")
+            data = res.json()
+            self.assertTrue(data.get("ok"))
+            user_data = data.get("user", {})
+            self.assertEqual(user_data.get("username"), "adminboston_test")
+            self.assertEqual(user_data.get("normalized_role"), "company_admin")
+            self.assertEqual(user_data.get("company_id"), 1)
+            self.assertEqual(user_data.get("company_name"), "Boston Medical")
+
+    async def test_login_super_admin_returns_null_company_info(self):
+        """Verify POST /bm/auth/login for global super_admin succeeds with null company info."""
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            res = await ac.post("/bm/auth/login", json={"username": "super_test@test.com", "password": "pass123"})
+            self.assertEqual(res.status_code, 200, msg=f"Login failed: {res.text}")
+            data = res.json()
+            self.assertTrue(data.get("ok"))
+            user_data = data.get("user", {})
+            self.assertEqual(user_data.get("username"), "superadmin_test")
+            self.assertEqual(user_data.get("normalized_role"), "super_admin")
+            self.assertIsNone(user_data.get("company_id"))
+            self.assertIsNone(user_data.get("company_name"))
+
     async def test_me_endpoint_returns_correct_role_for_company_admin(self):
         """1. Verify GET /bm/me returns normalized_role=company_admin and company info for adminboston."""
         async with AsyncSession(get_engine()) as db:

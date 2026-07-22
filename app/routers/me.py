@@ -11,6 +11,7 @@ from app.dependencies import get_db, get_current_user, get_tenant_context
 from app.core.tenant_context import TenantContext
 from app.schemas.multitenancy import TenantContextResponse
 from app.models.users import User, PasswordResetToken, UserAudit
+from app.models.companies import Company
 from app.schemas.users import (
     UserOut,
     LoginPayload,
@@ -95,8 +96,8 @@ async def login(
     token = create_access_token(token_data)
     
     from app.core.roles import normalize_role
-    comp_name = user.company.company_name if user.company else None
-    if not comp_name and user.company_id:
+    comp_name = None
+    if user.company_id is not None:
         c_res = await db.execute(select(Company.company_name).where(Company.company_id == user.company_id))
         comp_name = c_res.scalar()
 
@@ -538,11 +539,19 @@ async def get_my_profile(
     context: Annotated[TenantContext, Depends(get_tenant_context)],
 ):
     """Retrieve profile details of the authenticated user."""
-    out = UserOut.model_validate(current_user)
-    out.company_id = context.company_id
-    out.company_name = context.company_name
-    out.normalized_role = context.normalized_role.value
-    return out
+    return UserOut(
+        user_id=current_user.user_id,
+        username=current_user.username,
+        email=current_user.email,
+        name=current_user.name,
+        role=current_user.role,
+        normalized_role=context.normalized_role.value,
+        company_id=context.company_id,
+        company_name=context.company_name,
+        is_active=current_user.is_active,
+        hubspot_owner_id=current_user.hubspot_owner_id,
+        agent_initials=current_user.agent_initials,
+    )
 
 
 @router.post("/me/reveal-password")
