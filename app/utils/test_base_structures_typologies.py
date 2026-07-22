@@ -313,6 +313,137 @@ class TestBaseStructuresTypologies(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(res.status_code, 403)
 
+    # ── Active-prompt consistency tests ──────────────────────────────────────
+
+    async def _create_prompt_with_version(self, db, prompt_id, prompt_type, service_id, company_id, is_active, version_id):
+        """Helper: create a Prompt + PromptVersion, return both."""
+        p = Prompt(
+            prompt_id=prompt_id,
+            prompt_name=f"Prompt {prompt_id}",
+            prompt_type=prompt_type,
+            service_id=service_id,
+            company_id=company_id,
+            owner_user_id=2,
+            is_active=is_active,
+        )
+        db.add(p)
+        await db.flush()
+        v = PromptVersion(
+            id=version_id,
+            prompt_id=p.prompt_id,
+            prompt="Test prompt text",
+            version_label="v1",
+            is_current=is_active,
+        )
+        db.add(v)
+        await db.flush()
+        return p, v
+
+    async def test_active_prompt_found_for_service(self):
+        """get_active_prompt returns the active prompt for a given service."""
+        from app.services import prompts_service
+        async with AsyncSession(self.session_factory) as db:
+            p, v = await self._create_prompt_with_version(
+                db, prompt_id=200, prompt_type="audio",
+                service_id=1, company_id=1, is_active=True, version_id=200
+            )
+            await db.commit()
+
+        async with AsyncSession(self.session_factory) as db:
+            result = await prompts_service.get_active_prompt(db, prompt_type="audio", service_id=1)
+            self.assertIsNotNone(result, "Expected active audio prompt for service 1 but got None")
+            self.assertEqual(result["prompt_id"], 200)
+
+    async def test_activate_deactivates_same_tenant_service_type(self):
+        """Activating a prompt deactivates others with same company+service+type."""
+        from app.services import prompts_service
+        async with AsyncSession(self.session_factory) as db:
+            # Two audio prompts for same company+service
+            p1, v1 = await self._create_prompt_with_version(
+                db, prompt_id=301, prompt_type="audio",
+                service_id=1, company_id=1, is_active=True, version_id=301
+            )
+            p2, v2 = await self._create_prompt_with_version(
+                db, prompt_id=302, prompt_type="audio",
+                service_id=1, company_id=1, is_active=False, version_id=302
+            )
+            await db.commit()
+
+        # Activate p2 → p1 must become inactive
+        async with AsyncSession(self.session_factory) as db:
+            await prompts_service.activate_version(db, version_id=302)
+
+        async with AsyncSession(self.session_factory) as db:
+            p1_check = await db.get(Prompt, 301)
+            p2_check = await db.get(Prompt, 302)
+            self.assertFalse(p1_check.is_active, "p1 (same tenant/service/type) should be deactivated")
+            self.assertTrue(p2_check.is_active, "p2 should be active after activation")
+
+    async def test_activate_does_not_deactivate_other_service(self):
+        """Activating Front/audio does NOT deactivate Asesores/audio (different service)."""
+        from app.services import prompts_service
+        async with AsyncSession(self.session_factory) as db:
+            # Front audio (service 1, company 1) — active
+            p1, v1 = await self._create_prompt_with_version(
+                db, prompt_id=401, prompt_type="audio",
+                service_id=1, company_id=1, is_active=True, version_id=401
+            )
+            # GesDent audio (service 2, company 2) — active
+            p2, v2 = await self._create_prompt_with_version(
+                db, prompt_id=402, prompt_type="audio",
+                service_id=2, company_id=2, is_active=True, version_id=402
+            )
+            # Another Front audio to activate
+            p3, v3 = await self._create_prompt_with_version(
+                db, prompt_id=403, prompt_type="audio",
+                service_id=1, company_id=1, is_active=False, version_id=403
+            )
+            await db.commit()
+
+        # Activate p3 (Front/audio) → p2 (GesDent/audio) must remain active
+        async with AsyncSession(self.session_factory) as db:
+            await prompts_service.activate_version(db, version_id=403)
+
+        async with AsyncSession(self.session_factory) as db:
+            p1_check = await db.get(Prompt, 401)
+            p2_check = await db.get(Prompt, 402)
+            p3_check = await db.get(Prompt, 403)
+            self.assertFalse(p1_check.is_active, "p1 (same tenant/service) should be deactivated")
+            self.assertTrue(p2_check.is_active, "p2 (different company+service) must remain active")
+            self.assertTrue(p3_check.is_active, "p3 should be the new active prompt")
+
+    async def test_activate_does_not_deactivate_other_company_same_service_id(self):
+        """Activating a prompt does NOT deactivate another company's prompt even if service_id coincides numerically."""
+        from app.services import prompts_service
+        async with AsyncSession(self.session_factory) as db:
+            # Company 1, service 1, audio — active
+            p1, v1 = await self._create_prompt_with_version(
+                db, prompt_id=501, prompt_type="audio",
+                service_id=1, company_id=1, is_active=True, version_id=501
+            )
+            # Company 2 also has service_id=2 but same prompt_type; activate company 1's new prompt
+            p_other_company, v_other = await self._create_prompt_with_version(
+                db, prompt_id=502, prompt_type="audio",
+                service_id=2, company_id=2, is_active=True, version_id=502
+            )
+            # New company 1 prompt to activate
+            p_new, v_new = await self._create_prompt_with_version(
+                db, prompt_id=503, prompt_type="audio",
+                service_id=1, company_id=1, is_active=False, version_id=503
+            )
+            await db.commit()
+
+        async with AsyncSession(self.session_factory) as db:
+            await prompts_service.activate_version(db, version_id=503)
+
+        async with AsyncSession(self.session_factory) as db:
+            p1_check = await db.get(Prompt, 501)
+            p_other_check = await db.get(Prompt, 502)
+            p_new_check = await db.get(Prompt, 503)
+            self.assertFalse(p1_check.is_active, "Old company-1 prompt should be deactivated")
+            self.assertTrue(p_other_check.is_active, "Other company prompt must NOT be deactivated")
+            self.assertTrue(p_new_check.is_active, "New prompt must be active")
+
 
 if __name__ == "__main__":
     import asyncio

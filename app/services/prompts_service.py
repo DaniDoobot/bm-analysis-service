@@ -596,6 +596,9 @@ async def get_active_prompt(db: AsyncSession, prompt_type: str, service_id: int 
                 db.add(current)
                 await db.commit()
                 await db.refresh(current)
+                # Also refresh p: db.commit() expires all session objects, so accessing
+                # p attributes afterwards would trigger a sync lazy-load (MissingGreenlet).
+                await db.refresh(p)
                 logger.info(f"Saneamiento automático: Se saneó y persistió la versión activa ID {current.id} para prompt_id {p.prompt_id}.")
         except Exception as ex:
             logger.error(f"Error durante el saneamiento automático de versión activa: {ex}", exc_info=True)
@@ -916,7 +919,13 @@ async def duplicate_prompt(
 
 
 async def activate_version(db: AsyncSession, version_id: int) -> PromptVersion | None:
-    """Set a version as current and unset others of the same prompt."""
+    """Set a version as current and unset others of the same prompt.
+
+    Also deactivates other Prompt rows with the same (company_id, service_id, prompt_type)
+    so there is at most one active prompt per tenant+service+type.
+    Only touches prompts with non-NULL service_id and company_id to avoid affecting
+    legacy/global prompts.
+    """
     result = await db.execute(
         select(PromptVersion).where(PromptVersion.id == version_id)
     )
@@ -924,7 +933,7 @@ async def activate_version(db: AsyncSession, version_id: int) -> PromptVersion |
     if not version:
         return None
 
-    # Unset others
+    # Unset is_current for other versions of the same prompt
     await db.execute(
         update(PromptVersion)
         .where(PromptVersion.prompt_id == version.prompt_id)
@@ -936,15 +945,34 @@ async def activate_version(db: AsyncSession, version_id: int) -> PromptVersion |
     prompt_obj = prompt_res.scalars().first()
     if prompt_obj:
         prompt_obj.is_active = True
-        await db.execute(
-            update(Prompt)
-            .where(
-                Prompt.prompt_type == prompt_obj.prompt_type,
-                Prompt.service_id == prompt_obj.service_id,
-                Prompt.prompt_id != prompt_obj.prompt_id
+
+        # Deactivate other prompts of the same type within the same tenant+service scope.
+        # We only scope-deactivate when both company_id and service_id are set on the
+        # prompt being activated, to avoid accidentally affecting global/legacy prompts.
+        if prompt_obj.company_id is not None and prompt_obj.service_id is not None:
+            await db.execute(
+                update(Prompt)
+                .where(
+                    Prompt.prompt_type == prompt_obj.prompt_type,
+                    Prompt.company_id == prompt_obj.company_id,
+                    Prompt.service_id == prompt_obj.service_id,
+                    Prompt.prompt_id != prompt_obj.prompt_id
+                )
+                .values(is_active=False)
             )
-            .values(is_active=False)
-        )
+        elif prompt_obj.service_id is not None and prompt_obj.company_id is None:
+            # service_id set but no company: deactivate others with same service + type
+            await db.execute(
+                update(Prompt)
+                .where(
+                    Prompt.prompt_type == prompt_obj.prompt_type,
+                    Prompt.service_id == prompt_obj.service_id,
+                    Prompt.company_id == None,  # noqa: E711
+                    Prompt.prompt_id != prompt_obj.prompt_id
+                )
+                .values(is_active=False)
+            )
+        # If both are NULL (global prompt), do not deactivate anything else.
 
     await db.commit()
     await db.refresh(version)
