@@ -99,6 +99,8 @@ class TenantContext(BaseModel):
             svc_stmt = select(UserServiceAssociation.service_id).where(UserServiceAssociation.user_id == user.user_id)
             svc_res = await db.execute(svc_stmt)
             allowed_services = list(svc_res.scalars().all())
+            if user.primary_service_id is not None and user.primary_service_id not in allowed_services:
+                allowed_services.append(user.primary_service_id)
 
             # Cargar equipos asociados a esos servicios en su empresa
             teams_stmt = select(Team.team_id).where(Team.service_id.in_(allowed_services) & (Team.company_id == company_id))
@@ -123,6 +125,13 @@ class TenantContext(BaseModel):
             svc_stmt = select(Team.service_id).where(Team.team_id.in_(allowed_teams))
             svc_res = await db.execute(svc_stmt)
             allowed_services = list(set(svc_res.scalars().all()))
+
+            # Cargar servicios asignados directamente
+            direct_svc_stmt = select(UserServiceAssociation.service_id).where(UserServiceAssociation.user_id == user.user_id)
+            direct_svc_res = await db.execute(direct_svc_stmt)
+            allowed_services = list(set(allowed_services + list(direct_svc_res.scalars().all())))
+            if user.primary_service_id is not None and user.primary_service_id not in allowed_services:
+                allowed_services.append(user.primary_service_id)
 
             # Cargar agentes de esos equipos
             agents_stmt = select(User.hubspot_owner_id).join(AgentTeamAssociation).where(AgentTeamAssociation.team_id.in_(allowed_teams))

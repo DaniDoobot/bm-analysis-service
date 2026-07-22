@@ -64,6 +64,20 @@ class TestMultitenancyUsers(unittest.IsolatedAsyncioTestCase):
                 db.add(c2)
             await db.flush()
 
+            from app.models.services import Service
+            s1 = (await db.execute(select(Service).where(Service.service_id == 1))).scalars().first()
+            if not s1:
+                s1 = Service(service_id=1, company_id=1, service_key="front_boston", service_name="Front Boston")
+                db.add(s1)
+            s2 = (await db.execute(select(Service).where(Service.service_id == 2))).scalars().first()
+            if not s2:
+                s2 = Service(service_id=2, company_id=1, service_key="back_boston", service_name="Back Boston")
+                db.add(s2)
+            s3 = (await db.execute(select(Service).where(Service.service_id == 3))).scalars().first()
+            if not s3:
+                s3 = Service(service_id=3, company_id=2, service_key="front_madrid", service_name="Front Madrid")
+                db.add(s3)
+
             pass_h = hash_password("pass123")
 
             # Super admin
@@ -282,10 +296,57 @@ class TestMultitenancyUsers(unittest.IsolatedAsyncioTestCase):
             res_promote = await ac.patch(f"/bm/users/{self.u_agent_boston.user_id}", json={"role": "super_admin"})
             self.assertEqual(res_promote.status_code, 403)
 
+    async def test_service_manager_service_assignment_validation(self):
+        """7. Test creating/updating service_manager requires primary_service_id and enforces company scoping."""
+        async with AsyncSession(get_engine()) as db:
+            user = await db.get(User, self.u_admin_boston.user_id)
+            ctx = await TenantContext.build(user, db)
+
+        app.dependency_overrides[get_current_user] = lambda: user
+        app.dependency_overrides[get_tenant_context] = lambda: ctx
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            # 7a. Fail creation of service_manager without primary_service_id -> 400 Bad Request
+            payload_no_svc = {
+                "email": "mgr_nosvc@boston.com",
+                "username": "mgr_nosvc",
+                "role": "responsable_servicio",
+                "password_setup": "invite_link"
+            }
+            res_no_svc = await ac.post("/bm/users", json=payload_no_svc)
+            self.assertEqual(res_no_svc.status_code, 400, msg=res_no_svc.text)
+            self.assertIn("primary_service_id", res_no_svc.text)
+
+            # 7b. Fail creation with service belonging to another company (service_id=3 is Madrid) -> 400 or 403
+            payload_wrong_svc = {
+                "email": "mgr_wrongsvc@boston.com",
+                "username": "mgr_wrongsvc",
+                "role": "responsable_servicio",
+                "primary_service_id": 3,
+                "password_setup": "invite_link"
+            }
+            res_wrong_svc = await ac.post("/bm/users", json=payload_wrong_svc)
+            self.assertIn(res_wrong_svc.status_code, (400, 403), msg=res_wrong_svc.text)
+
+            # 7c. Succeed creation with primary_service_id=1 and allowed_service_ids=[1, 2]
+            payload_valid_mgr = {
+                "email": "mgr_valid@boston.com",
+                "username": "mgr_valid",
+                "role": "responsable_servicio",
+                "primary_service_id": 1,
+                "allowed_service_ids": [1, 2],
+                "password_setup": "invite_link"
+            }
+            res_valid_mgr = await ac.post("/bm/users", json=payload_valid_mgr)
+            self.assertEqual(res_valid_mgr.status_code, 201, msg=res_valid_mgr.text)
+            mgr_data = res_valid_mgr.json()["user"]
+            self.assertEqual(mgr_data["primary_service_id"], 1)
+            self.assertEqual(mgr_data["primary_service_name"], "Front Boston")
+            self.assertIn(1, mgr_data["allowed_service_ids"])
+            self.assertIn(2, mgr_data["allowed_service_ids"])
+            self.assertEqual(len(mgr_data["allowed_services"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
 
-
-if __name__ == "__main__":
-    unittest.main()

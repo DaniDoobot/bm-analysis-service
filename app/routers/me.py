@@ -23,6 +23,7 @@ from app.schemas.users import (
     ResetPasswordPayload,
     PasswordResetConfirmPayload,
 )
+from app.services.users_service import get_user_services_info
 from app.utils.security import (
     verify_password,
     hash_password,
@@ -537,8 +538,12 @@ async def confirm_password_reset(
 async def get_my_profile(
     current_user: Annotated[User, Depends(get_current_user)],
     context: Annotated[TenantContext, Depends(get_tenant_context)],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Retrieve profile details of the authenticated user."""
+    allowed_service_ids_map, allowed_services_map, primary_service_map = await get_user_services_info(db, [current_user.user_id])
+    p_id, p_name = primary_service_map.get(current_user.user_id, (current_user.primary_service_id, None))
+
     return UserOut(
         user_id=current_user.user_id,
         username=current_user.username,
@@ -548,6 +553,10 @@ async def get_my_profile(
         normalized_role=context.normalized_role.value,
         company_id=context.company_id,
         company_name=context.company_name,
+        primary_service_id=p_id,
+        primary_service_name=p_name,
+        allowed_service_ids=allowed_service_ids_map.get(current_user.user_id, []),
+        allowed_services=allowed_services_map.get(current_user.user_id, []),
         is_active=current_user.is_active,
         hubspot_owner_id=current_user.hubspot_owner_id,
         agent_initials=current_user.agent_initials,

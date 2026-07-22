@@ -26,6 +26,7 @@ from app.models.personalized_training import (
 from app.models.mass_evaluations import MassEvaluationResult
 from app.models.analyses import Analysis
 from app.services.auth_service import log_audit
+from app.services.users_service import validate_user_services, save_user_service_associations, get_user_services_info
 from app.schemas.users import (
     UserOut,
     UserOutFull,
@@ -207,10 +208,27 @@ async def list_eligible_users(
     ]
 
 
-def _user_to_full(u: User, comp_map: dict | None = None) -> dict:
+def _user_to_full(
+    u: User,
+    comp_map: dict | None = None,
+    allowed_service_ids_map: dict | None = None,
+    allowed_services_map: dict | None = None,
+    primary_service_map: dict | None = None
+) -> dict:
     c_name = None
     if comp_map and u.company_id is not None:
         c_name = comp_map.get(u.company_id)
+
+    p_id = u.primary_service_id
+    p_name = None
+    if primary_service_map and u.user_id in primary_service_map:
+        p_id, p_name = primary_service_map[u.user_id]
+
+    svc_ids = (allowed_service_ids_map or {}).get(u.user_id, [])
+    if p_id is not None and p_id not in svc_ids:
+        svc_ids = sorted(list(set(svc_ids + [p_id])))
+
+    svcs = (allowed_services_map or {}).get(u.user_id, [])
 
     return {
         "id": u.user_id,
@@ -222,6 +240,10 @@ def _user_to_full(u: User, comp_map: dict | None = None) -> dict:
         "normalized_role": normalize_role(u.role).value,
         "company_id": u.company_id,
         "company_name": c_name,
+        "primary_service_id": p_id,
+        "primary_service_name": p_name,
+        "allowed_service_ids": svc_ids,
+        "allowed_services": svcs,
         "is_active": u.is_active,
         "hubspot_owner_id": u.hubspot_owner_id,
         "agent_initials": u.agent_initials,
@@ -266,18 +288,30 @@ async def list_users(
     res = await db.execute(stmt)
     users = res.scalars().all()
 
+    user_ids = [u.user_id for u in users]
     comp_ids = list({u.company_id for u in users if u.company_id is not None})
     comp_map = {}
     if comp_ids:
         c_res = await db.execute(select(Company).where(Company.company_id.in_(comp_ids)))
         comp_map = {c.company_id: c.company_name for c in c_res.scalars().all()}
 
+    allowed_service_ids_map, allowed_services_map, primary_service_map = await get_user_services_info(db, user_ids)
+
     is_admin_user = context.is_super_admin or context.normalized_role == InternalRole.COMPANY_ADMIN
     if is_admin_user:
         return {
             "ok": True,
             "total": len(users),
-            "users": [_user_to_full(u, comp_map=comp_map) for u in users]
+            "users": [
+                _user_to_full(
+                    u,
+                    comp_map=comp_map,
+                    allowed_service_ids_map=allowed_service_ids_map,
+                    allowed_services_map=allowed_services_map,
+                    primary_service_map=primary_service_map
+                )
+                for u in users
+            ]
         }
 
     return {
@@ -294,6 +328,10 @@ async def list_users(
                 "normalized_role": normalize_role(u.role).value,
                 "company_id": u.company_id,
                 "company_name": comp_map.get(u.company_id),
+                "primary_service_id": primary_service_map.get(u.user_id, (None, None))[0],
+                "primary_service_name": primary_service_map.get(u.user_id, (None, None))[1],
+                "allowed_service_ids": allowed_service_ids_map.get(u.user_id, []),
+                "allowed_services": allowed_services_map.get(u.user_id, []),
                 "is_active": u.is_active,
                 "hubspot_owner_id": u.hubspot_owner_id,
                 "agent_initials": u.agent_initials,
@@ -335,12 +373,20 @@ async def get_user(
         c_name = c_res.scalar()
         comp_map[user.company_id] = c_name
 
-    user_data = _user_to_full(user, comp_map=comp_map)
+    allowed_service_ids_map, allowed_services_map, primary_service_map = await get_user_services_info(db, [user_id])
+    user_data = _user_to_full(
+        user,
+        comp_map=comp_map,
+        allowed_service_ids_map=allowed_service_ids_map,
+        allowed_services_map=allowed_services_map,
+        primary_service_map=primary_service_map
+    )
     return {
         **user_data,
         "ok": True,
         "user": user_data
     }
+
 
 
 # ── POST /bm/users ─────────────────────────────────────────────────────────────
@@ -374,6 +420,15 @@ async def create_user(
             company_id = None
         else:
             company_id = body.company_id or context.company_id
+
+    val_primary_id, val_allowed_ids = await validate_user_services(
+        db,
+        role=body.role,
+        company_id=company_id,
+        primary_service_id=body.primary_service_id,
+        allowed_service_ids=body.allowed_service_ids,
+        context=context
+    )
 
     username = (body.username or body.name or body.email.split("@")[0]).strip()
 
@@ -438,6 +493,7 @@ async def create_user(
         name=body.name,
         role=body.role,
         company_id=company_id,
+        primary_service_id=val_primary_id,
         is_active=body.is_active,
         hubspot_owner_id=clean_hs_id,
         agent_initials=body.agent_initials,
@@ -451,9 +507,19 @@ async def create_user(
     await db.commit()
     await db.refresh(new_user)
 
+    await save_user_service_associations(db, new_user.user_id, val_allowed_ids)
+    await db.commit()
+
     logger.info("Admin %s CREATED user %s (id=%s, company_id=%s)", admin.email, new_user.email, new_user.user_id, company_id)
     
-    resp = {"ok": True, "action": "created", "user": _user_to_full(new_user)}
+    allowed_service_ids_map, allowed_services_map, primary_service_map = await get_user_services_info(db, [new_user.user_id])
+    user_data = _user_to_full(
+        new_user,
+        allowed_service_ids_map=allowed_service_ids_map,
+        allowed_services_map=allowed_services_map,
+        primary_service_map=primary_service_map
+    )
+    resp = {"ok": True, "action": "created", "user": user_data}
     if token:
         from app.config import get_settings
         settings = get_settings()
@@ -503,6 +569,22 @@ async def update_user(
                 detail="No tienes permisos para cambiar la empresa del usuario."
             )
 
+    target_role = body.role if body.role is not None else user.role
+    target_company_id = body.company_id if body.company_id is not None else user.company_id
+    target_primary_id = body.primary_service_id if "primary_service_id" in body.model_fields_set else user.primary_service_id
+    target_allowed_ids = body.allowed_service_ids if "allowed_service_ids" in body.model_fields_set else None
+
+    val_primary_id, val_allowed_ids = await validate_user_services(
+        db,
+        role=target_role,
+        company_id=target_company_id,
+        primary_service_id=target_primary_id,
+        allowed_service_ids=target_allowed_ids,
+        context=context,
+        is_update=True,
+        existing_user=user
+    )
+
     # 1. Protect against deactivating oneself
     if body.is_active is False and admin.user_id == user_id:
         raise HTTPException(
@@ -530,7 +612,6 @@ async def update_user(
 
     # 3. Validate HubSpot Owner ID & Role transition logic
     has_role_update = body.role is not None
-    target_role = body.role if has_role_update else user.role
     is_target_agent = target_role in ["agent", "agente"]
 
     # If role changes from agent to non-agent, release hubspot_owner_id
@@ -605,6 +686,14 @@ async def update_user(
         changes["company_id"] = {"old": user.company_id, "new": body.company_id}
         user.company_id = body.company_id
 
+    if user.primary_service_id != val_primary_id:
+        changes["primary_service_id"] = {"old": user.primary_service_id, "new": val_primary_id}
+        user.primary_service_id = val_primary_id
+
+    if "allowed_service_ids" in body.model_fields_set or "primary_service_id" in body.model_fields_set or body.role is not None:
+        await save_user_service_associations(db, user_id, val_allowed_ids)
+        changes["allowed_service_ids"] = {"new": val_allowed_ids}
+
     if clean_hs_id != user.hubspot_owner_id:
         changes["hubspot_owner_id"] = {"old": user.hubspot_owner_id, "new": clean_hs_id}
         user.hubspot_owner_id = clean_hs_id
@@ -644,12 +733,19 @@ async def update_user(
     await db.refresh(user)
 
     logger.info("Admin %s UPDATED user %s (id=%s). Changes: %s", admin.email, user.email, user.user_id, changes)
-    user_data = _user_to_full(user)
+    allowed_service_ids_map, allowed_services_map, primary_service_map = await get_user_services_info(db, [user_id])
+    user_data = _user_to_full(
+        user,
+        allowed_service_ids_map=allowed_service_ids_map,
+        allowed_services_map=allowed_services_map,
+        primary_service_map=primary_service_map
+    )
     return {
         **user_data,
         "ok": True,
         "user": user_data
     }
+
 
 
 # ── POST /bm/users/{user_id}/reset-password ────────────────────────────────────

@@ -1,5 +1,5 @@
 """Pydantic schemas for User profile and auth payloads."""
-from typing import Optional, Any
+from typing import Optional, Any, List
 from pydantic import BaseModel, field_validator, model_validator, Field, AliasChoices
 
 
@@ -36,6 +36,10 @@ class UserBase(BaseModel):
     role: str = "agente"
     company_id: Optional[int] = None
     company_name: Optional[str] = None
+    primary_service_id: Optional[int] = None
+    primary_service_name: Optional[str] = None
+    allowed_service_ids: List[int] = Field(default_factory=list)
+    allowed_services: List[dict] = Field(default_factory=list)
     normalized_role: Optional[str] = None
     is_active: bool = True
     hubspot_owner_id: Optional[str] = None
@@ -122,6 +126,8 @@ class UserCreatePayload(BaseModel):
     password: Optional[str] = None
     role: str = "agente"
     company_id: Optional[int] = None
+    primary_service_id: Optional[int] = None
+    allowed_service_ids: Optional[List[int]] = None
     is_active: bool = True
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None
@@ -162,7 +168,7 @@ class UserCreatePayload(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def validate_password_requirement(self) -> "UserCreatePayload":
+    def validate_password_requirement(self) -> Any:
         is_invite = (self.password_setup == UserPasswordSetupMode.invite_link)
         is_temp = (self.password_setup == UserPasswordSetupMode.temporary_password)
         
@@ -185,6 +191,8 @@ class UserUpdatePayload(BaseModel):
     name: Optional[str] = Field(default=None, validation_alias=AliasChoices("name", "full_name"))
     role: Optional[str] = None
     company_id: Optional[int] = None
+    primary_service_id: Optional[int] = None
+    allowed_service_ids: Optional[List[int]] = None
     is_active: Optional[bool] = None
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None
