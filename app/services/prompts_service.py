@@ -1118,12 +1118,17 @@ async def update_base_structure(
 async def delete_base_structure(
     db: AsyncSession,
     structure_id: int,
-    confirm: bool = False
+    confirm: bool = False,
+    confirm_active: bool = False
 ) -> dict:
     """
     Deletes a base structure.
-    If confirm=False and there are dependent specific structures (prompts), returns dependency info.
-    If confirm=True or 0 dependencies, deletes the base structure and cascade-deletes dependent prompts.
+
+    - confirm=False  → if dependencies exist, return 409 with dependency summary.
+    - confirm=True   → cascade delete. BUT if any dependent prompt is active AND
+                       confirm_active=False, return a blocking error to prevent
+                       accidentally leaving a service without an active prompt.
+    - confirm=True + confirm_active=True → full cascade including active prompts.
     """
     stmt = select(PromptBaseStructure).where(PromptBaseStructure.id == structure_id)
     res = await db.execute(stmt)
@@ -1134,22 +1139,78 @@ async def delete_base_structure(
     # Find dependent prompts
     from sqlalchemy import delete
     from app.models.prompts import Prompt, BaseStructureTypology
-    p_stmt = select(Prompt).where(Prompt.base_structure_id == structure_id)
+    p_stmt = select(Prompt).where(
+        Prompt.base_structure_id == structure_id,
+        Prompt.deleted_at == None  # noqa: E711  (SQLAlchemy syntax)
+    )
     p_res = await db.execute(p_stmt)
     dependent_prompts = list(p_res.scalars().all())
 
+    active_prompts = [p for p in dependent_prompts if p.is_active and not p.is_archived]
+
     if dependent_prompts and not confirm:
-        dep_list = [{"prompt_id": p.prompt_id, "prompt_name": p.prompt_name} for p in dependent_prompts]
-        return {
+        dep_list = [
+            {
+                "prompt_id": p.prompt_id,
+                "prompt_name": p.prompt_name,
+                "is_active": p.is_active,
+                "prompt_type": p.prompt_type,
+                "service_id": p.service_id,
+            }
+            for p in dependent_prompts
+        ]
+        active_count = len(active_prompts)
+        warning = (
+            f"⚠️ ATENCIÓN: {active_count} de las estructuras específicas dependientes están ACTIVAS "
+            f"y son utilizadas actualmente para analizar llamadas. "
+            f"Eliminarlas dejará el servicio sin prompt activo. "
+            f"Usa confirm_active=true para confirmar el borrado de prompts activos."
+            if active_count > 0
+            else None
+        )
+        result = {
             "found": True,
             "deleted": False,
             "has_dependencies": True,
             "dependencies_count": len(dependent_prompts),
+            "active_prompts_count": active_count,
             "dependent_prompts": dep_list,
-            "message": f"La estructura base no se puede eliminar directamente porque tiene {len(dependent_prompts)} estructuras específicas vinculadas."
+            "message": (
+                f"La estructura base no se puede eliminar directamente porque tiene "
+                f"{len(dependent_prompts)} estructuras específicas vinculadas "
+                f"({active_count} activas)."
+            ),
+        }
+        if warning:
+            result["active_prompt_warning"] = warning
+        return result
+
+    # confirm=True: check if there are active prompts and confirm_active is not set
+    if active_prompts and not confirm_active:
+        active_list = [
+            {
+                "prompt_id": p.prompt_id,
+                "prompt_name": p.prompt_name,
+                "prompt_type": p.prompt_type,
+                "service_id": p.service_id,
+            }
+            for p in active_prompts
+        ]
+        return {
+            "found": True,
+            "deleted": False,
+            "blocked_by_active_prompts": True,
+            "active_prompts_count": len(active_prompts),
+            "active_prompts": active_list,
+            "message": (
+                f"No se puede completar el borrado: {len(active_prompts)} de las estructuras "
+                f"específicas dependientes están ACTIVAS (is_active=True). "
+                f"Eliminarlas dejaría el servicio sin prompt activo para analizar llamadas. "
+                f"Si estás seguro, envía confirm_active=true junto con confirm=true."
+            ),
         }
 
-    # If confirm=True or 0 dependencies: delete dependent prompts
+    # Safe to delete — cascade all dependent prompts (active or not)
     for p in dependent_prompts:
         await db.delete(p)
 
@@ -1160,7 +1221,13 @@ async def delete_base_structure(
     await db.delete(struct)
     await db.commit()
 
-    return {"found": True, "deleted": True, "has_dependencies": bool(dependent_prompts)}
+    return {
+        "found": True,
+        "deleted": True,
+        "has_dependencies": bool(dependent_prompts),
+        "deleted_prompts_count": len(dependent_prompts),
+        "deleted_active_prompts_count": len(active_prompts),
+    }
 
 
 async def assign_base_structure(db: AsyncSession, prompt_id: int, base_structure_id: int) -> dict[str, Any]:

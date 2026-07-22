@@ -474,8 +474,15 @@ async def delete_prompt_base_structure(
     context: Annotated[TenantContext, Depends(get_tenant_context)],
     confirm: bool = False,
     force: bool = False,
+    confirm_active: bool = Query(False, description="Requerido junto con confirm=true para borrar en cascada estructuras específicas ACTIVAS."),
 ):
-    """Delete a prompt base structure with dependency check."""
+    """Delete a prompt base structure with dependency check.
+
+    Flujo:
+    - Sin confirm: devuelve 409 con resumen de dependencias (incluye número de prompts activos).
+    - confirm=true sin confirm_active: si hay dependencias activas, devuelve 409 con aviso específico.
+    - confirm=true + confirm_active=true: elimina en cascada incluyendo prompts activos.
+    """
     role = context.normalized_role
     if role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
         raise HTTPException(status_code=403, detail="Los agentes y coordinadores no tienen acceso para eliminar estructuras.")
@@ -488,9 +495,11 @@ async def delete_prompt_base_structure(
     _verify_base_structure_tenant_access(struct, context)
 
     from fastapi.responses import JSONResponse
-    result = await prompts_service.delete_base_structure(db, id, confirm=confirm or force)
-    if not result.get("deleted") and result.get("has_dependencies"):
-        return JSONResponse(status_code=status.HTTP_409_CONFLICT, content=result)
+    result = await prompts_service.delete_base_structure(db, id, confirm=confirm or force, confirm_active=confirm_active)
+
+    if not result.get("deleted"):
+        if result.get("has_dependencies") or result.get("blocked_by_active_prompts"):
+            return JSONResponse(status_code=status.HTTP_409_CONFLICT, content=result)
 
     await log_audit(db, current_user.user_id, "delete", "base", id)
     return {"ok": True, "message": f"Estructura base {id} eliminada correctamente.", "details": result}

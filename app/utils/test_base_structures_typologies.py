@@ -271,12 +271,15 @@ class TestBaseStructuresTypologies(unittest.IsolatedAsyncioTestCase):
             prompt_id = p.prompt_id
             await db.commit()
 
-        # Delete with confirm=true
+        # Delete with confirm=true + confirm_active=true (prompt is active → requires explicit confirmation)
         res = await self.client.delete(
-            f"/bm/prompt-base-structures/{base_id}?confirm=true",
+            f"/bm/prompt-base-structures/{base_id}?confirm=true&confirm_active=true",
             headers={"Authorization": f"Bearer {self.t_boston_admin}"}
         )
         self.assertEqual(res.status_code, 200)
+        data = res.json()
+        # Response must include count of deleted active prompts
+        self.assertEqual(data["details"]["deleted_active_prompts_count"], 1)
 
         # Verify base structure and prompt are gone from DB
         async with AsyncSession(self.session_factory) as db:

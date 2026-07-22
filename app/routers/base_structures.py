@@ -1,7 +1,7 @@
 """FastAPI router for Base Structures typology associations."""
 import logging
 from typing import Annotated
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -163,8 +163,15 @@ async def delete_base_structure(
     current_user: Annotated[User, Depends(get_current_user)],
     confirm: bool = False,
     force: bool = False,
+    confirm_active: bool = Query(False, description="Requerido junto con confirm=true para borrar en cascada estructuras específicas ACTIVAS. Previene dejar el servicio sin prompt activo por accidente."),
 ):
-    """Delete base structure (Super Admin or Company Admin in scope). Checks for dependencies."""
+    """Delete base structure (Super Admin or Company Admin in scope). Checks for dependencies.
+
+    Flujo:
+    - Sin confirm: devuelve 409 con resumen de dependencias (incluye número de prompts activos).
+    - confirm=true sin confirm_active: si hay dependencias activas, devuelve 409 con aviso específico.
+    - confirm=true + confirm_active=true: elimina en cascada incluyendo prompts activos.
+    """
     role = context.normalized_role
     if role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
         raise HTTPException(
@@ -183,9 +190,11 @@ async def delete_base_structure(
 
     from app.services.prompts_service import delete_base_structure as svc_delete
     from fastapi.responses import JSONResponse
-    
-    result = await svc_delete(db, id, confirm=confirm or force)
-    if not result.get("deleted") and result.get("has_dependencies"):
-        return JSONResponse(status_code=status.HTTP_409_CONFLICT, content=result)
+
+    result = await svc_delete(db, id, confirm=confirm or force, confirm_active=confirm_active)
+
+    if not result.get("deleted"):
+        if result.get("has_dependencies") or result.get("blocked_by_active_prompts"):
+            return JSONResponse(status_code=status.HTTP_409_CONFLICT, content=result)
 
     return {"ok": True, "message": f"Estructura base {id} eliminada correctamente.", "details": result}
