@@ -65,11 +65,15 @@ async def get_current_user(
     return user
 
 
+from app.core.roles import InternalRole, normalize_role
+
+
 async def require_admin(
     current_user: User = Depends(get_current_user)
 ) -> User:
-    """Require authenticated user with role 'administrador' or 'admin'."""
-    if current_user.role not in {"administrador", "admin"}:
+    """Require authenticated user with administrative role (super_admin or company_admin)."""
+    norm = normalize_role(current_user.role)
+    if norm not in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Se requiere rol administrador para esta operación."

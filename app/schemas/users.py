@@ -34,6 +34,9 @@ class UserBase(BaseModel):
     email: str
     name: Optional[str] = None
     role: str = "agente"
+    company_id: Optional[int] = None
+    company_name: Optional[str] = None
+    normalized_role: Optional[str] = None
     is_active: bool = True
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None
@@ -51,6 +54,9 @@ class UserOutFull(UserBase):
     """Extended UserOut for admin views — includes timestamps."""
     user_id: int
     password_masked: str = "********"
+    must_reset_password: Optional[bool] = None
+    password_set_at: Optional[str] = None
+    reset_token_expires_at: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -69,7 +75,8 @@ class LoginPayload(BaseModel):
     @property
     def login_identifier(self) -> str:
         """Return whichever of username/email was provided."""
-        return (self.username or self.email or "").strip()
+        ident = (self.username or self.email or "").strip()
+        return ident
 
     def model_post_init(self, __context):
         if not self.username and not self.email:
@@ -78,10 +85,17 @@ class LoginPayload(BaseModel):
 
 class BootstrapPayload(BaseModel):
     """Payload for first-admin bootstrap. Only usable when bm_users is empty."""
+    username: str
     email: str
-    username: Optional[str] = None
     password: str
-    agent_initials: Optional[str] = None
+    name: Optional[str] = None
+
+    @field_validator("username", "email")
+    @classmethod
+    def not_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Field cannot be empty")
+        return v.strip()
 
 
 # ── Admin CRUD ────────────────────────────────────────────────────────────────
@@ -92,6 +106,7 @@ from datetime import datetime
 class UserPasswordSetupMode(str, Enum):
     invite_link = "invite_link"
     temporary_password = "temporary_password"
+    manual = "manual"
 
 class PasswordSetupLinkResponse(BaseModel):
     url: str
@@ -106,6 +121,7 @@ class UserCreatePayload(BaseModel):
     name: Optional[str] = Field(default=None, validation_alias=AliasChoices("name", "full_name"))
     password: Optional[str] = None
     role: str = "agente"
+    company_id: Optional[int] = None
     is_active: bool = True
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None
@@ -137,9 +153,12 @@ class UserCreatePayload(BaseModel):
     @field_validator("role")
     @classmethod
     def validate_role(cls, v):
-        allowed = {"administrador", "admin", "agente", "agent", "usuario"}
-        if v not in allowed:
-            raise ValueError(f"Rol invalido '{v}'. Permitidos: {allowed}")
+        if not v:
+            return v
+        from app.core.roles import ROLE_MAPPINGS
+        v_clean = v.strip().lower().replace(" ", "_").replace("-", "_")
+        if v.strip().lower() not in ROLE_MAPPINGS and v_clean not in ROLE_MAPPINGS:
+            raise ValueError(f"Rol inválido '{v}'.")
         return v
 
     @model_validator(mode="after")
@@ -165,6 +184,7 @@ class UserUpdatePayload(BaseModel):
     username: Optional[str] = None
     name: Optional[str] = Field(default=None, validation_alias=AliasChoices("name", "full_name"))
     role: Optional[str] = None
+    company_id: Optional[int] = None
     is_active: Optional[bool] = None
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None
@@ -197,9 +217,10 @@ class UserUpdatePayload(BaseModel):
     def validate_role(cls, v):
         if v is None:
             return v
-        allowed = {"administrador", "admin", "agente", "agent", "usuario"}
-        if v not in allowed:
-            raise ValueError(f"Rol invalido '{v}'. Permitidos: {allowed}")
+        from app.core.roles import ROLE_MAPPINGS
+        v_clean = v.strip().lower().replace(" ", "_").replace("-", "_")
+        if v.strip().lower() not in ROLE_MAPPINGS and v_clean not in ROLE_MAPPINGS:
+            raise ValueError(f"Rol inválido '{v}'.")
         return v
 
 

@@ -94,6 +94,12 @@ async def login(
     token_data = {"user_id": user.user_id, "username": user.username, "email": user.email}
     token = create_access_token(token_data)
     
+    from app.core.roles import normalize_role
+    comp_name = user.company.company_name if user.company else None
+    if not comp_name and user.company_id:
+        c_res = await db.execute(select(Company.company_name).where(Company.company_id == user.company_id))
+        comp_name = c_res.scalar()
+
     return {
         "ok": True,
         "access_token": token,
@@ -102,7 +108,10 @@ async def login(
             "user_id": user.user_id,
             "username": user.username,
             "email": user.email,
-            "role": user.role
+            "role": user.role,
+            "normalized_role": normalize_role(user.role).value,
+            "company_id": user.company_id,
+            "company_name": comp_name,
         }
     }
 
@@ -525,10 +534,15 @@ async def confirm_password_reset(
 
 @router.get("/me", response_model=UserOut)
 async def get_my_profile(
-    current_user: Annotated[User, Depends(get_current_user)]
+    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
 ):
     """Retrieve profile details of the authenticated user."""
-    return current_user
+    out = UserOut.model_validate(current_user)
+    out.company_id = context.company_id
+    out.company_name = context.company_name
+    out.normalized_role = context.normalized_role.value
+    return out
 
 
 @router.post("/me/reveal-password")

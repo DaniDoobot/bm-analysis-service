@@ -1,0 +1,265 @@
+import os
+import sys
+import unittest
+from httpx import AsyncClient, ASGITransport
+
+# Force DATABASE_URL to a safe local SQLite DB before any app modules are loaded
+os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///multitenancy_users_test.db"
+
+# Safety Confirmation Check
+db_url = os.environ.get("DATABASE_URL", "")
+if "91.98.230.119" in db_url or "n8n" in db_url.lower():
+    raise RuntimeError("CRITICAL: Test execution was blocked because DATABASE_URL points to production!")
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+# SQLite Type Compilers for Compatibility
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.dialects.postgresql import JSONB
+
+@compiles(JSONB, "sqlite")
+def compile_jsonb_sqlite(type_, compiler, **kw):
+    return "JSON"
+
+from sqlalchemy import select, delete
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.db import get_engine, Base
+from app.models.companies import Company
+from app.models.users import User
+from app.core.roles import normalize_role, InternalRole
+from app.core.tenant_context import TenantContext
+from app.dependencies import get_current_user, get_tenant_context, get_db
+from app.main import app
+from app.utils.security import hash_password
+from sqlalchemy.ext.asyncio import AsyncSession
+
+
+class TestMultitenancyUsers(unittest.IsolatedAsyncioTestCase):
+
+    async def asyncSetUp(self):
+        engine = get_engine()
+        db_url_str = str(engine.url)
+        assert "91.98.230.119" not in db_url_str, "CRITICAL: Database engine URL points to production host!"
+
+        if os.path.exists("multitenancy_users_test.db"):
+            try:
+                os.remove("multitenancy_users_test.db")
+            except Exception:
+                pass
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        async with AsyncSession(engine) as db:
+            await db.execute(delete(User).where(User.username.like("%_test%")))
+            await db.commit()
+
+            c1 = (await db.execute(select(Company).where(Company.company_id == 1))).scalars().first()
+            if not c1:
+                c1 = Company(company_id=1, company_name="Boston Medical", company_key="boston")
+                db.add(c1)
+            c2 = (await db.execute(select(Company).where(Company.company_id == 2))).scalars().first()
+            if not c2:
+                c2 = Company(company_id=2, company_name="Clinica Madrid", company_key="madrid")
+                db.add(c2)
+            await db.flush()
+
+            pass_h = hash_password("pass123")
+
+            # Super admin
+            u_super = User(
+                username="superadmin_test", email="super_test@test.com",
+                role="super_admin", company_id=None, password_hash=pass_h, is_active=True
+            )
+            # Company admin Boston Medical
+            u_admin_boston = User(
+                username="adminboston_test", email="adminboston_test@test.com",
+                role="Administrador de empresa", company_id=1, password_hash=pass_h, is_active=True
+            )
+            # Agent Boston Medical
+            u_agent_boston = User(
+                username="agentboston_test", email="agentboston_test@test.com",
+                role="agente", company_id=1, hubspot_owner_id="901", password_hash=pass_h, is_active=True
+            )
+            # Company admin Madrid
+            u_admin_madrid = User(
+                username="adminmadrid_test", email="adminmadrid_test@test.com",
+                role="company_admin", company_id=2, password_hash=pass_h, is_active=True
+            )
+            # Agent Madrid
+            u_agent_madrid = User(
+                username="agentmadrid_test", email="agentmadrid_test@test.com",
+                role="agente", company_id=2, hubspot_owner_id="902", password_hash=pass_h, is_active=True
+            )
+
+            db.add_all([u_super, u_admin_boston, u_agent_boston, u_admin_madrid, u_agent_madrid])
+            await db.commit()
+            await db.refresh(u_super)
+            await db.refresh(u_admin_boston)
+            await db.refresh(u_agent_boston)
+            await db.refresh(u_admin_madrid)
+            await db.refresh(u_agent_madrid)
+
+            self.u_super = u_super
+            self.u_admin_boston = u_admin_boston
+            self.u_agent_boston = u_agent_boston
+            self.u_admin_madrid = u_admin_madrid
+            self.u_agent_madrid = u_agent_madrid
+
+    async def asyncTearDown(self):
+        app.dependency_overrides.clear()
+
+    async def test_me_endpoint_returns_correct_role_for_company_admin(self):
+        """1. Verify GET /bm/me returns normalized_role=company_admin and company info for adminboston."""
+        async with AsyncSession(get_engine()) as db:
+            user = await db.get(User, self.u_admin_boston.user_id)
+            ctx = await TenantContext.build(user, db)
+
+        app.dependency_overrides[get_current_user] = lambda: user
+        app.dependency_overrides[get_tenant_context] = lambda: ctx
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            res = await ac.get("/bm/me")
+            self.assertEqual(res.status_code, 200)
+            data = res.json()
+            self.assertEqual(data["username"], "adminboston_test")
+            self.assertEqual(data["normalized_role"], "company_admin")
+            self.assertEqual(data["company_id"], 1)
+            self.assertEqual(data["company_name"], "Boston Medical")
+
+    async def test_tenant_context_endpoint_returns_can_manage_users(self):
+        """2. Verify GET /bm/me/tenant-context returns can_manage_users=True for company_admin."""
+        async with AsyncSession(get_engine()) as db:
+            user = await db.get(User, self.u_admin_boston.user_id)
+            ctx = await TenantContext.build(user, db)
+
+        app.dependency_overrides[get_current_user] = lambda: user
+        app.dependency_overrides[get_tenant_context] = lambda: ctx
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            res = await ac.get("/bm/me/tenant-context")
+            self.assertEqual(res.status_code, 200)
+            data = res.json()
+            self.assertTrue(data["can_manage_users"])
+            self.assertEqual(data["normalized_role"], "company_admin")
+
+    async def test_company_admin_user_listing_scoping(self):
+        """3. Verify GET /bm/users for company_admin only returns users of their company, excluding superadmins."""
+        async with AsyncSession(get_engine()) as db:
+            user = await db.get(User, self.u_admin_boston.user_id)
+            ctx = await TenantContext.build(user, db)
+
+        app.dependency_overrides[get_current_user] = lambda: user
+        app.dependency_overrides[get_tenant_context] = lambda: ctx
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            res = await ac.get("/bm/users")
+            self.assertEqual(res.status_code, 200)
+            data = res.json()
+            self.assertTrue(data["ok"])
+            user_list = data["users"]
+            usernames = [u["username"] for u in user_list]
+
+            self.assertIn("adminboston_test", usernames)
+            self.assertIn("agentboston_test", usernames)
+            self.assertNotIn("superadmin_test", usernames)
+            self.assertNotIn("adminmadrid_test", usernames)
+            self.assertNotIn("agentmadrid_test", usernames)
+
+    async def test_super_admin_user_listing_sees_all(self):
+        """4. Verify GET /bm/users for super_admin sees all users across companies."""
+        async with AsyncSession(get_engine()) as db:
+            user = await db.get(User, self.u_super.user_id)
+            ctx = await TenantContext.build(user, db)
+
+        app.dependency_overrides[get_current_user] = lambda: user
+        app.dependency_overrides[get_tenant_context] = lambda: ctx
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            res = await ac.get("/bm/users")
+            self.assertEqual(res.status_code, 200)
+            data = res.json()
+            user_list = data["users"]
+            usernames = [u["username"] for u in user_list]
+
+            self.assertIn("superadmin_test", usernames)
+            self.assertIn("adminboston_test", usernames)
+            self.assertIn("agentboston_test", usernames)
+            self.assertIn("adminmadrid_test", usernames)
+            self.assertIn("agentmadrid_test", usernames)
+
+    async def test_company_admin_user_creation_restrictions(self):
+        """5. Verify company_admin user creation rules (own company only, cannot create super_admin)."""
+        async with AsyncSession(get_engine()) as db:
+            user = await db.get(User, self.u_admin_boston.user_id)
+            ctx = await TenantContext.build(user, db)
+
+        app.dependency_overrides[get_current_user] = lambda: user
+        app.dependency_overrides[get_tenant_context] = lambda: ctx
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            # 5a. Successfully create an agent in Boston Medical
+            payload_valid = {
+                "email": "newagent@boston.com",
+                "username": "newagentboston",
+                "role": "agente",
+                "hubspot_owner_id": "999",
+                "must_reset_password": True,
+                "password_setup": "invite_link"
+            }
+            res = await ac.post("/bm/users?allow_unverified_hubspot_id=true", json=payload_valid)
+            self.assertEqual(res.status_code, 201, msg=f"Error response: {res.text}")
+            created_data = res.json()["user"]
+            self.assertEqual(created_data["company_id"], 1)
+
+            # 5b. Attempt to create super_admin -> 403 Forbidden
+            payload_super = {
+                "email": "rogue@super.com",
+                "username": "roguesuper",
+                "role": "super_admin",
+                "password_setup": "invite_link"
+            }
+            res_super = await ac.post("/bm/users", json=payload_super)
+            self.assertEqual(res_super.status_code, 403)
+
+            # 5c. Attempt to create user for company 2 -> 403 Forbidden
+            payload_other = {
+                "email": "rogue@madrid.com",
+                "username": "roguemadrid",
+                "role": "agente",
+                "company_id": 2,
+                "password_setup": "invite_link"
+            }
+            res_other = await ac.post("/bm/users", json=payload_other)
+            self.assertEqual(res_other.status_code, 403)
+
+    async def test_company_admin_user_edition_restrictions(self):
+        """6. Verify company_admin user editing restrictions."""
+        async with AsyncSession(get_engine()) as db:
+            user = await db.get(User, self.u_admin_boston.user_id)
+            ctx = await TenantContext.build(user, db)
+
+        app.dependency_overrides[get_current_user] = lambda: user
+        app.dependency_overrides[get_tenant_context] = lambda: ctx
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            # 6a. Edit user in own company (agentboston_test)
+            res_edit = await ac.patch(f"/bm/users/{self.u_agent_boston.user_id}?allow_unverified_hubspot_id=true", json={"name": "Agent Boston Updated"})
+            self.assertEqual(res_edit.status_code, 200)
+            self.assertEqual(res_edit.json()["user"]["name"], "Agent Boston Updated")
+
+            # 6b. Attempt to edit user in another company (agentmadrid_test) -> 403 Forbidden
+            res_other = await ac.patch(f"/bm/users/{self.u_agent_madrid.user_id}", json={"name": "Agent Madrid Hack"})
+            self.assertEqual(res_other.status_code, 403)
+
+            # 6c. Attempt to promote user to super_admin -> 403 Forbidden
+            res_promote = await ac.patch(f"/bm/users/{self.u_agent_boston.user_id}", json={"role": "super_admin"})
+            self.assertEqual(res_promote.status_code, 403)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+if __name__ == "__main__":
+    unittest.main()

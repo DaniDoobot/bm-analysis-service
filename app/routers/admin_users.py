@@ -99,8 +99,10 @@ async def list_users(
     if not context.is_super_admin:
         role_actor = context.normalized_role
         if role_actor == InternalRole.COMPANY_ADMIN:
-            # Can see all users in their company
-            pass
+            # Can see all users in their company except super_admins
+            super_admin_roles = ["admin", "administrador", "superadmin", "super_admin"]
+            stmt = stmt.where(~User.role.in_(super_admin_roles))
+            stmt = stmt.where(User.company_id.is_not(None))
         elif role_actor == InternalRole.SERVICE_MANAGER:
             # Users associated to their allowed services OR agents in teams under those services
             user_svc_sub = select(UserServiceAssociation.user_id).where(
