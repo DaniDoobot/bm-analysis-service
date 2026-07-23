@@ -112,16 +112,27 @@ async def list_users(
             stmt = stmt.where(~User.role.in_(super_admin_roles))
             stmt = stmt.where(User.company_id.is_not(None))
         elif role_actor == InternalRole.SERVICE_MANAGER:
-            # Users associated to their allowed services OR agents in teams under those services
+            super_admin_roles = ["admin", "administrador", "superadmin", "super_admin"]
+            stmt = stmt.where(~User.role.in_(super_admin_roles))
+            stmt = stmt.where(User.company_id == context.company_id)
+
+            allowed_svcs = context.allowed_service_ids or []
             user_svc_sub = select(UserServiceAssociation.user_id).where(
-                UserServiceAssociation.service_id.in_(context.allowed_service_ids or [])
+                UserServiceAssociation.service_id.in_(allowed_svcs)
             )
             agent_team_sub = select(AgentTeamAssociation.user_id).join(Team).where(
-                Team.service_id.in_(context.allowed_service_ids or [])
+                Team.service_id.in_(allowed_svcs)
             )
+            management_roles = [
+                "company_admin", "administrador_empresa", "administrador_de_empresa", "administrador de empresa",
+                "service_manager", "responsable_servicio", "responsable_de_servicio", "responsable de servicio",
+                "team_coordinator", "coordinador_equipo", "coordinador_de_equipo", "coordinador de equipo"
+            ]
             stmt = stmt.where(
+                User.primary_service_id.in_(allowed_svcs) |
                 User.user_id.in_(user_svc_sub) |
                 User.user_id.in_(agent_team_sub) |
+                func.lower(User.role).in_(management_roles) |
                 (User.user_id == context.user_id)
             )
         elif role_actor == InternalRole.TEAM_COORDINATOR:
@@ -226,10 +237,10 @@ async def create_user(
     from datetime import datetime, timezone, timedelta
 
     actor_role = context.normalized_role
-    if actor_role not in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN):
+    if actor_role not in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Acceso denegado: Se requiere rol Administrador de Empresa o Super Administrador."
+            detail="Acceso denegado: Se requiere rol de gestión."
         )
 
     val = payload.role.strip().lower()
@@ -245,6 +256,11 @@ async def create_user(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No tienes permisos para crear un Super Administrador."
         )
+    if actor_role == InternalRole.SERVICE_MANAGER and target_role_norm in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permisos para crear un Administrador de Empresa o Superadministrador."
+        )
 
     company_id = payload.company_id
     if target_role_norm == InternalRole.SUPER_ADMIN:
@@ -256,7 +272,7 @@ async def create_user(
                 detail="Se requiere especificar un company_id para roles que no sean super_admin."
             )
         
-        if actor_role == InternalRole.COMPANY_ADMIN and company_id != context.company_id:
+        if actor_role in (InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER) and company_id != context.company_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Solo puedes crear usuarios dentro de tu propia empresa."
@@ -374,7 +390,7 @@ async def get_role_options(
 ):
     """Retrieve available role options for the UI based on actor permissions."""
     actor_role = context.normalized_role
-    if actor_role not in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN):
+    if actor_role not in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado."
@@ -391,6 +407,8 @@ async def get_role_options(
 
     if actor_role == InternalRole.COMPANY_ADMIN:
         options = [opt for opt in options if opt["value"] != "super_admin"]
+    elif actor_role == InternalRole.SERVICE_MANAGER:
+        options = [opt for opt in options if opt["value"] in ("coordinador_equipo", "agente", "usuario")]
 
     return [
         RoleOption(
@@ -450,7 +468,7 @@ async def update_user(
                 detail="No se puede desactivar o degradar al único Super Administrador activo del sistema."
             )
 
-    # If actor is company_admin:
+    # If actor is company_admin or service_manager:
     if context.normalized_role == InternalRole.COMPANY_ADMIN:
         if user.company_id != context.company_id:
             raise HTTPException(
@@ -479,6 +497,27 @@ async def update_user(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="No puedes cambiar o degradar tu propio rol."
                 )
+    elif context.normalized_role == InternalRole.SERVICE_MANAGER:
+        if user.company_id != context.company_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes permisos para modificar usuarios de otra empresa."
+            )
+        if normalize_role(user.role) in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes permisos para modificar a un Administrador de Empresa o Superadministrador."
+            )
+        if target_role_norm in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes permisos para asignar el rol de Administrador de Empresa o Superadministrador."
+            )
+        if payload.company_id is not None and payload.company_id != context.company_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes permisos para cambiar la empresa del usuario."
+            )
     else:
         if payload.company_id is not None:
             comp_stmt = select(Company).where(Company.company_id == payload.company_id)

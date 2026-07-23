@@ -133,6 +133,13 @@ async def list_analyses_history(
                 detail="global_score_min cannot be greater than global_score_max",
             )
 
+    if service_id is not None and not context.is_super_admin:
+        if context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+            raise HTTPException(
+                status_code=403,
+                detail="Acceso denegado: No tienes permisos para este servicio.",
+            )
+
     return await analyses_service.list_analyses_history(
         db,
         analysis_type=type,

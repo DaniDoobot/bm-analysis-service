@@ -118,7 +118,9 @@ async def get_effective_structure_permission(
                 if context.allowed_service_ids is None or obj.service_id not in context.allowed_service_ids:
                     return no_access_dict
 
-    is_admin = context.is_super_admin or role == InternalRole.COMPANY_ADMIN
+    is_admin = context.is_super_admin or role == InternalRole.COMPANY_ADMIN or (
+        role == InternalRole.SERVICE_MANAGER and context.allowed_service_ids is not None and getattr(obj, "service_id", None) in context.allowed_service_ids
+    )
 
     settings = get_settings()
     if not settings.enable_structure_permissions:

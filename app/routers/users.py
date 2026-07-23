@@ -282,24 +282,45 @@ async def list_users(
         )
         super_admin_roles = ["admin", "administrador", "superadmin", "super_admin"]
         stmt = stmt.where(~User.role.in_(super_admin_roles))
-    elif context.normalized_role in (InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR):
+    elif context.normalized_role == InternalRole.SERVICE_MANAGER:
+        stmt = stmt.where(
+            (User.company_id == context.company_id) &
+            (User.company_id.is_not(None))
+        )
+        super_admin_roles = ["admin", "administrador", "superadmin", "super_admin"]
+        stmt = stmt.where(~User.role.in_(super_admin_roles))
+        allowed_svcs = context.allowed_service_ids or []
+        user_svc_sub = select(UserServiceAssociation.user_id).where(
+            UserServiceAssociation.service_id.in_(allowed_svcs)
+        )
+        agent_team_sub = select(AgentTeamAssociation.user_id).join(Team).where(
+            Team.service_id.in_(allowed_svcs)
+        )
+        management_roles = [
+            "company_admin", "administrador_empresa", "administrador_de_empresa", "administrador de empresa",
+            "service_manager", "responsable_servicio", "responsable_de_servicio", "responsable de servicio",
+            "team_coordinator", "coordinador_equipo", "coordinador_de_equipo", "coordinador de equipo"
+        ]
+        stmt = stmt.where(
+            User.primary_service_id.in_(allowed_svcs) |
+            User.user_id.in_(user_svc_sub) |
+            User.user_id.in_(agent_team_sub) |
+            func.lower(User.role).in_(management_roles) |
+            (User.user_id == context.user_id)
+        )
+    elif context.normalized_role == InternalRole.TEAM_COORDINATOR:
         stmt = stmt.where(
             (User.company_id == context.company_id) &
             (User.company_id.is_not(None))
         )
         admin_roles = ["admin", "administrador", "superadmin", "super_admin", "company_admin", "administrador_de_empresa", "administrador de empresa"]
         stmt = stmt.where(~User.role.in_(admin_roles))
-        if context.allowed_service_ids:
-            user_svc_sub = select(UserServiceAssociation.user_id).where(
-                UserServiceAssociation.service_id.in_(context.allowed_service_ids)
-            )
-            agent_team_sub = select(AgentTeamAssociation.user_id).join(Team).where(
-                Team.service_id.in_(context.allowed_service_ids)
+        if context.allowed_team_ids:
+            agent_team_sub = select(AgentTeamAssociation.user_id).where(
+                AgentTeamAssociation.team_id.in_(context.allowed_team_ids)
             )
             stmt = stmt.where(
-                User.user_id.in_(user_svc_sub) |
                 User.user_id.in_(agent_team_sub) |
-                User.primary_service_id.in_(context.allowed_service_ids) |
                 (User.user_id == context.user_id)
             )
         else:
@@ -597,6 +618,16 @@ async def update_user(
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="No tienes permisos para modificar este usuario."
+            )
+        if actor_role == InternalRole.SERVICE_MANAGER and normalize_role(user.role) in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes permisos para modificar a un Administrador de Empresa o Superadministrador."
+            )
+        if actor_role == InternalRole.SERVICE_MANAGER and body.role is not None and normalize_role(body.role) in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes permisos para asignar el rol de Administrador de Empresa o Superadministrador."
             )
         if body.role is not None and normalize_role(body.role) == InternalRole.SUPER_ADMIN:
             raise HTTPException(

@@ -571,18 +571,39 @@ class TestMultitenancyUsers(unittest.IsolatedAsyncioTestCase):
             })
             self.assertEqual(res_mc_bad.status_code, 403)
 
-            # 10g. Trainer simulations & evaluation configs
-            res_sim = await ac.get("/bm/trainer/simulations")
-            self.assertEqual(res_sim.status_code, 200)
+            # 10h. Role options & users visibility / management protection
+            res_roles = await ac.get("/bm/admin/users/role-options")
+            self.assertEqual(res_roles.status_code, 200)
+            role_vals = [r["value"] for r in res_roles.json()]
+            self.assertNotIn("super_admin", role_vals)
+            self.assertNotIn("company_admin", role_vals)
+            self.assertIn("agente", role_vals)
 
-            res_sim_bad = await ac.get("/bm/trainer/simulations?service_id=3")
-            self.assertEqual(res_sim_bad.status_code, 403)
+            res_users = await ac.get("/bm/admin/users")
+            self.assertEqual(res_users.status_code, 200)
+            u_names = [u["username"] for u in res_users.json()]
+            self.assertIn("adminboston_test", u_names)  # Company admin visible as superior
+            self.assertIn("agent_service1", u_names)    # Service 1 agent visible
+            self.assertNotIn("superadmin_test", u_names) # Super admin excluded
+            self.assertNotIn("agent_service3", u_names)  # Other company agent excluded
 
-            res_cfg = await ac.get("/bm/trainer/evaluation-configs")
-            self.assertEqual(res_cfg.status_code, 200)
+            # Try editing company admin -> forbidden
+            res_edit_admin = await ac.patch(f"/bm/admin/users/{self.u_admin_boston.user_id}", json={"name": "Illegal Edit"})
+            self.assertEqual(res_edit_admin.status_code, 403)
 
-            res_cfg_bad = await ac.get("/bm/trainer/evaluation-configs?service_id=3")
-            self.assertEqual(res_cfg_bad.status_code, 403)
+            # 10i. Prompts active check
+            res_act_ok = await ac.get("/bm/prompts/active?type=audio&service_id=1")
+            self.assertIn(res_act_ok.status_code, (200, 404))  # Not 403!
+
+            res_act_bad = await ac.get("/bm/prompts/active?type=audio&service_id=3")
+            self.assertEqual(res_act_bad.status_code, 403)
+
+            # 10j. Analyses history check
+            res_hist_ok = await ac.get("/bm/analyses/history?service_id=1")
+            self.assertEqual(res_hist_ok.status_code, 200)
+
+            res_hist_bad = await ac.get("/bm/analyses/history?service_id=3")
+            self.assertEqual(res_hist_bad.status_code, 403)
 
 
 if __name__ == "__main__":

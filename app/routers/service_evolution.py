@@ -95,6 +95,13 @@ async def get_evolution(
     if typology_ids and typology_ids.strip():
         typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
 
+    if service_id is not None and not context.is_super_admin:
+        if context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+            raise HTTPException(
+                status_code=403,
+                detail="Acceso denegado: No tienes permisos para este servicio."
+            )
+
     if context.allowed_agent_ids is not None:
         if agent_owner_id:
             if agent_owner_id not in context.allowed_agent_ids:
