@@ -171,5 +171,8 @@ class TenantContextResponse(BaseModel):
     can_manage_services: bool
     can_manage_teams: bool
     can_manage_users: bool
+    can_manage_training: bool = False
+    can_manage_trainer: bool = False
+    can_manage_structures: bool = False
 
     model_config = ConfigDict(from_attributes=True)

@@ -36,21 +36,25 @@ router = APIRouter(prefix="/bm/training", tags=["Personalized Training"])
 # ── Security Helpers ─────────────────────────────────────────────────────────
 
 def enforce_admin_role(user: User):
-    """Enforce that the logged-in user is an administrator."""
-    if user.role not in ["admin", "administrador"]:
-        logger.warning("Access denied: User ID %s does not have administrator role.", user.user_id)
+    """Enforce that the logged-in user is an administrator or manager."""
+    from app.core.roles import normalize_role, InternalRole
+    norm_role = normalize_role(user.role)
+    if norm_role not in [InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER]:
+        logger.warning("Access denied: User ID %s does not have administrator/manager role.", user.user_id)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Se requiere rol de administrador para realizar esta operación."
+            detail="Se requiere rol de administrador o responsable para realizar esta operación."
         )
 
 
 def enforce_agent_or_admin_ownership(user: User, hubspot_owner_id: str):
     """
-    Enforces that a user can only access their own data unless they are an admin.
+    Enforces that a user can only access their own data unless they are an admin or manager.
     """
-    if user.role in ["admin", "administrador"]:
-        return  # Admins can see everything
+    from app.core.roles import normalize_role, InternalRole
+    norm_role = normalize_role(user.role)
+    if norm_role in [InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER]:
+        return  # Admins and Service Managers can see agent data in scope
     
     if not user.hubspot_owner_id:
         raise HTTPException(
@@ -67,6 +71,49 @@ def enforce_agent_or_admin_ownership(user: User, hubspot_owner_id: str):
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No tienes permisos para ver el entrenamiento de otros agentes."
         )
+
+
+async def get_service_manager_agent_ids(db: AsyncSession, context: TenantContext) -> List[str]:
+    """Fetch all hubspot_owner_ids of agents belonging to context.allowed_service_ids within context.company_id."""
+    if not context.allowed_service_ids:
+        return []
+
+    from app.models.teams import UserServiceAssociation, AgentTeamAssociation, Team
+    
+    # 1. Agents with primary_service_id in allowed_service_ids
+    stmt1 = select(User.hubspot_owner_id).where(
+        User.company_id == context.company_id,
+        User.primary_service_id.in_(context.allowed_service_ids),
+        User.hubspot_owner_id != None
+    )
+    res1 = await db.execute(stmt1)
+    agent_ids = set(res1.scalars().all())
+
+    # 2. Agents associated via UserServiceAssociation
+    stmt2 = select(User.hubspot_owner_id).join(
+        UserServiceAssociation, User.user_id == UserServiceAssociation.user_id
+    ).where(
+        User.company_id == context.company_id,
+        UserServiceAssociation.service_id.in_(context.allowed_service_ids),
+        User.hubspot_owner_id != None
+    )
+    res2 = await db.execute(stmt2)
+    agent_ids.update(res2.scalars().all())
+
+    # 3. Agents associated via AgentTeamAssociation to Teams in allowed_service_ids
+    stmt3 = select(User.hubspot_owner_id).join(
+        AgentTeamAssociation, User.user_id == AgentTeamAssociation.user_id
+    ).join(
+        Team, AgentTeamAssociation.team_id == Team.team_id
+    ).where(
+        Team.company_id == context.company_id,
+        Team.service_id.in_(context.allowed_service_ids),
+        User.hubspot_owner_id != None
+    )
+    res3 = await db.execute(stmt3)
+    agent_ids.update(res3.scalars().all())
+
+    return list(agent_ids)
 
 
 def sanitize_report_for_agent(report: dict) -> dict:
@@ -136,7 +183,9 @@ async def list_agent_settings(
 
     company_ids = context.allowed_company_ids if not context.is_super_admin else None
     allowed_agent_ids = None
-    if context.normalized_role in [InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR]:
+    if context.normalized_role == InternalRole.SERVICE_MANAGER:
+        allowed_agent_ids = await get_service_manager_agent_ids(db, context)
+    elif context.normalized_role == InternalRole.TEAM_COORDINATOR:
         allowed_agent_ids = context.allowed_agent_ids or []
 
     return await PersonalizedTrainingService.get_agent_settings(
@@ -161,7 +210,14 @@ async def update_agent_setting(
         )
 
     # 1. Enforce agent-level restriction if manager/coordinator
-    if context.allowed_agent_ids is not None:
+    if context.normalized_role == InternalRole.SERVICE_MANAGER:
+        sm_agents = await get_service_manager_agent_ids(db, context)
+        if hubspot_owner_id not in sm_agents:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: No tienes permisos para gestionar este agente."
+            )
+    elif context.allowed_agent_ids is not None:
         if hubspot_owner_id not in context.allowed_agent_ids:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -230,7 +286,9 @@ async def list_agents_overview(
 
     company_ids = context.allowed_company_ids if not context.is_super_admin else None
     allowed_agent_ids = None
-    if context.normalized_role in [InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR]:
+    if context.normalized_role == InternalRole.SERVICE_MANAGER:
+        allowed_agent_ids = await get_service_manager_agent_ids(db, context)
+    elif context.normalized_role == InternalRole.TEAM_COORDINATOR:
         allowed_agent_ids = context.allowed_agent_ids or []
 
     return await PersonalizedTrainingService.get_agent_overview(
@@ -254,7 +312,9 @@ async def get_team_cycles_summary(
 
     company_ids = context.allowed_company_ids if not context.is_super_admin else None
     allowed_agent_ids = None
-    if context.normalized_role in [InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR]:
+    if context.normalized_role == InternalRole.SERVICE_MANAGER:
+        allowed_agent_ids = await get_service_manager_agent_ids(db, context)
+    elif context.normalized_role == InternalRole.TEAM_COORDINATOR:
         allowed_agent_ids = context.allowed_agent_ids or []
 
     return await PersonalizedTrainingService.get_cycles_team_summary(
@@ -471,7 +531,15 @@ async def create_manual_cycle(
         )
 
     # Atomic scope validation against TenantContext before creating any DB objects
-    if context.allowed_agent_ids is not None:
+    if context.normalized_role == InternalRole.SERVICE_MANAGER:
+        sm_agents = await get_service_manager_agent_ids(db, context)
+        for oid in payload.hubspot_owner_ids:
+            if oid not in sm_agents:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Acceso denegado: No tienes permiso para crear ciclos manuales para el agente {oid}."
+                )
+    elif context.allowed_agent_ids is not None:
         for oid in payload.hubspot_owner_ids:
             if oid not in context.allowed_agent_ids:
                 raise HTTPException(

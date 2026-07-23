@@ -3,7 +3,7 @@ import logging
 from typing import Annotated, List, Optional
 from datetime import datetime
 from decimal import Decimal
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status as http_status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -33,23 +33,27 @@ router = APIRouter(prefix="/bm/trainer", tags=["Trainer Module"])
 # ── Security Helpers ─────────────────────────────────────────────────────────
 
 def enforce_admin_role(user: User):
-    """Enforce that the logged-in user is an administrator (Legacy support)."""
-    if user.role not in ["admin", "administrador"]:
-        logger.warning("Access denied: User ID %s does not have administrator role.", user.user_id)
+    """Enforce that the logged-in user is an administrator or manager (Legacy support)."""
+    from app.core.roles import normalize_role, InternalRole
+    norm_role = normalize_role(user.role)
+    if norm_role not in [InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER]:
+        logger.warning("Access denied: User ID %s does not have administrator/manager role.", user.user_id)
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Se requiere rol de administrador para realizar esta operación."
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail="Se requiere rol de administrador o responsable para realizar esta operación."
         )
 
 
 def enforce_agent_or_admin_ownership(user: User, hubspot_owner_id: str):
-    """Enforce that a user can only access their own data unless they are an admin (Legacy support)."""
-    if user.role in ["admin", "administrador"]:
+    """Enforce that a user can only access their own data unless they are an admin/manager (Legacy support)."""
+    from app.core.roles import normalize_role, InternalRole
+    norm_role = normalize_role(user.role)
+    if norm_role in [InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER]:
         return
     
     if not user.hubspot_owner_id:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=http_status.HTTP_400_BAD_REQUEST,
             detail="Tu cuenta de usuario no está asociada a ningún HubSpot Owner ID. Contacta con administración."
         )
         
@@ -59,7 +63,7 @@ def enforce_agent_or_admin_ownership(user: User, hubspot_owner_id: str):
             user.user_id, user.hubspot_owner_id, hubspot_owner_id
         )
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=http_status.HTTP_403_FORBIDDEN,
             detail="No tienes permisos para ver el entrenamiento de otros agentes."
         )
 
@@ -69,13 +73,13 @@ async def verify_simulation_write_scope(db: AsyncSession, simulation_id: int, co
     from app.models.trainer import TrainerSimulation
     sim = await TrainerService.get_simulation(db, simulation_id)
     if not sim:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Simulación no encontrada.")
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Simulación no encontrada.")
     if not context.is_super_admin:
         if sim.company_id not in context.allowed_company_ids:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado: La simulación pertenece a otra empresa.")
+            raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="Acceso denegado: La simulación pertenece a otra empresa.")
         if context.allowed_service_ids is not None:
             if sim.service_id not in context.allowed_service_ids:
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado: No tienes permisos para este servicio.")
+                raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="Acceso denegado: No tienes permisos para este servicio.")
     return sim
 
 
@@ -84,13 +88,13 @@ async def verify_config_write_scope(db: AsyncSession, config_id: int, context: T
     from app.models.trainer import TrainerEvaluationConfig
     cfg = await TrainerService.get_evaluation_config(db, config_id)
     if not cfg:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Configuración no encontrada.")
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Configuración no encontrada.")
     if not context.is_super_admin:
         if cfg.company_id not in context.allowed_company_ids:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado: La configuración pertenece a otra empresa.")
+            raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="Acceso denegado: La configuración pertenece a otra empresa.")
         if context.allowed_service_ids is not None:
             if cfg.service_id not in context.allowed_service_ids:
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado: No tienes permisos para este servicio.")
+                raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="Acceso denegado: No tienes permisos para este servicio.")
     return cfg
 
 
@@ -98,16 +102,16 @@ async def verify_session_read_scope(db: AsyncSession, session_id: int, context: 
     """Verify that the session exists and is within the actor's company, service, and agent scopes."""
     sess = await TrainerService.get_session_detail(db, session_id)
     if not sess:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sesión no encontrada.")
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Sesión no encontrada.")
     if not context.is_super_admin:
         if sess.company_id not in context.allowed_company_ids:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sesión no encontrada.")
+            raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Sesión no encontrada.")
         if context.allowed_service_ids is not None:
             if sess.service_id not in context.allowed_service_ids:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sesión no encontrada.")
+                raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Sesión no encontrada.")
         if context.allowed_agent_ids is not None:
             if sess.agent_id not in context.allowed_agent_ids:
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tienes permisos para ver esta sesión.")
+                raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="No tienes permisos para ver esta sesión.")
     return sess
 
 
@@ -125,7 +129,7 @@ async def list_simulations(
     """List all simulations with optional filtering."""
     if service_id is not None and not context.is_super_admin:
         if context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado: No tienes permisos para este servicio.")
+            raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="Acceso denegado: No tienes permisos para este servicio.")
         
         # Resolve company_id of the service
         from app.models.services import Service
@@ -133,7 +137,7 @@ async def list_simulations(
         res_svc = await db.execute(stmt_svc)
         svc_company_id = res_svc.scalar()
         if svc_company_id not in context.allowed_company_ids:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado: El servicio pertenece a otra empresa.")
+            raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="Acceso denegado: El servicio pertenece a otra empresa.")
 
     company_ids = context.allowed_company_ids if not context.is_super_admin else None
     allowed_service_ids = context.allowed_service_ids if not context.is_super_admin else None
@@ -160,7 +164,7 @@ async def get_simulation(
     return sim
 
 
-@router.post("/simulations", response_model=TrainerSimulationResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/simulations", response_model=TrainerSimulationResponse, status_code=http_status.HTTP_201_CREATED)
 async def create_simulation(
     payload: TrainerSimulationCreate,
     context: Annotated[TenantContext, Depends(get_tenant_context)],
@@ -169,7 +173,7 @@ async def create_simulation(
     """Create a new simulation in draft state (Admin/Manager only)."""
     if context.normalized_role in [InternalRole.AGENT, InternalRole.TEAM_COORDINATOR]:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=http_status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: Se requiere rol de administración."
         )
 
@@ -179,18 +183,18 @@ async def create_simulation(
     res_svc = await db.execute(stmt_svc)
     svc_company_id = res_svc.scalar()
     if not svc_company_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Servicio no encontrado.")
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Servicio no encontrado.")
     if not context.is_super_admin:
         if svc_company_id not in context.allowed_company_ids:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado: El servicio pertenece a otra empresa.")
+            raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="Acceso denegado: El servicio pertenece a otra empresa.")
         if context.allowed_service_ids is not None:
             if payload.service_id not in context.allowed_service_ids:
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado: No tienes permisos para este servicio.")
+                raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="Acceso denegado: No tienes permisos para este servicio.")
 
     try:
         return await TrainerService.create_simulation(db, payload, created_by=context.user_email)
     except ValueError as ve:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+        raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail=str(ve))
 
 
 @router.patch("/simulations/{simulation_id}", response_model=TrainerSimulationResponse)
@@ -203,7 +207,7 @@ async def update_simulation(
     """Update an existing simulation (Admin/Manager only)."""
     if context.normalized_role in [InternalRole.AGENT, InternalRole.TEAM_COORDINATOR]:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=http_status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: Se requiere rol de administración."
         )
     
@@ -212,7 +216,7 @@ async def update_simulation(
         sim = await TrainerService.update_simulation(db, simulation_id, payload, updated_by=context.user_email)
         return sim
     except ValueError as ve:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+        raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail=str(ve))
 
 
 @router.post("/simulations/{simulation_id}/publish", response_model=TrainerSimulationResponse)
@@ -224,7 +228,7 @@ async def publish_simulation(
     """Publish a simulation making it active for voice calls (Admin/Manager only)."""
     if context.normalized_role in [InternalRole.AGENT, InternalRole.TEAM_COORDINATOR]:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=http_status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: Se requiere rol de administración."
         )
     
@@ -232,7 +236,7 @@ async def publish_simulation(
     try:
         return await TrainerService.publish_simulation(db, simulation_id, user_email=context.user_email)
     except ValueError as ve:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+        raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail=str(ve))
 
 
 @router.post("/simulations/{simulation_id}/archive", response_model=TrainerSimulationResponse)
@@ -244,7 +248,7 @@ async def archive_simulation(
     """Archive a simulation to hide/disable it (Admin/Manager only)."""
     if context.normalized_role in [InternalRole.AGENT, InternalRole.TEAM_COORDINATOR]:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=http_status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: Se requiere rol de administración."
         )
     
@@ -262,7 +266,7 @@ async def duplicate_simulation(
     """Duplicate an existing simulation as a new draft (Admin/Manager only)."""
     if context.normalized_role in [InternalRole.AGENT, InternalRole.TEAM_COORDINATOR]:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=http_status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: Se requiere rol de administración."
         )
     
@@ -270,7 +274,7 @@ async def duplicate_simulation(
     try:
         return await TrainerService.duplicate_simulation(db, simulation_id, user_email=context.user_email)
     except ValueError as ve:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+        raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail=str(ve))
 
 
 # ── Evaluation Configs Endpoints ──────────────────────────────────────────────
@@ -285,7 +289,7 @@ async def list_evaluation_configs(
     """List all evaluation configs."""
     if service_id is not None and not context.is_super_admin:
         if context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado: No tienes permisos para este servicio.")
+            raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="Acceso denegado: No tienes permisos para este servicio.")
         
         # Resolve company_id of the service
         from app.models.services import Service
@@ -293,7 +297,7 @@ async def list_evaluation_configs(
         res_svc = await db.execute(stmt_svc)
         svc_company_id = res_svc.scalar()
         if svc_company_id not in context.allowed_company_ids:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado: El servicio pertenece a otra empresa.")
+            raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="Acceso denegado: El servicio pertenece a otra empresa.")
 
     company_ids = context.allowed_company_ids if not context.is_super_admin else None
     allowed_service_ids = context.allowed_service_ids if not context.is_super_admin else None
@@ -318,7 +322,7 @@ async def get_evaluation_config(
     return cfg
 
 
-@router.post("/evaluation-configs", response_model=TrainerEvaluationConfigResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/evaluation-configs", response_model=TrainerEvaluationConfigResponse, status_code=http_status.HTTP_201_CREATED)
 async def create_evaluation_config(
     payload: TrainerEvaluationConfigCreate,
     context: Annotated[TenantContext, Depends(get_tenant_context)],
@@ -327,7 +331,7 @@ async def create_evaluation_config(
     """Create a new evaluation config (Admin/Manager only)."""
     if context.normalized_role in [InternalRole.AGENT, InternalRole.TEAM_COORDINATOR]:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=http_status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: Se requiere rol de administración."
         )
 
@@ -337,18 +341,18 @@ async def create_evaluation_config(
     res_svc = await db.execute(stmt_svc)
     svc_company_id = res_svc.scalar()
     if not svc_company_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Servicio no encontrado.")
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Servicio no encontrado.")
     if not context.is_super_admin:
         if svc_company_id not in context.allowed_company_ids:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado: El servicio pertenece a otra empresa.")
+            raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="Acceso denegado: El servicio pertenece a otra empresa.")
         if context.allowed_service_ids is not None:
             if payload.service_id not in context.allowed_service_ids:
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado: No tienes permisos para este servicio.")
+                raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="Acceso denegado: No tienes permisos para este servicio.")
 
     try:
         return await TrainerService.create_evaluation_config(db, payload, created_by=context.user_email)
     except ValueError as ve:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+        raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail=str(ve))
 
 
 @router.patch("/evaluation-configs/{config_id}", response_model=TrainerEvaluationConfigResponse)
@@ -361,7 +365,7 @@ async def update_evaluation_config(
     """Update an evaluation config (Admin/Manager only)."""
     if context.normalized_role in [InternalRole.AGENT, InternalRole.TEAM_COORDINATOR]:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=http_status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: Se requiere rol de administración."
         )
 
@@ -379,7 +383,7 @@ async def activate_evaluation_config(
     """Activate evaluation config (Admin/Manager only)."""
     if context.normalized_role in [InternalRole.AGENT, InternalRole.TEAM_COORDINATOR]:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=http_status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: Se requiere rol de administración."
         )
 
@@ -399,7 +403,7 @@ async def deactivate_evaluation_config(
     """Deactivate evaluation config (Admin/Manager only)."""
     if context.normalized_role in [InternalRole.AGENT, InternalRole.TEAM_COORDINATOR]:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=http_status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: Se requiere rol de administración."
         )
 
@@ -425,13 +429,13 @@ async def list_available_structures(
     res_svc = await db.execute(stmt_svc)
     svc_company_id = res_svc.scalar()
     if not svc_company_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Servicio no encontrado.")
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Servicio no encontrado.")
     if not context.is_super_admin:
         if svc_company_id not in context.allowed_company_ids:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado: El servicio pertenece a otra empresa.")
+            raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="Acceso denegado: El servicio pertenece a otra empresa.")
         if context.allowed_service_ids is not None:
             if service_id not in context.allowed_service_ids:
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado: No tienes permisos para este servicio.")
+                raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="Acceso denegado: No tienes permisos para este servicio.")
 
     try:
         return await TrainerService.list_available_structures(
@@ -441,7 +445,7 @@ async def list_available_structures(
             include_archived=include_archived,
         )
     except ValueError as ve:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(ve))
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail=str(ve))
 
 
 # ── AI Prompt Generation Endpoints ────────────────────────────────────────────
@@ -455,14 +459,14 @@ async def generate_roleplay_prompt(
     """AI Assistant to generate a new roleplay prompt from objective/ideas (Admin/Manager only)."""
     if context.normalized_role in [InternalRole.AGENT, InternalRole.TEAM_COORDINATOR]:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=http_status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: Se requiere rol de administración."
         )
     try:
         prompt_text = await TrainerService.generate_roleplay_prompt_ai(payload)
         return {"roleplay_prompt": prompt_text}
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"AI generation failed: {str(e)}")
+        raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"AI generation failed: {str(e)}")
 
 
 @router.post("/ai/improve-roleplay-prompt")
@@ -474,14 +478,14 @@ async def improve_roleplay_prompt(
     """AI Assistant to improve/refine an existing roleplay prompt (Admin/Manager only)."""
     if context.normalized_role in [InternalRole.AGENT, InternalRole.TEAM_COORDINATOR]:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=http_status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: Se requiere rol de administración."
         )
     try:
         prompt_text = await TrainerService.improve_roleplay_prompt_ai(payload)
         return {"roleplay_prompt": prompt_text}
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"AI refinement failed: {str(e)}")
+        raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"AI refinement failed: {str(e)}")
 
 
 # ── Sessions Endpoints ────────────────────────────────────────────────────────
@@ -504,7 +508,7 @@ async def list_sessions(
     """List sessions matching filters (Agents/Coordinators see only their scope)."""
     if context.normalized_role == InternalRole.AGENT and not context.allowed_agent_ids:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=http_status.HTTP_400_BAD_REQUEST,
             detail="Tu cuenta de usuario no está asociada a ningún HubSpot Owner ID."
         )
 
@@ -513,7 +517,7 @@ async def list_sessions(
         if not context.is_super_admin and context.allowed_agent_ids is not None:
             if agent_id not in context.allowed_agent_ids:
                 raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
+                    status_code=http_status.HTTP_403_FORBIDDEN,
                     detail="No tienes permisos para ver el entrenamiento de otros agentes."
                 )
 
@@ -522,7 +526,7 @@ async def list_sessions(
         if not context.is_super_admin:
             if context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
                 raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
+                    status_code=http_status.HTTP_403_FORBIDDEN,
                     detail="Acceso denegado: No tienes permisos para este servicio."
                 )
             
@@ -533,7 +537,7 @@ async def list_sessions(
             svc_company_id = res_svc.scalar()
             if svc_company_id not in context.allowed_company_ids:
                 raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
+                    status_code=http_status.HTTP_403_FORBIDDEN,
                     detail="Acceso denegado: El servicio pertenece a otra empresa."
                 )
 
@@ -599,7 +603,7 @@ async def get_session_recording_audio(
 
     if not raw_recording_url:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Grabación no disponible todavía"
         )
 
@@ -611,16 +615,16 @@ async def get_session_recording_audio(
     except httpx.HTTPStatusError as e:
         if e.response.status_code in (401, 403):
             raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
+                status_code=http_status.HTTP_502_BAD_GATEWAY,
                 detail="No se pudo recuperar la grabación desde Twilio"
             )
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
+            status_code=http_status.HTTP_502_BAD_GATEWAY,
             detail=f"Error al descargar la grabación desde Twilio: {str(e)}"
         )
     except Exception as e:
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
+            status_code=http_status.HTTP_502_BAD_GATEWAY,
             detail=f"No se pudo recuperar la grabación: {str(e)}"
         )
 

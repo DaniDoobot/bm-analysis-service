@@ -477,6 +477,8 @@ async def list_prompts(
     base_structure_key: str | None = None,
     is_active: bool | None = None,
     include_archived: bool = False,
+    service_id: int | None = None,
+    service_ids: list[int] | None = None,
 ) -> list[dict]:
     """Return all prompts joined with their current version."""
     stmt = select(Prompt).where(Prompt.deleted_at == None)
@@ -492,6 +494,10 @@ async def list_prompts(
         stmt = stmt.where(Prompt.base_structure_key == base_structure_key)
     if is_active is not None:
         stmt = stmt.where(Prompt.is_active == is_active)
+    if service_id is not None:
+        stmt = stmt.where(Prompt.service_id == service_id)
+    elif service_ids is not None:
+        stmt = stmt.where(Prompt.service_id.in_(service_ids))
     stmt = stmt.order_by(Prompt.prompt_id)
 
     result = await db.execute(stmt)
@@ -985,11 +991,17 @@ async def list_base_structures(
     db: AsyncSession,
     prompt_type: str | None = None,
     include_archived: bool = False,
+    service_id: int | None = None,
+    service_ids: list[int] | None = None,
 ) -> list[PromptBaseStructure]:
     """Return base structures. By default only active ones; pass include_archived=True to see all."""
     stmt = select(PromptBaseStructure)
     if not include_archived:
         stmt = stmt.where(PromptBaseStructure.is_active == True)
+    if service_id is not None:
+        stmt = stmt.where(PromptBaseStructure.service_id == service_id)
+    elif service_ids is not None:
+        stmt = stmt.where(PromptBaseStructure.service_id.in_(service_ids))
     stmt = stmt.order_by(PromptBaseStructure.id.asc())
     result = await db.execute(stmt)
     return list(result.scalars().all())

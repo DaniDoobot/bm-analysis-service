@@ -51,7 +51,7 @@ class TestMultitenancyUsers(unittest.IsolatedAsyncioTestCase):
             await conn.run_sync(Base.metadata.create_all)
 
         async with AsyncSession(engine) as db:
-            await db.execute(delete(User).where(User.username.like("%_test%")))
+            await db.execute(delete(User))
             await db.commit()
 
             c1 = (await db.execute(select(Company).where(Company.company_id == 1))).scalars().first()
@@ -472,6 +472,117 @@ class TestMultitenancyUsers(unittest.IsolatedAsyncioTestCase):
             svcs = res_svc.json()
             self.assertEqual(len(svcs), 1)
             self.assertEqual(svcs[0]["service_id"], 1)
+
+    async def test_service_manager_structures_cycles_trainer_scope(self):
+        """10. Test service_manager scoped access to structures, cycles, and trainer without requiring hubspot_owner_id."""
+        async with AsyncSession(get_engine()) as db:
+            mgr_user = User(
+                username="mgr_full_scope",
+                email="mgr_full_scope@boston.com",
+                password_hash="fake_hash",
+                role="responsable_servicio",
+                company_id=1,
+                primary_service_id=1,
+                hubspot_owner_id=None,
+                is_active=True
+            )
+            db.add(mgr_user)
+            
+            # Create an agent under service 1
+            agent1 = User(
+                username="agent_service1",
+                email="agent1@boston.com",
+                password_hash="fake_hash",
+                role="agente",
+                company_id=1,
+                primary_service_id=1,
+                hubspot_owner_id="hs_agent1_svc1",
+                is_active=True
+            )
+            db.add(agent1)
+
+            # Create an agent under company 2 (other company)
+            agent2 = User(
+                username="agent_service3",
+                email="agent3@madrid.com",
+                password_hash="fake_hash",
+                role="agente",
+                company_id=2,
+                primary_service_id=3,
+                hubspot_owner_id="hs_agent3_svc3",
+                is_active=True
+            )
+            db.add(agent2)
+
+            await db.commit()
+            await db.refresh(mgr_user)
+            mgr_id = mgr_user.user_id
+
+        async with AsyncSession(get_engine()) as db:
+            mgr_user = await db.get(User, mgr_id)
+            mgr_ctx = await TenantContext.build(mgr_user, db)
+
+        app.dependency_overrides[get_current_user] = lambda: mgr_user
+        app.dependency_overrides[get_tenant_context] = lambda: mgr_ctx
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            # 10a. Tenant context flags
+            res_tc = await ac.get("/bm/me/tenant-context")
+            self.assertEqual(res_tc.status_code, 200)
+            tc_data = res_tc.json()
+            self.assertTrue(tc_data["can_manage_training"])
+            self.assertTrue(tc_data["can_manage_trainer"])
+            self.assertTrue(tc_data["can_manage_structures"])
+
+            # 10b. Prompts listing with and without service_id
+            res_p1 = await ac.get("/bm/prompts?service_id=1")
+            self.assertEqual(res_p1.status_code, 200)
+
+            res_p_wrong = await ac.get("/bm/prompts?service_id=3")
+            self.assertEqual(res_p_wrong.status_code, 403)
+
+            res_p_all = await ac.get("/bm/prompts")
+            self.assertEqual(res_p_all.status_code, 200)
+
+            # 10c. Base structures listing
+            res_bs = await ac.get("/bm/prompt-base-structures")
+            self.assertEqual(res_bs.status_code, 200)
+
+            # 10d. Cycles admin overview & summary
+            res_ov = await ac.get("/bm/training/admin/agents-overview")
+            self.assertEqual(res_ov.status_code, 200)
+
+            res_sum = await ac.get("/bm/training/admin/cycles-summary")
+            self.assertEqual(res_sum.status_code, 200)
+
+            # 10e. Create manual cycle for agent of service 1 (succeeds)
+            res_mc = await ac.post("/bm/training/admin/manual-cycle", json={
+                "hubspot_owner_ids": ["hs_agent1_svc1"],
+                "title": "Manual Cycle Service 1",
+                "objectives": ["Mejorar cierre de llamada"]
+            })
+            self.assertEqual(res_mc.status_code, 200, msg=res_mc.text)
+
+            # 10f. Fail creating manual cycle for agent of another company/service (403)
+            res_mc_bad = await ac.post("/bm/training/admin/manual-cycle", json={
+                "hubspot_owner_ids": ["hs_agent3_svc3"],
+                "title": "Illegal Cycle Service 3",
+                "objectives": ["Intento ilegal"]
+            })
+            self.assertEqual(res_mc_bad.status_code, 403)
+
+            # 10g. Trainer simulations & evaluation configs
+            res_sim = await ac.get("/bm/trainer/simulations")
+            self.assertEqual(res_sim.status_code, 200)
+
+            res_sim_bad = await ac.get("/bm/trainer/simulations?service_id=3")
+            self.assertEqual(res_sim_bad.status_code, 403)
+
+            res_cfg = await ac.get("/bm/trainer/evaluation-configs")
+            self.assertEqual(res_cfg.status_code, 200)
+
+            res_cfg_bad = await ac.get("/bm/trainer/evaluation-configs?service_id=3")
+            self.assertEqual(res_cfg_bad.status_code, 403)
 
 
 if __name__ == "__main__":

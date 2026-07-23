@@ -92,11 +92,23 @@ async def list_prompts(
     base_structure_key: Annotated[str | None, Query(description="Filter by base structure Key")] = None,
     active: Annotated[bool | None, Query(description="Filter by active status")] = None,
     include_archived: Annotated[bool, Query(description="Include archived structures")] = False,
+    service_id: Annotated[int | None, Query(description="Filter by service ID")] = None,
 ):
     """Return all prompts with their current version (if any), with optional filtering."""
     role = context.normalized_role
     if role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
         raise HTTPException(status_code=403, detail="Los agentes y coordinadores no tienen acceso a las estructuras.")
+
+    target_service_id = service_id
+    target_service_ids = None
+
+    if not context.is_super_admin:
+        if role == InternalRole.SERVICE_MANAGER:
+            if target_service_id is not None:
+                if context.allowed_service_ids is None or target_service_id not in context.allowed_service_ids:
+                    raise HTTPException(status_code=403, detail="Acceso denegado: No tienes permisos sobre este servicio.")
+            else:
+                target_service_ids = context.allowed_service_ids
 
     prompts = await prompts_service.list_prompts(
         db,
@@ -105,6 +117,8 @@ async def list_prompts(
         base_structure_key=base_structure_key,
         is_active=active,
         include_archived=include_archived,
+        service_id=target_service_id,
+        service_ids=target_service_ids,
     )
 
     enriched_prompts = []
@@ -298,13 +312,31 @@ async def list_prompt_base_structures(
     context: Annotated[TenantContext, Depends(get_tenant_context)],
     type: Annotated[str | None, Query(description="audio | text")] = None,
     include_archived: Annotated[bool, Query(description="Include inactive/archived structures")] = False,
+    service_id: Annotated[int | None, Query(description="Filter by service ID")] = None,
 ):
     """Return active base structures by default; pass include_archived=true to see all."""
     role = context.normalized_role
     if role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
         raise HTTPException(status_code=403, detail="Los agentes y coordinadores no tienen acceso a las estructuras.")
 
-    structures = await prompts_service.list_base_structures(db, prompt_type=type, include_archived=include_archived)
+    target_service_id = service_id
+    target_service_ids = None
+
+    if not context.is_super_admin:
+        if role == InternalRole.SERVICE_MANAGER:
+            if target_service_id is not None:
+                if context.allowed_service_ids is None or target_service_id not in context.allowed_service_ids:
+                    raise HTTPException(status_code=403, detail="Acceso denegado: No tienes permisos sobre este servicio.")
+            else:
+                target_service_ids = context.allowed_service_ids
+
+    structures = await prompts_service.list_base_structures(
+        db,
+        prompt_type=type,
+        include_archived=include_archived,
+        service_id=target_service_id,
+        service_ids=target_service_ids,
+    )
     
     enriched_structures = []
     for s in structures:
