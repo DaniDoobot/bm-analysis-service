@@ -237,7 +237,7 @@ async def list_users(
         ))
 
     return res_list
-
+from app.core.roles import InternalRole, normalize_role, is_disallowed_creation_role, ROLE_MAPPINGS
 
 
 @router.post("", response_model=AdminUserResponse, status_code=status.HTTP_201_CREATED)
@@ -250,6 +250,12 @@ async def create_user(
     import secrets
     from app.utils.security import hash_password
     from datetime import datetime, timezone, timedelta
+
+    if is_disallowed_creation_role(payload.role):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El rol 'usuario' ya no está permitido para la creación de nuevos usuarios. Por favor, asigne un rol jerárquico válido (ej. agente)."
+        )
 
     actor_role = context.normalized_role
     if actor_role not in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR):
@@ -431,16 +437,15 @@ async def get_role_options(
         {"value": "company_admin", "label": "Administrador de empresa", "requires_company": True, "global_field": False},
         {"value": "responsable_servicio", "label": "Responsable de servicio", "requires_company": True, "global_field": False},
         {"value": "coordinador_equipo", "label": "Coordinador de equipo", "requires_company": True, "global_field": False},
-        {"value": "agente", "label": "Agente", "requires_company": True, "global_field": False},
-        {"value": "usuario", "label": "Usuario", "requires_company": True, "global_field": False}
+        {"value": "agente", "label": "Agente", "requires_company": True, "global_field": False}
     ]
 
     if actor_role == InternalRole.COMPANY_ADMIN:
         options = [opt for opt in options if opt["value"] != "super_admin"]
     elif actor_role == InternalRole.SERVICE_MANAGER:
-        options = [opt for opt in options if opt["value"] in ("coordinador_equipo", "agente", "usuario")]
+        options = [opt for opt in options if opt["value"] in ("coordinador_equipo", "agente")]
     elif actor_role == InternalRole.TEAM_COORDINATOR:
-        options = [opt for opt in options if opt["value"] in ("agente", "usuario")]
+        options = [opt for opt in options if opt["value"] in ("agente",)]
 
     return [
         RoleOption(
@@ -476,6 +481,11 @@ async def update_user(
         )
 
     # 1. Determine target role and company after update to validate constraints
+    if payload.role is not None and is_disallowed_creation_role(payload.role):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El rol 'usuario' ya no está permitido. Por favor, asigne un rol jerárquico válido (ej. agente)."
+        )
     target_role = payload.role if payload.role is not None else user.role
     target_role_norm = normalize_role(target_role)
 

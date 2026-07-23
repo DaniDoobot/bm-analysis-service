@@ -48,3 +48,11 @@ def normalize_role(raw_role: str) -> InternalRole:
         ROLE_MAPPINGS.get(val_clean) or
         InternalRole.AGENT
     )
+
+DISALLOWED_CREATION_ROLES = {"user", "usuario", "usuario_operativo", "usuario operativo", "generic_user"}
+
+def is_disallowed_creation_role(raw_role: str | None) -> bool:
+    if not raw_role:
+        return False
+    val = raw_role.strip().lower()
+    return val in DISALLOWED_CREATION_ROLES

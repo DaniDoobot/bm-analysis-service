@@ -16,7 +16,7 @@ from app.models.users import User, UserAudit, PasswordResetToken
 from app.models.companies import Company
 from app.models.teams import Team, UserServiceAssociation, AgentTeamAssociation
 from app.core.tenant_context import TenantContext
-from app.core.roles import InternalRole, normalize_role
+from app.core.roles import InternalRole, normalize_role, is_disallowed_creation_role
 from app.models.prompts import Prompt, PromptBaseStructure, StructurePermission
 from app.models.personalized_training import (
     TrainingAgentSetting,
@@ -476,12 +476,17 @@ async def create_user(
     db: Annotated[AsyncSession, Depends(get_db)],
     allow_unverified_hubspot_id: bool = Query(False, description="Permite omitir la comprobación de existencia del ID de HubSpot en el inventario real")
 ):
-    """Create a new user in bm_users enforcing company_admin / service_manager scoping."""
     actor_role = context.normalized_role
     if actor_role not in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: Se requieren permisos administrativos, de responsable de servicio o coordinador."
+        )
+
+    if is_disallowed_creation_role(body.role):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El rol 'usuario' ya no está permitido para la creación de nuevos usuarios. Por favor, asigne un rol jerárquico válido (ej. agente)."
         )
 
     target_role_norm = normalize_role(body.role)
@@ -817,6 +822,11 @@ async def update_user(
             user.name = new_name
 
     if body.role is not None and body.role != user.role:
+        if is_disallowed_creation_role(body.role):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El rol 'usuario' ya no está permitido. Por favor, asigne un rol jerárquico válido (ej. agente)."
+            )
         changes["role"] = {"old": user.role, "new": body.role}
         user.role = body.role
 

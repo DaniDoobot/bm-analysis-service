@@ -739,6 +739,7 @@ class TestMultitenancyUsers(unittest.IsolatedAsyncioTestCase):
             roles = [r["value"] for r in res_ro.json()]
             self.assertIn("coordinador_equipo", roles)
             self.assertIn("agente", roles)
+            self.assertNotIn("usuario", roles)
             self.assertNotIn("company_admin", roles)
             self.assertNotIn("super_admin", roles)
 
@@ -768,11 +769,12 @@ class TestMultitenancyUsers(unittest.IsolatedAsyncioTestCase):
         app.dependency_overrides[get_tenant_context] = lambda: tc_ctx
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-            # 12e. team_coordinator role options MUST NOT contain admin roles or team_coordinator
+            # 12e. team_coordinator role options MUST NOT contain admin roles, team_coordinator, or usuario
             res_tc_ro = await ac.get("/bm/admin/users/role-options")
             self.assertEqual(res_tc_ro.status_code, 200)
             tc_roles = [r["value"] for r in res_tc_ro.json()]
             self.assertIn("agente", tc_roles)
+            self.assertNotIn("usuario", tc_roles)
             self.assertNotIn("coordinador_equipo", tc_roles)
             self.assertNotIn("responsable_servicio", tc_roles)
             self.assertNotIn("company_admin", tc_roles)
@@ -792,6 +794,52 @@ class TestMultitenancyUsers(unittest.IsolatedAsyncioTestCase):
             # 12h. team_coordinator CANNOT generate setup link for service_manager or company_admin
             res_tc_link_sm = await ac.post(f"/bm/users/{sm_id}/password-setup-link")
             self.assertEqual(res_tc_link_sm.status_code, 403)
+
+    async def test_disallow_generic_usuario_creation_and_role_options(self):
+        """13. Test that generic 'usuario' role is removed from role-options and blocked on creation, while legacy users remain readable."""
+        # 13a. Create legacy user with role="usuario" directly in DB
+        async with AsyncSession(get_engine()) as db:
+            legacy_user = User(
+                username="legacy_generic_user", email="legacy_gen@boston.com", password_hash="hash",
+                role="usuario", company_id=1, is_active=True
+            )
+            db.add(legacy_user)
+            await db.commit()
+            await db.refresh(legacy_user)
+            legacy_id = legacy_user.user_id
+
+        # 13b. Verify super_admin role-options does NOT contain 'usuario'
+        async with AsyncSession(get_engine()) as db:
+            sa_user = await db.get(User, self.u_super.user_id)
+            sa_ctx = await TenantContext.build(sa_user, db)
+
+        app.dependency_overrides[get_current_user] = lambda: sa_user
+        app.dependency_overrides[get_tenant_context] = lambda: sa_ctx
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            res_ro = await ac.get("/bm/admin/users/role-options")
+            self.assertEqual(res_ro.status_code, 200)
+            roles = [r["value"] for r in res_ro.json()]
+            self.assertNotIn("usuario", roles)
+            self.assertNotIn("user", roles)
+
+            # Attempt to create user with role="usuario" -> 400 Bad Request
+            res_create = await ac.post("/bm/users", json={
+                "email": "new_generic_user@boston.com", "username": "new_gen_user",
+                "role": "usuario", "password_setup": "invite_link"
+            })
+            self.assertEqual(res_create.status_code, 400)
+
+            # Legacy user is still returned in user listing without error
+            res_list = await ac.get("/bm/users")
+            self.assertEqual(res_list.status_code, 200)
+            usernames = [u["username"] for u in res_list.json()["users"]]
+            self.assertIn("legacy_generic_user", usernames)
+
+            # Legacy user single lookup succeeds
+            res_get = await ac.get(f"/bm/users/{legacy_id}")
+            self.assertEqual(res_get.status_code, 200)
+            self.assertEqual(res_get.json()["user"]["role"], "usuario")
 
 
 if __name__ == "__main__":
