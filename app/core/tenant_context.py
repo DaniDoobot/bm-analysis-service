@@ -119,10 +119,27 @@ class TenantContext(BaseModel):
             if user.primary_service_id is not None and user.primary_service_id not in allowed_services:
                 allowed_services.append(user.primary_service_id)
 
+            # Fallback para service_manager sin servicios: usar el primer servicio activo de su empresa
+            if not allowed_services and company_id is not None:
+                fb_stmt = select(Service.service_id, Service.service_name).where(
+                    Service.company_id == company_id,
+                    Service.is_active == True
+                ).order_by(Service.service_id.asc()).limit(1)
+                fb_res = await db.execute(fb_stmt)
+                fb_row = fb_res.first()
+                if fb_row:
+                    allowed_services = [fb_row.service_id]
+                    if primary_service_id is None:
+                        primary_service_id = fb_row.service_id
+                        primary_service_name = fb_row.service_name
+
             # Cargar equipos asociados a esos servicios en su empresa
-            teams_stmt = select(Team.team_id).where(Team.service_id.in_(allowed_services) & (Team.company_id == company_id))
-            teams_res = await db.execute(teams_stmt)
-            allowed_teams = list(teams_res.scalars().all())
+            if allowed_services:
+                teams_stmt = select(Team.team_id).where(Team.service_id.in_(allowed_services) & (Team.company_id == company_id))
+                teams_res = await db.execute(teams_stmt)
+                allowed_teams = list(teams_res.scalars().all())
+            else:
+                allowed_teams = []
 
             # Service manager accede a todos los datos de sus servicios permitidos sin filtrar por agentes (hubspot_owner_id)
             allowed_agents = None
@@ -144,6 +161,20 @@ class TenantContext(BaseModel):
             allowed_services = list(set(allowed_services + list(direct_svc_res.scalars().all())))
             if user.primary_service_id is not None and user.primary_service_id not in allowed_services:
                 allowed_services.append(user.primary_service_id)
+
+            # Fallback para team_coordinator sin servicios: usar el primer servicio activo de su empresa
+            if not allowed_services and company_id is not None:
+                fb_stmt = select(Service.service_id, Service.service_name).where(
+                    Service.company_id == company_id,
+                    Service.is_active == True
+                ).order_by(Service.service_id.asc()).limit(1)
+                fb_res = await db.execute(fb_stmt)
+                fb_row = fb_res.first()
+                if fb_row:
+                    allowed_services = [fb_row.service_id]
+                    if primary_service_id is None:
+                        primary_service_id = fb_row.service_id
+                        primary_service_name = fb_row.service_name
 
             # Cargar agentes de esos equipos
             agents_stmt = select(User.hubspot_owner_id).join(AgentTeamAssociation).where(AgentTeamAssociation.team_id.in_(allowed_teams))

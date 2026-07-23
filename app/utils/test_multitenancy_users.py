@@ -306,7 +306,7 @@ class TestMultitenancyUsers(unittest.IsolatedAsyncioTestCase):
         app.dependency_overrides[get_tenant_context] = lambda: ctx
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-            # 7a. Fail creation of service_manager without primary_service_id -> 400 Bad Request
+            # 7a. Creation of service_manager without explicit primary_service_id falls back to company service (service 1) -> 201 Created
             payload_no_svc = {
                 "email": "mgr_nosvc@boston.com",
                 "username": "mgr_nosvc",
@@ -314,8 +314,8 @@ class TestMultitenancyUsers(unittest.IsolatedAsyncioTestCase):
                 "password_setup": "invite_link"
             }
             res_no_svc = await ac.post("/bm/users", json=payload_no_svc)
-            self.assertEqual(res_no_svc.status_code, 400, msg=res_no_svc.text)
-            self.assertIn("primary_service_id", res_no_svc.text)
+            self.assertEqual(res_no_svc.status_code, 201, msg=res_no_svc.text)
+            self.assertEqual(res_no_svc.json()["user"]["primary_service_id"], 1)
 
             # 7b. Fail creation with service belonging to another company (service_id=3 is Madrid) -> 400 or 403
             payload_wrong_svc = {
@@ -430,6 +430,48 @@ class TestMultitenancyUsers(unittest.IsolatedAsyncioTestCase):
                 "password_setup": "invite_link"
             })
             self.assertIn(res_cross_svc.status_code, (400, 403))
+
+    async def test_legacy_service_manager_fallback(self):
+        """9. Test existing service_manager created without primary_service_id or bm_user_services falls back to company service."""
+        async with AsyncSession(get_engine()) as db:
+            legacy_user = User(
+                username="legacy_responsable",
+                email="legacy_responsable@boston.com",
+                password_hash="fake_hash",
+                role="responsable_servicio",
+                company_id=1,
+                primary_service_id=None,
+                is_active=True
+            )
+            db.add(legacy_user)
+            await db.commit()
+            await db.refresh(legacy_user)
+            legacy_id = legacy_user.user_id
+
+        async with AsyncSession(get_engine()) as db:
+            legacy_user = await db.get(User, legacy_id)
+            legacy_ctx = await TenantContext.build(legacy_user, db)
+
+        # Check tenant context fallback
+        self.assertEqual(legacy_ctx.primary_service_id, 1)
+        self.assertIn(1, legacy_ctx.allowed_service_ids)
+        self.assertEqual(legacy_ctx.allowed_services[0]["service_id"], 1)
+
+        app.dependency_overrides[get_current_user] = lambda: legacy_user
+        app.dependency_overrides[get_tenant_context] = lambda: legacy_ctx
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            res_tc = await ac.get("/bm/me/tenant-context")
+            self.assertEqual(res_tc.status_code, 200)
+            tc_data = res_tc.json()
+            self.assertEqual(tc_data["primary_service_id"], 1)
+            self.assertEqual(tc_data["allowed_services"][0]["service_id"], 1)
+
+            res_svc = await ac.get("/bm/services")
+            self.assertEqual(res_svc.status_code, 200)
+            svcs = res_svc.json()
+            self.assertEqual(len(svcs), 1)
+            self.assertEqual(svcs[0]["service_id"], 1)
 
 
 if __name__ == "__main__":
