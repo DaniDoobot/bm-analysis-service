@@ -40,6 +40,10 @@ class UserBase(BaseModel):
     primary_service_name: Optional[str] = None
     allowed_service_ids: List[int] = Field(default_factory=list)
     allowed_services: List[dict] = Field(default_factory=list)
+    primary_team_id: Optional[int] = None
+    primary_team_name: Optional[str] = None
+    allowed_team_ids: List[int] = Field(default_factory=list)
+    allowed_teams: List[dict] = Field(default_factory=list)
     normalized_role: Optional[str] = None
     is_active: bool = True
     hubspot_owner_id: Optional[str] = None
@@ -128,6 +132,8 @@ class UserCreatePayload(BaseModel):
     company_id: Optional[int] = None
     primary_service_id: Optional[int] = Field(default=None, validation_alias=AliasChoices("primary_service_id", "service_id"))
     allowed_service_ids: Optional[List[int]] = Field(default=None, validation_alias=AliasChoices("allowed_service_ids", "service_ids"))
+    primary_team_id: Optional[int] = Field(default=None, validation_alias=AliasChoices("primary_team_id", "team_id"))
+    allowed_team_ids: Optional[List[int]] = Field(default=None, validation_alias=AliasChoices("allowed_team_ids", "team_ids"))
     is_active: bool = True
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None
@@ -193,6 +199,8 @@ class UserUpdatePayload(BaseModel):
     company_id: Optional[int] = None
     primary_service_id: Optional[int] = Field(default=None, validation_alias=AliasChoices("primary_service_id", "service_id"))
     allowed_service_ids: Optional[List[int]] = Field(default=None, validation_alias=AliasChoices("allowed_service_ids", "service_ids"))
+    primary_team_id: Optional[int] = Field(default=None, validation_alias=AliasChoices("primary_team_id", "team_id"))
+    allowed_team_ids: Optional[List[int]] = Field(default=None, validation_alias=AliasChoices("allowed_team_ids", "team_ids"))
     is_active: Optional[bool] = None
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None

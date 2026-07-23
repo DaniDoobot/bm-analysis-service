@@ -15,6 +15,7 @@ class User(Base):
     user_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     company_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("bm_companies.company_id", ondelete="SET NULL"), nullable=True)
     primary_service_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("bm_services.service_id", ondelete="SET NULL"), nullable=True)
+    primary_team_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("bm_teams.team_id", ondelete="SET NULL"), nullable=True)
     username: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     email: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     name: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -22,6 +23,7 @@ class User(Base):
     
     company = relationship("Company")
     primary_service = relationship("Service", foreign_keys=[primary_service_id])
+    primary_team = relationship("Team", foreign_keys=[primary_team_id])
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     hubspot_owner_id: Mapped[str | None] = mapped_column(Text, nullable=True, unique=True)
     agent_initials: Mapped[str | None] = mapped_column(Text, nullable=True)

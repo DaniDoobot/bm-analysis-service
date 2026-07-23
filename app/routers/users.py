@@ -27,7 +27,10 @@ from app.models.personalized_training import (
 from app.models.mass_evaluations import MassEvaluationResult
 from app.models.analyses import Analysis
 from app.services.auth_service import log_audit
-from app.services.users_service import validate_user_services, save_user_service_associations, get_user_services_info
+from app.services.users_service import (
+    validate_user_services, save_user_service_associations, get_user_services_info,
+    validate_user_teams, save_user_team_associations, get_user_teams_info
+)
 from app.schemas.users import (
     UserOut,
     UserOutFull,
@@ -214,7 +217,10 @@ def _user_to_full(
     comp_map: dict | None = None,
     allowed_service_ids_map: dict | None = None,
     allowed_services_map: dict | None = None,
-    primary_service_map: dict | None = None
+    primary_service_map: dict | None = None,
+    allowed_team_ids_map: dict | None = None,
+    allowed_teams_map: dict | None = None,
+    primary_team_map: dict | None = None,
 ) -> dict:
     c_name = None
     if comp_map and u.company_id is not None:
@@ -231,6 +237,14 @@ def _user_to_full(
 
     svcs = (allowed_services_map or {}).get(u.user_id, [])
 
+    pt_id = u.primary_team_id
+    pt_name = None
+    if primary_team_map and u.user_id in primary_team_map:
+        pt_id, pt_name = primary_team_map[u.user_id]
+
+    team_ids = (allowed_team_ids_map or {}).get(u.user_id, [])
+    teams = (allowed_teams_map or {}).get(u.user_id, [])
+
     return {
         "id": u.user_id,
         "user_id": u.user_id,
@@ -245,6 +259,10 @@ def _user_to_full(
         "primary_service_name": p_name,
         "allowed_service_ids": svc_ids,
         "allowed_services": svcs,
+        "primary_team_id": pt_id,
+        "primary_team_name": pt_name,
+        "allowed_team_ids": team_ids,
+        "allowed_teams": teams,
         "is_active": u.is_active,
         "hubspot_owner_id": u.hubspot_owner_id,
         "agent_initials": u.agent_initials,
@@ -340,8 +358,11 @@ async def list_users(
         comp_map = {c.company_id: c.company_name for c in c_res.scalars().all()}
 
     allowed_service_ids_map, allowed_services_map, primary_service_map = await get_user_services_info(db, user_ids)
+    allowed_team_ids_map, allowed_teams_map, primary_team_map = await get_user_teams_info(db, user_ids)
 
-    is_admin_user = context.is_super_admin or context.normalized_role in (InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER)
+    is_admin_user = context.is_super_admin or context.normalized_role in (
+        InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR
+    )
     if is_admin_user:
         return {
             "ok": True,
@@ -352,7 +373,10 @@ async def list_users(
                     comp_map=comp_map,
                     allowed_service_ids_map=allowed_service_ids_map,
                     allowed_services_map=allowed_services_map,
-                    primary_service_map=primary_service_map
+                    primary_service_map=primary_service_map,
+                    allowed_team_ids_map=allowed_team_ids_map,
+                    allowed_teams_map=allowed_teams_map,
+                    primary_team_map=primary_team_map,
                 )
                 for u in users
             ]
@@ -376,6 +400,10 @@ async def list_users(
                 "primary_service_name": primary_service_map.get(u.user_id, (None, None))[1],
                 "allowed_service_ids": allowed_service_ids_map.get(u.user_id, []),
                 "allowed_services": allowed_services_map.get(u.user_id, []),
+                "primary_team_id": primary_team_map.get(u.user_id, (None, None))[0],
+                "primary_team_name": primary_team_map.get(u.user_id, (None, None))[1],
+                "allowed_team_ids": allowed_team_ids_map.get(u.user_id, []),
+                "allowed_teams": allowed_teams_map.get(u.user_id, []),
                 "is_active": u.is_active,
                 "hubspot_owner_id": u.hubspot_owner_id,
                 "agent_initials": u.agent_initials,
@@ -418,12 +446,16 @@ async def get_user(
         comp_map[user.company_id] = c_name
 
     allowed_service_ids_map, allowed_services_map, primary_service_map = await get_user_services_info(db, [user_id])
+    allowed_team_ids_map, allowed_teams_map, primary_team_map = await get_user_teams_info(db, [user_id])
     user_data = _user_to_full(
         user,
         comp_map=comp_map,
         allowed_service_ids_map=allowed_service_ids_map,
         allowed_services_map=allowed_services_map,
-        primary_service_map=primary_service_map
+        primary_service_map=primary_service_map,
+        allowed_team_ids_map=allowed_team_ids_map,
+        allowed_teams_map=allowed_teams_map,
+        primary_team_map=primary_team_map,
     )
     return {
         **user_data,
@@ -568,11 +600,15 @@ async def create_user(
     logger.info("Admin %s CREATED user %s (id=%s, company_id=%s)", current_user.email, new_user.email, new_user.user_id, company_id)
     
     allowed_service_ids_map, allowed_services_map, primary_service_map = await get_user_services_info(db, [new_user.user_id])
+    allowed_team_ids_map, allowed_teams_map, primary_team_map = await get_user_teams_info(db, [new_user.user_id])
     user_data = _user_to_full(
         new_user,
         allowed_service_ids_map=allowed_service_ids_map,
         allowed_services_map=allowed_services_map,
-        primary_service_map=primary_service_map
+        primary_service_map=primary_service_map,
+        allowed_team_ids_map=allowed_team_ids_map,
+        allowed_teams_map=allowed_teams_map,
+        primary_team_map=primary_team_map,
     )
     resp = {"ok": True, "action": "created", "user": user_data}
     if token:
@@ -805,11 +841,15 @@ async def update_user(
 
     logger.info("Admin %s UPDATED user %s (id=%s). Changes: %s", current_user.email, user.email, user.user_id, changes)
     allowed_service_ids_map, allowed_services_map, primary_service_map = await get_user_services_info(db, [user_id])
+    allowed_team_ids_map, allowed_teams_map, primary_team_map = await get_user_teams_info(db, [user_id])
     user_data = _user_to_full(
         user,
         allowed_service_ids_map=allowed_service_ids_map,
         allowed_services_map=allowed_services_map,
-        primary_service_map=primary_service_map
+        primary_service_map=primary_service_map,
+        allowed_team_ids_map=allowed_team_ids_map,
+        allowed_teams_map=allowed_teams_map,
+        primary_team_map=primary_team_map,
     )
     return {
         **user_data,

@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.users import User
 from app.models.services import Service
-from app.models.teams import UserServiceAssociation
+from app.models.teams import Team, UserServiceAssociation, UserTeamAssociation, AgentTeamAssociation
 from app.core.roles import normalize_role, InternalRole
 from app.core.tenant_context import TenantContext
 
@@ -31,7 +31,7 @@ async def validate_user_services(
     target_company_id = company_id if company_id is not None else (existing_user.company_id if existing_user else context.company_id)
     
     # 1. Role requirements validation
-    if norm_role in (InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR):
+    if norm_role == InternalRole.SERVICE_MANAGER:
         target_primary = primary_service_id
         if is_update and target_primary is None and existing_user is not None:
             target_primary = existing_user.primary_service_id
@@ -50,7 +50,7 @@ async def validate_user_services(
         if target_primary is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Se requiere 'primary_service_id' para los roles Responsable de Servicio y Coordinador de Equipo."
+                detail="Se requiere 'primary_service_id' para el rol Responsable de Servicio."
             )
         primary_service_id = target_primary
 
@@ -210,3 +210,184 @@ async def get_user_services_info(
         ]
 
     return allowed_service_ids_map, allowed_services_map, primary_service_map
+
+
+async def validate_user_teams(
+    db: AsyncSession,
+    role: str,
+    company_id: Optional[int],
+    primary_team_id: Optional[int],
+    allowed_team_ids: Optional[List[int]],
+    context: TenantContext,
+    is_update: bool = False,
+    existing_user: Optional[User] = None
+) -> Tuple[Optional[int], List[int]]:
+    """
+    Validate primary_team_id and allowed_team_ids based on user role, company, and service manager scoping.
+    Returns (validated_primary_team_id, validated_allowed_team_ids).
+    """
+    norm_role = normalize_role(role)
+    target_company_id = company_id if company_id is not None else (existing_user.company_id if existing_user else context.company_id)
+
+    # 1. Role requirements validation for TEAM_COORDINATOR
+    if norm_role == InternalRole.TEAM_COORDINATOR:
+        target_primary = primary_team_id
+        if is_update and target_primary is None and existing_user is not None:
+            target_primary = existing_user.primary_team_id
+
+        if target_primary is None and allowed_team_ids:
+            target_primary = allowed_team_ids[0]
+
+        if target_primary is None and target_company_id is not None:
+            fb_stmt = select(Team.team_id).where(
+                Team.company_id == target_company_id,
+                Team.is_active == True
+            ).order_by(Team.team_id.asc()).limit(1)
+            fb_res = await db.execute(fb_stmt)
+            target_primary = fb_res.scalar()
+
+        if target_primary is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Se requiere 'primary_team_id' para el rol Coordinador de Equipo."
+            )
+        primary_team_id = target_primary
+
+    # Collect all team IDs to validate
+    all_team_ids = set()
+    if primary_team_id is not None:
+        all_team_ids.add(primary_team_id)
+    if allowed_team_ids is not None:
+        all_team_ids.update(allowed_team_ids)
+
+    if not all_team_ids:
+        return primary_team_id, []
+
+    # 2. Query teams and validate existence & scoping
+    stmt = select(Team).where(Team.team_id.in_(all_team_ids))
+    res = await db.execute(stmt)
+    teams_found = {t.team_id: t for t in res.scalars().all()}
+
+    missing = all_team_ids - set(teams_found.keys())
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Los siguientes equipos no existen: {sorted(list(missing))}."
+        )
+
+    for t_id in all_team_ids:
+        t = teams_found[t_id]
+        if target_company_id is not None and t.company_id != target_company_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"El equipo {t_id} ('{t.team_name}') no pertenece a la empresa {target_company_id} del usuario."
+            )
+        if not context.is_super_admin and context.company_id is not None and t.company_id != context.company_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Acceso denegado: No tienes permisos sobre el equipo {t_id}."
+            )
+        # If actor is service_manager, team must belong to allowed_service_ids
+        if context.normalized_role == InternalRole.SERVICE_MANAGER and context.allowed_service_ids is not None:
+            if t.service_id not in context.allowed_service_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Acceso denegado: El equipo {t_id} ('{t.team_name}') pertenece al servicio {t.service_id}, sobre el cual no tienes permisos."
+                )
+
+    # Ensure primary_team_id is included in allowed_team_ids if provided
+    final_allowed = set(allowed_team_ids) if allowed_team_ids is not None else set()
+    if primary_team_id is not None:
+        final_allowed.add(primary_team_id)
+
+    return primary_team_id, sorted(list(final_allowed))
+
+
+async def save_user_team_associations(
+    db: AsyncSession,
+    user_id: int,
+    allowed_team_ids: List[int]
+) -> None:
+    """
+    Sync UserTeamAssociation records for the given user_id.
+    """
+    existing_stmt = select(UserTeamAssociation.team_id).where(UserTeamAssociation.user_id == user_id)
+    existing_res = await db.execute(existing_stmt)
+    existing_team_ids = set(existing_res.scalars().all())
+
+    target_team_ids = set(allowed_team_ids)
+
+    to_remove = existing_team_ids - target_team_ids
+    to_add = target_team_ids - existing_team_ids
+
+    if to_remove:
+        await db.execute(
+            delete(UserTeamAssociation).where(
+                (UserTeamAssociation.user_id == user_id) &
+                (UserTeamAssociation.team_id.in_(to_remove))
+            )
+        )
+    for t_id in to_add:
+        db.add(UserTeamAssociation(user_id=user_id, team_id=t_id))
+
+
+async def get_user_teams_info(
+    db: AsyncSession,
+    user_ids: List[int]
+) -> Tuple[Dict[int, List[int]], Dict[int, List[Dict[str, Any]]], Dict[int, Tuple[Optional[int], Optional[str]]]]:
+    """
+    Fetch user team information for a list of user IDs.
+    Returns:
+    - allowed_team_ids_map: {user_id: [team_id, ...]}
+    - allowed_teams_map: {user_id: [{"team_id": id, "team_name": name, "service_id": svc_id}, ...]}
+    - primary_team_map: {user_id: (primary_team_id, primary_team_name)}
+    """
+    if not user_ids:
+        return {}, {}, {}
+
+    users_res = await db.execute(select(User).where(User.user_id.in_(user_ids)))
+    users = users_res.scalars().all()
+
+    primary_team_ids = {u.primary_team_id for u in users if u.primary_team_id is not None}
+
+    assoc_res = await db.execute(
+        select(UserTeamAssociation).where(UserTeamAssociation.user_id.in_(user_ids))
+    )
+    assocs = assoc_res.scalars().all()
+
+    user_assoc_ids: Dict[int, set] = {}
+    for ta in assocs:
+        user_assoc_ids.setdefault(ta.user_id, set()).add(ta.team_id)
+
+    all_team_ids = primary_team_ids | {ta.team_id for ta in assocs}
+
+    team_obj_map = {}
+    if all_team_ids:
+        team_res = await db.execute(select(Team).where(Team.team_id.in_(all_team_ids)))
+        team_obj_map = {t.team_id: t for t in team_res.scalars().all()}
+
+    allowed_team_ids_map: Dict[int, List[int]] = {}
+    allowed_teams_map: Dict[int, List[Dict[str, Any]]] = {}
+    primary_team_map: Dict[int, Tuple[Optional[int], Optional[str]]] = {}
+
+    for u in users:
+        p_id = u.primary_team_id
+        t_obj = team_obj_map.get(p_id) if p_id is not None else None
+        p_name = t_obj.team_name if t_obj else None
+        primary_team_map[u.user_id] = (p_id, p_name)
+
+        t_ids = set(user_assoc_ids.get(u.user_id, set()))
+        if p_id is not None:
+            t_ids.add(p_id)
+        sorted_ids = sorted(list(t_ids))
+        allowed_team_ids_map[u.user_id] = sorted_ids
+        allowed_teams_map[u.user_id] = [
+            {
+                "team_id": t_id,
+                "team_name": team_obj_map[t_id].team_name if t_id in team_obj_map else f"Equipo {t_id}",
+                "service_id": team_obj_map[t_id].service_id if t_id in team_obj_map else None
+            }
+            for t_id in sorted_ids
+        ]
+
+    return allowed_team_ids_map, allowed_teams_map, primary_team_map

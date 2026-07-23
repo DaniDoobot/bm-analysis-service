@@ -16,7 +16,10 @@ from app.core.tenant_context import TenantContext
 from app.core.roles import InternalRole, normalize_role, ROLE_MAPPINGS
 from app.schemas.services import ServiceOut
 from app.schemas.multitenancy import TeamResponse
-from app.services.users_service import validate_user_services, save_user_service_associations, get_user_services_info
+from app.services.users_service import (
+    validate_user_services, save_user_service_associations, get_user_services_info,
+    validate_user_teams, save_user_team_associations, get_user_teams_info
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/bm/admin/users", tags=["Admin Users"])
@@ -35,12 +38,15 @@ class AdminUserResponse(BaseModel):
     company_name: Optional[str] = None
     primary_service_id: Optional[int] = None
     primary_service_name: Optional[str] = None
+    primary_team_id: Optional[int] = None
+    primary_team_name: Optional[str] = None
     is_active: bool
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None
     allowed_service_ids: List[int] = []
     allowed_services: List[dict] = []
     allowed_team_ids: List[int] = []
+    allowed_teams: List[dict] = []
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -53,6 +59,8 @@ class AdminUserCreatePayload(BaseModel):
     company_id: Optional[int] = None
     primary_service_id: Optional[int] = Field(default=None, validation_alias=AliasChoices("primary_service_id", "service_id"))
     allowed_service_ids: Optional[List[int]] = Field(default=None, validation_alias=AliasChoices("allowed_service_ids", "service_ids"))
+    primary_team_id: Optional[int] = Field(default=None, validation_alias=AliasChoices("primary_team_id", "team_id"))
+    allowed_team_ids: Optional[List[int]] = Field(default=None, validation_alias=AliasChoices("allowed_team_ids", "team_ids"))
     is_active: bool = True
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None
@@ -66,6 +74,8 @@ class AdminUserUpdatePayload(BaseModel):
     role: Optional[str] = None
     primary_service_id: Optional[int] = Field(default=None, validation_alias=AliasChoices("primary_service_id", "service_id"))
     allowed_service_ids: Optional[List[int]] = Field(default=None, validation_alias=AliasChoices("allowed_service_ids", "service_ids"))
+    primary_team_id: Optional[int] = Field(default=None, validation_alias=AliasChoices("primary_team_id", "team_id"))
+    allowed_team_ids: Optional[List[int]] = Field(default=None, validation_alias=AliasChoices("allowed_team_ids", "team_ids"))
 
 
 class RoleOption(BaseModel):
@@ -198,10 +208,12 @@ async def list_users(
         comp_map = {c.company_id: c.company_name for c in comp_res.scalars().all()}
 
     allowed_service_ids_map, allowed_services_map, primary_service_map = await get_user_services_info(db, user_ids)
+    allowed_team_ids_map, allowed_teams_map, primary_team_map = await get_user_teams_info(db, user_ids)
 
     res_list = []
     for u in users:
         p_id, p_name = primary_service_map.get(u.user_id, (u.primary_service_id, None))
+        pt_id, pt_name = primary_team_map.get(u.user_id, (u.primary_team_id, None))
         res_list.append(AdminUserResponse(
             user_id=u.user_id,
             username=u.username,
@@ -213,12 +225,15 @@ async def list_users(
             company_name=comp_map.get(u.company_id) if u.company_id else None,
             primary_service_id=p_id,
             primary_service_name=p_name,
+            primary_team_id=pt_id,
+            primary_team_name=pt_name,
             is_active=u.is_active,
             hubspot_owner_id=u.hubspot_owner_id,
             agent_initials=u.agent_initials,
             allowed_service_ids=allowed_service_ids_map.get(u.user_id, []),
             allowed_services=allowed_services_map.get(u.user_id, []),
-            allowed_team_ids=list(set(team_map.get(u.user_id, [])))
+            allowed_team_ids=allowed_team_ids_map.get(u.user_id, []),
+            allowed_teams=allowed_teams_map.get(u.user_id, [])
         ))
 
     return res_list
@@ -295,6 +310,15 @@ async def create_user(
         context=context
     )
 
+    val_primary_team_id, val_allowed_team_ids = await validate_user_teams(
+        db,
+        role=payload.role,
+        company_id=company_id,
+        primary_team_id=payload.primary_team_id,
+        allowed_team_ids=payload.allowed_team_ids,
+        context=context
+    )
+
     username = payload.username.strip()
     if not username:
         raise HTTPException(
@@ -338,6 +362,7 @@ async def create_user(
         is_active=payload.is_active,
         company_id=company_id,
         primary_service_id=val_primary_id,
+        primary_team_id=val_primary_team_id,
         hubspot_owner_id=payload.hubspot_owner_id.strip() if payload.hubspot_owner_id else None,
         agent_initials=payload.agent_initials.strip() if payload.agent_initials else None,
         password_hash=pass_hash,
@@ -350,6 +375,7 @@ async def create_user(
     await db.refresh(new_user)
 
     await save_user_service_associations(db, new_user.user_id, val_allowed_ids)
+    await save_user_team_associations(db, new_user.user_id, val_allowed_team_ids)
     await db.commit()
 
     logger.info("Actor (user_id=%s) CREATED administrative user %s (id=%s)", context.user_id, new_user.email, new_user.user_id)
@@ -362,6 +388,8 @@ async def create_user(
 
     allowed_service_ids_map, allowed_services_map, primary_service_map = await get_user_services_info(db, [new_user.user_id])
     p_id, p_name = primary_service_map.get(new_user.user_id, (val_primary_id, None))
+    allowed_team_ids_map, allowed_teams_map, primary_team_map = await get_user_teams_info(db, [new_user.user_id])
+    pt_id, pt_name = primary_team_map.get(new_user.user_id, (val_primary_team_id, None))
 
     return AdminUserResponse(
         user_id=new_user.user_id,
@@ -374,12 +402,15 @@ async def create_user(
         company_name=comp_name,
         primary_service_id=p_id,
         primary_service_name=p_name,
+        primary_team_id=pt_id,
+        primary_team_name=pt_name,
         is_active=new_user.is_active,
         hubspot_owner_id=new_user.hubspot_owner_id,
         agent_initials=new_user.agent_initials,
         allowed_service_ids=allowed_service_ids_map.get(new_user.user_id, []),
         allowed_services=allowed_services_map.get(new_user.user_id, []),
-        allowed_team_ids=[]
+        allowed_team_ids=allowed_team_ids_map.get(new_user.user_id, []),
+        allowed_teams=allowed_teams_map.get(new_user.user_id, [])
     )
 
 
@@ -560,6 +591,21 @@ async def update_user(
     if payload.allowed_service_ids is not None or payload.primary_service_id is not None or payload.role is not None:
         await save_user_service_associations(db, user.user_id, val_allowed_ids)
 
+    # Validate and save team associations
+    val_primary_team_id, val_allowed_team_ids = await validate_user_teams(
+        db,
+        role=target_role,
+        company_id=target_company_id,
+        primary_team_id=payload.primary_team_id,
+        allowed_team_ids=payload.allowed_team_ids,
+        context=context,
+        is_update=True,
+        existing_user=user
+    )
+    user.primary_team_id = val_primary_team_id
+    if payload.allowed_team_ids is not None or payload.primary_team_id is not None or payload.role is not None:
+        await save_user_team_associations(db, user.user_id, val_allowed_team_ids)
+
     # Perform update fields
     if payload.name is not None:
         user.name = payload.name.strip()
@@ -590,18 +636,10 @@ async def update_user(
     comp_res = await db.execute(comp_stmt)
     comp_name = comp_res.scalar()
 
-    # Fetch user teams
-    t_stmt1 = select(UserTeamAssociation.team_id).where(UserTeamAssociation.user_id == user.user_id)
-    t_res1 = await db.execute(t_stmt1)
-    team_ids = list(t_res1.scalars().all())
-
-    t_stmt2 = select(AgentTeamAssociation.team_id).where(AgentTeamAssociation.user_id == user.user_id)
-    t_res2 = await db.execute(t_stmt2)
-    team_ids.extend(t_res2.scalars().all())
-    team_ids = list(set(team_ids))
-
     allowed_service_ids_map, allowed_services_map, primary_service_map = await get_user_services_info(db, [user.user_id])
     p_id, p_name = primary_service_map.get(user.user_id, (val_primary_id, None))
+    allowed_team_ids_map, allowed_teams_map, primary_team_map = await get_user_teams_info(db, [user.user_id])
+    pt_id, pt_name = primary_team_map.get(user.user_id, (user.primary_team_id, None))
 
     return AdminUserResponse(
         user_id=user.user_id,
@@ -614,12 +652,15 @@ async def update_user(
         company_name=comp_name,
         primary_service_id=p_id,
         primary_service_name=p_name,
+        primary_team_id=pt_id,
+        primary_team_name=pt_name,
         is_active=user.is_active,
         hubspot_owner_id=user.hubspot_owner_id,
         agent_initials=user.agent_initials,
         allowed_service_ids=allowed_service_ids_map.get(user.user_id, []),
         allowed_services=allowed_services_map.get(user.user_id, []),
-        allowed_team_ids=team_ids
+        allowed_team_ids=allowed_team_ids_map.get(user.user_id, []),
+        allowed_teams=allowed_teams_map.get(user.user_id, [])
     )
 
 

@@ -749,9 +749,9 @@ async def get_my_tenant_context(
     can_manage_company = is_super or role == InternalRole.COMPANY_ADMIN
     can_manage_services = is_super or role in (InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER)
     can_manage_teams = is_super or role in (InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR)
-    can_manage_users = is_super or role in (InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER)
-    can_manage_training = is_super or role in (InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER)
-    can_manage_trainer = is_super or role in (InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER)
+    can_manage_users = is_super or role in (InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR)
+    can_manage_training = is_super or role in (InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR)
+    can_manage_trainer = is_super or role in (InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR)
     can_manage_structures = is_super or role in (InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER)
 
     return TenantContextResponse(
@@ -764,10 +764,13 @@ async def get_my_tenant_context(
         company_name=context.company_name,
         primary_service_id=context.primary_service_id,
         primary_service_name=context.primary_service_name,
+        primary_team_id=context.primary_team_id,
+        primary_team_name=context.primary_team_name,
         allowed_company_ids=context.allowed_company_ids,
         allowed_service_ids=context.allowed_service_ids,
         allowed_services=context.allowed_services,
         allowed_team_ids=context.allowed_team_ids,
+        allowed_teams=context.allowed_teams,
         is_super_admin=is_super,
         can_manage_companies=can_manage_companies,
         can_manage_company=can_manage_company,

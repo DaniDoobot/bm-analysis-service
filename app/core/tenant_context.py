@@ -19,10 +19,13 @@ class TenantContext(BaseModel):
     company_name: Optional[str] = None
     primary_service_id: Optional[int] = None
     primary_service_name: Optional[str] = None
+    primary_team_id: Optional[int] = None
+    primary_team_name: Optional[str] = None
     allowed_company_ids: List[int] = []
     allowed_service_ids: Optional[List[int]] = None  # None = sin restricción
     allowed_services: Optional[List[dict]] = None
     allowed_team_ids: Optional[List[int]] = None     # None = sin restricción
+    allowed_teams: Optional[List[dict]] = None
     allowed_agent_ids: Optional[List[str]] = None    # None = sin restricción (hubspot_owner_ids)
 
     class Config:
@@ -54,6 +57,14 @@ class TenantContext(BaseModel):
             p_res = await db.execute(p_stmt)
             primary_service_name = p_res.scalar()
 
+        # 2b. Resolver primary_team_id y primary_team_name
+        primary_team_id = user.primary_team_id
+        primary_team_name = None
+        if primary_team_id is not None:
+            pt_stmt = select(Team.team_name).where(Team.team_id == primary_team_id)
+            pt_res = await db.execute(pt_stmt)
+            primary_team_name = pt_res.scalar()
+
         # 3. Cargar allowed_company_ids
         allowed_company_ids: List[int] = []
         if is_super:
@@ -81,10 +92,13 @@ class TenantContext(BaseModel):
                 company_name=company_name,
                 primary_service_id=primary_service_id,
                 primary_service_name=primary_service_name,
+                primary_team_id=primary_team_id,
+                primary_team_name=primary_team_name,
                 allowed_company_ids=allowed_company_ids,
                 allowed_service_ids=None,
                 allowed_services=None,
                 allowed_team_ids=None,
+                allowed_teams=None,
                 allowed_agent_ids=None
             )
 
@@ -100,10 +114,13 @@ class TenantContext(BaseModel):
                 company_name=None,
                 primary_service_id=primary_service_id,
                 primary_service_name=primary_service_name,
+                primary_team_id=primary_team_id,
+                primary_team_name=primary_team_name,
                 allowed_company_ids=[],
                 allowed_service_ids=[],
                 allowed_services=[],
                 allowed_team_ids=[],
+                allowed_teams=[],
                 allowed_agent_ids=[]
             )
 
@@ -145,24 +162,44 @@ class TenantContext(BaseModel):
             allowed_agents = None
 
         elif norm_role == InternalRole.TEAM_COORDINATOR:
-            # Cargar equipos asignados
+            # Cargar equipos asignados desde UserTeamAssociation
             teams_stmt = select(UserTeamAssociation.team_id).where(UserTeamAssociation.user_id == user.user_id)
             teams_res = await db.execute(teams_stmt)
-            allowed_teams = list(teams_res.scalars().all())
+            allowed_teams_ids_raw = list(teams_res.scalars().all())
+
+            # Asegurar que primary_team_id esté incluido
+            if user.primary_team_id is not None and user.primary_team_id not in allowed_teams_ids_raw:
+                allowed_teams_ids_raw.append(user.primary_team_id)
+
+            # Fallback si no tiene equipos: buscar primer equipo activo de la empresa
+            if not allowed_teams_ids_raw and company_id is not None:
+                fb_stmt = select(Team.team_id, Team.team_name).where(
+                    Team.company_id == company_id,
+                    Team.is_active == True
+                ).order_by(Team.team_id.asc()).limit(1)
+                fb_res = await db.execute(fb_stmt)
+                fb_row = fb_res.first()
+                if fb_row:
+                    allowed_teams_ids_raw = [fb_row.team_id]
+                    if primary_team_id is None:
+                        primary_team_id = fb_row.team_id
+                        primary_team_name = fb_row.team_name
+
+            allowed_teams = allowed_teams_ids_raw
 
             # Cargar servicios de esos equipos
             svc_stmt = select(Team.service_id).where(Team.team_id.in_(allowed_teams))
             svc_res = await db.execute(svc_stmt)
             allowed_services = list(set(svc_res.scalars().all()))
 
-            # Cargar servicios asignados directamente
+            # Incluir servicios directamente asignados
             direct_svc_stmt = select(UserServiceAssociation.service_id).where(UserServiceAssociation.user_id == user.user_id)
             direct_svc_res = await db.execute(direct_svc_stmt)
             allowed_services = list(set(allowed_services + list(direct_svc_res.scalars().all())))
             if user.primary_service_id is not None and user.primary_service_id not in allowed_services:
                 allowed_services.append(user.primary_service_id)
 
-            # Fallback para team_coordinator sin servicios: usar el primer servicio activo de su empresa
+            # Fallback para team_coordinator sin servicios
             if not allowed_services and company_id is not None:
                 fb_stmt = select(Service.service_id, Service.service_name).where(
                     Service.company_id == company_id,
@@ -211,6 +248,19 @@ class TenantContext(BaseModel):
             else:
                 allowed_services_dicts = []
 
+        # Construir objetos dict para allowed_teams
+        allowed_teams_dicts: Optional[List[dict]] = None
+        if allowed_teams is not None:
+            if allowed_teams:
+                tm_objs_stmt = select(Team.team_id, Team.team_name, Team.service_id).where(Team.team_id.in_(allowed_teams))
+                tm_objs_res = await db.execute(tm_objs_stmt)
+                allowed_teams_dicts = [
+                    {"team_id": row.team_id, "team_name": row.team_name, "service_id": row.service_id}
+                    for row in tm_objs_res.all()
+                ]
+            else:
+                allowed_teams_dicts = []
+
         return cls(
             user_id=user.user_id,
             user_email=user.email,
@@ -221,9 +271,12 @@ class TenantContext(BaseModel):
             company_name=company_name,
             primary_service_id=primary_service_id,
             primary_service_name=primary_service_name,
+            primary_team_id=primary_team_id,
+            primary_team_name=primary_team_name,
             allowed_company_ids=allowed_company_ids,
             allowed_service_ids=allowed_services,
             allowed_services=allowed_services_dicts,
             allowed_team_ids=allowed_teams,
+            allowed_teams=allowed_teams_dicts,
             allowed_agent_ids=allowed_agents
         )

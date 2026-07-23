@@ -123,6 +123,7 @@ async def init_db():
                 ("reset_token_expires_at", "TIMESTAMPTZ NULL"),
                 ("last_login_at", "TIMESTAMPTZ NULL"),
                 ("primary_service_id", "INTEGER NULL"),
+                ("primary_team_id", "INTEGER NULL"),
             ]:
                 res = await conn.execute(
                     text(f"""
