@@ -29,7 +29,8 @@ from app.models.analyses import Analysis
 from app.services.auth_service import log_audit
 from app.services.users_service import (
     validate_user_services, save_user_service_associations, get_user_services_info,
-    validate_user_teams, save_user_team_associations, get_user_teams_info
+    validate_user_teams, save_user_team_associations, get_user_teams_info,
+    check_can_manage_target_user
 )
 from app.schemas.users import (
     UserOut,
@@ -903,13 +904,13 @@ async def update_user(
 async def admin_reset_password(
     user_id: int,
     body: UserAdminResetPasswordPayload,
-    admin: Annotated[User, Depends(require_admin)],
+    current_user: Annotated[User, Depends(get_current_user)],
     context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """
     Reset another user's password (no current_password required).
-    Requires administrative role (super_admin or company_admin).
+    Scoped for super_admin, company_admin, service_manager, and team_coordinator.
     """
     stmt = select(User).where(User.user_id == user_id)
     res = await db.execute(stmt)
@@ -917,16 +918,14 @@ async def admin_reset_password(
     if not user:
         raise HTTPException(status_code=404, detail=f"Usuario {user_id} no encontrado.")
 
-    if not context.is_super_admin:
-        if user.company_id != context.company_id or normalize_role(user.role) == InternalRole.SUPER_ADMIN:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tienes permisos sobre este usuario.")
+    check_can_manage_target_user(context, user)
 
     user.password_hash = hash_password(body.new_password)
     user.password_plain_dev = None
     await db.commit()
 
     logger.info(
-        "Admin %s RESET password for user %s (id=%s)", admin.email, user.email, user.user_id
+        "User %s RESET password for user %s (id=%s)", current_user.email, user.email, user.user_id
     )
     return {"ok": True, "message": "Contraseña actualizada correctamente.", "user_id": user_id}
 
@@ -999,7 +998,8 @@ async def deactivate_user(
 async def administrative_password_reset(
     user_id: int,
     body: AdminPasswordResetPayload,
-    admin: Annotated[User, Depends(require_admin)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """
@@ -1013,6 +1013,8 @@ async def administrative_password_reset(
     if not user:
         raise HTTPException(status_code=404, detail=f"Usuario {user_id} no encontrado.")
 
+    check_can_manage_target_user(context, user)
+
     temp_pass = body.temp_password
     if not temp_pass:
         temp_pass = secrets.token_urlsafe(9)  # ~12 characters
@@ -1025,7 +1027,7 @@ async def administrative_password_reset(
 
     # Audit log
     audit = UserAudit(
-        admin_user_id=admin.user_id,
+        admin_user_id=current_user.user_id,
         target_user_id=user_id,
         action="password_reset",
         changes_json={"password_reset": True}
@@ -1033,7 +1035,7 @@ async def administrative_password_reset(
     db.add(audit)
     await db.commit()
 
-    logger.info("Admin %s reset password for user %s (id=%s)", admin.email, user.email, user.user_id)
+    logger.info("User %s reset password for user %s (id=%s)", current_user.email, user.email, user.user_id)
     return {
         "ok": True,
         "message": "Contraseña restablecida con éxito. Se requerirá cambio en el próximo inicio de sesión.",
@@ -1045,7 +1047,8 @@ async def administrative_password_reset(
 @router.post("/{user_id}/force-password-reset")
 async def force_password_reset(
     user_id: int,
-    admin: Annotated[User, Depends(require_admin)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """
@@ -1058,6 +1061,8 @@ async def force_password_reset(
     if not user:
         raise HTTPException(status_code=404, detail=f"Usuario {user_id} no encontrado.")
 
+    check_can_manage_target_user(context, user)
+
     token = secrets.token_urlsafe(32)
     user.must_reset_password = True
     user.reset_token = token
@@ -1065,7 +1070,7 @@ async def force_password_reset(
     
     await db.commit()
     
-    logger.info("Admin %s FORCED password reset for user %s (id=%s)", admin.email, user.email, user.user_id)
+    logger.info("User %s FORCED password reset for user %s (id=%s)", current_user.email, user.email, user.user_id)
     from app.config import get_settings
     settings = get_settings()
     return {
@@ -1078,12 +1083,13 @@ async def force_password_reset(
 @router.post("/{user_id}/password-reset-link")
 async def generate_password_reset_link(
     user_id: int,
-    admin: Annotated[User, Depends(require_admin)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: Annotated[AsyncSession, Depends(get_db)]
 ):
     """
     Generate a secure password reset link for a user.
-    Only accessible to administrators.
+    Accessible to users with management scope over target_user.
     Invalidates any active tokens for this user.
     """
     import hashlib
@@ -1097,6 +1103,8 @@ async def generate_password_reset_link(
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No se puede generar un enlace para un usuario inactivo.")
         
+    check_can_manage_target_user(context, user)
+
     # 2. Invalidate previous active tokens
     stmt_tokens = select(PasswordResetToken).where(
         PasswordResetToken.user_id == user_id,
@@ -1119,7 +1127,7 @@ async def generate_password_reset_link(
         user_id=user_id,
         token_hash=token_hash,
         expires_at=expires_at,
-        created_by_admin_id=admin.user_id
+        created_by_admin_id=current_user.user_id
     )
     db.add(new_token_record)
     
@@ -1129,7 +1137,7 @@ async def generate_password_reset_link(
     
     # 6. Log audit
     audit = UserAudit(
-        admin_user_id=admin.user_id,
+        admin_user_id=current_user.user_id,
         target_user_id=user_id,
         action="password_reset_link_created",
         changes_json={
@@ -1146,7 +1154,7 @@ async def generate_password_reset_link(
     settings = get_settings()
     reset_url = f"{settings.frontend_public_url}/reset-password?token={token}"
     
-    logger.info("Admin %s generated password reset link for user %s", admin.email, user.email)
+    logger.info("User %s generated password reset link for user %s", current_user.email, user.email)
     
     return {
         "ok": True,
@@ -1162,7 +1170,7 @@ async def generate_password_reset_link(
     responses={
         200: {"description": "Enlace de restablecimiento generado con éxito"},
         401: {"description": "No autenticado"},
-        403: {"description": "No autorizado (requiere rol de administrador)"},
+        403: {"description": "No autorizado"},
         404: {"description": "Usuario no encontrado"},
         409: {"description": "Conflicto o usuario inactivo"},
         422: {"description": "Error de validación"}
@@ -1170,12 +1178,13 @@ async def generate_password_reset_link(
 )
 async def generate_password_setup_link(
     user_id: int,
-    admin: Annotated[User, Depends(require_admin)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: Annotated[AsyncSession, Depends(get_db)]
 ):
     """
     Generate a secure password setup/reset link for a user.
-    Only accessible to administrators.
+    Accessible to users with management scope over target_user.
     Invalidates any active reset tokens for this user.
     """
     import hashlib
@@ -1195,6 +1204,8 @@ async def generate_password_setup_link(
             detail="No se puede generar un enlace para un usuario inactivo."
         )
         
+    check_can_manage_target_user(context, user)
+
     # 2. Invalidate previous active tokens
     stmt_tokens = select(PasswordResetToken).where(
         PasswordResetToken.user_id == user_id,
@@ -1217,7 +1228,7 @@ async def generate_password_setup_link(
         user_id=user_id,
         token_hash=token_hash,
         expires_at=expires_at,
-        created_by_admin_id=admin.user_id
+        created_by_admin_id=current_user.user_id
     )
     db.add(new_token_record)
     
@@ -1227,7 +1238,7 @@ async def generate_password_setup_link(
     
     # 6. Log audit
     audit = UserAudit(
-        admin_user_id=admin.user_id,
+        admin_user_id=current_user.user_id,
         target_user_id=user_id,
         action="password_reset_link_created",
         changes_json={
@@ -1244,7 +1255,7 @@ async def generate_password_setup_link(
     settings = get_settings()
     url = f"{settings.frontend_public_url.rstrip('/')}/reset-password?token={token}"
     
-    logger.info("Admin %s generated password setup link for user %s (id=%s)", admin.email, user.email, user_id)
+    logger.info("User %s generated password setup link for user %s (id=%s)", current_user.email, user.email, user_id)
     
     return PasswordSetupLinkResponse(
         url=url,

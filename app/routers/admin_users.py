@@ -420,7 +420,7 @@ async def get_role_options(
 ):
     """Retrieve available role options for the UI based on actor permissions."""
     actor_role = context.normalized_role
-    if actor_role not in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER):
+    if actor_role not in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado."
@@ -439,6 +439,8 @@ async def get_role_options(
         options = [opt for opt in options if opt["value"] != "super_admin"]
     elif actor_role == InternalRole.SERVICE_MANAGER:
         options = [opt for opt in options if opt["value"] in ("coordinador_equipo", "agente", "usuario")]
+    elif actor_role == InternalRole.TEAM_COORDINATOR:
+        options = [opt for opt in options if opt["value"] in ("agente", "usuario")]
 
     return [
         RoleOption(

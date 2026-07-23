@@ -699,6 +699,100 @@ class TestMultitenancyUsers(unittest.IsolatedAsyncioTestCase):
             })
             self.assertEqual(res_beta_agent.status_code, 403)
 
+    async def test_scoped_password_links_and_role_options(self):
+        """12. Test password setup link generation and role options scoping for service_manager and team_coordinator."""
+        from app.models.teams import Team, UserTeamAssociation, AgentTeamAssociation
+        
+        async with AsyncSession(get_engine()) as db:
+            sm = User(
+                username="sm_links_test", email="sm_links@boston.com", password_hash="hash",
+                role="responsable_servicio", company_id=1, primary_service_id=1, is_active=True
+            )
+            tc = User(
+                username="tc_links_test", email="tc_links@boston.com", password_hash="hash",
+                role="coordinador_equipo", company_id=1, primary_service_id=1, primary_team_id=10, is_active=True
+            )
+            ag = User(
+                username="ag_links_test", email="ag_links@boston.com", password_hash="hash",
+                role="agente", company_id=1, primary_service_id=1, primary_team_id=10, is_active=True
+            )
+            db.add_all([sm, tc, ag])
+            await db.flush()
+            sm_id, tc_id, ag_id = sm.user_id, tc.user_id, ag.user_id
+
+            db.add(UserTeamAssociation(user_id=tc_id, team_id=10))
+            db.add(AgentTeamAssociation(user_id=ag_id, team_id=10))
+            await db.commit()
+
+        # Part 1: Act as service_manager
+        async with AsyncSession(get_engine()) as db:
+            sm_user = await db.get(User, sm_id)
+            sm_ctx = await TenantContext.build(sm_user, db)
+
+        app.dependency_overrides[get_current_user] = lambda: sm_user
+        app.dependency_overrides[get_tenant_context] = lambda: sm_ctx
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            # 12a. service_manager role options
+            res_ro = await ac.get("/bm/admin/users/role-options")
+            self.assertEqual(res_ro.status_code, 200)
+            roles = [r["value"] for r in res_ro.json()]
+            self.assertIn("coordinador_equipo", roles)
+            self.assertIn("agente", roles)
+            self.assertNotIn("company_admin", roles)
+            self.assertNotIn("super_admin", roles)
+
+            # 12b. service_manager CAN generate setup link for coordinator in their service
+            res_link_tc = await ac.post(f"/bm/users/{tc_id}/password-setup-link")
+            self.assertEqual(res_link_tc.status_code, 200, msg=res_link_tc.text)
+            self.assertIn("url", res_link_tc.json())
+
+            # 12c. service_manager CAN generate reset link for agent in their service
+            res_link_ag = await ac.post(f"/bm/users/{ag_id}/password-reset-link")
+            self.assertEqual(res_link_ag.status_code, 200, msg=res_link_ag.text)
+            self.assertIn("reset_url", res_link_ag.json())
+
+            # 12d. service_manager CANNOT generate setup link for company_admin or super_admin
+            res_link_ca = await ac.post(f"/bm/users/{self.u_admin_boston.user_id}/password-setup-link")
+            self.assertEqual(res_link_ca.status_code, 403)
+
+            res_link_sa = await ac.post(f"/bm/users/{self.u_super.user_id}/password-setup-link")
+            self.assertEqual(res_link_sa.status_code, 403)
+
+        # Part 2: Act as team_coordinator
+        async with AsyncSession(get_engine()) as db:
+            tc_user = await db.get(User, tc_id)
+            tc_ctx = await TenantContext.build(tc_user, db)
+
+        app.dependency_overrides[get_current_user] = lambda: tc_user
+        app.dependency_overrides[get_tenant_context] = lambda: tc_ctx
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            # 12e. team_coordinator role options MUST NOT contain admin roles or team_coordinator
+            res_tc_ro = await ac.get("/bm/admin/users/role-options")
+            self.assertEqual(res_tc_ro.status_code, 200)
+            tc_roles = [r["value"] for r in res_tc_ro.json()]
+            self.assertIn("agente", tc_roles)
+            self.assertNotIn("coordinador_equipo", tc_roles)
+            self.assertNotIn("responsable_servicio", tc_roles)
+            self.assertNotIn("company_admin", tc_roles)
+            self.assertNotIn("super_admin", tc_roles)
+
+            # 12f. team_coordinator CANNOT create user with role "Administrador" or "admin" (403)
+            res_create_admin = await ac.post("/bm/users", json={
+                "email": "illegal_tc_admin@boston.com", "username": "illegal_tc_admin",
+                "role": "Administrador", "password_setup": "invite_link"
+            })
+            self.assertEqual(res_create_admin.status_code, 403)
+
+            # 12g. team_coordinator CAN generate setup link for agent in their team
+            res_tc_link_ag = await ac.post(f"/bm/users/{ag_id}/password-setup-link")
+            self.assertEqual(res_tc_link_ag.status_code, 200, msg=res_tc_link_ag.text)
+
+            # 12h. team_coordinator CANNOT generate setup link for service_manager or company_admin
+            res_tc_link_sm = await ac.post(f"/bm/users/{sm_id}/password-setup-link")
+            self.assertEqual(res_tc_link_sm.status_code, 403)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -402,3 +402,64 @@ async def get_user_teams_info(
         ]
 
     return allowed_team_ids_map, allowed_teams_map, primary_team_map
+
+
+def check_can_manage_target_user(context: TenantContext, target_user: User) -> None:
+    """
+    Verify if context user has permission to manage (e.g. generate password links, edit, reset) target_user.
+    Raises HTTPException(403) if forbidden.
+    """
+    if context.is_super_admin:
+        return
+
+    # Non-superadmin must be in the same company
+    if target_user.company_id != context.company_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: No tienes permisos sobre usuarios de otra empresa."
+        )
+
+    actor_role = context.normalized_role
+    target_role = normalize_role(target_user.role)
+
+    if actor_role == InternalRole.COMPANY_ADMIN:
+        if target_role == InternalRole.SUPER_ADMIN:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: No tienes permisos para gestionar a un Super Administrador."
+            )
+        return
+
+    if actor_role == InternalRole.SERVICE_MANAGER:
+        if target_role in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN) and target_user.user_id != context.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: No tienes permisos para gestionar a Administradores de Empresa o Superadministradores."
+            )
+        if context.allowed_service_ids is not None and target_user.primary_service_id is not None:
+            if target_user.primary_service_id not in context.allowed_service_ids and target_user.user_id != context.user_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: El usuario no pertenece a tus servicios permitidos."
+                )
+        return
+
+    if actor_role == InternalRole.TEAM_COORDINATOR:
+        if target_role != InternalRole.AGENT and target_user.user_id != context.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: Un coordinador de equipo solo puede gestionar agentes de sus equipos."
+            )
+        if context.allowed_team_ids is not None and target_user.primary_team_id is not None:
+            if target_user.primary_team_id not in context.allowed_team_ids and target_user.user_id != context.user_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: El usuario no pertenece a tus equipos permitidos."
+                )
+        return
+
+    if target_user.user_id != context.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Se requieren permisos de gestión."
+        )
