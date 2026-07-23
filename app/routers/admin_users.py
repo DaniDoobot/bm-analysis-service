@@ -252,19 +252,13 @@ async def create_user(
     from datetime import datetime, timezone, timedelta
 
     actor_role = context.normalized_role
-    if actor_role not in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER):
+    if actor_role not in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: Se requiere rol de gestión."
         )
 
-    val = payload.role.strip().lower()
-    if val not in ROLE_MAPPINGS:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Rol no válido: '{payload.role}'."
-        )
-    target_role_norm = ROLE_MAPPINGS[val]
+    target_role_norm = normalize_role(payload.role)
 
     if actor_role == InternalRole.COMPANY_ADMIN and target_role_norm == InternalRole.SUPER_ADMIN:
         raise HTTPException(
@@ -275,6 +269,11 @@ async def create_user(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No tienes permisos para crear un Administrador de Empresa o Superadministrador."
+        )
+    if actor_role == InternalRole.TEAM_COORDINATOR and target_role_norm != InternalRole.AGENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Un coordinador de equipo solo puede crear usuarios con rol de agente."
         )
 
     company_id = payload.company_id
@@ -375,7 +374,7 @@ async def create_user(
     await db.refresh(new_user)
 
     await save_user_service_associations(db, new_user.user_id, val_allowed_ids)
-    await save_user_team_associations(db, new_user.user_id, val_allowed_team_ids)
+    await save_user_team_associations(db, new_user.user_id, val_allowed_team_ids, role=new_user.role)
     await db.commit()
 
     logger.info("Actor (user_id=%s) CREATED administrative user %s (id=%s)", context.user_id, new_user.email, new_user.user_id)
@@ -468,21 +467,15 @@ async def update_user(
             detail="Usuario no encontrado."
         )
 
-    if context.normalized_role not in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN):
+    if context.normalized_role not in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Acceso denegado: Se requiere rol Administrador de Empresa o Super Administrador."
+            detail="Acceso denegado: Se requiere rol Administrador de Empresa, Responsable de Servicio o Coordinador."
         )
 
     # 1. Determine target role and company after update to validate constraints
     target_role = payload.role if payload.role is not None else user.role
-    val = target_role.strip().lower()
-    if val not in ROLE_MAPPINGS:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Rol no válido: '{target_role}'."
-        )
-    target_role_norm = ROLE_MAPPINGS[val]
+    target_role_norm = normalize_role(target_role)
 
     # Prevent deactivating/degrading the last active super_admin
     is_target_active_super = user.is_active and normalize_role(user.role) == InternalRole.SUPER_ADMIN
@@ -549,6 +542,27 @@ async def update_user(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="No tienes permisos para cambiar la empresa del usuario."
             )
+    elif context.normalized_role == InternalRole.TEAM_COORDINATOR:
+        if user.company_id != context.company_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes permisos para modificar usuarios de otra empresa."
+            )
+        if normalize_role(user.role) != InternalRole.AGENT and user.user_id != context.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Un coordinador de equipo solo puede modificar usuarios con rol de agente."
+            )
+        if target_role_norm != InternalRole.AGENT and user.user_id != context.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Un coordinador de equipo solo puede asignar el rol de agente."
+            )
+        if payload.company_id is not None and payload.company_id != context.company_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes permisos para cambiar la empresa del usuario."
+            )
     else:
         if payload.company_id is not None:
             comp_stmt = select(Company).where(Company.company_id == payload.company_id)
@@ -604,7 +618,7 @@ async def update_user(
     )
     user.primary_team_id = val_primary_team_id
     if payload.allowed_team_ids is not None or payload.primary_team_id is not None or payload.role is not None:
-        await save_user_team_associations(db, user.user_id, val_allowed_team_ids)
+        await save_user_team_associations(db, user.user_id, val_allowed_team_ids, role=target_role)
 
     # Perform update fields
     if payload.name is not None:

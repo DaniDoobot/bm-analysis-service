@@ -605,6 +605,100 @@ class TestMultitenancyUsers(unittest.IsolatedAsyncioTestCase):
             res_hist_bad = await ac.get("/bm/analyses/history?service_id=3")
             self.assertEqual(res_hist_bad.status_code, 403)
 
+    async def test_team_coordinator_permissions_and_scoping(self):
+        """11. Test team_coordinator permissions, tenant-context, and team scoping."""
+        from app.models.teams import Team, UserTeamAssociation, AgentTeamAssociation
+        
+        async with AsyncSession(get_engine()) as db:
+            # Create two teams under Service 1 in Company 1
+            t1 = Team(team_id=10, team_name="Equipo Alfa", company_id=1, service_id=1, is_active=True)
+            t2 = Team(team_id=20, team_name="Equipo Beta", company_id=1, service_id=1, is_active=True)
+            db.add_all([t1, t2])
+            await db.flush()
+
+            # Create agents in Team Alfa vs Team Beta
+            agent_alfa = User(
+                username="agent_alfa", email="agent_alfa@boston.com", password_hash="hash",
+                role="agente", company_id=1, hubspot_owner_id="hs_alfa_10", is_active=True
+            )
+            agent_beta = User(
+                username="agent_beta", email="agent_beta@boston.com", password_hash="hash",
+                role="agente", company_id=1, hubspot_owner_id="hs_beta_20", is_active=True
+            )
+            db.add_all([agent_alfa, agent_beta])
+            await db.flush()
+
+            # Associate agents to respective teams
+            db.add(AgentTeamAssociation(user_id=agent_alfa.user_id, team_id=10))
+            db.add(AgentTeamAssociation(user_id=agent_beta.user_id, team_id=20))
+
+            # Create Team Coordinator assigned ONLY to Team Alfa (team_id=10)
+            coord_user = User(
+                username="coord_alfa", email="coord_alfa@boston.com", password_hash="hash",
+                role="coordinador_equipo", company_id=1, primary_team_id=10, is_active=True
+            )
+            db.add(coord_user)
+            await db.flush()
+            coord_id = coord_user.user_id
+            db.add(UserTeamAssociation(user_id=coord_id, team_id=10))
+
+            await db.commit()
+
+        # 11a. Test tenant context of team_coordinator
+        async with AsyncSession(get_engine()) as db:
+            coord_user = await db.get(User, coord_id)
+            coord_ctx = await TenantContext.build(coord_user, db)
+
+        self.assertEqual(coord_ctx.primary_team_id, 10)
+        self.assertIn(10, coord_ctx.allowed_team_ids)
+        self.assertNotIn(20, coord_ctx.allowed_team_ids)
+        self.assertIn(1, coord_ctx.allowed_service_ids)  # Service 1 derived from Team 10
+        self.assertIn("hs_alfa_10", coord_ctx.allowed_agent_ids)
+        self.assertNotIn("hs_beta_20", coord_ctx.allowed_agent_ids)
+
+        app.dependency_overrides[get_current_user] = lambda: coord_user
+        app.dependency_overrides[get_tenant_context] = lambda: coord_ctx
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            # 11b. Test GET /bm/me/tenant-context
+            res_tc = await ac.get("/bm/me/tenant-context")
+            self.assertEqual(res_tc.status_code, 200)
+            tc = res_tc.json()
+            self.assertEqual(tc["normalized_role"], "team_coordinator")
+            self.assertEqual(tc["primary_team_id"], 10)
+            self.assertIn(10, tc["allowed_team_ids"])
+            self.assertIn(1, tc["allowed_service_ids"])
+            self.assertTrue(tc["can_manage_users"])
+            self.assertTrue(tc["can_manage_training"])
+
+            # 11c. Test agent listing / visibility: coord sees agent_alfa, NOT agent_beta (different team)
+            res_users = await ac.get("/bm/users")
+            self.assertEqual(res_users.status_code, 200)
+            user_names = [u["username"] for u in res_users.json()["users"]]
+            self.assertIn("agent_alfa", user_names)
+            self.assertNotIn("agent_beta", user_names)
+
+            # 11d. Cannot create company_admin or service_manager (403)
+            res_bad_role = await ac.post("/bm/users", json={
+                "email": "bad_admin@boston.com", "username": "bad_admin",
+                "role": "company_admin", "password_setup": "invite_link"
+            })
+            self.assertEqual(res_bad_role.status_code, 403)
+
+            # 11e. Can create agent in their team (team_id=10)
+            res_agent = await ac.post("/bm/users", json={
+                "email": "new_alfa_agent@boston.com", "username": "new_alfa_agent",
+                "role": "agente", "primary_team_id": 10, "password_setup": "invite_link"
+            })
+            self.assertEqual(res_agent.status_code, 201, msg=res_agent.text)
+
+            # 11f. Cannot create agent in Team Beta (team_id=20) outside their scope
+            res_beta_agent = await ac.post("/bm/users", json={
+                "email": "new_beta_agent@boston.com", "username": "new_beta_agent",
+                "role": "agente", "primary_team_id": 20, "password_setup": "invite_link"
+            })
+            self.assertEqual(res_beta_agent.status_code, 403)
+
 
 if __name__ == "__main__":
     unittest.main()

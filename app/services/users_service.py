@@ -294,6 +294,13 @@ async def validate_user_teams(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail=f"Acceso denegado: El equipo {t_id} ('{t.team_name}') pertenece al servicio {t.service_id}, sobre el cual no tienes permisos."
                 )
+        # If actor is team_coordinator, team must belong to context.allowed_team_ids
+        if context.normalized_role == InternalRole.TEAM_COORDINATOR and context.allowed_team_ids is not None:
+            if t_id not in context.allowed_team_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Acceso denegado: El equipo {t_id} ('{t.team_name}') no pertenece a tus equipos asignados."
+                )
 
     # Ensure primary_team_id is included in allowed_team_ids if provided
     final_allowed = set(allowed_team_ids) if allowed_team_ids is not None else set()
@@ -306,12 +313,16 @@ async def validate_user_teams(
 async def save_user_team_associations(
     db: AsyncSession,
     user_id: int,
-    allowed_team_ids: List[int]
+    allowed_team_ids: List[int],
+    role: str = "agente"
 ) -> None:
     """
-    Sync UserTeamAssociation records for the given user_id.
+    Sync UserTeamAssociation or AgentTeamAssociation records for the given user_id depending on role.
     """
-    existing_stmt = select(UserTeamAssociation.team_id).where(UserTeamAssociation.user_id == user_id)
+    norm_r = normalize_role(role)
+    assoc_model = AgentTeamAssociation if norm_r == InternalRole.AGENT else UserTeamAssociation
+
+    existing_stmt = select(assoc_model.team_id).where(assoc_model.user_id == user_id)
     existing_res = await db.execute(existing_stmt)
     existing_team_ids = set(existing_res.scalars().all())
 
@@ -322,13 +333,13 @@ async def save_user_team_associations(
 
     if to_remove:
         await db.execute(
-            delete(UserTeamAssociation).where(
-                (UserTeamAssociation.user_id == user_id) &
-                (UserTeamAssociation.team_id.in_(to_remove))
+            delete(assoc_model).where(
+                (assoc_model.user_id == user_id) &
+                (assoc_model.team_id.in_(to_remove))
             )
         )
     for t_id in to_add:
-        db.add(UserTeamAssociation(user_id=user_id, team_id=t_id))
+        db.add(assoc_model(user_id=user_id, team_id=t_id))
 
 
 async def get_user_teams_info(

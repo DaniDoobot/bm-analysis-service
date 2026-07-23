@@ -477,15 +477,15 @@ async def create_user(
 ):
     """Create a new user in bm_users enforcing company_admin / service_manager scoping."""
     actor_role = context.normalized_role
-    if actor_role not in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER):
+    if actor_role not in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Acceso denegado: Se requieren permisos administrativos o de responsable de servicio."
+            detail="Acceso denegado: Se requieren permisos administrativos, de responsable de servicio o coordinador."
         )
 
     target_role_norm = normalize_role(body.role)
 
-    # 1. Company admin & service manager permissions check
+    # 1. Role creation permissions check
     if not context.is_super_admin:
         if target_role_norm == InternalRole.SUPER_ADMIN:
             raise HTTPException(
@@ -496,6 +496,11 @@ async def create_user(
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="No tienes permisos para crear usuarios con rol de administrador de empresa o responsable de servicio."
+            )
+        if actor_role == InternalRole.TEAM_COORDINATOR and target_role_norm != InternalRole.AGENT:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Un coordinador de equipo solo puede crear usuarios con rol de agente."
             )
         if body.company_id is not None and body.company_id != context.company_id:
             raise HTTPException(
@@ -515,6 +520,15 @@ async def create_user(
         company_id=company_id,
         primary_service_id=body.primary_service_id,
         allowed_service_ids=body.allowed_service_ids,
+        context=context
+    )
+
+    val_primary_team_id, val_allowed_team_ids = await validate_user_teams(
+        db,
+        role=body.role,
+        company_id=company_id,
+        primary_team_id=body.primary_team_id,
+        allowed_team_ids=body.allowed_team_ids,
         context=context
     )
 
@@ -583,6 +597,7 @@ async def create_user(
         is_active=body.is_active,
         company_id=company_id,
         primary_service_id=val_primary_id,
+        primary_team_id=val_primary_team_id,
         hubspot_owner_id=clean_hs_id,
         agent_initials=body.agent_initials.strip() if body.agent_initials else None,
         password_hash=pass_hash,
@@ -595,6 +610,7 @@ async def create_user(
     await db.refresh(new_user)
 
     await save_user_service_associations(db, new_user.user_id, val_allowed_ids)
+    await save_user_team_associations(db, new_user.user_id, val_allowed_team_ids, role=new_user.role)
     await db.commit()
 
     logger.info("Admin %s CREATED user %s (id=%s, company_id=%s)", current_user.email, new_user.email, new_user.user_id, company_id)
@@ -687,6 +703,20 @@ async def update_user(
         company_id=target_company_id,
         primary_service_id=target_primary_id,
         allowed_service_ids=target_allowed_ids,
+        context=context,
+        is_update=True,
+        existing_user=user
+    )
+
+    target_primary_team_id = body.primary_team_id if "primary_team_id" in body.model_fields_set else user.primary_team_id
+    target_allowed_team_ids = body.allowed_team_ids if "allowed_team_ids" in body.model_fields_set else None
+
+    val_primary_team_id, val_allowed_team_ids = await validate_user_teams(
+        db,
+        role=target_role,
+        company_id=target_company_id,
+        primary_team_id=target_primary_team_id,
+        allowed_team_ids=target_allowed_team_ids,
         context=context,
         is_update=True,
         existing_user=user
@@ -797,9 +827,17 @@ async def update_user(
         changes["primary_service_id"] = {"old": user.primary_service_id, "new": val_primary_id}
         user.primary_service_id = val_primary_id
 
+    if user.primary_team_id != val_primary_team_id:
+        changes["primary_team_id"] = {"old": user.primary_team_id, "new": val_primary_team_id}
+        user.primary_team_id = val_primary_team_id
+
     if "allowed_service_ids" in body.model_fields_set or "primary_service_id" in body.model_fields_set or body.role is not None:
         await save_user_service_associations(db, user_id, val_allowed_ids)
         changes["allowed_service_ids"] = {"new": val_allowed_ids}
+
+    if "allowed_team_ids" in body.model_fields_set or "primary_team_id" in body.model_fields_set or body.role is not None:
+        await save_user_team_associations(db, user_id, val_allowed_team_ids, role=target_role)
+        changes["allowed_team_ids"] = {"new": val_allowed_team_ids}
 
     if clean_hs_id != user.hubspot_owner_id:
         changes["hubspot_owner_id"] = {"old": user.hubspot_owner_id, "new": clean_hs_id}
