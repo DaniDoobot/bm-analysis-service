@@ -96,14 +96,14 @@ async def list_prompts(
 ):
     """Return all prompts with their current version (if any), with optional filtering."""
     role = context.normalized_role
-    if role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
-        raise HTTPException(status_code=403, detail="Los agentes y coordinadores no tienen acceso a las estructuras.")
+    if role == InternalRole.AGENT:
+        raise HTTPException(status_code=403, detail="Los agentes no tienen acceso a las estructuras.")
 
     target_service_id = service_id
     target_service_ids = None
 
     if not context.is_super_admin:
-        if role == InternalRole.SERVICE_MANAGER:
+        if role in (InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR):
             if target_service_id is not None:
                 if context.allowed_service_ids is None or target_service_id not in context.allowed_service_ids:
                     raise HTTPException(status_code=403, detail="Acceso denegado: No tienes permisos sobre este servicio.")
@@ -167,8 +167,8 @@ async def get_active_prompt(
     context = await TenantContext.build(current_user, db)
     role = context.normalized_role
     
-    if role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
-        raise HTTPException(status_code=403, detail="Los agentes y coordinadores no tienen acceso a las estructuras.")
+    if role == InternalRole.AGENT:
+        raise HTTPException(status_code=403, detail="Los agentes no tienen acceso a las estructuras.")
 
     resolved_service_id = service_id
     if resolved_service_id is not None:
@@ -176,7 +176,7 @@ async def get_active_prompt(
             s_stmt = select(Service).where(Service.service_id == resolved_service_id)
             if role == InternalRole.COMPANY_ADMIN:
                 s_stmt = s_stmt.where(Service.company_id == context.company_id)
-            elif role == InternalRole.SERVICE_MANAGER:
+            elif role in (InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR):
                 s_stmt = s_stmt.where(Service.service_id.in_(context.allowed_service_ids))
             s_res = await db.execute(s_stmt)
             if not s_res.scalar():
@@ -190,7 +190,7 @@ async def get_active_prompt(
             s_stmt = select(Service.service_id).where(Service.company_id == context.company_id).limit(1)
             s_res = await db.execute(s_stmt)
             resolved_service_id = s_res.scalar()
-        elif role == InternalRole.SERVICE_MANAGER:
+        elif role in (InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR):
             if context.allowed_service_ids:
                 resolved_service_id = context.allowed_service_ids[0]
                 
@@ -316,14 +316,14 @@ async def list_prompt_base_structures(
 ):
     """Return active base structures by default; pass include_archived=true to see all."""
     role = context.normalized_role
-    if role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
-        raise HTTPException(status_code=403, detail="Los agentes y coordinadores no tienen acceso a las estructuras.")
+    if role == InternalRole.AGENT:
+        raise HTTPException(status_code=403, detail="Los agentes no tienen acceso a las estructuras.")
 
     target_service_id = service_id
     target_service_ids = None
 
     if not context.is_super_admin:
-        if role == InternalRole.SERVICE_MANAGER:
+        if role in (InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR):
             if target_service_id is not None:
                 if context.allowed_service_ids is None or target_service_id not in context.allowed_service_ids:
                     raise HTTPException(status_code=403, detail="Acceso denegado: No tienes permisos sobre este servicio.")

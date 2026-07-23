@@ -134,10 +134,10 @@ async def verify_report_write_scope(
     context: TenantContext
 ) -> TrainingAgentReport:
     """Verifies that a report exists and the user has permission to write/mutate it."""
-    if context.normalized_role in [InternalRole.AGENT, InternalRole.TEAM_COORDINATOR]:
+    if context.normalized_role == InternalRole.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Acceso denegado: Se requiere rol de administración."
+            detail="Acceso denegado: Se requiere rol de administración o coordinación."
         )
 
     stmt_rep = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == training_report_id)
@@ -203,10 +203,10 @@ async def update_agent_setting(
     db: AsyncSession = Depends(get_db)
 ):
     """Update training setting for an agent (enable/disable) (Admin/Company Admin/Service Manager)."""
-    if context.normalized_role in [InternalRole.AGENT, InternalRole.TEAM_COORDINATOR]:
+    if context.normalized_role == InternalRole.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Acceso denegado: Se requiere rol de administración."
+            detail="Acceso denegado: Se requiere rol de administración o coordinación."
         )
 
     # 1. Enforce agent-level restriction if manager/coordinator
@@ -457,10 +457,10 @@ async def trigger_manual_generation(
     db: AsyncSession = Depends(get_db)
 ):
     """Trigger manual personalized training generation for one or more agents."""
-    if context.normalized_role in [InternalRole.AGENT, InternalRole.TEAM_COORDINATOR]:
+    if context.normalized_role == InternalRole.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Acceso denegado: Se requiere rol de administración."
+            detail="Acceso denegado: Se requiere rol de administración o coordinación."
         )
 
     # Validate agent scoping if owner IDs were explicitly requested

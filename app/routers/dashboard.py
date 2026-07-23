@@ -300,23 +300,25 @@ async def get_my_evolution(
     Get chronological performance evolution metrics specifically for the logged-in agent.
     """
     # Use context's normalized role and fields instead of legacy strings
-    is_admin = context.is_super_admin or context.normalized_role == InternalRole.COMPANY_ADMIN
+    is_manager_or_admin = (
+        context.is_super_admin or
+        context.normalized_role in (InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR)
+    )
     
-    # We resolve the email owner_id if it's admin, else we use context.allowed_agent_ids
-    if is_admin:
-        if email:
-            owner_id = resolve_owner_id_by_email(email)
-        else:
-            # Fallback to current user's owner ID
-            current_user = await db.get(User, context.user_id)
-            owner_id = resolve_agent_owner_id(current_user) if current_user else None
+    if is_manager_or_admin and email:
+        owner_id = resolve_owner_id_by_email(email)
         if not owner_id:
             raise HTTPException(
                 status_code=400,
                 detail="Debes especificar un agente válido (vía email u owner_id asignado)."
             )
+        if context.allowed_agent_ids is not None and owner_id not in context.allowed_agent_ids:
+            raise HTTPException(
+                status_code=403,
+                detail="No tienes permiso para consultar la evolución de este agente."
+            )
     else:
-        # For restricted roles (managers, coordinators, agents), we use their own assigned owner_id
+        # Fallback to current user's owner ID
         current_user = await db.get(User, context.user_id)
         owner_id = resolve_agent_owner_id(current_user) if current_user else None
         if not owner_id:
@@ -324,7 +326,6 @@ async def get_my_evolution(
                 status_code=403,
                 detail="No hay agente asociado a este usuario."
             )
-        # Check permissions explicitly
         if context.allowed_agent_ids is not None and owner_id not in context.allowed_agent_ids:
             raise HTTPException(
                 status_code=403,

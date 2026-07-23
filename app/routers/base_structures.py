@@ -24,7 +24,7 @@ def _verify_base_structure_tenant_access(struct: PromptBaseStructure, context: T
         return
 
     role = context.normalized_role
-    if role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+    if role == InternalRole.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: rol no autorizado."
@@ -38,8 +38,8 @@ def _verify_base_structure_tenant_access(struct: PromptBaseStructure, context: T
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Acceso denegado: esta estructura pertenece a otra empresa."
             )
-        # Check service manager restrictions
-        if role == InternalRole.SERVICE_MANAGER:
+        # Check service scope for service managers and team coordinators
+        if role in (InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR):
             if context.allowed_service_ids is None or struct.service_id not in context.allowed_service_ids:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
@@ -56,10 +56,10 @@ async def get_base_structure_with_typologies(
 ):
     """Retrieve detailed base structure by ID including associated and available typologies."""
     role = context.normalized_role
-    if role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+    if role == InternalRole.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Los agentes y coordinadores no tienen acceso a las estructuras."
+            detail="Los agentes no tienen acceso a las estructuras."
         )
 
     # 1. Fetch base structure

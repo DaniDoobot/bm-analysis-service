@@ -841,6 +841,119 @@ class TestMultitenancyUsers(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(res_get.status_code, 200)
             self.assertEqual(res_get.json()["user"]["role"], "usuario")
 
+    async def test_team_coordinator_scoped_operational_access(self):
+        """14. Test team_coordinator operational access to prompts, analyses history, cycles, and trainer scoped to allowed teams/agents."""
+        from app.models.teams import Team, UserTeamAssociation, AgentTeamAssociation
+        from app.models.analyses import Analysis
+        from app.models.personalized_training import TrainingAgentSetting
+        
+        async with AsyncSession(get_engine()) as db:
+            team_alpha = Team(team_id=100, team_name="Equipo Alfa Ops", service_id=1, company_id=1, is_active=True)
+            team_beta = Team(team_id=200, team_name="Equipo Beta Ops", service_id=1, company_id=1, is_active=True)
+            db.add_all([team_alpha, team_beta])
+            await db.flush()
+
+            tc_ops = User(
+                username="tc_ops_user", email="tc_ops@boston.com", password_hash="hash",
+                role="coordinador_equipo", company_id=1, primary_service_id=1, primary_team_id=100, is_active=True
+            )
+            agent_a = User(
+                username="agent_a_user", email="agent_a@boston.com", password_hash="hash",
+                role="agente", company_id=1, primary_service_id=1, primary_team_id=100, hubspot_owner_id="hs_owner_a", is_active=True
+            )
+            agent_b = User(
+                username="agent_b_user", email="agent_b@boston.com", password_hash="hash",
+                role="agente", company_id=1, primary_service_id=1, primary_team_id=200, hubspot_owner_id="hs_owner_b", is_active=True
+            )
+            db.add_all([tc_ops, agent_a, agent_b])
+            await db.flush()
+            tc_ops_id, agent_a_id, agent_b_id = tc_ops.user_id, agent_a.user_id, agent_b.user_id
+
+            db.add(UserTeamAssociation(user_id=tc_ops_id, team_id=100))
+            db.add(AgentTeamAssociation(user_id=agent_a_id, team_id=100))
+            db.add(AgentTeamAssociation(user_id=agent_b_id, team_id=200))
+
+            an_a = Analysis(
+                analysis_id=9001, call_id="CALL_OPS_A", company_id=1, service_id=1, hubspot_owner_id="hs_owner_a",
+                agente_telefonico="Agente A", tipo_llamada="Inbound", analysis_type="audio", evaluacion_global=8.5
+            )
+            an_b = Analysis(
+                analysis_id=9002, call_id="CALL_OPS_B", company_id=1, service_id=1, hubspot_owner_id="hs_owner_b",
+                agente_telefonico="Agente B", tipo_llamada="Inbound", analysis_type="audio", evaluacion_global=9.0
+            )
+            db.add_all([an_a, an_b])
+
+            # Create TrainingAgentSetting for agent_a so agents-overview can find it
+            setting_a = TrainingAgentSetting(
+                hubspot_owner_id="hs_owner_a", agent_name="Agente A", agent_initials="AA",
+                company_id=1, is_enabled=True
+            )
+            db.add(setting_a)
+            await db.commit()
+
+        # Build context for tc_ops
+        async with AsyncSession(get_engine()) as db:
+            tc_user = await db.get(User, tc_ops_id)
+            tc_ctx = await TenantContext.build(tc_user, db)
+
+        app.dependency_overrides[get_current_user] = lambda: tc_user
+        app.dependency_overrides[get_tenant_context] = lambda: tc_ctx
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            # 14b. Verify /me/tenant-context flags for coordinator
+            res_tc_me = await ac.get("/bm/me/tenant-context")
+            self.assertEqual(res_tc_me.status_code, 200)
+            data_me = res_tc_me.json()
+            self.assertTrue(data_me["can_manage_structures"])
+            self.assertTrue(data_me["can_manage_training"])
+            self.assertEqual(data_me["allowed_team_ids"], [100])
+
+            # 14c. Prompt active: allowed service (service_id=1) returns 200 or 404, NOT 403
+            res_prompt_active = await ac.get("/bm/prompts/active?type=audio&service_id=1")
+            self.assertIn(res_prompt_active.status_code, (200, 404))
+
+            # 14d. Prompt active: unallowed service (service_id=999) returns 403 Forbidden
+            res_prompt_forbidden = await ac.get("/bm/prompts/active?type=audio&service_id=999")
+            self.assertEqual(res_prompt_forbidden.status_code, 403)
+
+            # 14e. Analyses history returns analyses for Agent A, but NOT Agent B
+            res_history = await ac.get("/bm/analyses/history")
+            self.assertEqual(res_history.status_code, 200)
+            call_ids = [an["call_id"] for an in res_history.json()]
+            self.assertIn("CALL_OPS_A", call_ids)
+            self.assertNotIn("CALL_OPS_B", call_ids)
+
+            # 14f. Admin agents overview returns only Agent A
+            res_overview = await ac.get("/bm/training/admin/agents-overview")
+            self.assertEqual(res_overview.status_code, 200)
+            overview_agents = [item["hubspot_owner_id"] for item in res_overview.json()]
+            self.assertIn("hs_owner_a", overview_agents)
+            self.assertNotIn("hs_owner_b", overview_agents)
+
+            # 14g. Create manual cycle for Agent A (in team 100) -> 200 OK
+            res_cycle_a = await ac.post("/bm/training/admin/manual-cycle", json={
+                "hubspot_owner_ids": ["hs_owner_a"], "reason": "Test manual cycle Agent A"
+            })
+            self.assertEqual(res_cycle_a.status_code, 200, msg=res_cycle_a.text)
+
+            # 14h. Create manual cycle for Agent B (outside team) -> 403 Forbidden
+            res_cycle_b = await ac.post("/bm/training/admin/manual-cycle", json={
+                "hubspot_owner_ids": ["hs_owner_b"], "reason": "Test manual cycle Agent B"
+            })
+            self.assertEqual(res_cycle_b.status_code, 403)
+
+        # 14i. Test that pure AGENT role is still blocked from structure endpoints
+        async with AsyncSession(get_engine()) as db:
+            agent_user = await db.get(User, agent_a_id)
+            agent_ctx = await TenantContext.build(agent_user, db)
+
+        app.dependency_overrides[get_current_user] = lambda: agent_user
+        app.dependency_overrides[get_tenant_context] = lambda: agent_ctx
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            res_agent_prompt = await ac.get("/bm/prompts/active?type=audio&service_id=1")
+            self.assertEqual(res_agent_prompt.status_code, 403)
+
 
 if __name__ == "__main__":
     unittest.main()

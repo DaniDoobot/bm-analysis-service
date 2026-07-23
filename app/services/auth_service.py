@@ -78,8 +78,8 @@ async def get_effective_structure_permission(
         "access_source": "none"
     }
 
-    # 1. Normalize roles. Exclude agents and team coordinators completely from structure management/viewing
-    if role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+    # 1. Normalize roles. Exclude agents completely from structure management/viewing
+    if role == InternalRole.AGENT:
         return no_access_dict
 
     # 2. Fetch structure and verify existence
@@ -113,13 +113,13 @@ async def get_effective_structure_permission(
             if obj.company_id != context.company_id:
                 return no_access_dict
             
-            # Check service scope for service managers
-            if role == InternalRole.SERVICE_MANAGER:
+            # Check service scope for service managers and team coordinators
+            if role in (InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR):
                 if context.allowed_service_ids is None or obj.service_id not in context.allowed_service_ids:
                     return no_access_dict
 
     is_admin = context.is_super_admin or role == InternalRole.COMPANY_ADMIN or (
-        role == InternalRole.SERVICE_MANAGER and context.allowed_service_ids is not None and getattr(obj, "service_id", None) in context.allowed_service_ids
+        role in (InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR) and context.allowed_service_ids is not None and getattr(obj, "service_id", None) in context.allowed_service_ids
     )
 
     settings = get_settings()
