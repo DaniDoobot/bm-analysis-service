@@ -251,16 +251,14 @@ async def publish_draft(
             )
             db.add(new_crit)
             
-    # 8. Update parent Prompt to be active, and deactivate other prompts of the same type
+    # 8. Update parent Prompt to be active, and deactivate competing prompts
+    #    (same company_id + service_id + prompt_type, different prompt_id).
     prompt_res = await db.execute(select(Prompt).where(Prompt.prompt_id == draft.prompt_id))
     prompt_obj = prompt_res.scalars().first()
     if prompt_obj:
         prompt_obj.is_active = True
-        await db.execute(
-            update(Prompt)
-            .where(Prompt.prompt_type == prompt_obj.prompt_type, Prompt.prompt_id != prompt_obj.prompt_id)
-            .values(is_active=False)
-        )
+        from app.services.prompts_service import deactivate_competing_prompts
+        await deactivate_competing_prompts(db, prompt_obj)
         
     # 8.5. Archive previous 'published' drafts of this user/prompt to satisfy the unique constraint
     if draft.updated_by_email:

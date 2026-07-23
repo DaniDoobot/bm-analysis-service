@@ -445,6 +445,161 @@ class TestBaseStructuresTypologies(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(p_new_check.is_active, "New prompt must be active")
 
 
+    # ── Regresión: unicidad exclusiva de estructura activa ────────────────────
+
+    async def test_activate_toggle_a_b_deactivates_previous(self):
+        """15a. Activar A → A activo, B inactivo. Luego activar B → B activo, A inactivo."""
+        from app.services import prompts_service
+        async with AsyncSession(self.session_factory) as db:
+            pA, vA = await self._create_prompt_with_version(
+                db, prompt_id=601, prompt_type="audio",
+                service_id=1, company_id=1, is_active=False, version_id=601
+            )
+            pB, vB = await self._create_prompt_with_version(
+                db, prompt_id=602, prompt_type="audio",
+                service_id=1, company_id=1, is_active=False, version_id=602
+            )
+            await db.commit()
+
+        # Activate A
+        async with AsyncSession(self.session_factory) as db:
+            await prompts_service.activate_version(db, version_id=601)
+        async with AsyncSession(self.session_factory) as db:
+            self.assertTrue((await db.get(Prompt, 601)).is_active, "A should be active after first activation")
+            self.assertFalse((await db.get(Prompt, 602)).is_active, "B should be inactive")
+
+        # Activate B → A must become inactive
+        async with AsyncSession(self.session_factory) as db:
+            await prompts_service.activate_version(db, version_id=602)
+        async with AsyncSession(self.session_factory) as db:
+            self.assertFalse((await db.get(Prompt, 601)).is_active, "A must be deactivated when B is activated")
+            self.assertTrue((await db.get(Prompt, 602)).is_active, "B should now be active")
+
+    async def test_deactivate_competing_leaves_only_one_active(self):
+        """15b. Simulates a direct call to deactivate_competing_prompts: starts with two actives, ends with one."""
+        from app.services.prompts_service import deactivate_competing_prompts
+        async with AsyncSession(self.session_factory) as db:
+            pA, _ = await self._create_prompt_with_version(
+                db, prompt_id=611, prompt_type="audio",
+                service_id=1, company_id=1, is_active=True, version_id=611
+            )
+            pB, _ = await self._create_prompt_with_version(
+                db, prompt_id=612, prompt_type="audio",
+                service_id=1, company_id=1, is_active=True, version_id=612
+            )
+            await db.commit()
+
+        async with AsyncSession(self.session_factory) as db:
+            target = await db.get(Prompt, 612)
+            await deactivate_competing_prompts(db, target)
+            await db.commit()
+
+        async with AsyncSession(self.session_factory) as db:
+            # pA should be deactivated, pB untouched
+            self.assertFalse((await db.get(Prompt, 611)).is_active, "pA must be deactivated")
+            self.assertTrue((await db.get(Prompt, 612)).is_active, "pB (target) must remain active")
+
+    async def test_duplicate_prompt_starts_inactive(self):
+        """15c. Duplicating an active prompt must NOT create a second active prompt."""
+        from app.services import prompts_service
+        async with AsyncSession(self.session_factory) as db:
+            pOrig, vOrig = await self._create_prompt_with_version(
+                db, prompt_id=621, prompt_type="audio",
+                service_id=1, company_id=1, is_active=True, version_id=621
+            )
+            await db.commit()
+
+        async with AsyncSession(self.session_factory) as db:
+            result = await prompts_service.duplicate_prompt(
+                db, source_prompt_id=621,
+                prompt_name="Copia Front Audio",
+                created_by="test",
+                created_by_email="test@test.com",
+            )
+
+        # Original must still be active; copy must be inactive
+        async with AsyncSession(self.session_factory) as db:
+            self.assertTrue((await db.get(Prompt, 621)).is_active, "Original must remain active")
+            copy_id = result["prompt_id"]
+            copy = await db.get(Prompt, copy_id)
+            self.assertFalse(copy.is_active, "Duplicated prompt must start as inactive")
+
+    async def test_activating_one_service_does_not_affect_another_service(self):
+        """15d. Activating Front/audio does NOT touch Asesores/audio (different service_id)."""
+        from app.services import prompts_service
+        async with AsyncSession(self.session_factory) as db:
+            # Service 2 = Experiencia GesDent (already in setUp)
+            p_front, v_front = await self._create_prompt_with_version(
+                db, prompt_id=631, prompt_type="audio",
+                service_id=1, company_id=1, is_active=True, version_id=631
+            )
+            p_asesores_active, v_asesores = await self._create_prompt_with_version(
+                db, prompt_id=632, prompt_type="audio",
+                service_id=2, company_id=2, is_active=True, version_id=632
+            )
+            p_front_new, v_front_new = await self._create_prompt_with_version(
+                db, prompt_id=633, prompt_type="audio",
+                service_id=1, company_id=1, is_active=False, version_id=633
+            )
+            await db.commit()
+
+        async with AsyncSession(self.session_factory) as db:
+            await prompts_service.activate_version(db, version_id=633)
+
+        async with AsyncSession(self.session_factory) as db:
+            self.assertFalse((await db.get(Prompt, 631)).is_active, "Old Front prompt must be deactivated")
+            self.assertTrue((await db.get(Prompt, 632)).is_active, "Asesores/audio must remain active (different service)")
+            self.assertTrue((await db.get(Prompt, 633)).is_active, "New Front prompt must be active")
+
+    async def test_null_service_id_handled_correctly(self):
+        """15e. service_id=NULL: activating prompt with service_id=NULL only deactivates others with same company+NULL service."""
+        from app.services.prompts_service import deactivate_competing_prompts
+        async with AsyncSession(self.session_factory) as db:
+            # Two prompts: same company, no service (NULL)
+            pNull1, _ = await self._create_prompt_with_version(
+                db, prompt_id=641, prompt_type="audio",
+                service_id=None, company_id=1, is_active=True, version_id=641
+            )
+            pNull2, _ = await self._create_prompt_with_version(
+                db, prompt_id=642, prompt_type="audio",
+                service_id=None, company_id=1, is_active=True, version_id=642
+            )
+            # Unrelated: has service_id=1, should NOT be touched
+            pWithService, _ = await self._create_prompt_with_version(
+                db, prompt_id=643, prompt_type="audio",
+                service_id=1, company_id=1, is_active=True, version_id=643
+            )
+            await db.commit()
+
+        async with AsyncSession(self.session_factory) as db:
+            target = await db.get(Prompt, 642)
+            await deactivate_competing_prompts(db, target)
+            await db.commit()
+
+        async with AsyncSession(self.session_factory) as db:
+            self.assertFalse((await db.get(Prompt, 641)).is_active, "pNull1 must be deactivated (same company + NULL service)")
+            self.assertTrue((await db.get(Prompt, 642)).is_active, "Target (pNull2) must remain active")
+            self.assertTrue((await db.get(Prompt, 643)).is_active, "Prompt with service_id=1 must NOT be touched")
+
+    async def test_get_active_prompt_returns_at_most_one(self):
+        """15f. get_active_prompt never returns None when one active exists, and never returns duplicates."""
+        from app.services import prompts_service
+        async with AsyncSession(self.session_factory) as db:
+            p1, v1 = await self._create_prompt_with_version(
+                db, prompt_id=651, prompt_type="audio",
+                service_id=1, company_id=1, is_active=False, version_id=651
+            )
+            await db.commit()
+
+        async with AsyncSession(self.session_factory) as db:
+            await prompts_service.activate_version(db, version_id=651)
+
+        async with AsyncSession(self.session_factory) as db:
+            result = await prompts_service.get_active_prompt(db, prompt_type="audio", service_id=1)
+            self.assertIsNotNone(result, "Expected an active prompt for service 1")
+            self.assertEqual(result["prompt_id"], 651, "Should return the activated prompt")
+
+
 if __name__ == "__main__":
     import asyncio
     asyncio.run(unittest.main())

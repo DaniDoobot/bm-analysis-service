@@ -460,7 +460,6 @@ async def sync_prompt_text_with_active_criteria(
     return new_prompt_text, changed
 
 
-
 from app.models.prompts import Prompt, PromptVersion, PromptBaseStructure
 from app.schemas.prompts import (
     SavePromptRequest,
@@ -468,6 +467,69 @@ from app.schemas.prompts import (
     PromptBaseStructureUpdate,
     CreateFromBaseRequest,
 )
+
+
+async def deactivate_competing_prompts(db: AsyncSession, prompt_obj: Prompt) -> int:
+    """Deactivate all active prompts that compete with prompt_obj for the same
+    (company_id, service_id, prompt_type) slot, excluding prompt_obj itself.
+
+    Rules:
+    - Only acts when at least one of company_id / service_id is non-NULL.
+    - Uses IS NULL for NULL columns (SQLAlchemy == None maps to IS NULL in WHERE).
+    - Does NOT touch archived (is_archived=True) or soft-deleted (deleted_at IS NOT NULL) prompts.
+    - Does NOT touch global prompts (both company_id=NULL and service_id=NULL).
+    - Returns the number of prompts deactivated.
+    """
+    from sqlalchemy import and_, or_
+
+    company_id = prompt_obj.company_id
+    service_id = prompt_obj.service_id
+    prompt_type = prompt_obj.prompt_type
+    prompt_id = prompt_obj.prompt_id
+
+    # Do not touch global prompts (both fields NULL)
+    if company_id is None and service_id is None:
+        return 0
+
+    # Build matching conditions for (company_id, service_id) using IS NULL where needed
+    if company_id is not None and service_id is not None:
+        scope_filter = and_(
+            Prompt.company_id == company_id,
+            Prompt.service_id == service_id,
+        )
+    elif company_id is not None and service_id is None:
+        scope_filter = and_(
+            Prompt.company_id == company_id,
+            Prompt.service_id == None,  # noqa: E711  (SQLAlchemy → IS NULL)
+        )
+    elif company_id is None and service_id is not None:
+        scope_filter = and_(
+            Prompt.company_id == None,  # noqa: E711  (SQLAlchemy → IS NULL)
+            Prompt.service_id == service_id,
+        )
+    else:
+        return 0  # safety fallback (unreachable given guard above)
+
+    result = await db.execute(
+        update(Prompt)
+        .where(
+            Prompt.prompt_type == prompt_type,
+            Prompt.prompt_id != prompt_id,
+            Prompt.is_active == True,          # noqa: E712
+            Prompt.is_archived == False,       # noqa: E712
+            Prompt.deleted_at == None,         # noqa: E711
+            scope_filter,
+        )
+        .values(is_active=False)
+    )
+    deactivated = result.rowcount if result.rowcount is not None else 0
+    if deactivated:
+        logger.info(
+            "deactivate_competing_prompts: deactivated %d competing prompt(s) "
+            "for company_id=%s service_id=%s type=%s (keeping prompt_id=%s)",
+            deactivated, company_id, service_id, prompt_type, prompt_id,
+        )
+    return deactivated
 
 
 async def list_prompts(
@@ -927,10 +989,8 @@ async def duplicate_prompt(
 async def activate_version(db: AsyncSession, version_id: int) -> PromptVersion | None:
     """Set a version as current and unset others of the same prompt.
 
-    Also deactivates other Prompt rows with the same (company_id, service_id, prompt_type)
-    so there is at most one active prompt per tenant+service+type.
-    Only touches prompts with non-NULL service_id and company_id to avoid affecting
-    legacy/global prompts.
+    Also calls deactivate_competing_prompts so there is at most one active
+    Prompt per (company_id, service_id, prompt_type) after activation.
     """
     result = await db.execute(
         select(PromptVersion).where(PromptVersion.id == version_id)
@@ -951,38 +1011,12 @@ async def activate_version(db: AsyncSession, version_id: int) -> PromptVersion |
     prompt_obj = prompt_res.scalars().first()
     if prompt_obj:
         prompt_obj.is_active = True
-
-        # Deactivate other prompts of the same type within the same tenant+service scope.
-        # We only scope-deactivate when both company_id and service_id are set on the
-        # prompt being activated, to avoid accidentally affecting global/legacy prompts.
-        if prompt_obj.company_id is not None and prompt_obj.service_id is not None:
-            await db.execute(
-                update(Prompt)
-                .where(
-                    Prompt.prompt_type == prompt_obj.prompt_type,
-                    Prompt.company_id == prompt_obj.company_id,
-                    Prompt.service_id == prompt_obj.service_id,
-                    Prompt.prompt_id != prompt_obj.prompt_id
-                )
-                .values(is_active=False)
-            )
-        elif prompt_obj.service_id is not None and prompt_obj.company_id is None:
-            # service_id set but no company: deactivate others with same service + type
-            await db.execute(
-                update(Prompt)
-                .where(
-                    Prompt.prompt_type == prompt_obj.prompt_type,
-                    Prompt.service_id == prompt_obj.service_id,
-                    Prompt.company_id == None,  # noqa: E711
-                    Prompt.prompt_id != prompt_obj.prompt_id
-                )
-                .values(is_active=False)
-            )
-        # If both are NULL (global prompt), do not deactivate anything else.
+        await deactivate_competing_prompts(db, prompt_obj)
 
     await db.commit()
     await db.refresh(version)
     return version
+
 
 
 # ── Prompt Base Structures CRUD ───────────────────────────────────────────────
