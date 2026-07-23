@@ -600,6 +600,102 @@ class TestBaseStructuresTypologies(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["prompt_id"], 651, "Should return the activated prompt")
 
 
+    async def test_activating_legacy_null_company_deactivates_tenant_prompt_and_sets_company_id(self):
+        """16a. Activar B (company=NULL, service=1) → B asigna company=1, A (company=1, service=1) pasa a inactivo."""
+        from app.services import prompts_service
+        async with AsyncSession(self.session_factory) as db:
+            pA, _ = await self._create_prompt_with_version(
+                db, prompt_id=701, prompt_type="audio",
+                service_id=1, company_id=1, is_active=True, version_id=701
+            )
+            pB, _ = await self._create_prompt_with_version(
+                db, prompt_id=702, prompt_type="audio",
+                service_id=1, company_id=None, is_active=False, version_id=702
+            )
+            await db.commit()
+
+        # Activate B (legacy NULL company)
+        async with AsyncSession(self.session_factory) as db:
+            await prompts_service.set_prompt_active_status(db, prompt_id=702, is_active=True)
+
+        async with AsyncSession(self.session_factory) as db:
+            pA_db = await db.get(Prompt, 701)
+            pB_db = await db.get(Prompt, 702)
+            self.assertFalse(pA_db.is_active, "A must be deactivated when B is activated")
+            self.assertTrue(pB_db.is_active, "B must be active")
+            self.assertEqual(pB_db.company_id, 1, "B must inherit company_id=1 from service")
+
+        # Activate A again
+        async with AsyncSession(self.session_factory) as db:
+            await prompts_service.set_prompt_active_status(db, prompt_id=701, is_active=True)
+
+        async with AsyncSession(self.session_factory) as db:
+            pA_db = await db.get(Prompt, 701)
+            pB_db = await db.get(Prompt, 702)
+            self.assertTrue(pA_db.is_active, "A must be active")
+            self.assertFalse(pB_db.is_active, "B must be deactivated when A is activated")
+
+    async def test_patch_endpoint_toggles_active_status(self):
+        """16b. PATCH /bm/prompts/{id} activa B y desactiva A correctamente."""
+        from app.services import prompts_service
+        async with AsyncSession(self.session_factory) as db:
+            pA, _ = await self._create_prompt_with_version(
+                db, prompt_id=711, prompt_type="audio",
+                service_id=1, company_id=1, is_active=True, version_id=711
+            )
+            pB, _ = await self._create_prompt_with_version(
+                db, prompt_id=712, prompt_type="audio",
+                service_id=1, company_id=1, is_active=False, version_id=712
+            )
+            await db.commit()
+
+        # Call PATCH /bm/prompts/712
+        res = await self.client.patch(
+            "/bm/prompts/712",
+            json={"is_active": True},
+            headers={"Authorization": f"Bearer {self.t_boston_admin}"}
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertTrue(res.json()["is_active"])
+
+        async with AsyncSession(self.session_factory) as db:
+            self.assertFalse((await db.get(Prompt, 711)).is_active, "pA must be deactivated by PATCH on pB")
+            self.assertTrue((await db.get(Prompt, 712)).is_active, "pB must be active")
+
+    async def test_publish_draft_deactivates_legacy_null_competitors(self):
+        """16c. publicar borrador desactiva competidores legacy NULL."""
+        from app.models.drafts import PromptDraft
+        from app.services import drafts_service
+        async with AsyncSession(self.session_factory) as db:
+            pLegacy, _ = await self._create_prompt_with_version(
+                db, prompt_id=721, prompt_type="audio",
+                service_id=1, company_id=None, is_active=True, version_id=721
+            )
+            pNew, _ = await self._create_prompt_with_version(
+                db, prompt_id=722, prompt_type="audio",
+                service_id=1, company_id=1, is_active=False, version_id=722
+            )
+            draft = PromptDraft(
+                draft_id=7220,
+                prompt_id=722,
+                draft_name="Draft 722",
+                draft_data={"prompt": "Texto nuevo", "version_name": "v2"},
+                updated_by="tester",
+                updated_by_email="test@test.com",
+                status="draft"
+            )
+            db.add(draft)
+            await db.commit()
+
+        async with AsyncSession(self.session_factory) as db:
+            await drafts_service.publish_draft(db, draft_id=7220)
+
+        async with AsyncSession(self.session_factory) as db:
+            self.assertFalse((await db.get(Prompt, 721)).is_active, "Legacy prompt must be deactivated upon draft publication")
+            self.assertTrue((await db.get(Prompt, 722)).is_active, "Published prompt must be active")
+
+
 if __name__ == "__main__":
     import asyncio
     asyncio.run(unittest.main())
+

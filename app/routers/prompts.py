@@ -265,6 +265,66 @@ async def activate_prompt_version(
     return {"ok": True, "status": "activated", "version": PromptVersionOut.model_validate(version)}
 
 
+class ToggleActiveRequest(BaseModel):
+    is_active: bool | None = None
+    active: bool | None = None
+
+
+@router.patch("/prompts/{prompt_id}", dependencies=[require_structure_edit("specific")])
+@router.put("/prompts/{prompt_id}", dependencies=[require_structure_edit("specific")])
+async def update_prompt_active_status(
+    prompt_id: int,
+    body: ToggleActiveRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    """Toggle active status for a prompt structure.
+    When activating (is_active=true), automatically deactivates competing active prompts for the same service_id + prompt_type.
+    """
+    if getattr(current_user, "role", "agent").lower() == "agent":
+        raise HTTPException(status_code=403, detail="Los agentes no tienen acceso a las estructuras.")
+
+    target_active = body.is_active if body.is_active is not None else body.active
+    if target_active is None:
+        target_active = True
+
+    try:
+        prompt = await prompts_service.set_prompt_active_status(db, prompt_id=prompt_id, is_active=target_active)
+        await log_audit(db, current_user.user_id, "modify", "specific", prompt_id, details={"is_active": prompt.is_active})
+        return {
+            "ok": True,
+            "prompt_id": prompt.prompt_id,
+            "is_active": prompt.is_active,
+            "company_id": prompt.company_id,
+            "service_id": prompt.service_id,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/prompts/{prompt_id}/activate", dependencies=[require_structure_edit("specific")])
+async def activate_prompt_endpoint(
+    prompt_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    """Explicit endpoint to activate a prompt structure."""
+    if getattr(current_user, "role", "agent").lower() == "agent":
+        raise HTTPException(status_code=403, detail="Los agentes no tienen acceso a las estructuras.")
+    try:
+        prompt = await prompts_service.set_prompt_active_status(db, prompt_id=prompt_id, is_active=True)
+        await log_audit(db, current_user.user_id, "modify", "specific", prompt_id, details={"is_active": True})
+        return {
+            "ok": True,
+            "prompt_id": prompt.prompt_id,
+            "is_active": prompt.is_active,
+            "company_id": prompt.company_id,
+            "service_id": prompt.service_id,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 # ── Prompt Base Structures Endpoints ──────────────────────────────────────────
 
 def _base_structure_out(struct) -> dict:
