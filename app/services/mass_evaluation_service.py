@@ -681,11 +681,15 @@ class MassEvaluationService:
             try:
                 # 1. Resolve and extract ALL parameters to local variables BEFORE any commits.
                 # This completely prevents any lazy-loading/expiration/greenlet errors.
+                # Snapshot ALL scalar job fields BEFORE any commit/await that would expire the ORM object.
+                # Accessing job.xxx after a db.commit() triggers a lazy-load outside an async greenlet
+                # → MissingGreenlet error. Keep all reads here, never read job.xxx after this block.
                 prompt_id = job.prompt_id
                 prompt_name = job.prompt_name
                 prompt_version_id = job.prompt_version_id
                 prompt_version_name = job.prompt_version_name
                 prompt_version_label = job.prompt_version_label
+                company_id = job.company_id  # FIX: snapshot here to avoid MissingGreenlet after commits
                 execution_source = job.execution_source or "on_demand"
                 duration_min_seconds = job.duration_min_seconds
                 duration_max_seconds = job.duration_max_seconds
@@ -695,6 +699,9 @@ class MassEvaluationService:
                 timezone_name = job.timezone
                 schedule_enabled = job.schedule_enabled
                 schedule_type = job.schedule_type
+                schedule_time = job.schedule_time          # FIX: snapshot – used in calculate_next_run
+                schedule_day_of_week = job.schedule_day_of_week    # FIX: snapshot
+                schedule_day_of_month = job.schedule_day_of_month  # FIX: snapshot
                 schedule_cron = job.schedule_cron
 
                 # Resolve prompt snapshot content
@@ -915,7 +922,7 @@ class MassEvaluationService:
                                 "prompt_snapshot": prompt_snapshot,
                                 "status": "skipped",
                                 "error_message": "No recording URL present.",
-                                "company_id": job.company_id,
+                                "company_id": company_id,  # FIX: use local snapshot, not job ORM (expired after commit)
                                 "service_id": service_id,
                                 "service_key": service_key,
                                 "service_name": service_name,
@@ -1124,7 +1131,7 @@ class MassEvaluationService:
                                 "items_json": items,
                                 "evaluacion_global": eval_decimal,
                                 "hubspot_metadata": call,
-                                "company_id": job.company_id,
+                                "company_id": company_id,  # FIX: use local snapshot, not job ORM (expired after commit)
                                 "service_id": service_id,
                                 "service_key": service_key,
                                 "service_name": service_name,
@@ -1199,7 +1206,7 @@ class MassEvaluationService:
                                 "prompt_snapshot": prompt_snapshot,
                                 "status": "failed",
                                 "error_message": str(e_call),
-                                "company_id": job.company_id,
+                                "company_id": company_id,  # FIX: use local snapshot, not job ORM (expired after commit)
                                 "service_id": service_id,
                                 "service_key": service_key,
                                 "service_name": service_name,

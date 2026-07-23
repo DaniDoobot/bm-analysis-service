@@ -1,4 +1,4 @@
-﻿import os
+import os
 import sys
 import unittest
 from httpx import AsyncClient, ASGITransport
@@ -250,3 +250,4 @@ class TestMassEvaluationJobDerivation(unittest.IsolatedAsyncioTestCase):
 if __name__ == "__main__":
     import asyncio
     asyncio.run(unittest.main())
+
