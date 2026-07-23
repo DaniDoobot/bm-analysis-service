@@ -126,8 +126,8 @@ class UserCreatePayload(BaseModel):
     password: Optional[str] = None
     role: str = "agente"
     company_id: Optional[int] = None
-    primary_service_id: Optional[int] = None
-    allowed_service_ids: Optional[List[int]] = None
+    primary_service_id: Optional[int] = Field(default=None, validation_alias=AliasChoices("primary_service_id", "service_id"))
+    allowed_service_ids: Optional[List[int]] = Field(default=None, validation_alias=AliasChoices("allowed_service_ids", "service_ids"))
     is_active: bool = True
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None
@@ -191,8 +191,8 @@ class UserUpdatePayload(BaseModel):
     name: Optional[str] = Field(default=None, validation_alias=AliasChoices("name", "full_name"))
     role: Optional[str] = None
     company_id: Optional[int] = None
-    primary_service_id: Optional[int] = None
-    allowed_service_ids: Optional[List[int]] = None
+    primary_service_id: Optional[int] = Field(default=None, validation_alias=AliasChoices("primary_service_id", "service_id"))
+    allowed_service_ids: Optional[List[int]] = Field(default=None, validation_alias=AliasChoices("allowed_service_ids", "service_ids"))
     is_active: Optional[bool] = None
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None

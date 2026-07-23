@@ -159,8 +159,11 @@ class TenantContextResponse(BaseModel):
     normalized_role: InternalRole
     company_id: Optional[int] = None
     company_name: Optional[str] = None
+    primary_service_id: Optional[int] = None
+    primary_service_name: Optional[str] = None
     allowed_company_ids: List[int] = []
     allowed_service_ids: Optional[List[int]] = None
+    allowed_services: Optional[List[dict]] = None
     allowed_team_ids: Optional[List[int]] = None
     is_super_admin: bool
     can_manage_companies: bool

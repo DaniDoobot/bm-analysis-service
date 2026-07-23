@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.dependencies import get_db, get_current_user, require_admin, get_tenant_context
 from app.models.users import User, UserAudit, PasswordResetToken
 from app.models.companies import Company
+from app.models.teams import Team, UserServiceAssociation, AgentTeamAssociation
 from app.core.tenant_context import TenantContext
 from app.core.roles import InternalRole, normalize_role
 from app.models.prompts import Prompt, PromptBaseStructure, StructurePermission
@@ -281,6 +282,28 @@ async def list_users(
         )
         super_admin_roles = ["admin", "administrador", "superadmin", "super_admin"]
         stmt = stmt.where(~User.role.in_(super_admin_roles))
+    elif context.normalized_role in (InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR):
+        stmt = stmt.where(
+            (User.company_id == context.company_id) &
+            (User.company_id.is_not(None))
+        )
+        admin_roles = ["admin", "administrador", "superadmin", "super_admin", "company_admin", "administrador_de_empresa", "administrador de empresa"]
+        stmt = stmt.where(~User.role.in_(admin_roles))
+        if context.allowed_service_ids:
+            user_svc_sub = select(UserServiceAssociation.user_id).where(
+                UserServiceAssociation.service_id.in_(context.allowed_service_ids)
+            )
+            agent_team_sub = select(AgentTeamAssociation.user_id).join(Team).where(
+                Team.service_id.in_(context.allowed_service_ids)
+            )
+            stmt = stmt.where(
+                User.user_id.in_(user_svc_sub) |
+                User.user_id.in_(agent_team_sub) |
+                User.primary_service_id.in_(context.allowed_service_ids) |
+                (User.user_id == context.user_id)
+            )
+        else:
+            stmt = stmt.where(User.user_id == context.user_id)
     else:
         if context.company_id:
             stmt = stmt.where(User.company_id == context.company_id)
@@ -297,7 +320,7 @@ async def list_users(
 
     allowed_service_ids_map, allowed_services_map, primary_service_map = await get_user_services_info(db, user_ids)
 
-    is_admin_user = context.is_super_admin or context.normalized_role == InternalRole.COMPANY_ADMIN
+    is_admin_user = context.is_super_admin or context.normalized_role in (InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER)
     if is_admin_user:
         return {
             "ok": True,
@@ -394,20 +417,32 @@ async def get_user(
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_user(
     body: UserCreatePayload,
-    admin: Annotated[User, Depends(require_admin)],
+    current_user: Annotated[User, Depends(get_current_user)],
     context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
     allow_unverified_hubspot_id: bool = Query(False, description="Permite omitir la comprobación de existencia del ID de HubSpot en el inventario real")
 ):
-    """Create a new user in bm_users enforcing company_admin scoping."""
+    """Create a new user in bm_users enforcing company_admin / service_manager scoping."""
+    actor_role = context.normalized_role
+    if actor_role not in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Se requieren permisos administrativos o de responsable de servicio."
+        )
+
     target_role_norm = normalize_role(body.role)
 
-    # 1. Company admin permissions check
+    # 1. Company admin & service manager permissions check
     if not context.is_super_admin:
         if target_role_norm == InternalRole.SUPER_ADMIN:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="No tienes permisos para crear un Super Administrador."
+            )
+        if actor_role == InternalRole.SERVICE_MANAGER and target_role_norm in (InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes permisos para crear usuarios con rol de administrador de empresa o responsable de servicio."
             )
         if body.company_id is not None and body.company_id != context.company_id:
             raise HTTPException(
@@ -438,70 +473,69 @@ async def create_user(
         if clean_hs_id == "":
             clean_hs_id = None
 
-    await validate_hubspot_owner_id(
-        db,
-        role=body.role,
-        hubspot_owner_id=clean_hs_id,
-        allow_unverified=allow_unverified_hubspot_id
-    )
+    if clean_hs_id is not None and not allow_unverified_hubspot_id:
+        existing_hs_stmt = select(User).where(User.hubspot_owner_id == clean_hs_id)
+        existing_hs_res = await db.execute(existing_hs_stmt)
+        if existing_hs_res.scalars().first():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"El Hubspot Owner ID '{clean_hs_id}' ya está asignado a otro usuario activo."
+            )
 
-    stmt_email = select(User).where(User.email == body.email)
-    if (await db.execute(stmt_email)).scalars().first():
+    uname_stmt = select(User).where(User.username == username)
+    uname_res = await db.execute(uname_stmt)
+    if uname_res.scalars().first():
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Ya existe un usuario con email '{body.email}'.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"El nombre de usuario '{username}' ya está en uso."
         )
 
-    stmt_uname = select(User).where(User.username == username)
-    if (await db.execute(stmt_uname)).scalars().first():
+    email = body.email.strip().lower()
+    email_stmt = select(User).where(User.email == email)
+    email_res = await db.execute(email_stmt)
+    if email_res.scalars().first():
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Ya existe un usuario con username '{username}'.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"El correo electrónico '{email}' ya está en uso."
         )
 
-    must_reset_password = body.must_reset_password
-    if body.password_setup in {UserPasswordSetupMode.invite_link, UserPasswordSetupMode.temporary_password}:
-        must_reset_password = True
-
+    pass_hash = None
     token = None
     expires_at = None
-    pass_hash = None
 
     if body.password_setup == UserPasswordSetupMode.invite_link:
         temp_pass = secrets.token_urlsafe(32)
         pass_hash = hash_password(temp_pass)
-    elif body.password_setup == UserPasswordSetupMode.temporary_password:
-        if body.password:
-            pass_hash = hash_password(body.password)
-        else:
-            temp_pass = secrets.token_urlsafe(12)
-            pass_hash = hash_password(temp_pass)
         token = secrets.token_urlsafe(32)
         expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+        must_reset = True
+    elif body.password_setup == UserPasswordSetupMode.temporary_password:
+        temp_pass = body.password if body.password else secrets.token_urlsafe(12)
+        pass_hash = hash_password(temp_pass)
+        must_reset = True
     else:
-        if must_reset_password:
-            token = secrets.token_urlsafe(32)
-            expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
-            temp_pass = secrets.token_urlsafe(32)
-            pass_hash = hash_password(temp_pass)
-        else:
+        if body.password:
             pass_hash = hash_password(body.password)
+            must_reset = body.must_reset_password
+        else:
+            temp_pass = secrets.token_urlsafe(16)
+            pass_hash = hash_password(temp_pass)
+            must_reset = True
 
     new_user = User(
         username=username,
-        email=body.email,
-        name=body.name,
+        email=email,
+        name=body.name.strip() if body.name else None,
         role=body.role,
+        is_active=body.is_active,
         company_id=company_id,
         primary_service_id=val_primary_id,
-        is_active=body.is_active,
         hubspot_owner_id=clean_hs_id,
-        agent_initials=body.agent_initials,
+        agent_initials=body.agent_initials.strip() if body.agent_initials else None,
         password_hash=pass_hash,
-        password_plain_dev=None,
-        must_reset_password=must_reset_password,
+        must_reset_password=must_reset,
         reset_token=token,
-        reset_token_expires_at=expires_at,
+        reset_token_expires_at=expires_at
     )
     db.add(new_user)
     await db.commit()
@@ -510,7 +544,7 @@ async def create_user(
     await save_user_service_associations(db, new_user.user_id, val_allowed_ids)
     await db.commit()
 
-    logger.info("Admin %s CREATED user %s (id=%s, company_id=%s)", admin.email, new_user.email, new_user.user_id, company_id)
+    logger.info("Admin %s CREATED user %s (id=%s, company_id=%s)", current_user.email, new_user.email, new_user.user_id, company_id)
     
     allowed_service_ids_map, allowed_services_map, primary_service_map = await get_user_services_info(db, [new_user.user_id])
     user_data = _user_to_full(
@@ -534,7 +568,7 @@ async def create_user(
 async def update_user(
     user_id: int,
     body: UserUpdatePayload,
-    admin: Annotated[User, Depends(require_admin)],
+    current_user: Annotated[User, Depends(get_current_user)],
     context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
     transfer_owner_id: Annotated[int | None, Query(description="ID of the new owner to transfer structures to if deactivating")] = None,
@@ -542,16 +576,22 @@ async def update_user(
 ):
     """
     Update email, username, role, is_active, hubspot_owner_id, or agent_initials.
-    Requires administrative role (super_admin or company_admin).
-    Used by Lovable for role changes, deactivation, and profile edits.
+    Requires administrative or service manager role.
     """
+    actor_role = context.normalized_role
+    if actor_role not in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Se requieren permisos administrativos."
+        )
+
     stmt = select(User).where(User.user_id == user_id)
     res = await db.execute(stmt)
     user = res.scalars().first()
     if not user:
         raise HTTPException(status_code=404, detail=f"Usuario {user_id} no encontrado.")
 
-    # Scoping check for company_admin
+    # Scoping check for company_admin & service_manager
     if not context.is_super_admin:
         if user.company_id != context.company_id or normalize_role(user.role) == InternalRole.SUPER_ADMIN:
             raise HTTPException(
@@ -704,7 +744,7 @@ async def update_user(
 
     if body.is_active is not None and body.is_active != user.is_active:
         if body.is_active is False and user.is_active is True:
-            await handle_user_ownership_transfer(db, user_id, transfer_owner_id, admin.user_id)
+            await handle_user_ownership_transfer(db, user_id, transfer_owner_id, current_user.user_id)
         changes["is_active"] = {"old": user.is_active, "new": body.is_active}
         user.is_active = body.is_active
 
@@ -722,7 +762,7 @@ async def update_user(
             action = "deactivate" if not user.is_active else "activate"
         
         audit = UserAudit(
-            admin_user_id=admin.user_id,
+            admin_user_id=current_user.user_id,
             target_user_id=user_id,
             action=action,
             changes_json=changes
@@ -732,7 +772,7 @@ async def update_user(
     await db.commit()
     await db.refresh(user)
 
-    logger.info("Admin %s UPDATED user %s (id=%s). Changes: %s", admin.email, user.email, user.user_id, changes)
+    logger.info("Admin %s UPDATED user %s (id=%s). Changes: %s", current_user.email, user.email, user.user_id, changes)
     allowed_service_ids_map, allowed_services_map, primary_service_map = await get_user_services_info(db, [user_id])
     user_data = _user_to_full(
         user,

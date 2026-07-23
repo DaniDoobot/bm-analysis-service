@@ -17,8 +17,11 @@ class TenantContext(BaseModel):
     is_super_admin: bool
     company_id: Optional[int] = None
     company_name: Optional[str] = None
+    primary_service_id: Optional[int] = None
+    primary_service_name: Optional[str] = None
     allowed_company_ids: List[int] = []
     allowed_service_ids: Optional[List[int]] = None  # None = sin restricción
+    allowed_services: Optional[List[dict]] = None
     allowed_team_ids: Optional[List[int]] = None     # None = sin restricción
     allowed_agent_ids: Optional[List[str]] = None    # None = sin restricción (hubspot_owner_ids)
 
@@ -43,7 +46,15 @@ class TenantContext(BaseModel):
             company_res = await db.execute(company_stmt)
             company_name = company_res.scalar()
 
-        # 2. Cargar allowed_company_ids
+        # 2. Resolver primary_service_id y primary_service_name
+        primary_service_id = user.primary_service_id
+        primary_service_name = None
+        if primary_service_id is not None:
+            p_stmt = select(Service.service_name).where(Service.service_id == primary_service_id)
+            p_res = await db.execute(p_stmt)
+            primary_service_name = p_res.scalar()
+
+        # 3. Cargar allowed_company_ids
         allowed_company_ids: List[int] = []
         if is_super:
             all_comp_stmt = select(Company.company_id)
@@ -53,7 +64,7 @@ class TenantContext(BaseModel):
             if user.company_id is not None:
                 allowed_company_ids = [user.company_id]
 
-        # 3. Inicializar permisos por rol
+        # 4. Inicializar permisos por rol
         allowed_services: Optional[List[int]] = None
         allowed_teams: Optional[List[int]] = None
         allowed_agents: Optional[List[str]] = None
@@ -68,8 +79,11 @@ class TenantContext(BaseModel):
                 is_super_admin=True,
                 company_id=company_id,
                 company_name=company_name,
+                primary_service_id=primary_service_id,
+                primary_service_name=primary_service_name,
                 allowed_company_ids=allowed_company_ids,
                 allowed_service_ids=None,
+                allowed_services=None,
                 allowed_team_ids=None,
                 allowed_agent_ids=None
             )
@@ -84,8 +98,11 @@ class TenantContext(BaseModel):
                 is_super_admin=False,
                 company_id=None,
                 company_name=None,
+                primary_service_id=primary_service_id,
+                primary_service_name=primary_service_name,
                 allowed_company_ids=[],
                 allowed_service_ids=[],
+                allowed_services=[],
                 allowed_team_ids=[],
                 allowed_agent_ids=[]
             )
@@ -107,13 +124,8 @@ class TenantContext(BaseModel):
             teams_res = await db.execute(teams_stmt)
             allowed_teams = list(teams_res.scalars().all())
 
-            # Cargar agentes de esos equipos
-            agents_stmt = select(User.hubspot_owner_id).join(AgentTeamAssociation).where(AgentTeamAssociation.team_id.in_(allowed_teams))
-            agents_res = await db.execute(agents_stmt)
-            allowed_agents = [uid for uid in agents_res.scalars().all() if uid]
-            if user.hubspot_owner_id:
-                allowed_agents.append(user.hubspot_owner_id)
-            allowed_agents = list(set(allowed_agents))
+            # Service manager accede a todos los datos de sus servicios permitidos sin filtrar por agentes (hubspot_owner_id)
+            allowed_agents = None
 
         elif norm_role == InternalRole.TEAM_COORDINATOR:
             # Cargar equipos asignados
@@ -155,6 +167,19 @@ class TenantContext(BaseModel):
             # Solo accede a su propio hubspot_owner_id
             allowed_agents = [user.hubspot_owner_id] if user.hubspot_owner_id else []
 
+        # Construir objetos dict para allowed_services si es una lista
+        allowed_services_dicts: Optional[List[dict]] = None
+        if allowed_services is not None:
+            if allowed_services:
+                svc_objs_stmt = select(Service.service_id, Service.service_name).where(Service.service_id.in_(allowed_services))
+                svc_objs_res = await db.execute(svc_objs_stmt)
+                allowed_services_dicts = [
+                    {"service_id": row.service_id, "service_name": row.service_name}
+                    for row in svc_objs_res.all()
+                ]
+            else:
+                allowed_services_dicts = []
+
         return cls(
             user_id=user.user_id,
             user_email=user.email,
@@ -163,8 +188,11 @@ class TenantContext(BaseModel):
             is_super_admin=False,
             company_id=company_id,
             company_name=company_name,
+            primary_service_id=primary_service_id,
+            primary_service_name=primary_service_name,
             allowed_company_ids=allowed_company_ids,
             allowed_service_ids=allowed_services,
+            allowed_services=allowed_services_dicts,
             allowed_team_ids=allowed_teams,
             allowed_agent_ids=allowed_agents
         )

@@ -346,6 +346,91 @@ class TestMultitenancyUsers(unittest.IsolatedAsyncioTestCase):
             self.assertIn(2, mgr_data["allowed_service_ids"])
             self.assertEqual(len(mgr_data["allowed_services"]), 2)
 
+    async def test_service_manager_operational_permissions_and_scoping(self):
+        """8. Test service_manager operational access: tenant-context, services list, user scoping, agent creation."""
+        # First, create a valid service_manager user
+        async with AsyncSession(get_engine()) as db:
+            admin_user = await db.get(User, self.u_admin_boston.user_id)
+            admin_ctx = await TenantContext.build(admin_user, db)
+
+        app.dependency_overrides[get_current_user] = lambda: admin_user
+        app.dependency_overrides[get_tenant_context] = lambda: admin_ctx
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            res_create = await ac.post("/bm/users", json={
+                "email": "responsable_op@boston.com",
+                "username": "responsable_op",
+                "role": "responsable_servicio",
+                "service_id": 1,
+                "password_setup": "invite_link"
+            })
+            self.assertEqual(res_create.status_code, 201, msg=res_create.text)
+            mgr_id = res_create.json()["user"]["user_id"]
+
+        # Now act AS the created service_manager
+        async with AsyncSession(get_engine()) as db:
+            mgr_user = await db.get(User, mgr_id)
+            mgr_ctx = await TenantContext.build(mgr_user, db)
+
+        app.dependency_overrides[get_current_user] = lambda: mgr_user
+        app.dependency_overrides[get_tenant_context] = lambda: mgr_ctx
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            # 8a. Check GET /bm/me/tenant-context
+            res_tc = await ac.get("/bm/me/tenant-context")
+            self.assertEqual(res_tc.status_code, 200)
+            tc_data = res_tc.json()
+            self.assertEqual(tc_data["normalized_role"], "service_manager")
+            self.assertEqual(tc_data["primary_service_id"], 1)
+            self.assertIn(1, tc_data["allowed_service_ids"])
+            self.assertTrue(tc_data["can_manage_users"])
+            self.assertEqual(tc_data["allowed_services"][0]["service_id"], 1)
+
+            # 8b. Check GET /bm/services returns only allowed service (service 1)
+            res_svc = await ac.get("/bm/services")
+            self.assertEqual(res_svc.status_code, 200)
+            svcs = res_svc.json()
+            svc_ids = [s["service_id"] for s in svcs]
+            self.assertIn(1, svc_ids)
+            self.assertNotIn(3, svc_ids)
+
+            # 8c. Check GET /bm/users does not return superadmins or company_admin
+            res_users = await ac.get("/bm/users")
+            self.assertEqual(res_users.status_code, 200)
+            returned_users = res_users.json()["users"]
+            returned_roles = [u["role"] for u in returned_users]
+            self.assertNotIn("super_admin", returned_roles)
+            self.assertNotIn("company_admin", returned_roles)
+
+            # 8d. Check service_manager CANNOT create super_admin or company_admin
+            res_bad_role = await ac.post("/bm/users", json={
+                "email": "illegal_admin@boston.com",
+                "username": "illegal_admin",
+                "role": "company_admin",
+                "password_setup": "invite_link"
+            })
+            self.assertEqual(res_bad_role.status_code, 403)
+
+            # 8e. Check service_manager CAN create an agent in their service
+            res_agent = await ac.post("/bm/users", json={
+                "email": "new_agent_under_mgr@boston.com",
+                "username": "new_agent_under_mgr",
+                "role": "agente",
+                "primary_service_id": 1,
+                "password_setup": "invite_link"
+            })
+            self.assertEqual(res_agent.status_code, 201, msg=res_agent.text)
+
+            # 8f. Check service_manager CANNOT assign a service of another company (service 3)
+            res_cross_svc = await ac.post("/bm/users", json={
+                "email": "cross_agent@boston.com",
+                "username": "cross_agent",
+                "role": "agente",
+                "primary_service_id": 3,
+                "password_setup": "invite_link"
+            })
+            self.assertIn(res_cross_svc.status_code, (400, 403))
+
 
 if __name__ == "__main__":
     unittest.main()

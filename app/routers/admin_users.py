@@ -2,7 +2,7 @@
 import logging
 import re
 from typing import Annotated, List, Optional
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, AliasChoices
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,8 +51,8 @@ class AdminUserCreatePayload(BaseModel):
     name: Optional[str] = None
     role: str
     company_id: Optional[int] = None
-    primary_service_id: Optional[int] = None
-    allowed_service_ids: Optional[List[int]] = None
+    primary_service_id: Optional[int] = Field(default=None, validation_alias=AliasChoices("primary_service_id", "service_id"))
+    allowed_service_ids: Optional[List[int]] = Field(default=None, validation_alias=AliasChoices("allowed_service_ids", "service_ids"))
     is_active: bool = True
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None
@@ -64,8 +64,8 @@ class AdminUserUpdatePayload(BaseModel):
     is_active: Optional[bool] = None
     company_id: Optional[int] = None
     role: Optional[str] = None
-    primary_service_id: Optional[int] = None
-    allowed_service_ids: Optional[List[int]] = None
+    primary_service_id: Optional[int] = Field(default=None, validation_alias=AliasChoices("primary_service_id", "service_id"))
+    allowed_service_ids: Optional[List[int]] = Field(default=None, validation_alias=AliasChoices("allowed_service_ids", "service_ids"))
 
 
 class RoleOption(BaseModel):
