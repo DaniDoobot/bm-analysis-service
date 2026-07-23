@@ -532,6 +532,29 @@ async def deactivate_competing_prompts(db: AsyncSession, prompt_obj: Prompt) -> 
     return deactivated
 
 
+async def resolve_company_id_for_prompt(
+    db: AsyncSession,
+    service_id: int | None,
+    fallback_company_id: int | None,
+) -> int | None:
+    """Derive a company_id for a new prompt.
+
+    Priority:
+    1. If service_id is given, look up Service.company_id.
+    2. Otherwise use fallback_company_id.
+    Returns None if neither source yields a value.
+    """
+    if service_id is not None:
+        from app.models.services import Service
+        res = await db.execute(
+            select(Service.company_id).where(Service.service_id == service_id)
+        )
+        company_from_service = res.scalar()
+        if company_from_service is not None:
+            return company_from_service
+    return fallback_company_id
+
+
 async def list_prompts(
     db: AsyncSession,
     prompt_type: str | None = None,
@@ -541,12 +564,20 @@ async def list_prompts(
     include_archived: bool = False,
     service_id: int | None = None,
     service_ids: list[int] | None = None,
+    company_id: int | None = None,
 ) -> list[dict]:
-    """Return all prompts joined with their current version."""
-    stmt = select(Prompt).where(Prompt.deleted_at == None)
+    """Return all prompts joined with their current version.
+
+    When company_id is provided (tenant context), results include both
+    company-specific prompts (company_id=company_id) and legacy globals
+    (company_id=NULL) for the same service(s). This lets admins see and
+    manage legacy entries without hiding them.
+    """
+    from sqlalchemy import or_
+    stmt = select(Prompt).where(Prompt.deleted_at == None)  # noqa: E711
     if not include_archived:
-        stmt = stmt.where(Prompt.is_archived == False)
-    
+        stmt = stmt.where(Prompt.is_archived == False)  # noqa: E712
+
     if not prompt_type:
         prompt_type = "audio"
     stmt = stmt.where(Prompt.prompt_type == prompt_type)
@@ -556,10 +587,31 @@ async def list_prompts(
         stmt = stmt.where(Prompt.base_structure_key == base_structure_key)
     if is_active is not None:
         stmt = stmt.where(Prompt.is_active == is_active)
+
+    # Service filter: when company_id is in context, also include NULL-company
+    # rows for those services (legacy/global entries visible to tenant admins).
     if service_id is not None:
-        stmt = stmt.where(Prompt.service_id == service_id)
+        if company_id is not None:
+            stmt = stmt.where(
+                Prompt.service_id == service_id,
+                or_(Prompt.company_id == company_id, Prompt.company_id == None),  # noqa: E711
+            )
+        else:
+            stmt = stmt.where(Prompt.service_id == service_id)
     elif service_ids is not None:
-        stmt = stmt.where(Prompt.service_id.in_(service_ids))
+        if company_id is not None:
+            stmt = stmt.where(
+                Prompt.service_id.in_(service_ids),
+                or_(Prompt.company_id == company_id, Prompt.company_id == None),  # noqa: E711
+            )
+        else:
+            stmt = stmt.where(Prompt.service_id.in_(service_ids))
+    elif company_id is not None:
+        # No service filter but tenant context: restrict to tenant + globals
+        stmt = stmt.where(
+            or_(Prompt.company_id == company_id, Prompt.company_id == None)  # noqa: E711
+        )
+
     stmt = stmt.order_by(Prompt.prompt_id)
 
     result = await db.execute(stmt)
@@ -630,19 +682,53 @@ async def list_prompts(
     return out
 
 
-async def get_active_prompt(db: AsyncSession, prompt_type: str, service_id: int | None = None) -> dict | None:
-    """Return the active prompt for a given type with its current version, optionally filtered by service_id."""
-    stmt = select(Prompt).where(
+async def get_active_prompt(
+    db: AsyncSession,
+    prompt_type: str,
+    service_id: int | None = None,
+    company_id: int | None = None,
+) -> dict | None:
+    """Return the active prompt for a given type with its current version.
+
+    When company_id is provided (tenant context):
+    1. Prefer a tenant-specific active prompt (company_id=company_id).
+    2. Fall back to a global active prompt (company_id=NULL) only when no
+       tenant-specific one exists for that (service_id, prompt_type).
+    When company_id is None (super-admin or no context), return whatever is
+    active for the given service_id without company filter.
+    """
+    base_filters = [
         Prompt.prompt_type == prompt_type,
-        Prompt.is_active == True,
-        Prompt.is_archived == False,
-        Prompt.deleted_at == None,
-    )
+        Prompt.is_active == True,    # noqa: E712
+        Prompt.is_archived == False, # noqa: E712
+        Prompt.deleted_at == None,   # noqa: E711
+    ]
     if service_id is not None:
-        stmt = stmt.where(Prompt.service_id == service_id)
-        
-    result = await db.execute(stmt.order_by(Prompt.prompt_id.desc()).limit(1))
-    p = result.scalars().first()
+        base_filters.append(Prompt.service_id == service_id)
+
+    if company_id is not None:
+        # 1. Try tenant-specific first
+        tenant_stmt = select(Prompt).where(
+            *base_filters,
+            Prompt.company_id == company_id,
+        ).order_by(Prompt.prompt_id.desc()).limit(1)
+        tenant_res = await db.execute(tenant_stmt)
+        p = tenant_res.scalars().first()
+
+        if p is None:
+            # 2. Fall back to global (company_id=NULL) if no tenant-specific exists
+            global_stmt = select(Prompt).where(
+                *base_filters,
+                Prompt.company_id == None,  # noqa: E711
+            ).order_by(Prompt.prompt_id.desc()).limit(1)
+            global_res = await db.execute(global_stmt)
+            p = global_res.scalars().first()
+    else:
+        result = await db.execute(
+            select(Prompt).where(*base_filters).order_by(Prompt.prompt_id.desc()).limit(1)
+        )
+        p = result.scalars().first()
+
     if not p:
         return None
 
@@ -891,7 +977,14 @@ async def duplicate_prompt(
     current_version = await _get_current_version(db, source_prompt_id)
     current_text = current_version.prompt if current_version else None
 
-    # 3. Create new prompt record
+    # 3. Resolve company_id: copy from source; if NULL, derive from the service
+    inherited_company_id = src_prompt.company_id
+    if inherited_company_id is None and src_prompt.service_id is not None:
+        inherited_company_id = await resolve_company_id_for_prompt(
+            db, src_prompt.service_id, None
+        )
+
+    # 4. Create new prompt record
     new_prompt = Prompt(
         prompt_name=prompt_name,
         prompt_type=src_prompt.prompt_type,
@@ -904,12 +997,13 @@ async def duplicate_prompt(
         base_structure_key=src_prompt.base_structure_key,
         base_structure_name=src_prompt.base_structure_name,
         service_id=src_prompt.service_id,
+        company_id=inherited_company_id,
         owner_user_id=owner_user_id,
     )
     db.add(new_prompt)
     await db.flush()
 
-    # 4. Create initial version for the new prompt
+    # 5. Create initial version for the new prompt
     version_label = _generate_label()
     new_version = PromptVersion(
         prompt_id=new_prompt.prompt_id,
@@ -926,11 +1020,11 @@ async def duplicate_prompt(
     db.add(new_version)
     await db.flush()
 
-    # 5. Copy active criteria and their typology relations
+    # 6. Copy active criteria and their typology relations
     criteria_res = await db.execute(
         select(PromptCriterion).where(
             PromptCriterion.prompt_id == source_prompt_id,
-            PromptCriterion.is_active == True,
+            PromptCriterion.is_active == True,  # noqa: E712
         ).order_by(PromptCriterion.order_index.asc())
     )
     src_criteria = criteria_res.scalars().all()
@@ -1348,7 +1442,14 @@ async def create_prompt_from_base(db: AsyncSession, body: CreateFromBaseRequest)
     if not struct:
         raise ValueError(f"Base structure with ID {body.base_structure_id} not found.")
 
-    # 2. Create the prompt record
+    # 2. Resolve company_id: prefer base structure's company, derive from service if NULL
+    resolved_company_id = struct.company_id
+    if resolved_company_id is None and struct.service_id is not None:
+        resolved_company_id = await resolve_company_id_for_prompt(
+            db, struct.service_id, None
+        )
+
+    # 3. Create the prompt record
     new_prompt = Prompt(
         prompt_name=body.prompt_name,
         prompt_type=body.prompt_type,
@@ -1360,23 +1461,16 @@ async def create_prompt_from_base(db: AsyncSession, body: CreateFromBaseRequest)
         base_structure_key=struct.structure_key,
         base_structure_name=struct.structure_name,
         service_id=struct.service_id,
-        company_id=struct.company_id,
+        company_id=resolved_company_id,
         owner_user_id=body.owner_user_id,
     )
     db.add(new_prompt)
     await db.flush()
 
-    # If explicitly requested to activate, deactivate all other prompts of the same type WITHIN THE SAME SERVICE
+    # If explicitly requested to activate, use deactivate_competing_prompts
+    # to enforce the one-active-per-(company, service, type) invariant.
     if body.activate:
-        await db.execute(
-            update(Prompt)
-            .where(
-                Prompt.prompt_type == body.prompt_type,
-                Prompt.service_id == new_prompt.service_id,
-                Prompt.prompt_id != new_prompt.prompt_id
-            )
-            .values(is_active=False)
-        )
+        await deactivate_competing_prompts(db, new_prompt)
 
 
     # 3. Create the first prompt version

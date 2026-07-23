@@ -8,7 +8,9 @@ class MassEvaluationJobCreate(BaseModel):
     job_name: str
     description: str | None = None
     is_active: bool = True
-    prompt_id: int
+    prompt_id: int | None = None
+    company_id: int | None = None
+    service_id: int | None = None
     prompt_version_id: int | None = None
     selection_mode: str = "filter"  # filter / manual_call_ids
     call_ids: list[str] | None = None
@@ -60,6 +62,14 @@ class MassEvaluationJobCreate(BaseModel):
                     return data[k], True
             return None, False
 
+        # Normalize prompt_id
+        val, found = get_matching_value(["prompt_id", "evaluation_structure_id", "structure_id", "prompt_structure_id"])
+        if found and val is not None and val != "":
+            try:
+                data["prompt_id"] = int(val)
+            except (ValueError, TypeError):
+                pass
+
         # Normalize date_from
         val, found = get_matching_value(["date_from", "search_date_from", "fecha_desde"])
         if found:
@@ -96,6 +106,8 @@ class MassEvaluationJobUpdate(BaseModel):
     description: str | None = None
     is_active: bool | None = None
     prompt_id: int | None = None
+    company_id: int | None = None
+    service_id: int | None = None
     prompt_version_id: int | None = None
 
     # Validation override flags
@@ -141,6 +153,14 @@ class MassEvaluationJobUpdate(BaseModel):
                 if k in data:
                     return data[k], True
             return None, False
+
+        # Normalize prompt_id
+        val, found = get_matching_value(["prompt_id", "evaluation_structure_id", "structure_id", "prompt_structure_id"])
+        if found and val is not None and val != "":
+            try:
+                data["prompt_id"] = int(val)
+            except (ValueError, TypeError):
+                pass
 
         # Normalize date_from
         val, found = get_matching_value(["date_from", "search_date_from", "fecha_desde"])

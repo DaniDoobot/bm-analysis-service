@@ -100,36 +100,96 @@ async def create_job(
             detail="No autorizado para crear jobs masivos."
         )
 
-    # Validate Prompt ownership
-    stmt = select(Prompt).where(Prompt.prompt_id == payload.prompt_id)
-    res = await db.execute(stmt)
-    prompt = res.scalars().first()
-    if not prompt:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"La estructura con ID {payload.prompt_id} no existe."
-        )
+    target_company_id: int | None = None
+    target_service_id: int | None = None
 
-    if not context.is_super_admin:
-        if prompt.company_id not in context.allowed_company_ids:
+    if payload.prompt_id is not None:
+        stmt = select(Prompt).where(Prompt.prompt_id == payload.prompt_id)
+        res = await db.execute(stmt)
+        prompt = res.scalars().first()
+        if not prompt or prompt.is_archived or prompt.deleted_at is not None:
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Acceso denegado: la estructura seleccionada pertenece a otra empresa."
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="La estructura seleccionada no existe o está archivada."
             )
-        if context.allowed_service_ids is not None and prompt.service_id not in context.allowed_service_ids:
+
+        prompt_service_id = prompt.service_id
+        prompt_company_id = prompt.company_id
+
+        if prompt_company_id is None and prompt_service_id is not None:
+            s_res = await db.execute(select(Service.company_id).where(Service.service_id == prompt_service_id))
+            company_from_service = s_res.scalar()
+            if company_from_service is not None:
+                prompt_company_id = company_from_service
+                prompt.company_id = prompt_company_id
+                db.add(prompt)
+                await db.flush()
+
+        if prompt_company_id is None:
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Acceso denegado: la estructura seleccionada pertenece a un servicio no asignado."
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="La estructura seleccionada no tiene empresa asociada."
             )
+
+        if prompt_service_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No se pudo determinar el servicio para el job."
+            )
+
+        # Rule 2: If payload also sends company_id or service_id, validate match
+        if payload.service_id is not None and payload.service_id != prompt_service_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="La empresa/servicio no coincide con la estructura específica seleccionada."
+            )
+        if payload.company_id is not None and payload.company_id != prompt_company_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="La empresa/servicio no coincide con la estructura específica seleccionada."
+            )
+
+        target_company_id = prompt_company_id
+        target_service_id = prompt_service_id
+
+        # Rules 4, 5, 6: Scope check based on prompt's derived scope
+        if not context.is_super_admin:
+            if prompt_company_id not in context.allowed_company_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: la estructura seleccionada pertenece a otra empresa."
+                )
+            if context.allowed_service_ids is not None and prompt_service_id not in context.allowed_service_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: la estructura seleccionada pertenece a un servicio no asignado."
+                )
+    else:
+        target_company_id = payload.company_id or context.company_id
+        target_service_id = payload.service_id
+        if not target_company_id or not target_service_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Debe seleccionar una estructura específica o especificar empresa y servicio."
+            )
+        if not context.is_super_admin:
+            if target_company_id not in context.allowed_company_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: la empresa especificada no está autorizada."
+                )
+            if context.allowed_service_ids is not None and target_service_id not in context.allowed_service_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: el servicio especificado no está asignado."
+                )
 
     try:
-        comp_id = prompt.company_id or context.company_id
-        serv_id = prompt.service_id
         return await MassEvaluationService.create_job(
             db,
             payload=payload,
-            company_id=comp_id,
-            service_id=serv_id
+            company_id=target_company_id,
+            service_id=target_service_id
         )
     except ValueError as ve:
         raise HTTPException(
@@ -178,18 +238,52 @@ async def update_job(
         stmt = select(Prompt).where(Prompt.prompt_id == payload.prompt_id)
         res = await db.execute(stmt)
         new_prompt = res.scalars().first()
-        if not new_prompt:
+        if not new_prompt or new_prompt.is_archived or new_prompt.deleted_at is not None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"El prompt ID {payload.prompt_id} no existe."
+                detail="La estructura seleccionada no existe o está archivada."
             )
+
+        p_serv_id = new_prompt.service_id
+        p_comp_id = new_prompt.company_id
+        if p_comp_id is None and p_serv_id is not None:
+            s_res = await db.execute(select(Service.company_id).where(Service.service_id == p_serv_id))
+            comp_from_service = s_res.scalar()
+            if comp_from_service is not None:
+                p_comp_id = comp_from_service
+                new_prompt.company_id = p_comp_id
+                db.add(new_prompt)
+                await db.flush()
+
+        if p_comp_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="La estructura seleccionada no tiene empresa asociada."
+            )
+        if p_serv_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No se pudo determinar el servicio para el job."
+            )
+
+        if payload.service_id is not None and payload.service_id != p_serv_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="La empresa/servicio no coincide con la estructura específica seleccionada."
+            )
+        if payload.company_id is not None and payload.company_id != p_comp_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="La empresa/servicio no coincide con la estructura específica seleccionada."
+            )
+
         if not context.is_super_admin:
-            if new_prompt.company_id not in context.allowed_company_ids:
+            if p_comp_id not in context.allowed_company_ids:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Acceso denegado: el nuevo prompt pertenece a otra empresa."
                 )
-            if context.allowed_service_ids is not None and new_prompt.service_id not in context.allowed_service_ids:
+            if context.allowed_service_ids is not None and p_serv_id not in context.allowed_service_ids:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Acceso denegado: el nuevo prompt pertenece a un servicio no asignado."

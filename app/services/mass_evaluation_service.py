@@ -254,31 +254,59 @@ class MassEvaluationService:
         company_id: int | None = None,
         service_id: int | None = None,
     ) -> MassEvaluationJob:
-        # Validate Prompt State
-        stmt = select(Prompt).where(Prompt.prompt_id == payload.prompt_id)
-        res = await db.execute(stmt)
-        prompt = res.scalars().first()
-        if not prompt:
-            raise ValueError(f"La estructura con ID {payload.prompt_id} no existe.")
+        target_company_id: int | None = None
+        target_service_id: int | None = None
 
-        if prompt.is_archived or prompt.deleted_at is not None:
-            raise ValueError("La estructura seleccionada no existe o está archivada.")
+        if payload.prompt_id:
+            stmt = select(Prompt).where(Prompt.prompt_id == payload.prompt_id)
+            res = await db.execute(stmt)
+            prompt = res.scalars().first()
+            if not prompt or prompt.is_archived or prompt.deleted_at is not None:
+                raise ValueError("La estructura seleccionada no existe o está archivada.")
 
-        # Check for active draft warning
-        from app.models.drafts import PromptDraft
-        draft_stmt = select(PromptDraft).where(
-            PromptDraft.prompt_id == prompt.prompt_id,
-            PromptDraft.status.in_(["draft", "pending", "active"])
-        ).limit(1)
-        draft_res = await db.execute(draft_stmt)
-        active_draft = draft_res.scalars().first()
-        if active_draft:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.warning(
-                f"¡ADVERTENCIA! El prompt ID {prompt.prompt_id} tiene un borrador activo (Draft ID {active_draft.draft_id}). "
-                f"El job de análisis masivo usará la versión publicada en producción (current_version_id), NO el borrador activo de trabajo."
-            )
+            # Check for active draft warning
+            from app.models.drafts import PromptDraft
+            draft_stmt = select(PromptDraft).where(
+                PromptDraft.prompt_id == prompt.prompt_id,
+                PromptDraft.status.in_(["draft", "pending", "active"])
+            ).limit(1)
+            draft_res = await db.execute(draft_stmt)
+            active_draft = draft_res.scalars().first()
+            if active_draft:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(
+                    f"¡ADVERTENCIA! El prompt ID {prompt.prompt_id} tiene un borrador activo (Draft ID {active_draft.draft_id}). "
+                    f"El job de análisis masivo usará la versión publicada en producción (current_version_id), NO el borrador activo de trabajo."
+                )
+
+            prompt_service_id = prompt.service_id or service_id or payload.service_id
+            prompt_company_id = prompt.company_id or company_id or payload.company_id
+
+            if not prompt_company_id and prompt_service_id:
+                from app.models.services import Service
+                s_res = await db.execute(select(Service.company_id).where(Service.service_id == prompt_service_id))
+                company_from_service = s_res.scalar()
+                if company_from_service:
+                    prompt_company_id = company_from_service
+                    prompt.company_id = prompt_company_id
+                    db.add(prompt)
+                    await db.flush()
+
+            if not prompt_company_id:
+                raise ValueError("La estructura seleccionada no tiene empresa asociada.")
+
+            if not prompt_service_id:
+                raise ValueError("No se pudo determinar el servicio para el job.")
+
+            target_company_id = prompt_company_id
+            target_service_id = prompt_service_id
+        else:
+            target_company_id = company_id or payload.company_id
+            target_service_id = service_id or payload.service_id
+
+        if not target_company_id or not target_service_id:
+            raise ValueError("Debe seleccionar una estructura específica o especificar empresa y servicio.")
 
         # Validate selection mode and call_ids
         if payload.selection_mode == "manual_call_ids":
@@ -304,13 +332,6 @@ class MassEvaluationService:
         job_data = payload.model_dump()
         job_data.pop("allow_inactive_prompt", None)
         job_data.pop("test_mode", None)
-
-        # Resolve company/service from prompt or override
-        target_company_id = company_id or prompt.company_id
-        target_service_id = service_id or prompt.service_id
-
-        if not target_company_id or not target_service_id:
-            raise ValueError("No se pudo determinar la empresa o el servicio para el job.")
 
         job = MassEvaluationJob(**job_data)
         job.company_id = target_company_id
@@ -372,13 +393,23 @@ class MassEvaluationService:
             ).limit(1)
             draft_res = await db.execute(draft_stmt)
             active_draft = draft_res.scalars().first()
-            if active_draft:
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.warning(
-                    f"¡ADVERTENCIA! El prompt ID {prompt.prompt_id} tiene un borrador activo (Draft ID {active_draft.draft_id}). "
-                    f"El job de análisis masivo usará la versión publicada en producción (current_version_id), NO el borrador activo de trabajo."
-                )
+            target_service_id = prompt.service_id or update_data.get("service_id")
+            target_company_id = prompt.company_id or update_data.get("company_id")
+
+            if not target_company_id and target_service_id:
+                from app.models.services import Service
+                s_res = await db.execute(select(Service.company_id).where(Service.service_id == target_service_id))
+                company_from_service = s_res.scalar()
+                if company_from_service:
+                    target_company_id = company_from_service
+                    prompt.company_id = target_company_id
+                    db.add(prompt)
+                    await db.flush()
+
+            if target_company_id:
+                update_data["company_id"] = target_company_id
+            if target_service_id:
+                update_data["service_id"] = target_service_id
 
         for k, v in update_data.items():
             setattr(job, k, v)
