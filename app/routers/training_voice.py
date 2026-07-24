@@ -15,7 +15,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, or_, desc, func, text
 
-from app.dependencies import get_db, get_current_user
+from app.dependencies import get_db, get_current_user, get_tenant_context
+from app.core.tenant_context import TenantContext
 from app.models.users import User
 from app.models.personalized_training import (
     TrainingAgentSetting,
@@ -2074,7 +2075,7 @@ async def retry_cycle_finalization(
     cycle_id: int,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
-    current_user=Depends(get_current_user),
+    context: TenantContext = Depends(get_tenant_context),
 ):
     """
     Admin endpoint: Re-trigger the final cycle consolidation report for a cycle
@@ -2083,6 +2084,10 @@ async def retry_cycle_finalization(
     """
     from app.models.personalized_training import TrainingAgentReport, TrainingCompletionStatus
     from app.services.personalized_training_service import check_and_finalize_training_cycle
+    from app.core.roles import InternalRole
+
+    if context.normalized_role == InternalRole.AGENT:
+        raise HTTPException(status_code=403, detail="Acceso denegado.")
 
     stmt = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == cycle_id)
     res = await db.execute(stmt)
@@ -2090,6 +2095,12 @@ async def retry_cycle_finalization(
 
     if not report:
         raise HTTPException(status_code=404, detail=f"Cycle {cycle_id} not found.")
+
+    if not context.is_super_admin:
+        if report.company_id not in context.allowed_company_ids:
+            raise HTTPException(status_code=403, detail="Acceso denegado: El ciclo pertenece a otra empresa.")
+        if context.allowed_agent_ids is not None and report.hubspot_owner_id not in context.allowed_agent_ids:
+            raise HTTPException(status_code=403, detail="Acceso denegado: No tienes permiso sobre el agente de este ciclo.")
 
     if report.status == "completed" and report.final_report_json is not None:
         raise HTTPException(status_code=400, detail="Cycle is already finalized successfully.")
@@ -2128,13 +2139,17 @@ async def retry_cycle_finalization(
 async def get_cycle_status(
     cycle_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user=Depends(get_current_user),
+    context: TenantContext = Depends(get_tenant_context),
 ):
     """
     Admin endpoint: Get the current status of a training cycle,
     including how many simulations are completed and the report status.
     """
     from app.models.personalized_training import TrainingAgentReport, TrainingCompletionStatus
+    from app.core.roles import InternalRole
+
+    if context.normalized_role == InternalRole.AGENT:
+        raise HTTPException(status_code=403, detail="Acceso denegado.")
 
     stmt = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == cycle_id)
     res = await db.execute(stmt)
@@ -2142,6 +2157,12 @@ async def get_cycle_status(
 
     if not report:
         raise HTTPException(status_code=404, detail=f"Cycle {cycle_id} not found.")
+
+    if not context.is_super_admin:
+        if report.company_id not in context.allowed_company_ids:
+            raise HTTPException(status_code=403, detail="Acceso denegado: El ciclo pertenece a otra empresa.")
+        if context.allowed_agent_ids is not None and report.hubspot_owner_id not in context.allowed_agent_ids:
+            raise HTTPException(status_code=403, detail="Acceso denegado: No tienes permiso sobre el agente de este ciclo.")
 
     stmt_all = select(TrainingCompletionStatus).where(
         TrainingCompletionStatus.training_report_id == cycle_id

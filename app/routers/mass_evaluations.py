@@ -849,7 +849,7 @@ async def list_automations(
     db: AsyncSession = Depends(get_db)
 ):
     """List all active automation configurations."""
-    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+    if context.normalized_role == InternalRole.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No autorizado para gestionar automatizaciones."
@@ -869,7 +869,7 @@ async def get_automation(
     db: AsyncSession = Depends(get_db)
 ):
     """Retrieve details of a single automation configuration."""
-    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+    if context.normalized_role == InternalRole.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No autorizado para gestionar automatizaciones."
@@ -909,7 +909,7 @@ async def create_automation(
     db: AsyncSession = Depends(get_db)
 ):
     """Create a new automation configuration."""
-    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+    if context.normalized_role == InternalRole.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No autorizado para crear automatizaciones."
@@ -952,6 +952,17 @@ async def create_automation(
                 detail="Acceso denegado: la estructura pertenece a un servicio no asignado."
             )
 
+        if context.allowed_agent_ids is not None:
+            if payload.agent_owner_ids is not None:
+                for a_id in payload.agent_owner_ids:
+                    if a_id not in context.allowed_agent_ids:
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail=f"Acceso denegado: no tienes permisos para incluir al agente {a_id}."
+                        )
+            elif context.normalized_role == InternalRole.TEAM_COORDINATOR:
+                payload.agent_owner_ids = context.allowed_agent_ids
+
     try:
         return await MassEvaluationService.create_automation(db, payload=payload)
     except ValueError as ve:
@@ -974,7 +985,7 @@ async def update_automation(
     db: AsyncSession = Depends(get_db)
 ):
     """Update an automation configuration."""
-    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+    if context.normalized_role == InternalRole.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No autorizado para modificar automatizaciones."
@@ -1037,7 +1048,7 @@ async def delete_automation(
     db: AsyncSession = Depends(get_db)
 ):
     """Deactivate or delete an automation configuration."""
-    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+    if context.normalized_role == InternalRole.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No autorizado para borrar automatizaciones."
@@ -1078,7 +1089,7 @@ async def run_automation_now(
     db: AsyncSession = Depends(get_db)
 ):
     """Trigger an automation execution run immediately."""
-    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+    if context.normalized_role == InternalRole.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No autorizado para ejecutar automatizaciones."
@@ -1130,7 +1141,7 @@ async def list_automation_runs(
     db: AsyncSession = Depends(get_db)
 ):
     """List execution logs / runs for a given automation configuration."""
-    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+    if context.normalized_role == InternalRole.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No autorizado para gestionar automatizaciones."

@@ -213,10 +213,12 @@ class TenantContext(BaseModel):
                         primary_service_id = fb_row.service_id
                         primary_service_name = fb_row.service_name
 
-            # Cargar agentes de esos equipos
-            agents_stmt = select(User.hubspot_owner_id).join(AgentTeamAssociation).where(AgentTeamAssociation.team_id.in_(allowed_teams))
-            agents_res = await db.execute(agents_stmt)
-            allowed_agents = [uid for uid in agents_res.scalars().all() if uid]
+            # Cargar agentes de esos equipos (vía AgentTeamAssociation o primary_team_id)
+            agents_stmt1 = select(User.hubspot_owner_id).join(AgentTeamAssociation).where(AgentTeamAssociation.team_id.in_(allowed_teams))
+            agents_res1 = await db.execute(agents_stmt1)
+            agents_stmt2 = select(User.hubspot_owner_id).where(User.primary_team_id.in_(allowed_teams))
+            agents_res2 = await db.execute(agents_stmt2)
+            allowed_agents = [uid for uid in list(agents_res1.scalars().all()) + list(agents_res2.scalars().all()) if uid]
             if user.hubspot_owner_id:
                 allowed_agents.append(user.hubspot_owner_id)
             allowed_agents = list(set(allowed_agents))

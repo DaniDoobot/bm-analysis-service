@@ -36,26 +36,39 @@ router = APIRouter(prefix="/bm/training", tags=["Personalized Training"])
 # ── Security Helpers ─────────────────────────────────────────────────────────
 
 def enforce_admin_role(user: User):
-    """Enforce that the logged-in user is an administrator or manager."""
+    """Enforce that the logged-in user is an administrator, manager or team coordinator."""
     from app.core.roles import normalize_role, InternalRole
     norm_role = normalize_role(user.role)
-    if norm_role not in [InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER]:
-        logger.warning("Access denied: User ID %s does not have administrator/manager role.", user.user_id)
+    if norm_role not in [InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR]:
+        logger.warning("Access denied: User ID %s does not have administrator/manager/coordinator role.", user.user_id)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Se requiere rol de administrador o responsable para realizar esta operación."
+            detail="Se requiere rol de administrador, responsable o coordinador para realizar esta operación."
         )
 
 
-def enforce_agent_or_admin_ownership(user: User, hubspot_owner_id: str):
+def enforce_agent_or_admin_ownership(user: User, hubspot_owner_id: str, context: Optional[TenantContext] = None):
     """
-    Enforces that a user can only access their own data unless they are an admin or manager.
+    Enforces that a user can only access their own data unless they are an admin, manager or team coordinator.
     """
     from app.core.roles import normalize_role, InternalRole
     norm_role = normalize_role(user.role)
     if norm_role in [InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER]:
         return  # Admins and Service Managers can see agent data in scope
     
+    if norm_role == InternalRole.TEAM_COORDINATOR:
+        if context and context.allowed_agent_ids is not None:
+            if hubspot_owner_id in context.allowed_agent_ids:
+                return
+        logger.warning(
+            "Access denied: Team Coordinator User ID %s tried to access agent %s outside team scope.",
+            user.user_id, hubspot_owner_id
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permisos para ver el entrenamiento de agentes fuera de tus equipos."
+        )
+
     if not user.hubspot_owner_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
