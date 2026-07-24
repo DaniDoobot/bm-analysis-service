@@ -33,6 +33,7 @@ class UserBase(BaseModel):
     username: str
     email: str
     name: Optional[str] = None
+    display_name: Optional[str] = None
     role: str = "agente"
     company_id: Optional[int] = None
     company_name: Optional[str] = None
@@ -48,6 +49,15 @@ class UserBase(BaseModel):
     is_active: bool = True
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None
+
+    @model_validator(mode="after")
+    def compute_display_name(self) -> "UserBase":
+        if not self.display_name:
+            if self.name and self.name.strip():
+                self.display_name = self.name.strip()
+            else:
+                self.display_name = self.username
+        return self
 
 
 class UserOut(UserBase):
@@ -256,8 +266,19 @@ class MeUpdatePayload(BaseModel):
     current_password: str
     username: Optional[str] = None
     email: Optional[str] = None
+    name: Optional[str] = Field(default=None, validation_alias=AliasChoices("name", "full_name"))
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_conflict(cls, data: Any) -> Any:
+        return check_name_conflict(data)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def clean_name(cls, v):
+        return normalize_name_val(v)
 
     @field_validator("hubspot_owner_id", mode="before")
     @classmethod
@@ -296,8 +317,19 @@ class ResetPasswordPayload(BaseModel):
 class EligibleUserOut(BaseModel):
     user_id: int
     username: str
+    name: Optional[str] = None
+    display_name: Optional[str] = None
     email: str
     role: str
+
+    @model_validator(mode="after")
+    def compute_display_name(self) -> "EligibleUserOut":
+        if not self.display_name:
+            if self.name and self.name.strip():
+                self.display_name = self.name.strip()
+            else:
+                self.display_name = self.username
+        return self
 
 
 class PasswordResetConfirmPayload(BaseModel):

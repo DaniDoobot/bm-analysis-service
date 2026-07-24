@@ -20,6 +20,12 @@ class User(Base):
     email: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     name: Mapped[str | None] = mapped_column(Text, nullable=True)
     role: Mapped[str] = mapped_column(Text, default="agent", nullable=False)
+
+    @property
+    def display_name(self) -> str:
+        if self.name and self.name.strip():
+            return self.name.strip()
+        return self.username
     
     company = relationship("Company")
     primary_service = relationship("Service", foreign_keys=[primary_service_id])

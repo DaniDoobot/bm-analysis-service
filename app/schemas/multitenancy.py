@@ -1,7 +1,7 @@
 import re
 from datetime import datetime
 from typing import List, Optional
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from app.core.roles import InternalRole
 
 _SLUG_REGEX = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
@@ -145,16 +145,28 @@ class UserSummaryResponse(BaseModel):
     username: str
     email: str
     name: Optional[str] = None
+    display_name: Optional[str] = None
     role: str
     hubspot_owner_id: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="after")
+    def compute_display_name(self) -> "UserSummaryResponse":
+        if not self.display_name:
+            if self.name and self.name.strip():
+                self.display_name = self.name.strip()
+            else:
+                self.display_name = self.username
+        return self
 
 
 class TenantContextResponse(BaseModel):
     user_id: int
     username: str
     email: str
+    name: Optional[str] = None
+    display_name: Optional[str] = None
     raw_role: str
     normalized_role: InternalRole
     company_id: Optional[int] = None

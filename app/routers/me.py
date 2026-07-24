@@ -109,6 +109,8 @@ async def login(
         "user": {
             "user_id": user.user_id,
             "username": user.username,
+            "name": user.name,
+            "display_name": user.display_name,
             "email": user.email,
             "role": user.role,
             "normalized_role": normalize_role(user.role).value,
@@ -660,6 +662,9 @@ async def update_my_profile(
         )
         
     # 2. Update editable fields
+    if "name" in payload.model_fields_set:
+        current_user.name = payload.name.strip() if (payload.name and payload.name.strip()) else None
+
     if payload.username is not None:
         # Check uniqueness if changed
         if payload.username != current_user.username:

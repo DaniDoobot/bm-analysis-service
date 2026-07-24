@@ -67,7 +67,9 @@ async def _enrich_structure_response(
         if owner_obj:
             owner_data = {
                 "user_id": owner_obj.user_id,
-                "display_name": owner_obj.username,
+                "name": owner_obj.name,
+                "display_name": owner_obj.display_name,
+                "username": owner_obj.username,
                 "email": owner_obj.email
             }
     response_dict["owner"] = owner_data
@@ -844,6 +846,8 @@ async def get_structure_permissions(
         out.append({
             "permission_id": p_obj.permission_id,
             "user_id": u_obj.user_id,
+            "name": u_obj.name,
+            "display_name": u_obj.display_name,
             "username": u_obj.username,
             "email": u_obj.email,
             "permission_level": p_obj.permission_level,

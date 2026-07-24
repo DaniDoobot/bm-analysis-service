@@ -954,7 +954,95 @@ class TestMultitenancyUsers(unittest.IsolatedAsyncioTestCase):
             res_agent_prompt = await ac.get("/bm/prompts/active?type=audio&service_id=1")
             self.assertEqual(res_agent_prompt.status_code, 403)
 
+    async def test_user_display_name_persistence_and_fallback(self):
+        """Verify saving, updating, and display_name fallback logic for User name."""
+        async with AsyncSession(get_engine()) as db:
+            super_admin = User(
+                username="admin_name_test",
+                email="admin_name_test@boston.com",
+                role="super_admin",
+                is_active=True,
+                company_id=1,
+                password_hash=hash_password("Pass1234!")
+            )
+            db.add(super_admin)
+            await db.commit()
+            await db.refresh(super_admin)
+
+            s_ctx = await TenantContext.build(super_admin, db)
+
+        app.dependency_overrides[get_current_user] = lambda: super_admin
+        app.dependency_overrides[get_tenant_context] = lambda: s_ctx
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            # 1. Create user with name="Victoria Arellano" via POST /bm/users
+            res_create = await ac.post("/bm/users", json={
+                "username": "varellano",
+                "email": "varellano@boston.com",
+                "name": "Victoria Arellano",
+                "role": "coordinador_equipo",
+                "company_id": 1,
+                "password": "Pass1234!"
+            })
+            self.assertEqual(res_create.status_code, 201, msg=res_create.text)
+            created_data = res_create.json()["user"]
+            u_id = created_data["user_id"]
+            self.assertEqual(created_data["name"], "Victoria Arellano")
+            self.assertEqual(created_data["display_name"], "Victoria Arellano")
+            self.assertEqual(created_data["username"], "varellano")
+
+            # GET list & detail
+            res_detail = await ac.get(f"/bm/users/{u_id}")
+            self.assertEqual(res_detail.status_code, 200)
+            detail_data = res_detail.json()
+            self.assertEqual(detail_data["name"], "Victoria Arellano")
+            self.assertEqual(detail_data["display_name"], "Victoria Arellano")
+
+            # 2. Create user without name via POST /bm/admin/users
+            res_admin_create = await ac.post("/bm/admin/users", json={
+                "username": "jcerdan",
+                "email": "jcerdan@boston.com",
+                "role": "agente",
+                "company_id": 1
+            })
+            self.assertEqual(res_admin_create.status_code, 201, msg=res_admin_create.text)
+            admin_created_data = res_admin_create.json()
+            u_id_no_name = admin_created_data["user_id"]
+            self.assertIsNone(admin_created_data["name"])
+            self.assertEqual(admin_created_data["display_name"], "jcerdan")
+
+            # 3. PATCH user with name="María Olvera" via PATCH /bm/users/{u_id}
+            res_patch1 = await ac.patch(f"/bm/users/{u_id}", json={
+                "name": "María Olvera"
+            })
+            self.assertEqual(res_patch1.status_code, 200)
+            res_detail_p1 = await ac.get(f"/bm/users/{u_id}")
+            data_p1 = res_detail_p1.json()
+            self.assertEqual(data_p1["name"], "María Olvera")
+            self.assertEqual(data_p1["display_name"], "María Olvera")
+
+            # 4. PATCH user without including name -> preserves previous name
+            res_patch2 = await ac.patch(f"/bm/users/{u_id}", json={
+                "email": "maria_olvera_updated@boston.com"
+            })
+            self.assertEqual(res_patch2.status_code, 200)
+            res_detail_p2 = await ac.get(f"/bm/users/{u_id}")
+            data_p2 = res_detail_p2.json()
+            self.assertEqual(data_p2["name"], "María Olvera")
+            self.assertEqual(data_p2["display_name"], "María Olvera")
+
+            # 5. PATCH user with name="" -> clears name to None and fallback display_name=username
+            res_patch3 = await ac.patch(f"/bm/users/{u_id}", json={
+                "name": ""
+            })
+            self.assertEqual(res_patch3.status_code, 200)
+            res_detail_p3 = await ac.get(f"/bm/users/{u_id}")
+            data_p3 = res_detail_p3.json()
+            self.assertIsNone(data_p3["name"])
+            self.assertEqual(data_p3["display_name"], "varellano")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

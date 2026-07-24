@@ -205,6 +205,8 @@ async def list_eligible_users(
     return [
         {
             "user_id": u.user_id,
+            "name": u.name,
+            "display_name": u.display_name,
             "username": u.username,
             "email": u.email,
             "role": u.role
@@ -250,6 +252,7 @@ def _user_to_full(
         "id": u.user_id,
         "user_id": u.user_id,
         "name": u.name,
+        "display_name": u.display_name,
         "username": u.username,
         "email": u.email,
         "role": u.role,
@@ -391,6 +394,7 @@ async def list_users(
                 "id": u.user_id,
                 "user_id": u.user_id,
                 "name": u.name,
+                "display_name": u.display_name,
                 "username": u.username,
                 "email": u.email,
                 "role": u.role,
@@ -538,7 +542,7 @@ async def create_user(
         context=context
     )
 
-    username = (body.username or body.name or body.email.split("@")[0]).strip()
+    username = (body.username or body.email.split("@")[0]).strip()
 
     clean_hs_id = body.hubspot_owner_id
     if clean_hs_id is not None:
@@ -816,7 +820,7 @@ async def update_user(
             user.username = username_clean
 
     if "name" in body.model_fields_set:
-        new_name = body.name
+        new_name = body.name.strip() if (body.name and body.name.strip()) else None
         if new_name != user.name:
             changes["name"] = {"old": user.name, "new": new_name}
             user.name = new_name

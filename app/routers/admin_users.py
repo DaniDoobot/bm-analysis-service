@@ -1,8 +1,8 @@
 """FastAPI router for administrative user management and assignments."""
 import logging
 import re
-from typing import Annotated, List, Optional
-from pydantic import BaseModel, ConfigDict, Field, AliasChoices
+from typing import Annotated, List, Optional, Any
+from pydantic import BaseModel, ConfigDict, Field, AliasChoices, field_validator, model_validator
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +16,7 @@ from app.core.tenant_context import TenantContext
 from app.core.roles import InternalRole, normalize_role, ROLE_MAPPINGS
 from app.schemas.services import ServiceOut
 from app.schemas.multitenancy import TeamResponse
+from app.schemas.users import check_name_conflict, normalize_name_val
 from app.services.users_service import (
     validate_user_services, save_user_service_associations, get_user_services_info,
     validate_user_teams, save_user_team_associations, get_user_teams_info
@@ -32,6 +33,7 @@ class AdminUserResponse(BaseModel):
     username: str
     email: str
     name: Optional[str] = None
+    display_name: Optional[str] = None
     role: str
     normalized_role: str
     company_id: Optional[int] = None
@@ -50,11 +52,20 @@ class AdminUserResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+    @model_validator(mode="after")
+    def compute_display_name(self) -> "AdminUserResponse":
+        if not self.display_name:
+            if self.name and self.name.strip():
+                self.display_name = self.name.strip()
+            else:
+                self.display_name = self.username
+        return self
+
 
 class AdminUserCreatePayload(BaseModel):
-    username: str
+    username: Optional[str] = None
     email: str
-    name: Optional[str] = None
+    name: Optional[str] = Field(default=None, validation_alias=AliasChoices("name", "full_name"))
     role: str
     company_id: Optional[int] = None
     primary_service_id: Optional[int] = Field(default=None, validation_alias=AliasChoices("primary_service_id", "service_id"))
@@ -65,9 +76,19 @@ class AdminUserCreatePayload(BaseModel):
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def check_conflict(cls, data: Any) -> Any:
+        return check_name_conflict(data)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def clean_name(cls, v):
+        return normalize_name_val(v)
+
 
 class AdminUserUpdatePayload(BaseModel):
-    name: Optional[str] = None
+    name: Optional[str] = Field(default=None, validation_alias=AliasChoices("name", "full_name"))
     email: Optional[str] = None
     is_active: Optional[bool] = None
     company_id: Optional[int] = None
@@ -76,6 +97,16 @@ class AdminUserUpdatePayload(BaseModel):
     allowed_service_ids: Optional[List[int]] = Field(default=None, validation_alias=AliasChoices("allowed_service_ids", "service_ids"))
     primary_team_id: Optional[int] = Field(default=None, validation_alias=AliasChoices("primary_team_id", "team_id"))
     allowed_team_ids: Optional[List[int]] = Field(default=None, validation_alias=AliasChoices("allowed_team_ids", "team_ids"))
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_conflict(cls, data: Any) -> Any:
+        return check_name_conflict(data)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def clean_name(cls, v):
+        return normalize_name_val(v)
 
 
 class RoleOption(BaseModel):
@@ -324,7 +355,7 @@ async def create_user(
         context=context
     )
 
-    username = payload.username.strip()
+    username = (payload.username or payload.email.split("@")[0]).strip()
     if not username:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -633,8 +664,8 @@ async def update_user(
         await save_user_team_associations(db, user.user_id, val_allowed_team_ids, role=target_role)
 
     # Perform update fields
-    if payload.name is not None:
-        user.name = payload.name.strip()
+    if "name" in payload.model_fields_set:
+        user.name = payload.name.strip() if (payload.name and payload.name.strip()) else None
 
     if payload.email is not None:
         email_str = payload.email.strip().lower()
