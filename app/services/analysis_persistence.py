@@ -175,30 +175,33 @@ async def save_analysis(
     resolved_service_id = call_metadata.get("service_id")
     resolved_company_id = call_metadata.get("company_id")
 
-    if not resolved_service_id or not resolved_company_id:
-        if prompt_id:
-            from app.models.prompts import Prompt
-            p_stmt = select(Prompt.company_id, Prompt.service_id).where(Prompt.prompt_id == prompt_id)
-            p_res = await db.execute(p_stmt)
-            p_row = p_res.fetchone()
-            if p_row:
-                if not resolved_company_id:
-                    resolved_company_id = p_row[0]
-                if not resolved_service_id:
-                    resolved_service_id = p_row[1]
+    # 1. If prompt_id is present, its service_id and company_id take absolute precedence
+    if prompt_id:
+        from app.models.prompts import Prompt
+        p_stmt = select(Prompt.company_id, Prompt.service_id).where(Prompt.prompt_id == prompt_id)
+        p_res = await db.execute(p_stmt)
+        p_row = p_res.fetchone()
+        if p_row:
+            if p_row[1] is not None:
+                resolved_service_id = p_row[1]
+            if p_row[0] is not None:
+                resolved_company_id = p_row[0]
 
+    # 2. If service_id is known but company_id is missing, derive company_id from Service
     if resolved_service_id and not resolved_company_id:
         from app.models.services import Service
         s_stmt = select(Service.company_id).where(Service.service_id == resolved_service_id)
         s_res = await db.execute(s_stmt)
         resolved_company_id = s_res.scalar()
 
+    # 3. Fallback for company_id via owner_id if still unknown
     if not resolved_company_id and owner_id:
         from app.models.users import User
         u_stmt = select(User.company_id).where(User.hubspot_owner_id == owner_id)
         u_res = await db.execute(u_stmt)
         resolved_company_id = u_res.scalar()
 
+    # 4. Fallback to "front" ONLY if service_id was never specified AND prompt_id is None
     if not resolved_service_id:
         from app.models.services import Service
         s_stmt = select(Service.service_id, Service.company_id).where(Service.service_key == "front")

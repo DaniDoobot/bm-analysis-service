@@ -168,14 +168,54 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
     if target_url.endswith(".wav") or target_url.endswith(".WAV"):
         audio_format = "wav"
 
-    # ── 4. Prompt Resolution ────────────────────────────────────────────────
-    resolved_prompt_id = request.prompt_id
+    # ── 4. Prompt & Service Resolution ─────────────────────────────────────
+    requested_service_id = getattr(request, "effective_service_id", None) or request.service_id or metadata.get("service_id")
+    requested_prompt_id = getattr(request, "effective_prompt_id", None) or request.prompt_id or metadata.get("prompt_id")
+    requested_company_id = getattr(request, "company_id", None) or metadata.get("company_id")
+
+    resolved_prompt_id = requested_prompt_id
     resolved_version_id = request.prompt_version_id
+    resolved_service_id = requested_service_id
+    resolved_company_id = requested_company_id
     prompt_text = None
 
+    logger.info(
+        "Test analysis audio request: call_id=%s, service_id=%s, prompt_id=%s, company_id=%s",
+        call_id,
+        resolved_service_id,
+        resolved_prompt_id,
+        resolved_company_id,
+    )
+
     if resolved_prompt_id:
-        # Explicit prompt_id provided: fetch its current active version
+        from app.models.prompts import Prompt
         from app.services.prompts_service import _get_current_version
+
+        p_obj = await db.get(Prompt, resolved_prompt_id)
+        if not p_obj or p_obj.deleted_at is not None or p_obj.is_archived:
+            return {
+                "ok": False,
+                "status": "error",
+                "stage": "validation",
+                "error_message": f"La estructura con ID {resolved_prompt_id} no existe o se encuentra archivada/eliminada.",
+            }
+
+        if p_obj.service_id is not None:
+            if resolved_service_id is not None and resolved_service_id != p_obj.service_id:
+                return {
+                    "ok": False,
+                    "status": "error",
+                    "stage": "validation",
+                    "error_message": (
+                        f"La estructura con ID {resolved_prompt_id} pertenece al servicio {p_obj.service_id}, "
+                        f"pero se seleccionó el servicio {resolved_service_id}."
+                    ),
+                }
+            resolved_service_id = p_obj.service_id
+
+        if p_obj.company_id is not None:
+            resolved_company_id = p_obj.company_id
+
         v = await _get_current_version(db, resolved_prompt_id)
         if not v:
             return {
@@ -186,8 +226,29 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
             }
         resolved_version_id = v.id
         prompt_text = v.prompt
+
+    elif resolved_service_id:
+        from app.services.prompts_service import get_active_prompt
+        active_prompt = await get_active_prompt(db, "audio", service_id=resolved_service_id, company_id=resolved_company_id)
+        if not active_prompt:
+            return {
+                "ok": False,
+                "status": "error",
+                "stage": "validation",
+                "error_message": (
+                    f"No hay estructura activa para llamadas en el servicio seleccionado "
+                    f"(service_id={resolved_service_id}, type=audio). "
+                    f"Activa una estructura en ese servicio antes de analizar."
+                ),
+            }
+        resolved_prompt_id = active_prompt.get("prompt_id")
+        resolved_version_id = active_prompt.get("prompt_version_id") or active_prompt.get("current_version_id")
+        prompt_text = active_prompt.get("prompt")
+        if active_prompt.get("company_id"):
+            resolved_company_id = active_prompt.get("company_id")
+
     else:
-        # No explicit prompt_id -> default to active "audio" prompt
+        # Fallback when neither prompt_id nor service_id is specified
         from app.services.prompts_service import get_active_prompt
         active_prompt = await get_active_prompt(db, "audio")
         if not active_prompt:
@@ -200,6 +261,8 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
         resolved_prompt_id = active_prompt.get("prompt_id")
         resolved_version_id = active_prompt.get("prompt_version_id") or active_prompt.get("current_version_id")
         prompt_text = active_prompt.get("prompt")
+        resolved_service_id = active_prompt.get("service_id")
+        resolved_company_id = active_prompt.get("company_id")
 
     if not prompt_text:
         return {
@@ -439,6 +502,8 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
         "hubspot_owner_id": hubspot_owner_id,
         "duracion_llamada": duracion_llamada,
         "source": source,
+        "service_id": resolved_service_id,
+        "company_id": resolved_company_id,
         "run_ts": metadata.get("run_ts"),
         "fecha_eval": metadata.get("fecha_eval"),
     }
@@ -474,6 +539,20 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
         }
 
     # ── 8. Build Response ───────────────────────────────────────────────────
+    resolved_service_name = None
+    if analysis_record.service_id:
+        from app.models.services import Service
+        s_obj = await db.get(Service, analysis_record.service_id)
+        if s_obj:
+            resolved_service_name = s_obj.service_name
+
+    resolved_prompt_name = None
+    if analysis_record.prompt_id:
+        from app.models.prompts import Prompt
+        p_obj = await db.get(Prompt, analysis_record.prompt_id)
+        if p_obj:
+            resolved_prompt_name = p_obj.prompt_name
+
     summary = {
         "tipo_llamada": parsed.get("tipo_llamada"),
         "evaluacion_global": parsed.get("evaluacion_global"),
@@ -496,6 +575,10 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
         "message": "Análisis de audio completado y guardado en base de datos",
         "call_id": call_id,
         "analysis_id": analysis_record.analysis_id,
+        "service_id": analysis_record.service_id,
+        "service_name": resolved_service_name,
+        "prompt_id": analysis_record.prompt_id,
+        "prompt_name": resolved_prompt_name,
         "summary": summary,
         "result": parsed,
     }

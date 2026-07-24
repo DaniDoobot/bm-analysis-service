@@ -64,7 +64,132 @@ async def analyze_transcription_pipeline(
             "error_message": "call_id is required.",
         }
 
-    # If transcription is not provided, resolve and transcribe the audio first
+    now = datetime.now(timezone.utc)
+
+    # ── 1. Resolve Prompt & Scope FIRST ──────────────────────────────────
+    resolved_prompt_id = prompt_id
+    resolved_version_id = prompt_version_id
+    resolved_service_id = service_id
+    resolved_company_id = (metadata.get("company_id") if isinstance(metadata, dict) else None)
+    prompt_content: str | None = None
+
+    logger.info(
+        "Test analysis request: call_id=%s, service_id=%s, prompt_id=%s, company_id=%s",
+        call_id,
+        resolved_service_id,
+        resolved_prompt_id,
+        resolved_company_id,
+    )
+
+    if custom_prompt_text:
+        # If custom prompt is passed explicitly, use it directly
+        prompt_content = custom_prompt_text
+        resolved_prompt_id = None
+        resolved_version_id = None
+
+    elif resolved_prompt_id:
+        # Explicit prompt_id provided: load Prompt ORM and validate status & service
+        from app.models.prompts import Prompt
+        from app.services.prompts_service import _get_current_version
+
+        p_obj = await db.get(Prompt, resolved_prompt_id)
+        if not p_obj or p_obj.deleted_at is not None or p_obj.is_archived:
+            return {
+                "ok": False,
+                "status": "error",
+                "stage": "validation",
+                "error_message": f"La estructura con ID {resolved_prompt_id} no existe o se encuentra archivada/eliminada.",
+            }
+
+        if p_obj.service_id is not None:
+            if resolved_service_id is not None and resolved_service_id != p_obj.service_id:
+                return {
+                    "ok": False,
+                    "status": "error",
+                    "stage": "validation",
+                    "error_message": (
+                        f"La estructura con ID {resolved_prompt_id} pertenece al servicio {p_obj.service_id}, "
+                        f"pero se seleccionó el servicio {resolved_service_id}."
+                    ),
+                }
+            resolved_service_id = p_obj.service_id
+
+        if p_obj.company_id is not None:
+            resolved_company_id = p_obj.company_id
+
+        v = await _get_current_version(db, resolved_prompt_id)
+        if not v:
+            return {
+                "ok": False,
+                "status": "error",
+                "stage": "validation",
+                "error_message": f"Prompt ID {resolved_prompt_id} not found or has no current version.",
+            }
+        resolved_version_id = v.id
+        prompt_content = v.prompt
+
+    elif resolved_service_id:
+        # No explicit prompt_id → resolve active prompt for the requested service_id
+        active_prompt = await get_active_prompt(db, "audio", service_id=resolved_service_id, company_id=resolved_company_id)
+
+        if not active_prompt:
+            # DO NOT fall back to Front or global prompt if a specific service_id was requested
+            return {
+                "ok": False,
+                "status": "error",
+                "stage": "validation",
+                "error_message": (
+                    f"No hay estructura activa para llamadas en el servicio seleccionado "
+                    f"(service_id={resolved_service_id}, type=audio). "
+                    f"Activa una estructura en ese servicio antes de analizar."
+                ),
+            }
+
+        resolved_prompt_id = active_prompt.get("prompt_id")
+        resolved_version_id = (
+            active_prompt.get("prompt_version_id")
+            or active_prompt.get("current_version_id")
+        )
+        prompt_content = active_prompt.get("prompt")
+        if active_prompt.get("company_id"):
+            resolved_company_id = active_prompt.get("company_id")
+
+    else:
+        # No prompt_id AND no service_id → global fallback
+        active_prompt = await get_active_prompt(db, "audio")
+        if not active_prompt:
+            logger.info("No active audio prompt found; falling back to text prompt for transcription analysis.")
+            active_prompt = await get_active_prompt(db, "text")
+
+        if not active_prompt:
+            return {
+                "ok": False,
+                "status": "error",
+                "stage": "validation",
+                "error_message": "No active prompt found (tried audio, then text).",
+            }
+
+        resolved_prompt_id = active_prompt.get("prompt_id")
+        resolved_version_id = (
+            active_prompt.get("prompt_version_id")
+            or active_prompt.get("current_version_id")
+        )
+        prompt_content = active_prompt.get("prompt")
+        resolved_service_id = active_prompt.get("service_id")
+        resolved_company_id = active_prompt.get("company_id")
+
+    if not resolved_version_id or not prompt_content:
+        return {
+            "ok": False,
+            "status": "error",
+            "stage": "validation",
+            "error_message": (
+                f"Could not resolve active prompt version. "
+                f"Available keys: {list(active_prompt.keys()) if 'active_prompt' in locals() and active_prompt else []}"
+            ),
+        }
+
+    # If transcription is not provided, resolve and transcribe the audio now
     if not transcription:
         logger.info("No transcription provided. Resolving and transcribing audio for call_id=%s", call_id)
         from app.services.hubspot_service import HubSpotService
@@ -123,84 +248,6 @@ async def analyze_transcription_pipeline(
                 "status": "error",
                 "stage": "transcription",
                 "error_message": f"Whisper transcription failed: {str(e)}",
-            }
-
-    now = datetime.now(timezone.utc)
-
-    # ── 1. Resolve Prompt ──────────────────────────────────────────────────
-    resolved_prompt_id = prompt_id
-    resolved_version_id = prompt_version_id
-    prompt_content: str | None = None
-
-    if custom_prompt_text:
-        # If custom prompt is passed explicitly, use it directly and bypass DB resolution/healing
-        prompt_content = custom_prompt_text
-        resolved_prompt_id = None
-        resolved_version_id = None
-
-    elif resolved_prompt_id:
-        # Explicit prompt_id provided: fetch its current active version
-        from app.services.prompts_service import _get_current_version
-        v = await _get_current_version(db, resolved_prompt_id)
-        if not v:
-            return {
-                "ok": False,
-                "status": "error",
-                "stage": "validation",
-                "error_message": f"Prompt ID {resolved_prompt_id} not found or has no current version.",
-            }
-        resolved_version_id = v.id
-        prompt_content = v.prompt
-
-    else:
-        # No explicit prompt_id → resolve the active "audio" prompt.
-        # If service_id is provided, scope to that service so Test Análisis uses
-        # the correct structure for the selected service.
-        active_prompt = await get_active_prompt(db, "audio", service_id=service_id)
-
-        if not active_prompt:
-            if service_id:
-                # Service was explicitly requested but has no active audio prompt
-                return {
-                    "ok": False,
-                    "status": "error",
-                    "stage": "validation",
-                    "error_message": (
-                        f"No hay estructura activa para llamadas en el servicio seleccionado "
-                        f"(service_id={service_id}, type=audio). "
-                        f"Activa una estructura en ese servicio antes de analizar."
-                    ),
-                }
-            # Only fall back to "text" when no service was specified
-            logger.info(
-                "No active audio prompt found; falling back to text prompt for transcription analysis."
-            )
-            active_prompt = await get_active_prompt(db, "text", service_id=service_id)
-
-        if not active_prompt:
-            return {
-                "ok": False,
-                "status": "error",
-                "stage": "validation",
-                "error_message": "No active prompt found (tried audio, then text).",
-            }
-
-        resolved_prompt_id = active_prompt.get("prompt_id")
-        resolved_version_id = (
-            active_prompt.get("prompt_version_id")
-            or active_prompt.get("current_version_id")
-        )
-        prompt_content = active_prompt.get("prompt")
-
-        if not resolved_version_id or not prompt_content:
-            return {
-                "ok": False,
-                "status": "error",
-                "stage": "validation",
-                "error_message": (
-                    f"Could not resolve active prompt version. "
-                    f"Available keys: {list(active_prompt.keys())}"
-                ),
             }
 
     if not prompt_content:
@@ -444,8 +491,8 @@ async def analyze_transcription_pipeline(
     # ── 5. Persist ────────────────────────────────────────────────────────
     call_metadata: dict[str, Any] = dict(metadata or {})
     call_metadata["call_id"] = call_id
-    if service_id is not None:
-        call_metadata.setdefault("service_id", service_id)
+    call_metadata["service_id"] = resolved_service_id
+    call_metadata["company_id"] = resolved_company_id
     # Ensure run_ts is always a timezone-aware datetime, never a string
     call_metadata.setdefault("run_ts", now)
 
@@ -486,6 +533,13 @@ async def analyze_transcription_pipeline(
         if s_obj:
             resolved_service_name = s_obj.service_name
 
+    resolved_prompt_name = None
+    if analysis_record.prompt_id:
+        from app.models.prompts import Prompt
+        p_obj = await db.get(Prompt, analysis_record.prompt_id)
+        if p_obj:
+            resolved_prompt_name = p_obj.prompt_name
+
     summary = {
         "tipo_llamada": parsed.get("tipo_llamada"),
         "evaluacion_global": parsed.get("evaluacion_global"),
@@ -507,6 +561,8 @@ async def analyze_transcription_pipeline(
         "analysis_id": analysis_record.analysis_id,
         "service_id": analysis_record.service_id,
         "service_name": resolved_service_name,
+        "prompt_id": analysis_record.prompt_id,
+        "prompt_name": resolved_prompt_name,
         "summary": summary,
         "result": parsed,
     }

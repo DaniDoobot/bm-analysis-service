@@ -121,12 +121,25 @@ class AnalysisDetailResponse(BaseModel):
 class AnalyzeAudioRequest(BaseModel):
     call_id: str
     prompt_id: int | None = None
+    structure_id: int | None = None
+    evaluation_structure_id: int | None = None
     prompt_version_id: int | None = None
     analysis_type: str = "audio"
     metadata: dict[str, Any] | None = None
     recording_url: str | None = None
     audio_url: str | None = None
     force: bool = False
+    service_id: int | None = None
+    selected_service_id: int | None = None
+    company_id: int | None = None
+
+    @property
+    def effective_service_id(self) -> int | None:
+        return self.service_id or self.selected_service_id
+
+    @property
+    def effective_prompt_id(self) -> int | None:
+        return self.prompt_id or self.structure_id or self.evaluation_structure_id
 
 
 class TranscribeRequest(BaseModel):
@@ -138,8 +151,20 @@ class AnalyzeTranscriptionRequest(BaseModel):
     transcription: str | None = None
     analysis_type: str = "text"
     prompt_id: int | None = None
+    structure_id: int | None = None
+    evaluation_structure_id: int | None = None
     prompt_version_id: int | None = None
+    service_id: int | None = None
+    selected_service_id: int | None = None
     metadata: dict[str, Any] | None = None
+
+    @property
+    def effective_service_id(self) -> int | None:
+        return self.service_id or self.selected_service_id
+
+    @property
+    def effective_prompt_id(self) -> int | None:
+        return self.prompt_id or self.structure_id or self.evaluation_structure_id
 
 
 class TestAnalysisByCallIdRequest(BaseModel):
@@ -147,6 +172,18 @@ class TestAnalysisByCallIdRequest(BaseModel):
     custom_prompt: str | None = None
     prompt: str | None = None
     service_id: int | None = None
+    selected_service_id: int | None = None
+    prompt_id: int | None = None
+    structure_id: int | None = None
+    evaluation_structure_id: int | None = None
+
+    @property
+    def effective_service_id(self) -> int | None:
+        return self.service_id or self.selected_service_id
+
+    @property
+    def effective_prompt_id(self) -> int | None:
+        return self.prompt_id or self.structure_id or self.evaluation_structure_id
 
 
 

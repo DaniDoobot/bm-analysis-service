@@ -123,6 +123,8 @@ async def test_analysis_by_call_id(
     from app.services.transcription_analysis_service import analyze_transcription_pipeline
 
     custom_prompt = body.custom_prompt or body.prompt
+    eff_service_id = body.effective_service_id
+    eff_prompt_id = body.effective_prompt_id
 
     try:
         result = await analyze_transcription_pipeline(
@@ -130,7 +132,8 @@ async def test_analysis_by_call_id(
             call_id=body.call_id,
             transcription=None,
             custom_prompt_text=custom_prompt,
-            service_id=body.service_id,
+            service_id=eff_service_id,
+            prompt_id=eff_prompt_id,
         )
     except Exception as exc:
         logger.error(
@@ -177,6 +180,10 @@ async def test_analysis_by_audio_upload(
     custom_prompt: Optional[str] = Form(None),
     prompt: Optional[str] = Form(None),
     service_id: Optional[int] = Form(None),
+    selected_service_id: Optional[int] = Form(None),
+    prompt_id: Optional[int] = Form(None),
+    structure_id: Optional[int] = Form(None),
+    evaluation_structure_id: Optional[int] = Form(None),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -190,15 +197,20 @@ async def test_analysis_by_audio_upload(
     from app.services import openai_service
     from app.services.transcription_analysis_service import analyze_transcription_pipeline
 
+    eff_service_id = service_id or selected_service_id
+    eff_prompt_id = prompt_id or structure_id or evaluation_structure_id
+
     filename = file.filename or ""
     ext = os.path.splitext(filename)[1].lower()
     content_type = (file.content_type or "").lower()
 
     logger.info(
-        "Initiating test-analysis/by-audio-upload. File: %s, size: %s, content_type: %s",
+        "Initiating test-analysis/by-audio-upload. File: %s, size: %s, content_type: %s, service_id: %s, prompt_id: %s",
         filename,
         file.size if hasattr(file, "size") else "unknown",
-        content_type
+        content_type,
+        eff_service_id,
+        eff_prompt_id,
     )
 
     valid_extensions = {".mp3", ".wav"}
@@ -261,14 +273,15 @@ async def test_analysis_by_audio_upload(
     dummy_call_id = f"upload-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
     resolved_prompt = custom_prompt or prompt
 
-    logger.info("Starting analysis pipeline with dummy call_id=%s...", dummy_call_id)
+    logger.info("Starting analysis pipeline with dummy call_id=%s, service_id=%s, prompt_id=%s...", dummy_call_id, eff_service_id, eff_prompt_id)
     try:
         result = await analyze_transcription_pipeline(
             db=db,
             call_id=dummy_call_id,
             transcription=transcription,
             custom_prompt_text=resolved_prompt,
-            service_id=service_id,
+            service_id=eff_service_id,
+            prompt_id=eff_prompt_id,
         )
     except Exception as exc:
         logger.error(
