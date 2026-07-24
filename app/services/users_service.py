@@ -463,3 +463,135 @@ def check_can_manage_target_user(context: TenantContext, target_user: User) -> N
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: Se requieren permisos de gestión."
         )
+
+
+def compute_user_management_flags(
+    context: TenantContext,
+    target_user: User,
+    user_service_ids: Optional[List[int]] = None,
+    user_team_ids: Optional[List[int]] = None
+) -> Dict[str, Any]:
+    """
+    Calculate permission flags (is_readonly, can_edit, can_reset_password, can_deactivate, visibility_reason)
+    for target_user from the perspective of context user.
+    """
+    svc_ids = set(user_service_ids or [])
+    if target_user.primary_service_id is not None:
+        svc_ids.add(target_user.primary_service_id)
+
+    tm_ids = set(user_team_ids or [])
+    if target_user.primary_team_id is not None:
+        tm_ids.add(target_user.primary_team_id)
+
+    target_role = normalize_role(target_user.role)
+    actor_role = context.normalized_role
+
+    # 1. Self
+    if context.user_id == target_user.user_id:
+        return {
+            "is_readonly": False,
+            "can_edit": True,
+            "can_reset_password": True,
+            "can_deactivate": False,
+            "visibility_reason": "self"
+        }
+
+    # 2. Super Admin
+    if context.is_super_admin:
+        return {
+            "is_readonly": False,
+            "can_edit": True,
+            "can_reset_password": True,
+            "can_deactivate": True,
+            "visibility_reason": "super_admin"
+        }
+
+    # 3. Company Admin
+    if actor_role == InternalRole.COMPANY_ADMIN:
+        if target_role == InternalRole.SUPER_ADMIN:
+            return {
+                "is_readonly": True,
+                "can_edit": False,
+                "can_reset_password": False,
+                "can_deactivate": False,
+                "visibility_reason": "super_admin"
+            }
+        return {
+            "is_readonly": False,
+            "can_edit": True,
+            "can_reset_password": True,
+            "can_deactivate": True,
+            "visibility_reason": "company_admin"
+        }
+
+    # 4. Service Manager
+    if actor_role == InternalRole.SERVICE_MANAGER:
+        if target_role in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN):
+            return {
+                "is_readonly": True,
+                "can_edit": False,
+                "can_reset_password": False,
+                "can_deactivate": False,
+                "visibility_reason": "superior_role"
+            }
+        if target_role == InternalRole.SERVICE_MANAGER:
+            return {
+                "is_readonly": True,
+                "can_edit": False,
+                "can_reset_password": False,
+                "can_deactivate": False,
+                "visibility_reason": "horizontal_service_manager"
+            }
+        allowed_svcs = set(context.allowed_service_ids or [])
+        if svc_ids & allowed_svcs:
+            return {
+                "is_readonly": False,
+                "can_edit": True,
+                "can_reset_password": True,
+                "can_deactivate": True,
+                "visibility_reason": "managed_service_user"
+            }
+        return {
+            "is_readonly": True,
+            "can_edit": False,
+            "can_reset_password": False,
+            "can_deactivate": False,
+            "visibility_reason": "unmanaged_service_user"
+        }
+
+    # 5. Team Coordinator
+    if actor_role == InternalRole.TEAM_COORDINATOR:
+        if target_role == InternalRole.SERVICE_MANAGER:
+            return {
+                "is_readonly": True,
+                "can_edit": False,
+                "can_reset_password": False,
+                "can_deactivate": False,
+                "visibility_reason": "immediate_service_manager"
+            }
+        if target_role == InternalRole.AGENT:
+            allowed_teams = set(context.allowed_team_ids or [])
+            if tm_ids & allowed_teams:
+                return {
+                    "is_readonly": False,
+                    "can_edit": True,
+                    "can_reset_password": True,
+                    "can_deactivate": False,
+                    "visibility_reason": "managed_team_agent"
+                }
+        return {
+            "is_readonly": True,
+            "can_edit": False,
+            "can_reset_password": False,
+            "can_deactivate": False,
+            "visibility_reason": "readonly_user"
+        }
+
+    # Fallback
+    return {
+        "is_readonly": True,
+        "can_edit": False,
+        "can_reset_password": False,
+        "can_deactivate": False,
+        "visibility_reason": "readonly_user"
+    }

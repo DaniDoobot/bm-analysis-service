@@ -131,12 +131,22 @@ class AdminTeamMemberResponse(BaseModel):
     username: str
     email: str
     name: Optional[str] = None
+    display_name: Optional[str] = None
     role: str
     normalized_role: Optional[str] = None
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="after")
+    def compute_display_name(self) -> "AdminTeamMemberResponse":
+        if not self.display_name:
+            if self.name and self.name.strip():
+                self.display_name = self.name.strip()
+            else:
+                self.display_name = self.username
+        return self
 
 
 

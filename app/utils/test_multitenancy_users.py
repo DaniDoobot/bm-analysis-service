@@ -25,6 +25,8 @@ from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_engine, Base
 from app.models.companies import Company
+from app.models.services import Service
+from app.models.teams import Team, UserServiceAssociation, UserTeamAssociation, AgentTeamAssociation
 from app.models.users import User
 from app.core.roles import normalize_role, InternalRole
 from app.core.tenant_context import TenantContext
@@ -1040,6 +1042,163 @@ class TestMultitenancyUsers(unittest.IsolatedAsyncioTestCase):
             data_p3 = res_detail_p3.json()
             self.assertIsNone(data_p3["name"])
             self.assertEqual(data_p3["display_name"], "varellano")
+
+    async def test_hierarchical_visibility_and_scoped_teams_access(self):
+        """Verify service_manager & team_coordinator user visibility, read-only flags, and scoped team access."""
+        async with AsyncSession(get_engine(), expire_on_commit=False) as db:
+            # 1. Company
+            comp = Company(company_id=10, company_name="Boston Medical Test", company_key="boston_test", is_active=True)
+            db.add(comp)
+            await db.flush()
+
+            # 2. Services
+            s_front = Service(service_id=101, service_key="front", service_name="Front", company_id=10, is_active=True)
+            s_exppa = Service(service_id=102, service_key="exppa", service_name="Experiencia de Paciente", company_id=10, is_active=True)
+            s_com = Service(service_id=103, service_key="comerciales", service_name="Comerciales", company_id=10, is_active=True)
+            db.add_all([s_front, s_exppa, s_com])
+            await db.flush()
+
+            # 3. Teams
+            t_front = Team(team_id=1001, team_name="Equipo Front", service_id=101, company_id=10, is_active=True)
+            t_exppa = Team(team_id=1002, team_name="Equipo ExpPa", service_id=102, company_id=10, is_active=True)
+            t_com = Team(team_id=1003, team_name="Equipo Comerciales", service_id=103, company_id=10, is_active=True)
+            db.add_all([t_front, t_exppa, t_com])
+            await db.flush()
+
+            # 4. Users
+            pwd_hash = hash_password("Pass1234!")
+            u_admin = User(user_id=1010, username="admin_boston", email="admin_boston@boston.com", name="Admin Boston", role="company_admin", company_id=10, is_active=True, password_hash=pwd_hash)
+            u_sm_front = User(user_id=1011, username="resp_front", email="resp_front@boston.com", name="Responsable Front", role="responsable_servicio", primary_service_id=101, company_id=10, is_active=True, password_hash=pwd_hash)
+            u_sm_exppa = User(user_id=1012, username="resp_exppa", email="resp_exppa@boston.com", name="Juanjo Rodriguez", role="responsable_servicio", primary_service_id=102, company_id=10, is_active=True, password_hash=pwd_hash)
+            u_sm_com = User(user_id=1013, username="resp_comerciales", email="resp_comerciales@boston.com", name="Jorge Bermejo", role="responsable_servicio", primary_service_id=103, company_id=10, is_active=True, password_hash=pwd_hash)
+
+            u_tc_exppa = User(user_id=1020, username="coord_exppa", email="coord_exppa@boston.com", name="Jordi Cerdan", role="coordinador_equipo", primary_service_id=102, primary_team_id=1002, company_id=10, is_active=True, password_hash=pwd_hash)
+            u_tc_com = User(user_id=1021, username="coord_comerciales", email="coord_comerciales@boston.com", name="Braulio Pena", role="coordinador_equipo", primary_service_id=103, primary_team_id=1003, company_id=10, is_active=True, password_hash=pwd_hash)
+
+            u_ag_front = User(user_id=1030, username="ag_front", email="ag_front@boston.com", name="Agente Front", role="agente", primary_service_id=101, primary_team_id=1001, company_id=10, is_active=True, password_hash=pwd_hash)
+            u_ag_exppa = User(user_id=1031, username="ag_exppa", email="ag_exppa@boston.com", name="Agente ExpPa", role="agente", primary_service_id=102, primary_team_id=1002, company_id=10, is_active=True, password_hash=pwd_hash)
+            u_ag_com = User(user_id=1032, username="ag_comerciales", email="ag_comerciales@boston.com", name="Agente Comerciales", role="agente", primary_service_id=103, primary_team_id=1003, company_id=10, is_active=True, password_hash=pwd_hash)
+
+            db.add_all([u_admin, u_sm_front, u_sm_exppa, u_sm_com, u_tc_exppa, u_tc_com, u_ag_front, u_ag_exppa, u_ag_com])
+            await db.flush()
+
+            # Associations
+            db.add(UserServiceAssociation(user_id=1011, service_id=101))
+            db.add(UserServiceAssociation(user_id=1012, service_id=102))
+            db.add(UserServiceAssociation(user_id=1013, service_id=103))
+
+            db.add(UserTeamAssociation(user_id=1020, team_id=1002))
+            db.add(UserTeamAssociation(user_id=1021, team_id=1003))
+
+            db.add(AgentTeamAssociation(user_id=1030, team_id=1001))
+            db.add(AgentTeamAssociation(user_id=1031, team_id=1002))
+            db.add(AgentTeamAssociation(user_id=1032, team_id=1003))
+
+            await db.commit()
+
+            ctx_sm_front = await TenantContext.build(u_sm_front, db)
+            ctx_tc_exppa = await TenantContext.build(u_tc_exppa, db)
+
+        # 5. Service Manager (resp_front) Test
+        app.dependency_overrides[get_current_user] = lambda: u_sm_front
+        app.dependency_overrides[get_tenant_context] = lambda: ctx_sm_front
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            res_users = await ac.get("/bm/users")
+            self.assertEqual(res_users.status_code, 200)
+            u_list = res_users.json()["users"]
+            visible_ids = {u["user_id"] for u in u_list}
+
+            # Should see admin, SMs, and front agent
+            self.assertIn(1010, visible_ids)  # admin_boston
+            self.assertIn(1011, visible_ids)  # resp_front (self)
+            self.assertIn(1012, visible_ids)  # resp_exppa (horizontal SM)
+            self.assertIn(1013, visible_ids)  # resp_comerciales (horizontal SM)
+            self.assertIn(1030, visible_ids)  # ag_front
+
+            # Should NOT see coordinators or agents of other services
+            self.assertNotIn(1020, visible_ids)  # coord_exppa
+            self.assertNotIn(1021, visible_ids)  # coord_comerciales
+            self.assertNotIn(1031, visible_ids)  # ag_exppa
+            self.assertNotIn(1032, visible_ids)  # ag_comerciales
+
+            # Check read-only flags
+            admin_user_obj = next(u for u in u_list if u["user_id"] == 1010)
+            self.assertTrue(admin_user_obj["is_readonly"])
+            self.assertFalse(admin_user_obj["can_edit"])
+
+            ag_front_obj = next(u for u in u_list if u["user_id"] == 1030)
+            self.assertFalse(ag_front_obj["is_readonly"])
+            self.assertTrue(ag_front_obj["can_edit"])
+
+            # Check teams listing: only Front team
+            res_teams = await ac.get("/bm/admin/teams")
+            self.assertEqual(res_teams.status_code, 200)
+            team_ids = [t["team_id"] for t in res_teams.json()]
+            self.assertEqual(team_ids, [1001])
+
+            # Check team creation in service 101 vs 102
+            res_create_101 = await ac.post("/bm/admin/teams", json={
+                "team_name": "Nuevo Equipo Front",
+                "service_id": 101,
+                "company_id": 10
+            })
+            self.assertEqual(res_create_101.status_code, 201)
+
+            res_create_102 = await ac.post("/bm/admin/teams", json={
+                "team_name": "Nuevo Equipo ExpPa",
+                "service_id": 102,
+                "company_id": 10
+            })
+            self.assertEqual(res_create_102.status_code, 403)
+
+        # 6. Team Coordinator (coord_exppa) Test
+        app.dependency_overrides[get_current_user] = lambda: u_tc_exppa
+        app.dependency_overrides[get_tenant_context] = lambda: ctx_tc_exppa
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            res_users_tc = await ac.get("/bm/users")
+            self.assertEqual(res_users_tc.status_code, 200)
+            u_list_tc = res_users_tc.json()["users"]
+            visible_ids_tc = {u["user_id"] for u in u_list_tc}
+
+            # Should see self, team agent, and immediate service manager (resp_exppa)
+            self.assertIn(1020, visible_ids_tc)  # coord_exppa (self)
+            self.assertIn(1031, visible_ids_tc)  # ag_exppa
+            self.assertIn(1012, visible_ids_tc)  # resp_exppa (immediate SM)
+
+            # Should NOT see unrelated agents, coordinators, service managers, or admin
+            self.assertNotIn(1010, visible_ids_tc)  # admin_boston
+            self.assertNotIn(1011, visible_ids_tc)  # resp_front
+            self.assertNotIn(1013, visible_ids_tc)  # resp_comerciales
+            self.assertNotIn(1021, visible_ids_tc)  # coord_comerciales
+            self.assertNotIn(1030, visible_ids_tc)  # ag_front
+            self.assertNotIn(1032, visible_ids_tc)  # ag_comerciales
+
+            # Check read-only flags for immediate SM
+            resp_exppa_obj = next(u for u in u_list_tc if u["user_id"] == 1012)
+            self.assertTrue(resp_exppa_obj["is_readonly"])
+            self.assertFalse(resp_exppa_obj["can_edit"])
+            self.assertFalse(resp_exppa_obj["can_reset_password"])
+            self.assertFalse(resp_exppa_obj["can_deactivate"])
+
+            # Attempting to edit immediate SM -> 403 Forbidden
+            res_edit_sm = await ac.patch(f"/bm/users/{1012}", json={"name": "Nuevo Nombre Invalid"})
+            self.assertEqual(res_edit_sm.status_code, 403)
+
+            # Check teams listing: only ExpPa team
+            res_teams_tc = await ac.get("/bm/admin/teams")
+            self.assertEqual(res_teams_tc.status_code, 200)
+            team_ids_tc = [t["team_id"] for t in res_teams_tc.json()]
+            self.assertEqual(team_ids_tc, [1002])
+
+            # Attempting team creation -> 403 Forbidden
+            res_create_tc = await ac.post("/bm/admin/teams", json={
+                "team_name": "Equipo Invalido TC",
+                "service_id": 102,
+                "company_id": 10
+            })
+            self.assertEqual(res_create_tc.status_code, 403)
 
 
 if __name__ == "__main__":

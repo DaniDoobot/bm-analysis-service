@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.dependencies import get_db, get_current_user, require_admin, get_tenant_context
 from app.models.users import User, UserAudit, PasswordResetToken
 from app.models.companies import Company
-from app.models.teams import Team, UserServiceAssociation, AgentTeamAssociation
+from app.models.teams import Team, UserServiceAssociation, AgentTeamAssociation, UserTeamAssociation
 from app.core.tenant_context import TenantContext
 from app.core.roles import InternalRole, normalize_role, is_disallowed_creation_role
 from app.models.prompts import Prompt, PromptBaseStructure, StructurePermission
@@ -30,7 +30,7 @@ from app.services.auth_service import log_audit
 from app.services.users_service import (
     validate_user_services, save_user_service_associations, get_user_services_info,
     validate_user_teams, save_user_team_associations, get_user_teams_info,
-    check_can_manage_target_user
+    check_can_manage_target_user, compute_user_management_flags
 )
 from app.schemas.users import (
     UserOut,
@@ -224,6 +224,7 @@ def _user_to_full(
     allowed_team_ids_map: dict | None = None,
     allowed_teams_map: dict | None = None,
     primary_team_map: dict | None = None,
+    context: TenantContext | None = None,
 ) -> dict:
     c_name = None
     if comp_map and u.company_id is not None:
@@ -247,6 +248,16 @@ def _user_to_full(
 
     team_ids = (allowed_team_ids_map or {}).get(u.user_id, [])
     teams = (allowed_teams_map or {}).get(u.user_id, [])
+
+    flags = {
+        "is_readonly": False,
+        "can_edit": True,
+        "can_reset_password": True,
+        "can_deactivate": True,
+        "visibility_reason": None
+    }
+    if context:
+        flags = compute_user_management_flags(context, u, svc_ids, team_ids)
 
     return {
         "id": u.user_id,
@@ -276,6 +287,7 @@ def _user_to_full(
         "reset_token_expires_at": u.reset_token_expires_at.isoformat() if u.reset_token_expires_at else None,
         "created_at": u.created_at.isoformat() if u.created_at else None,
         "updated_at": u.updated_at.isoformat() if u.updated_at else None,
+        **flags
     }
 
 
@@ -291,7 +303,8 @@ async def list_users(
     List users enforcing multi-tenant scoping:
     - super_admin: sees all users.
     - company_admin: sees users of their company_id, excluding super_admins or global NULL company users.
-    - non-admin: basic public info of users in their company/scope.
+    - service_manager: sees company_admin, service_managers, and coordinators/agents of allowed services.
+    - team_coordinator: sees self, agents of allowed teams, and immediate service managers of allowed services.
     """
     stmt = select(User).order_by(User.user_id.asc())
 
@@ -312,22 +325,31 @@ async def list_users(
         super_admin_roles = ["admin", "administrador", "superadmin", "super_admin"]
         stmt = stmt.where(~User.role.in_(super_admin_roles))
         allowed_svcs = context.allowed_service_ids or []
+
         user_svc_sub = select(UserServiceAssociation.user_id).where(
             UserServiceAssociation.service_id.in_(allowed_svcs)
+        )
+        user_team_svc_sub = select(UserTeamAssociation.user_id).join(Team).where(
+            Team.service_id.in_(allowed_svcs)
         )
         agent_team_sub = select(AgentTeamAssociation.user_id).join(Team).where(
             Team.service_id.in_(allowed_svcs)
         )
-        management_roles = [
+        primary_team_svc_sub = select(User.user_id).join(Team, User.primary_team_id == Team.team_id).where(
+            Team.service_id.in_(allowed_svcs)
+        )
+        company_mgmt_roles = [
             "company_admin", "administrador_empresa", "administrador_de_empresa", "administrador de empresa",
-            "service_manager", "responsable_servicio", "responsable_de_servicio", "responsable de servicio",
-            "team_coordinator", "coordinador_equipo", "coordinador_de_equipo", "coordinador de equipo"
+            "service_manager", "responsable_servicio", "responsable_de_servicio", "responsable de servicio"
         ]
+
         stmt = stmt.where(
             User.primary_service_id.in_(allowed_svcs) |
             User.user_id.in_(user_svc_sub) |
+            User.user_id.in_(user_team_svc_sub) |
             User.user_id.in_(agent_team_sub) |
-            func.lower(User.role).in_(management_roles) |
+            User.user_id.in_(primary_team_svc_sub) |
+            func.lower(User.role).in_(company_mgmt_roles) |
             (User.user_id == context.user_id)
         )
     elif context.normalized_role == InternalRole.TEAM_COORDINATOR:
@@ -335,18 +357,25 @@ async def list_users(
             (User.company_id == context.company_id) &
             (User.company_id.is_not(None))
         )
-        admin_roles = ["admin", "administrador", "superadmin", "super_admin", "company_admin", "administrador_de_empresa", "administrador de empresa"]
-        stmt = stmt.where(~User.role.in_(admin_roles))
-        if context.allowed_team_ids:
-            agent_team_sub = select(AgentTeamAssociation.user_id).where(
-                AgentTeamAssociation.team_id.in_(context.allowed_team_ids)
-            )
-            stmt = stmt.where(
-                User.user_id.in_(agent_team_sub) |
-                (User.user_id == context.user_id)
-            )
-        else:
-            stmt = stmt.where(User.user_id == context.user_id)
+        allowed_teams = context.allowed_team_ids or []
+        allowed_svcs = context.allowed_service_ids or []
+
+        agent_team_sub = select(AgentTeamAssociation.user_id).where(
+            AgentTeamAssociation.team_id.in_(allowed_teams)
+        )
+        primary_team_agent_sub = select(User.user_id).where(
+            User.primary_team_id.in_(allowed_teams)
+        )
+        user_svc_sub = select(UserServiceAssociation.user_id).where(
+            UserServiceAssociation.service_id.in_(allowed_svcs)
+        )
+        svc_manager_roles = ["service_manager", "responsable_servicio", "responsable_de_servicio", "responsable de servicio"]
+
+        stmt = stmt.where(
+            (User.user_id == context.user_id) |
+            ((User.user_id.in_(agent_team_sub) | User.user_id.in_(primary_team_agent_sub)) & func.lower(User.role).in_(["agent", "agente"])) |
+            ((User.primary_service_id.in_(allowed_svcs) | User.user_id.in_(user_svc_sub)) & func.lower(User.role).in_(svc_manager_roles))
+        )
     else:
         if context.company_id:
             stmt = stmt.where(User.company_id == context.company_id)
@@ -381,6 +410,7 @@ async def list_users(
                     allowed_team_ids_map=allowed_team_ids_map,
                     allowed_teams_map=allowed_teams_map,
                     primary_team_map=primary_team_map,
+                    context=context,
                 )
                 for u in users
             ]

@@ -49,6 +49,11 @@ class AdminUserResponse(BaseModel):
     allowed_services: List[dict] = []
     allowed_team_ids: List[int] = []
     allowed_teams: List[dict] = []
+    is_readonly: bool = False
+    can_edit: bool = True
+    can_reset_password: bool = True
+    can_deactivate: bool = True
+    visibility_reason: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -161,29 +166,49 @@ async def list_users(
             user_svc_sub = select(UserServiceAssociation.user_id).where(
                 UserServiceAssociation.service_id.in_(allowed_svcs)
             )
+            user_team_svc_sub = select(UserTeamAssociation.user_id).join(Team).where(
+                Team.service_id.in_(allowed_svcs)
+            )
             agent_team_sub = select(AgentTeamAssociation.user_id).join(Team).where(
                 Team.service_id.in_(allowed_svcs)
             )
-            management_roles = [
+            primary_team_svc_sub = select(User.user_id).join(Team, User.primary_team_id == Team.team_id).where(
+                Team.service_id.in_(allowed_svcs)
+            )
+            company_mgmt_roles = [
                 "company_admin", "administrador_empresa", "administrador_de_empresa", "administrador de empresa",
-                "service_manager", "responsable_servicio", "responsable_de_servicio", "responsable de servicio",
-                "team_coordinator", "coordinador_equipo", "coordinador_de_equipo", "coordinador de equipo"
+                "service_manager", "responsable_servicio", "responsable_de_servicio", "responsable de servicio"
             ]
+
             stmt = stmt.where(
                 User.primary_service_id.in_(allowed_svcs) |
                 User.user_id.in_(user_svc_sub) |
+                User.user_id.in_(user_team_svc_sub) |
                 User.user_id.in_(agent_team_sub) |
-                func.lower(User.role).in_(management_roles) |
+                User.user_id.in_(primary_team_svc_sub) |
+                func.lower(User.role).in_(company_mgmt_roles) |
                 (User.user_id == context.user_id)
             )
         elif role_actor == InternalRole.TEAM_COORDINATOR:
-            # Agents in their allowed teams, and themselves
+            stmt = stmt.where(User.company_id == context.company_id)
+            allowed_teams = context.allowed_team_ids or []
+            allowed_svcs = context.allowed_service_ids or []
+
             agent_team_sub = select(AgentTeamAssociation.user_id).where(
-                AgentTeamAssociation.team_id.in_(context.allowed_team_ids or [])
+                AgentTeamAssociation.team_id.in_(allowed_teams)
             )
+            primary_team_agent_sub = select(User.user_id).where(
+                User.primary_team_id.in_(allowed_teams)
+            )
+            user_svc_sub = select(UserServiceAssociation.user_id).where(
+                UserServiceAssociation.service_id.in_(allowed_svcs)
+            )
+            svc_manager_roles = ["service_manager", "responsable_servicio", "responsable_de_servicio", "responsable de servicio"]
+
             stmt = stmt.where(
-                User.user_id.in_(agent_team_sub) |
-                (User.user_id == context.user_id)
+                (User.user_id == context.user_id) |
+                ((User.user_id.in_(agent_team_sub) | User.user_id.in_(primary_team_agent_sub)) & func.lower(User.role).in_(["agent", "agente"])) |
+                ((User.primary_service_id.in_(allowed_svcs) | User.user_id.in_(user_svc_sub)) & func.lower(User.role).in_(svc_manager_roles))
             )
         else:
             # Agent or other role: can only see themselves
@@ -241,10 +266,15 @@ async def list_users(
     allowed_service_ids_map, allowed_services_map, primary_service_map = await get_user_services_info(db, user_ids)
     allowed_team_ids_map, allowed_teams_map, primary_team_map = await get_user_teams_info(db, user_ids)
 
+    from app.services.users_service import compute_user_management_flags
+
     res_list = []
     for u in users:
         p_id, p_name = primary_service_map.get(u.user_id, (u.primary_service_id, None))
         pt_id, pt_name = primary_team_map.get(u.user_id, (u.primary_team_id, None))
+        u_svc_ids = allowed_service_ids_map.get(u.user_id, [])
+        u_tm_ids = allowed_team_ids_map.get(u.user_id, [])
+        flags = compute_user_management_flags(context, u, u_svc_ids, u_tm_ids)
         res_list.append(AdminUserResponse(
             user_id=u.user_id,
             username=u.username,
@@ -261,10 +291,11 @@ async def list_users(
             is_active=u.is_active,
             hubspot_owner_id=u.hubspot_owner_id,
             agent_initials=u.agent_initials,
-            allowed_service_ids=allowed_service_ids_map.get(u.user_id, []),
+            allowed_service_ids=u_svc_ids,
             allowed_services=allowed_services_map.get(u.user_id, []),
-            allowed_team_ids=allowed_team_ids_map.get(u.user_id, []),
-            allowed_teams=allowed_teams_map.get(u.user_id, [])
+            allowed_team_ids=u_tm_ids,
+            allowed_teams=allowed_teams_map.get(u.user_id, []),
+            **flags
         ))
 
     return res_list

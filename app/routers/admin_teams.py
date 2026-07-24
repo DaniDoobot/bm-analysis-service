@@ -1,4 +1,4 @@
-﻿"""
+"""
 Admin Teams Router — /bm/admin/teams
 
 Provides CRUD and membership management for teams with full hierarchical permission enforcement.
@@ -57,12 +57,26 @@ async def _build_admin_team_response(team: Team, db: AsyncSession) -> AdminTeamR
         service_name = svc_res.scalar()
 
     agent_count_res = await db.execute(
-        select(func.count()).select_from(AgentTeamAssociation).where(AgentTeamAssociation.team_id == team.team_id)
+        select(func.count(func.distinct(User.user_id))).where(
+            (User.is_active == True) &
+            (
+                (User.user_id.in_(select(AgentTeamAssociation.user_id).where(AgentTeamAssociation.team_id == team.team_id))) |
+                (User.primary_team_id == team.team_id)
+            ) &
+            (func.lower(User.role).in_(["agent", "agente"]))
+        )
     )
     agent_count = agent_count_res.scalar() or 0
 
     coord_count_res = await db.execute(
-        select(func.count()).select_from(UserTeamAssociation).where(UserTeamAssociation.team_id == team.team_id)
+        select(func.count(func.distinct(User.user_id))).where(
+            (User.is_active == True) &
+            (
+                (User.user_id.in_(select(UserTeamAssociation.user_id).where(UserTeamAssociation.team_id == team.team_id))) |
+                (User.primary_team_id == team.team_id)
+            ) &
+            (func.lower(User.role).in_(["team_coordinator", "coordinador_equipo", "coordinador_de_equipo", "coordinador de equipo"]))
+        )
     )
     coordinator_count = coord_count_res.scalar() or 0
 
@@ -81,20 +95,39 @@ async def _build_admin_team_response(team: Team, db: AsyncSession) -> AdminTeamR
     )
 
 
-def _check_write_permission(context: TenantContext, team: Optional[Team] = None):
-    """Raises 403 if the actor cannot write teams (create/update)."""
+def _check_write_permission(context: TenantContext, team: Optional[Team] = None, target_service_id: Optional[int] = None):
+    """Raises 403 if the actor cannot write teams (create/update/delete)."""
+    if context.is_super_admin:
+        return
+
     role = context.normalized_role
-    if role not in (InternalRole.SUPER_ADMIN, InternalRole.COMPANY_ADMIN):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Acceso denegado: Se requiere rol de Administrador de Empresa o Super Administrador.",
-        )
-    if team is not None and not context.is_super_admin:
-        if team.company_id != context.company_id:
+    if role == InternalRole.COMPANY_ADMIN:
+        if team is not None and team.company_id != context.company_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Acceso denegado: el equipo pertenece a otra empresa.",
             )
+        return
+
+    if role == InternalRole.SERVICE_MANAGER:
+        svc_id = target_service_id or (team.service_id if team else None)
+        allowed_svcs = context.allowed_service_ids or []
+        if svc_id is None or svc_id not in allowed_svcs:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: no puedes gestionar equipos fuera de tus servicios permitidos.",
+            )
+        if team is not None and team.company_id != context.company_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: el equipo pertenece a otra empresa.",
+            )
+        return
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Acceso denegado: Se requieren permisos de gestión de equipos en el servicio o empresa.",
+    )
 
 
 def _check_read_permission(context: TenantContext, team: Team) -> bool:
@@ -135,18 +168,28 @@ def _check_read_permission(context: TenantContext, team: Team) -> bool:
 
 
 def _check_agent_management_permission(context: TenantContext, team: Team):
-    """Only super_admin, company_admin, or team_coordinator (of this team) can manage agents."""
-    role = context.normalized_role
+    """Only super_admin, company_admin, service_manager (of service), or team_coordinator (of team) can manage agents."""
     if context.is_super_admin:
         return
+
+    role = context.normalized_role
     if role == InternalRole.COMPANY_ADMIN:
         if team.company_id != context.company_id:
             raise HTTPException(status_code=403, detail="Acceso denegado: equipo de otra empresa.")
         return
+
+    if role == InternalRole.SERVICE_MANAGER:
+        allowed_svcs = context.allowed_service_ids or []
+        if team.service_id not in allowed_svcs or team.company_id != context.company_id:
+            raise HTTPException(status_code=403, detail="Acceso denegado: este equipo no pertenece a tus servicios.")
+        return
+
     if role == InternalRole.TEAM_COORDINATOR:
-        if context.allowed_team_ids is not None and team.team_id not in context.allowed_team_ids:
+        allowed_teams = context.allowed_team_ids or []
+        if team.team_id not in allowed_teams or team.company_id != context.company_id:
             raise HTTPException(status_code=403, detail="Acceso denegado: no eres coordinador de este equipo.")
         return
+
     raise HTTPException(status_code=403, detail="Acceso denegado para gestionar agentes.")
 
 
@@ -230,7 +273,7 @@ async def create_admin_team(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Create a new team. Requires company_admin or super_admin."""
-    _check_write_permission(context)
+    _check_write_permission(context, target_service_id=payload.service_id)
 
     # Company admins can only create in their own company
     if not context.is_super_admin and payload.company_id != context.company_id:
@@ -353,6 +396,7 @@ async def list_team_agents(
             username=u.username,
             email=u.email,
             name=u.name,
+            display_name=u.display_name,
             role=u.role,
             normalized_role=normalize_role(u.role).value,
             hubspot_owner_id=u.hubspot_owner_id,
@@ -475,6 +519,7 @@ async def list_team_coordinators(
             username=u.username,
             email=u.email,
             name=u.name,
+            display_name=u.display_name,
             role=u.role,
             normalized_role=normalize_role(u.role).value,
             hubspot_owner_id=u.hubspot_owner_id,

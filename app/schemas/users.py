@@ -49,6 +49,11 @@ class UserBase(BaseModel):
     is_active: bool = True
     hubspot_owner_id: Optional[str] = None
     agent_initials: Optional[str] = None
+    is_readonly: bool = False
+    can_edit: bool = True
+    can_reset_password: bool = True
+    can_deactivate: bool = True
+    visibility_reason: Optional[str] = None
 
     @model_validator(mode="after")
     def compute_display_name(self) -> "UserBase":
