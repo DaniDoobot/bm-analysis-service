@@ -1,5 +1,5 @@
 """
-Test suite verifying team_coordinator permissions in mass automations and agent training tracking.
+Test suite verifying team_coordinator permissions in mass automations, jobs, runs, and agent training tracking.
 """
 import asyncio
 import os
@@ -35,6 +35,7 @@ from app.models.services import Service
 from app.models.teams import Team, UserTeamAssociation, AgentTeamAssociation
 from app.models.users import User
 from app.models.prompts import Prompt, PromptVersion
+from app.models.mass_evaluations import MassEvaluationJob, MassEvaluationRun, MassEvaluationResult
 from app.utils.security import create_access_token
 from app.main import app
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -79,11 +80,6 @@ class TestTeamCoordinatorPermissions(unittest.IsolatedAsyncioTestCase):
             await db.flush()
 
             # 4. Users:
-            # - Super Admin
-            # - Company Admin
-            # - Team Coordinator (Team A)
-            # - Agent A (Team A)
-            # - Agent B (Team B)
             u_super = User(user_id=1, username="super_admin", email="super@test.com", role="admin", password_hash="dummy")
             u_comp_admin = User(user_id=2, username="comp_admin", email="comp_admin@test.com", role="company_admin", company_id=1, password_hash="dummy")
             u_coord = User(user_id=3, username="coord_a", email="coord_a@test.com", role="coordinador_equipo", company_id=1, primary_team_id=10, primary_service_id=1, password_hash="dummy")
@@ -104,6 +100,34 @@ class TestTeamCoordinatorPermissions(unittest.IsolatedAsyncioTestCase):
             p1 = Prompt(prompt_id=1, prompt_name="Prompt Front V1", prompt_type="audio", service_id=1, company_id=1, is_active=True)
             v1 = PromptVersion(id=1, prompt_id=1, prompt="Test prompt content", version_label="v1", is_current=True)
             db.add_all([p1, v1])
+            await db.flush()
+
+            # 6. Mass Jobs, Runs and Results
+            job_a = MassEvaluationJob(
+                job_id=1, job_name="Job Equipo A", company_id=1, service_id=1, prompt_id=1,
+                agent_owner_ids=["owner_A"], is_active=True, execution_source="on_demand"
+            )
+            job_b = MassEvaluationJob(
+                job_id=2, job_name="Job Equipo B", company_id=1, service_id=1, prompt_id=1,
+                agent_owner_ids=["owner_B"], is_active=True, execution_source="on_demand"
+            )
+            db.add_all([job_a, job_b])
+            await db.flush()
+
+            run_a = MassEvaluationRun(run_id=10, job_id=1, company_id=1, service_id=1, status="completed", trigger_type="manual")
+            run_b = MassEvaluationRun(run_id=20, job_id=2, company_id=1, service_id=1, status="completed", trigger_type="manual")
+            db.add_all([run_a, run_b])
+            await db.flush()
+
+            res_a = MassEvaluationResult(
+                mass_analysis_id=100, run_id=10, job_id=1, company_id=1, service_id=1, prompt_id=1, prompt_snapshot="{}",
+                hubspot_owner_id="owner_A", call_id="call_a_100", status="completed", evaluacion_global=8.5
+            )
+            res_b = MassEvaluationResult(
+                mass_analysis_id=200, run_id=20, job_id=2, company_id=1, service_id=1, prompt_id=1, prompt_snapshot="{}",
+                hubspot_owner_id="owner_B", call_id="call_b_200", status="completed", evaluacion_global=7.0
+            )
+            db.add_all([res_a, res_b])
 
             await db.commit()
 
@@ -140,21 +164,18 @@ class TestTeamCoordinatorPermissions(unittest.IsolatedAsyncioTestCase):
 
     async def test_team_coordinator_can_list_and_create_automations(self):
         """Team Coordinator can list and create mass automations for allowed service_id=1."""
-        # 1. GET automations as coordinator -> 200 OK
         res = await self.client.get(
             "/bm/mass-analysis/automations",
             headers={"Authorization": f"Bearer {self.t_coord}"}
         )
         self.assertEqual(res.status_code, 200, res.text)
 
-        # 2. GET automations as agent -> 403 Forbidden
         res_agent = await self.client.get(
             "/bm/mass-analysis/automations",
             headers={"Authorization": f"Bearer {self.t_agent}"}
         )
         self.assertEqual(res_agent.status_code, 403)
 
-        # 3. POST automation in service_id=1 (allowed) -> 201 Created
         res_create = await self.client.post(
             "/bm/mass-analysis/automations",
             json={
@@ -169,7 +190,6 @@ class TestTeamCoordinatorPermissions(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(res_create.status_code, 201, res_create.text)
 
-        # 4. POST automation with agent_owner_ids=["owner_B"] (out of team scope) -> 403 Forbidden
         res_create_err = await self.client.post(
             "/bm/mass-analysis/automations",
             json={
@@ -184,19 +204,84 @@ class TestTeamCoordinatorPermissions(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(res_create_err.status_code, 403)
 
-        # 5. POST automation in service_id=2 (unassigned service) -> 403 Forbidden
-        res_svc_err = await self.client.post(
-            "/bm/mass-analysis/automations",
+    async def test_team_coordinator_mass_evaluation_jobs_runs_and_results(self):
+        """Team Coordinator can list/create jobs, list runs without status shadowing 500 error, and view results."""
+        # 1. GET /bm/mass-evaluation-jobs as coordinator -> 200 OK, includes Job A (id=1), excludes Job B (id=2)
+        res_jobs = await self.client.get(
+            "/bm/mass-evaluation-jobs",
+            headers={"Authorization": f"Bearer {self.t_coord}"}
+        )
+        self.assertEqual(res_jobs.status_code, 200, res_jobs.text)
+        jobs_data = res_jobs.json()
+        job_ids = [j["job_id"] for j in jobs_data]
+        self.assertIn(1, job_ids)
+        self.assertNotIn(2, job_ids)
+
+        # 2. GET /bm/mass-evaluation-jobs as agent -> 403 Forbidden
+        res_agent_jobs = await self.client.get(
+            "/bm/mass-evaluation-jobs",
+            headers={"Authorization": f"Bearer {self.t_agent}"}
+        )
+        self.assertEqual(res_agent_jobs.status_code, 403)
+
+        # 3. POST /bm/mass-evaluation-jobs as coordinator (allowed agent_owner_ids=["owner_A"]) -> 201 Created
+        res_post_job = await self.client.post(
+            "/bm/mass-evaluation-jobs",
             json={
-                "name": "Automatización Servicio 2",
-                "service_id": 2,
+                "job_name": "Nuevo Job Equipo A",
                 "prompt_id": 1,
-                "interval_minutes": 60,
-                "lookback_minutes": 60
+                "service_id": 1,
+                "company_id": 1,
+                "agent_owner_ids": ["owner_A"]
             },
             headers={"Authorization": f"Bearer {self.t_coord}"}
         )
-        self.assertEqual(res_svc_err.status_code, 403)
+        self.assertEqual(res_post_job.status_code, 201, res_post_job.text)
+
+        # 4. POST /bm/mass-evaluation-jobs with unallowed agent owner -> 403 Forbidden
+        res_post_job_err = await self.client.post(
+            "/bm/mass-evaluation-jobs",
+            json={
+                "job_name": "Nuevo Job Equipo B Invalido",
+                "prompt_id": 1,
+                "service_id": 1,
+                "company_id": 1,
+                "agent_owner_ids": ["owner_B"]
+            },
+            headers={"Authorization": f"Bearer {self.t_coord}"}
+        )
+        self.assertEqual(res_post_job_err.status_code, 403)
+
+        # 5. POST /bm/mass-evaluation-jobs with unallowed service -> 403 Forbidden
+        res_post_svc_err = await self.client.post(
+            "/bm/mass-evaluation-jobs",
+            json={
+                "job_name": "Nuevo Job Servicio 2 Invalido",
+                "service_id": 2,
+                "company_id": 1,
+                "agent_owner_ids": ["owner_A"]
+            },
+            headers={"Authorization": f"Bearer {self.t_coord}"}
+        )
+        self.assertEqual(res_post_svc_err.status_code, 403)
+
+        # 6. GET /bm/mass-evaluation-runs?status=completed -> 200 OK (No 500 error from status shadowing!)
+        res_runs = await self.client.get(
+            "/bm/mass-evaluation-runs?limit=100&status=completed",
+            headers={"Authorization": f"Bearer {self.t_coord}"}
+        )
+        self.assertEqual(res_runs.status_code, 200, res_runs.text)
+
+        # 7. GET /bm/mass-evaluation-results -> 200 OK, filtered to owner_A
+        res_results = await self.client.get(
+            "/bm/mass-evaluation-results",
+            headers={"Authorization": f"Bearer {self.t_coord}"}
+        )
+        self.assertEqual(res_results.status_code, 200, res_results.text)
+        results_data = res_results.json()
+        owners = [r["hubspot_owner_id"] for r in results_data]
+        self.assertIn("owner_A", owners)
+        self.assertNotIn("owner_B", owners)
 
     @patch("app.services.personalized_training_service.PersonalizedTrainingService.approve_training_cycle")
     async def test_team_coordinator_agent_tracking_and_manual_cycles(self, mock_approve):
@@ -211,28 +296,25 @@ class TestTeamCoordinatorPermissions(unittest.IsolatedAsyncioTestCase):
             return rep
 
         mock_approve.side_effect = fake_approve
-        # 1. GET /bm/training/admin/settings as coordinator -> 200 OK
+
         res = await self.client.get(
             "/bm/training/admin/settings",
             headers={"Authorization": f"Bearer {self.t_coord}"}
         )
         self.assertEqual(res.status_code, 200, res.text)
 
-        # 2. GET /bm/training/admin/agents-overview as coordinator -> 200 OK
         res_ov = await self.client.get(
             "/bm/training/admin/agents-overview",
             headers={"Authorization": f"Bearer {self.t_coord}"}
         )
         self.assertEqual(res_ov.status_code, 200, res_ov.text)
 
-        # 3. GET /bm/training/admin/cycles-summary as coordinator -> 200 OK
         res_sum = await self.client.get(
             "/bm/training/admin/cycles-summary",
             headers={"Authorization": f"Bearer {self.t_coord}"}
         )
         self.assertEqual(res_sum.status_code, 200, res_sum.text)
 
-        # 4. POST /bm/training/admin/manual-cycle for owner_A (Team A) -> 200 OK
         res_manual = await self.client.post(
             "/bm/training/admin/manual-cycle",
             json={
@@ -244,7 +326,6 @@ class TestTeamCoordinatorPermissions(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(res_manual.status_code, 200, res_manual.text)
 
-        # 5. POST /bm/training/admin/manual-cycle for owner_B (Team B, out of scope) -> 403 Forbidden
         res_manual_err = await self.client.post(
             "/bm/training/admin/manual-cycle",
             json={

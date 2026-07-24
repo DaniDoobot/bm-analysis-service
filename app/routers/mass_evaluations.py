@@ -42,17 +42,27 @@ async def list_jobs(
     db: AsyncSession = Depends(get_db)
 ):
     """List all active mass evaluation jobs."""
-    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+    if context.normalized_role == InternalRole.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No autorizado para ver jobs masivos."
         )
-    return await MassEvaluationService.list_jobs(
+    jobs = await MassEvaluationService.list_jobs(
         db,
         limit=limit,
         company_ids=context.allowed_company_ids,
         service_ids=context.allowed_service_ids
     )
+    if context.normalized_role == InternalRole.TEAM_COORDINATOR and context.allowed_agent_ids is not None:
+        filtered = []
+        for j in jobs:
+            if j.agent_owner_ids:
+                if any(a in context.allowed_agent_ids for a in j.agent_owner_ids):
+                    filtered.append(j)
+            else:
+                filtered.append(j)
+        return filtered
+    return jobs
 
 
 @router.get("/mass-evaluation-jobs/{job_id}", response_model=MassEvaluationJobResponse)
@@ -62,7 +72,7 @@ async def get_job(
     db: AsyncSession = Depends(get_db)
 ):
     """Retrieve details of a single mass evaluation job."""
-    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+    if context.normalized_role == InternalRole.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No autorizado para acceder a este job."
@@ -84,6 +94,13 @@ async def get_job(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Acceso denegado: este job pertenece a un servicio no asignado."
             )
+        if context.normalized_role == InternalRole.TEAM_COORDINATOR and context.allowed_agent_ids is not None:
+            if job.agent_owner_ids:
+                if not any(a in context.allowed_agent_ids for a in job.agent_owner_ids):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Acceso denegado: este job pertenece a agentes fuera de tus equipos."
+                    )
     return job
 
 
@@ -94,7 +111,7 @@ async def create_job(
     db: AsyncSession = Depends(get_db)
 ):
     """Create a new mass evaluation job."""
-    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+    if context.normalized_role == InternalRole.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No autorizado para crear jobs masivos."
@@ -184,6 +201,17 @@ async def create_job(
                     detail="Acceso denegado: el servicio especificado no está asignado."
                 )
 
+    if not context.is_super_admin and context.allowed_agent_ids is not None:
+        if payload.agent_owner_ids:
+            for a_id in payload.agent_owner_ids:
+                if a_id not in context.allowed_agent_ids:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail=f"Acceso denegado: no tienes permisos para incluir al agente {a_id}."
+                    )
+        elif context.normalized_role == InternalRole.TEAM_COORDINATOR:
+            payload.agent_owner_ids = context.allowed_agent_ids
+
     try:
         return await MassEvaluationService.create_job(
             db,
@@ -211,7 +239,7 @@ async def update_job(
     db: AsyncSession = Depends(get_db)
 ):
     """Update an existing mass evaluation job."""
-    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+    if context.normalized_role == InternalRole.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No autorizado para modificar jobs masivos."
@@ -233,6 +261,13 @@ async def update_job(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Acceso denegado: este job pertenece a un servicio no asignado."
             )
+        if context.allowed_agent_ids is not None and payload.agent_owner_ids:
+            for a_id in payload.agent_owner_ids:
+                if a_id not in context.allowed_agent_ids:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail=f"Acceso denegado: no tienes permisos para incluir al agente {a_id}."
+                    )
 
     if payload.prompt_id is not None:
         stmt = select(Prompt).where(Prompt.prompt_id == payload.prompt_id)
@@ -312,7 +347,7 @@ async def delete_job(
     db: AsyncSession = Depends(get_db)
 ):
     """Soft delete (deactivate) or hard delete a mass evaluation job."""
-    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+    if context.normalized_role == InternalRole.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No autorizado para borrar jobs masivos."
@@ -367,7 +402,7 @@ async def run_job(
     Trigger immediate execution of a mass evaluation job.
     Supports dry run mode to inspect HubSpot calls found without launching analysis.
     """
-    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+    if context.normalized_role == InternalRole.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No autorizado para ejecutar jobs masivos."
@@ -389,6 +424,13 @@ async def run_job(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Acceso denegado: este job pertenece a un servicio no asignado."
             )
+        if context.normalized_role == InternalRole.TEAM_COORDINATOR and context.allowed_agent_ids is not None:
+            if job.agent_owner_ids:
+                if not any(a in context.allowed_agent_ids for a in job.agent_owner_ids):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Acceso denegado: este job pertenece a agentes fuera de tus equipos."
+                    )
 
     if payload.dry_run:
         try:
@@ -439,13 +481,13 @@ async def run_job(
 @router.get("/mass-evaluation-runs", response_model=list[MassEvaluationRunResponse])
 async def list_runs(
     job_id: int | None = Query(None),
-    status: str | None = Query(None),
+    run_status: str | None = Query(None, alias="status"),
     limit: int = Query(100, ge=1, le=1000),
     context: TenantContext = Depends(get_tenant_context),
     db: AsyncSession = Depends(get_db)
 ):
     """List mass evaluation executions, optionally filtering by job and status."""
-    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+    if context.normalized_role == InternalRole.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No autorizado para ver ejecuciones masivas."
@@ -473,7 +515,7 @@ async def list_runs(
     return await MassEvaluationService.list_runs(
         db,
         job_id=job_id,
-        status=status,
+        status=run_status,
         limit=limit,
         company_ids=context.allowed_company_ids,
         service_ids=context.allowed_service_ids
@@ -487,7 +529,7 @@ async def get_run(
     db: AsyncSession = Depends(get_db)
 ):
     """Get details and summary stats of a single mass evaluation run."""
-    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+    if context.normalized_role == InternalRole.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No autorizado para acceder a este run."
@@ -519,7 +561,7 @@ async def cancel_run(
     db: AsyncSession = Depends(get_db)
 ):
     """Cancel a running mass evaluation run cooperatively."""
-    if context.normalized_role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+    if context.normalized_role == InternalRole.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No autorizado para cancelar ejecuciones masivas."
