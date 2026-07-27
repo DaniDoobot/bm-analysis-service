@@ -15,8 +15,17 @@ from app.models.companies import Company
 from app.models.services import Service
 from app.models.teams import Team
 from app.models.users import User
+from app.core.roles import InternalRole
 from app.core.tenant_context import TenantContext
-from app.schemas.multitenancy import AdminCompanyResponse, CompanyCreate, CompanyResponse, CompanyUpdate
+from app.schemas.multitenancy import (
+    AdminCompanyResponse,
+    CompanyCreate,
+    CompanyResponse,
+    CompanyUpdate,
+    CompanyBrandingResponse,
+    CompanyBrandingUpdate,
+)
+from app.services.company_branding_service import CompanyBrandingService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/bm", tags=["Multi-tenancy Companies"])
@@ -230,3 +239,62 @@ async def update_company(
         context.user_id, company_id, company.company_name, company.company_key, company.is_active,
     )
     return await _build_admin_company_response(company, db)
+
+
+# ---------------------------------------------------------------------------
+# GET & PATCH /bm/admin/companies/{company_id}/branding
+# ---------------------------------------------------------------------------
+
+async def _check_company_branding_permission(context: TenantContext, company_id: int):
+    """Validate permission for reading or updating company branding."""
+    if context.is_super_admin:
+        return
+    if context.normalized_role == InternalRole.COMPANY_ADMIN:
+        if company_id == context.company_id or company_id in context.allowed_company_ids:
+            return
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: no puedes gestionar el branding de otra empresa."
+        )
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Acceso denegado: rol no autorizado para gestionar branding."
+    )
+
+
+@router.get("/admin/companies/{company_id}/branding", response_model=CompanyBrandingResponse)
+@router.get("/companies/{company_id}/branding", response_model=CompanyBrandingResponse)
+async def get_company_branding(
+    company_id: int,
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Get branding details for a specific company."""
+    await _check_company_branding_permission(context, company_id)
+
+    stmt = select(Company).where(Company.company_id == company_id)
+    res = await db.execute(stmt)
+    company = res.scalar()
+    if not company:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Empresa no encontrada.")
+
+    return CompanyBrandingService.build_branding_response(company)
+
+
+@router.patch("/admin/companies/{company_id}/branding", response_model=CompanyBrandingResponse)
+@router.patch("/companies/{company_id}/branding", response_model=CompanyBrandingResponse)
+async def update_company_branding(
+    company_id: int,
+    payload: CompanyBrandingUpdate,
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Update branding details for a specific company (super_admin or company_admin for their company)."""
+    await _check_company_branding_permission(context, company_id)
+
+    updated_branding = await CompanyBrandingService.update_company_branding(db, company_id, payload)
+    if not updated_branding:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Empresa no encontrada.")
+
+    logger.info("Actor (user_id=%s) UPDATED branding for company id=%s", context.user_id, company_id)
+    return updated_branding

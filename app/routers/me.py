@@ -9,7 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_db, get_current_user, get_tenant_context
 from app.core.tenant_context import TenantContext
-from app.schemas.multitenancy import TenantContextResponse
+from app.schemas.multitenancy import TenantContextResponse, CompanyBrandingResponse
+from app.services.company_branding_service import CompanyBrandingService
 from app.models.users import User, PasswordResetToken, UserAudit
 from app.models.companies import Company
 from app.schemas.users import (
@@ -739,10 +740,20 @@ async def get_my_analysis_results(
     return report_data
 
 
+@router.get("/me/branding", response_model=CompanyBrandingResponse)
+async def get_my_branding(
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Retrieve branding configuration for the authenticated user's company or global neutral branding."""
+    return await CompanyBrandingService.get_branding_for_user(db, context)
+
+
 @router.get("/me/tenant-context", response_model=TenantContextResponse)
 async def get_my_tenant_context(
     current_user: Annotated[User, Depends(get_current_user)],
     context: Annotated[TenantContext, Depends(get_tenant_context)],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Retrieve the current user's multi-tenant access context and permission flags."""
     from app.core.roles import InternalRole
@@ -758,6 +769,8 @@ async def get_my_tenant_context(
     can_manage_training = is_super or role in (InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR)
     can_manage_trainer = is_super or role in (InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR)
     can_manage_structures = is_super or role in (InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR)
+
+    branding = await CompanyBrandingService.get_branding_for_user(db, context)
 
     return TenantContextResponse(
         user_id=context.user_id,
@@ -785,5 +798,6 @@ async def get_my_tenant_context(
         can_manage_training=can_manage_training,
         can_manage_trainer=can_manage_trainer,
         can_manage_structures=can_manage_structures,
+        branding=branding,
     )
 

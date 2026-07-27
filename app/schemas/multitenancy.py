@@ -171,6 +171,45 @@ class UserSummaryResponse(BaseModel):
         return self
 
 
+class CompanyBrandingResponse(BaseModel):
+    company_id: Optional[int] = None
+    company_name: Optional[str] = None
+    brand_name: str
+    brand_short_name: str
+    logo_url: Optional[str] = None
+    logo_dark_url: Optional[str] = None
+    favicon_url: Optional[str] = None
+    primary_color: Optional[str] = None
+    secondary_color: Optional[str] = None
+    accent_color: Optional[str] = None
+    login_background_url: Optional[str] = None
+    app_variant: str
+    dashboard_variant: str
+    sector: Optional[str] = None
+    custom_welcome_title: Optional[str] = None
+    custom_welcome_subtitle: Optional[str] = None
+    is_global_context: bool = False
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CompanyBrandingUpdate(BaseModel):
+    brand_name: Optional[str] = None
+    brand_short_name: Optional[str] = None
+    logo_url: Optional[str] = None
+    logo_dark_url: Optional[str] = None
+    favicon_url: Optional[str] = None
+    primary_color: Optional[str] = None
+    secondary_color: Optional[str] = None
+    accent_color: Optional[str] = None
+    login_background_url: Optional[str] = None
+    app_variant: Optional[str] = None
+    dashboard_variant: Optional[str] = None
+    sector: Optional[str] = None
+    custom_welcome_title: Optional[str] = None
+    custom_welcome_subtitle: Optional[str] = None
+
+
 class TenantContextResponse(BaseModel):
     user_id: int
     username: str
@@ -199,5 +238,6 @@ class TenantContextResponse(BaseModel):
     can_manage_training: bool = False
     can_manage_trainer: bool = False
     can_manage_structures: bool = False
+    branding: Optional[CompanyBrandingResponse] = None
 
     model_config = ConfigDict(from_attributes=True)

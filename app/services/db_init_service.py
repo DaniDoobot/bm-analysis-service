@@ -150,6 +150,85 @@ async def init_db():
                 else:
                     logger.info("Column '%s' already exists on 'bm_users' table.", col_name)
 
+        # 1.1.b Migration: Add missing branding columns to bm_companies table
+        async with engine.begin() as conn:
+            is_sqlite = conn.dialect.name == "sqlite"
+            branding_cols = [
+                ("brand_name", "TEXT NULL"),
+                ("brand_short_name", "TEXT NULL"),
+                ("logo_url", "TEXT NULL"),
+                ("logo_dark_url", "TEXT NULL"),
+                ("favicon_url", "TEXT NULL"),
+                ("primary_color", "TEXT NULL"),
+                ("secondary_color", "TEXT NULL"),
+                ("accent_color", "TEXT NULL"),
+                ("login_background_url", "TEXT NULL"),
+                ("app_variant", "TEXT NULL"),
+                ("dashboard_variant", "TEXT NULL"),
+                ("sector", "TEXT NULL"),
+                ("custom_welcome_title", "TEXT NULL"),
+                ("custom_welcome_subtitle", "TEXT NULL"),
+            ]
+            for col_name, col_type in branding_cols:
+                if is_sqlite:
+                    res = await conn.execute(text("PRAGMA table_info(bm_companies);"))
+                    cols = [row[1] for row in res.fetchall()]
+                    col_exists = col_name in cols
+                else:
+                    res = await conn.execute(
+                        text(f"""
+                            SELECT EXISTS (
+                                SELECT FROM information_schema.columns 
+                                WHERE table_schema = 'public' 
+                                  AND table_name = 'bm_companies' 
+                                  AND column_name = '{col_name}'
+                            );
+                        """)
+                    )
+                    col_exists = res.scalar()
+
+                if not col_exists:
+                    logger.info("Adding column '%s' to 'bm_companies' table...", col_name)
+                    await conn.execute(
+                        text(f"ALTER TABLE bm_companies ADD COLUMN {col_name} {col_type};")
+                    )
+                    logger.info("Column '%s' added successfully to 'bm_companies'.", col_name)
+
+        # 1.1.c Backfill Boston Medical branding
+        from app.models.companies import Company
+        async with AsyncSession(engine) as session:
+            try:
+                res = await session.execute(
+                    select(Company).where(
+                        (Company.company_name.ilike("%boston%")) | (Company.company_key.ilike("%boston%"))
+                    )
+                )
+                boston_companies = list(res.scalars().all())
+                for company in boston_companies:
+                    updated = False
+                    if not company.brand_name:
+                        company.brand_name = "Boston Medical"
+                        updated = True
+                    if not company.brand_short_name:
+                        company.brand_short_name = "Boston Medical"
+                        updated = True
+                    if not company.app_variant:
+                        company.app_variant = "boston_medical"
+                        updated = True
+                    if not company.dashboard_variant:
+                        company.dashboard_variant = "boston_medical"
+                        updated = True
+                    if not company.sector:
+                        company.sector = "healthcare"
+                        updated = True
+                    if updated:
+                        session.add(company)
+                if boston_companies:
+                    await session.commit()
+                    logger.info("Boston Medical branding backfilled successfully.")
+            except Exception as e:
+                logger.error("Failed to backfill Boston Medical branding: %s", e)
+
         # 1.2. Seed default developer user if bm_users is empty
         from app.models.users import User
         from app.utils.security import hash_password
