@@ -33,9 +33,8 @@ async def list_typologies(
     is_active: bool | None = None,
     db: AsyncSession = Depends(get_db)
 ):
-    """Retrieve all typologies, optionally filtered by service_id and is_active, scoped by tenant."""
     role = context.normalized_role
-    if role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+    if role == InternalRole.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: rol no autorizado para ver tipologías."
@@ -62,7 +61,7 @@ async def list_typologies(
                     detail="El servicio especificado no pertenece a tu empresa."
                 )
             stmt = stmt.where(Typology.service_id == service_id)
-    elif role == InternalRole.SERVICE_MANAGER:
+    elif role in (InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR):
         if service_id is not None:
             if context.allowed_service_ids is None or service_id not in context.allowed_service_ids:
                 raise HTTPException(
@@ -91,7 +90,7 @@ async def get_typology(
 ):
     """Retrieve details of a specific typology with tenant validation."""
     role = context.normalized_role
-    if role in (InternalRole.AGENT, InternalRole.TEAM_COORDINATOR):
+    if role == InternalRole.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: rol no autorizado."
@@ -114,7 +113,7 @@ async def get_typology(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="No tienes permisos para ver esta tipología."
                 )
-        elif role == InternalRole.SERVICE_MANAGER:
+        elif role in (InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR):
             if context.allowed_service_ids is None or typology.service_id not in context.allowed_service_ids:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
