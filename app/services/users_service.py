@@ -153,6 +153,25 @@ async def get_user_services_info(
     for sa in assocs:
         user_assoc_ids.setdefault(sa.user_id, set()).add(sa.service_id)
 
+    # Derive services from team associations (UserTeamAssociation & AgentTeamAssociation)
+    team_svc_res = await db.execute(
+        select(UserTeamAssociation.user_id, Team.service_id)
+        .join(Team, UserTeamAssociation.team_id == Team.team_id)
+        .where(UserTeamAssociation.user_id.in_(user_ids))
+    )
+    for u_id, svc_id in team_svc_res.all():
+        if svc_id is not None:
+            user_assoc_ids.setdefault(u_id, set()).add(svc_id)
+
+    agent_svc_res = await db.execute(
+        select(AgentTeamAssociation.user_id, Team.service_id)
+        .join(Team, AgentTeamAssociation.team_id == Team.team_id)
+        .where(AgentTeamAssociation.user_id.in_(user_ids))
+    )
+    for u_id, svc_id in agent_svc_res.all():
+        if svc_id is not None:
+            user_assoc_ids.setdefault(u_id, set()).add(svc_id)
+
     # Fallback para service_manager / team_coordinator sin primary_service_id ni asociaciones
     comp_needing_fallback = {
         u.company_id for u in users

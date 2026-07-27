@@ -54,6 +54,7 @@ class UserBase(BaseModel):
     can_reset_password: bool = True
     can_deactivate: bool = True
     visibility_reason: Optional[str] = None
+    display_service_team: Optional[str] = None
 
     @model_validator(mode="after")
     def compute_display_name(self) -> "UserBase":

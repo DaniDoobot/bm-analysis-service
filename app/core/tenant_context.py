@@ -27,6 +27,7 @@ class TenantContext(BaseModel):
     allowed_team_ids: Optional[List[int]] = None     # None = sin restricción
     allowed_teams: Optional[List[dict]] = None
     allowed_agent_ids: Optional[List[str]] = None    # None = sin restricción (hubspot_owner_ids)
+    display_service_team: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -38,12 +39,10 @@ class TenantContext(BaseModel):
 
         # 1. Resolver company_id y company_name del usuario
         company_id = user.company_id
-        company_name = None
-
         if is_super and company_override is not None:
-            # Superadmin puede simular cualquier empresa
             company_id = company_override
 
+        company_name = None
         if company_id is not None:
             company_stmt = select(Company.company_name).where(Company.company_id == company_id)
             company_res = await db.execute(company_stmt)
@@ -99,7 +98,8 @@ class TenantContext(BaseModel):
                 allowed_services=None,
                 allowed_team_ids=None,
                 allowed_teams=None,
-                allowed_agent_ids=None
+                allowed_agent_ids=None,
+                display_service_team="Doobot.ai_ Global"
             )
 
         if company_id is None:
@@ -121,12 +121,33 @@ class TenantContext(BaseModel):
                 allowed_services=[],
                 allowed_team_ids=[],
                 allowed_teams=[],
-                allowed_agent_ids=[]
+                allowed_agent_ids=[],
+                display_service_team=None
             )
 
         if norm_role == InternalRole.COMPANY_ADMIN:
-            # Admin de empresa ve toda su empresa, sin restricciones internas
-            pass
+            # Admin de empresa ve toda su empresa
+            svc_stmt = select(Service.service_id).where(Service.company_id == company_id, Service.is_active == True)
+            svc_res = await db.execute(svc_stmt)
+            allowed_services = list(svc_res.scalars().all())
+
+            teams_stmt = select(Team.team_id).where(Team.company_id == company_id, Team.is_active == True)
+            teams_res = await db.execute(teams_stmt)
+            allowed_teams = list(teams_res.scalars().all())
+
+            if primary_service_id is None and allowed_services:
+                primary_service_id = allowed_services[0]
+                ps_stmt = select(Service.service_name).where(Service.service_id == primary_service_id)
+                ps_res = await db.execute(ps_stmt)
+                primary_service_name = ps_res.scalar()
+
+            if primary_team_id is None and allowed_teams:
+                primary_team_id = allowed_teams[0]
+                pt_stmt = select(Team.team_name).where(Team.team_id == primary_team_id)
+                pt_res = await db.execute(pt_stmt)
+                primary_team_name = pt_res.scalar()
+
+            allowed_agents = None
 
         elif norm_role == InternalRole.SERVICE_MANAGER:
             # Cargar servicios asignados
@@ -157,6 +178,18 @@ class TenantContext(BaseModel):
                 allowed_teams = list(teams_res.scalars().all())
             else:
                 allowed_teams = []
+
+            if primary_service_id is None and allowed_services:
+                primary_service_id = allowed_services[0]
+                ps_stmt = select(Service.service_name).where(Service.service_id == primary_service_id)
+                ps_res = await db.execute(ps_stmt)
+                primary_service_name = ps_res.scalar()
+
+            if primary_team_id is None and allowed_teams:
+                primary_team_id = allowed_teams[0]
+                pt_stmt = select(Team.team_name).where(Team.team_id == primary_team_id)
+                pt_res = await db.execute(pt_stmt)
+                primary_team_name = pt_res.scalar()
 
             # Service manager accede a todos los datos de sus servicios permitidos sin filtrar por agentes (hubspot_owner_id)
             allowed_agents = None
@@ -213,6 +246,21 @@ class TenantContext(BaseModel):
                         primary_service_id = fb_row.service_id
                         primary_service_name = fb_row.service_name
 
+            if primary_team_id is None and allowed_teams:
+                primary_team_id = allowed_teams[0]
+                pt_stmt = select(Team.team_name, Team.service_id).where(Team.team_id == primary_team_id)
+                pt_res = await db.execute(pt_stmt)
+                pt_row = pt_res.first()
+                if pt_row:
+                    primary_team_name = pt_row.team_name
+                    if primary_service_id is None:
+                        primary_service_id = pt_row.service_id
+
+            if primary_service_id is not None and primary_service_name is None:
+                ps_stmt = select(Service.service_name).where(Service.service_id == primary_service_id)
+                ps_res = await db.execute(ps_stmt)
+                primary_service_name = ps_res.scalar()
+
             # Cargar agentes de esos equipos (vía AgentTeamAssociation o primary_team_id)
             agents_stmt1 = select(User.hubspot_owner_id).join(AgentTeamAssociation).where(
                 AgentTeamAssociation.team_id.in_(allowed_teams),
@@ -237,10 +285,35 @@ class TenantContext(BaseModel):
             teams_res = await db.execute(teams_stmt)
             allowed_teams = list(teams_res.scalars().all())
 
+            if user.primary_team_id is not None and user.primary_team_id not in allowed_teams:
+                allowed_teams.append(user.primary_team_id)
+
             # Cargar servicios de sus equipos
-            svc_stmt = select(Team.service_id).where(Team.team_id.in_(allowed_teams))
-            svc_res = await db.execute(svc_stmt)
-            allowed_services = list(set(svc_res.scalars().all()))
+            if allowed_teams:
+                svc_stmt = select(Team.service_id).where(Team.team_id.in_(allowed_teams))
+                svc_res = await db.execute(svc_stmt)
+                allowed_services = list(set(svc_res.scalars().all()))
+            else:
+                allowed_services = []
+
+            if user.primary_service_id is not None and user.primary_service_id not in allowed_services:
+                allowed_services.append(user.primary_service_id)
+
+            # Resolver primary_team_id / primary_service_id para agente si no están informados
+            if primary_team_id is None and allowed_teams:
+                primary_team_id = allowed_teams[0]
+                pt_stmt = select(Team.team_name, Team.service_id).where(Team.team_id == primary_team_id)
+                pt_res = await db.execute(pt_stmt)
+                pt_row = pt_res.first()
+                if pt_row:
+                    primary_team_name = pt_row.team_name
+                    if primary_service_id is None:
+                        primary_service_id = pt_row.service_id
+
+            if primary_service_id is not None and primary_service_name is None:
+                ps_stmt = select(Service.service_name).where(Service.service_id == primary_service_id)
+                ps_res = await db.execute(ps_stmt)
+                primary_service_name = ps_res.scalar()
 
             # Solo accede a su propio hubspot_owner_id
             allowed_agents = [user.hubspot_owner_id] if user.hubspot_owner_id else []
@@ -252,7 +325,12 @@ class TenantContext(BaseModel):
                 svc_objs_stmt = select(Service.service_id, Service.service_name).where(Service.service_id.in_(allowed_services))
                 svc_objs_res = await db.execute(svc_objs_stmt)
                 allowed_services_dicts = [
-                    {"service_id": row.service_id, "service_name": row.service_name}
+                    {
+                        "id": row.service_id,
+                        "service_id": row.service_id,
+                        "name": row.service_name,
+                        "service_name": row.service_name
+                    }
                     for row in svc_objs_res.all()
                 ]
             else:
@@ -264,19 +342,45 @@ class TenantContext(BaseModel):
             if allowed_teams:
                 tm_objs_stmt = select(Team.team_id, Team.team_name, Team.service_id).where(Team.team_id.in_(allowed_teams))
                 tm_objs_res = await db.execute(tm_objs_stmt)
+                tm_rows = tm_objs_res.all()
+
+                tm_svc_ids = {row.service_id for row in tm_rows if row.service_id is not None}
+                svc_name_map = {}
+                if tm_svc_ids:
+                    svc_names_res = await db.execute(select(Service.service_id, Service.service_name).where(Service.service_id.in_(tm_svc_ids)))
+                    svc_name_map = {row.service_id: row.service_name for row in svc_names_res.all()}
+
                 allowed_teams_dicts = [
-                    {"team_id": row.team_id, "team_name": row.team_name, "service_id": row.service_id}
-                    for row in tm_objs_res.all()
+                    {
+                        "id": row.team_id,
+                        "team_id": row.team_id,
+                        "name": row.team_name,
+                        "team_name": row.team_name,
+                        "service_id": row.service_id,
+                        "service_name": svc_name_map.get(row.service_id)
+                    }
+                    for row in tm_rows
                 ]
             else:
                 allowed_teams_dicts = []
+
+        # Construir display_service_team
+        display_service_team: Optional[str] = None
+        if primary_service_name and primary_team_name:
+            display_service_team = f"{primary_service_name} · {primary_team_name}"
+        elif primary_service_name:
+            display_service_team = primary_service_name
+        elif primary_team_name:
+            display_service_team = primary_team_name
+        elif company_name:
+            display_service_team = company_name
 
         return cls(
             user_id=user.user_id,
             user_email=user.email,
             raw_role=user.role,
             normalized_role=norm_role,
-            is_super_admin=False,
+            is_super_admin=is_super,
             company_id=company_id,
             company_name=company_name,
             primary_service_id=primary_service_id,
@@ -288,5 +392,6 @@ class TenantContext(BaseModel):
             allowed_services=allowed_services_dicts,
             allowed_team_ids=allowed_teams,
             allowed_teams=allowed_teams_dicts,
-            allowed_agent_ids=allowed_agents
+            allowed_agent_ids=allowed_agents,
+            display_service_team=display_service_team
         )

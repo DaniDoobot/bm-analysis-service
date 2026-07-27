@@ -545,9 +545,6 @@ async def get_my_profile(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Retrieve profile details of the authenticated user."""
-    allowed_service_ids_map, allowed_services_map, primary_service_map = await get_user_services_info(db, [current_user.user_id])
-    p_id, p_name = primary_service_map.get(current_user.user_id, (current_user.primary_service_id, None))
-
     return UserOut(
         user_id=current_user.user_id,
         username=current_user.username,
@@ -557,10 +554,15 @@ async def get_my_profile(
         normalized_role=context.normalized_role.value,
         company_id=context.company_id,
         company_name=context.company_name,
-        primary_service_id=p_id,
-        primary_service_name=p_name,
-        allowed_service_ids=allowed_service_ids_map.get(current_user.user_id, []),
-        allowed_services=allowed_services_map.get(current_user.user_id, []),
+        primary_service_id=context.primary_service_id,
+        primary_service_name=context.primary_service_name,
+        primary_team_id=context.primary_team_id,
+        primary_team_name=context.primary_team_name,
+        allowed_service_ids=context.allowed_service_ids or [],
+        allowed_services=context.allowed_services or [],
+        allowed_team_ids=context.allowed_team_ids or [],
+        allowed_teams=context.allowed_teams or [],
+        display_service_team=context.display_service_team,
         is_active=current_user.is_active,
         hubspot_owner_id=current_user.hubspot_owner_id,
         agent_initials=current_user.agent_initials,
@@ -850,6 +852,7 @@ async def get_my_tenant_context(
         allowed_services=context.allowed_services,
         allowed_team_ids=context.allowed_team_ids,
         allowed_teams=context.allowed_teams,
+        display_service_team=context.display_service_team,
         is_super_admin=is_super,
         can_manage_companies=can_manage_companies,
         can_manage_company=can_manage_company,

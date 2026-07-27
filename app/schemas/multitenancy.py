@@ -239,5 +239,6 @@ class TenantContextResponse(BaseModel):
     can_manage_trainer: bool = False
     can_manage_structures: bool = False
     branding: Optional[CompanyBrandingResponse] = None
+    display_service_team: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
