@@ -302,12 +302,18 @@ class TestTeamCoordinatorPermissions(unittest.IsolatedAsyncioTestCase):
             headers={"Authorization": f"Bearer {self.t_coord}"}
         )
         self.assertEqual(res.status_code, 200, res.text)
+        settings_owners = [s["hubspot_owner_id"] for s in res.json()]
+        self.assertIn("owner_A", settings_owners)
+        self.assertNotIn("owner_B", settings_owners)
 
         res_ov = await self.client.get(
             "/bm/training/admin/agents-overview",
             headers={"Authorization": f"Bearer {self.t_coord}"}
         )
         self.assertEqual(res_ov.status_code, 200, res_ov.text)
+        ov_owners = [item["hubspot_owner_id"] for item in res_ov.json()]
+        self.assertIn("owner_A", ov_owners)
+        self.assertNotIn("owner_B", ov_owners)
 
         res_sum = await self.client.get(
             "/bm/training/admin/cycles-summary",

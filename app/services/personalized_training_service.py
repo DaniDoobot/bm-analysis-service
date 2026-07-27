@@ -50,15 +50,70 @@ class PersonalizedTrainingService:
         company_ids: Optional[List[int]] = None,
         allowed_agent_ids: Optional[List[str]] = None
     ) -> List[TrainingAgentSetting]:
-        """List all agent settings, ordered by agent name, filtered by multitenant scope."""
-        stmt = select(TrainingAgentSetting)
+        """List all agent settings, ordered by agent name, filtered by multitenant scope. Auto-creates settings for real active agents."""
+        # 1. Fetch active real agents from User model in scope
+        stmt_users = select(User).where(
+            User.is_active == True,
+            func.lower(User.role).in_(["agent", "agente"]),
+            User.hubspot_owner_id != None,
+            User.hubspot_owner_id != ""
+        )
         if company_ids is not None:
-            stmt = stmt.where(TrainingAgentSetting.company_id.in_(company_ids))
+            stmt_users = stmt_users.where(User.company_id.in_(company_ids))
         if allowed_agent_ids is not None:
-            stmt = stmt.where(TrainingAgentSetting.hubspot_owner_id.in_(allowed_agent_ids))
-        stmt = stmt.order_by(TrainingAgentSetting.agent_name.asc())
-        res = await db.execute(stmt)
-        return list(res.scalars().all())
+            stmt_users = stmt_users.where(User.hubspot_owner_id.in_(allowed_agent_ids))
+        res_users = await db.execute(stmt_users)
+        active_agents = list(res_users.scalars().all())
+
+        # 2. Fetch existing settings for these agents
+        agent_hs_ids = [u.hubspot_owner_id for u in active_agents if u.hubspot_owner_id]
+        existing_settings_map = {}
+        if agent_hs_ids:
+            stmt_set = select(TrainingAgentSetting).where(TrainingAgentSetting.hubspot_owner_id.in_(agent_hs_ids))
+            res_set = await db.execute(stmt_set)
+            existing_settings_map = {s.hubspot_owner_id: s for s in res_set.scalars().all()}
+
+        # 3. Idempotently create missing settings for active agents & sync names
+        new_created = False
+        for u in active_agents:
+            hs_id = u.hubspot_owner_id
+            disp_name = u.display_name or u.name or u.username or f"Agente {hs_id}"
+            
+            # Compute initials if not present
+            initials = u.agent_initials
+            if not initials:
+                parts = [p for p in disp_name.strip().split() if p]
+                initials = "".join([p[0].upper() for p in parts[:2]]) if parts else "AG"
+
+            if hs_id not in existing_settings_map:
+                new_setting = TrainingAgentSetting(
+                    hubspot_owner_id=hs_id,
+                    agent_name=disp_name,
+                    agent_initials=initials,
+                    is_enabled=False,
+                    company_id=u.company_id
+                )
+                db.add(new_setting)
+                existing_settings_map[hs_id] = new_setting
+                new_created = True
+            else:
+                s = existing_settings_map[hs_id]
+                if s.agent_name != disp_name and disp_name:
+                    s.agent_name = disp_name
+                    new_created = True
+
+        if new_created:
+            await db.commit()
+
+        # 4. Also include any remaining settings matching the query filters
+        stmt_all = select(TrainingAgentSetting)
+        if company_ids is not None:
+            stmt_all = stmt_all.where(TrainingAgentSetting.company_id.in_(company_ids))
+        if allowed_agent_ids is not None:
+            stmt_all = stmt_all.where(TrainingAgentSetting.hubspot_owner_id.in_(allowed_agent_ids))
+        stmt_all = stmt_all.order_by(TrainingAgentSetting.agent_name.asc())
+        res_all = await db.execute(stmt_all)
+        return list(res_all.scalars().all())
 
     @staticmethod
     async def update_agent_setting(
@@ -1243,17 +1298,9 @@ class PersonalizedTrainingService:
         Dashboard visibility is determined by having valid (non-archived) reports,
         regardless of is_enabled. All agents with cycles are monitored.
         """
-        # 1. Fetch ALL agent settings regardless of is_enabled
-        # is_enabled only controls generation of new cycles, NOT dashboard visibility
-        settings_stmt = select(TrainingAgentSetting)
-        if company_ids is not None:
-            settings_stmt = settings_stmt.where(TrainingAgentSetting.company_id.in_(company_ids))
-        if allowed_agent_ids is not None:
-            settings_stmt = settings_stmt.where(TrainingAgentSetting.hubspot_owner_id.in_(allowed_agent_ids))
-        settings_stmt = settings_stmt.order_by(TrainingAgentSetting.agent_name.asc())
-
-        res_settings = await db.execute(settings_stmt)
-        all_settings = list(res_settings.scalars().all())
+        all_settings = await PersonalizedTrainingService.get_agent_settings(
+            db, company_ids=company_ids, allowed_agent_ids=allowed_agent_ids
+        )
 
         # Count how many agents have generation enabled (for informational purposes)
         generation_enabled_agents = sum(1 for s in all_settings if s.is_enabled)

@@ -366,11 +366,18 @@ async def get_user_teams_info(
     )
     assocs = assoc_res.scalars().all()
 
+    agent_assoc_res = await db.execute(
+        select(AgentTeamAssociation).where(AgentTeamAssociation.user_id.in_(user_ids))
+    )
+    agent_assocs = agent_assoc_res.scalars().all()
+
     user_assoc_ids: Dict[int, set] = {}
     for ta in assocs:
         user_assoc_ids.setdefault(ta.user_id, set()).add(ta.team_id)
+    for ta in agent_assocs:
+        user_assoc_ids.setdefault(ta.user_id, set()).add(ta.team_id)
 
-    all_team_ids = primary_team_ids | {ta.team_id for ta in assocs}
+    all_team_ids = primary_team_ids | {ta.team_id for ta in assocs} | {ta.team_id for ta in agent_assocs}
 
     team_obj_map = {}
     if all_team_ids:
@@ -571,7 +578,9 @@ def compute_user_management_flags(
             }
         if target_role == InternalRole.AGENT:
             allowed_teams = set(context.allowed_team_ids or [])
-            if tm_ids & allowed_teams:
+            allowed_agents = set(context.allowed_agent_ids or [])
+            is_in_team = bool(tm_ids & allowed_teams) or (bool(target_user.hubspot_owner_id) and target_user.hubspot_owner_id in allowed_agents)
+            if is_in_team:
                 return {
                     "is_readonly": False,
                     "can_edit": True,

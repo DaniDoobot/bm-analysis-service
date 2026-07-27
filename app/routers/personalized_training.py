@@ -3,7 +3,7 @@ import logging
 from typing import Annotated, List, Optional
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_db, get_current_user, get_tenant_context
@@ -97,7 +97,9 @@ async def get_service_manager_agent_ids(db: AsyncSession, context: TenantContext
     stmt1 = select(User.hubspot_owner_id).where(
         User.company_id == context.company_id,
         User.primary_service_id.in_(context.allowed_service_ids),
-        User.hubspot_owner_id != None
+        User.hubspot_owner_id != None,
+        User.is_active == True,
+        func.lower(User.role).in_(["agent", "agente"])
     )
     res1 = await db.execute(stmt1)
     agent_ids = set(res1.scalars().all())
@@ -108,7 +110,9 @@ async def get_service_manager_agent_ids(db: AsyncSession, context: TenantContext
     ).where(
         User.company_id == context.company_id,
         UserServiceAssociation.service_id.in_(context.allowed_service_ids),
-        User.hubspot_owner_id != None
+        User.hubspot_owner_id != None,
+        User.is_active == True,
+        func.lower(User.role).in_(["agent", "agente"])
     )
     res2 = await db.execute(stmt2)
     agent_ids.update(res2.scalars().all())
@@ -121,7 +125,9 @@ async def get_service_manager_agent_ids(db: AsyncSession, context: TenantContext
     ).where(
         Team.company_id == context.company_id,
         Team.service_id.in_(context.allowed_service_ids),
-        User.hubspot_owner_id != None
+        User.hubspot_owner_id != None,
+        User.is_active == True,
+        func.lower(User.role).in_(["agent", "agente"])
     )
     res3 = await db.execute(stmt3)
     agent_ids.update(res3.scalars().all())

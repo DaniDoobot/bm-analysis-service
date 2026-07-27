@@ -1,6 +1,6 @@
 from typing import List, Optional
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.companies import Company
@@ -214,12 +214,20 @@ class TenantContext(BaseModel):
                         primary_service_name = fb_row.service_name
 
             # Cargar agentes de esos equipos (vía AgentTeamAssociation o primary_team_id)
-            agents_stmt1 = select(User.hubspot_owner_id).join(AgentTeamAssociation).where(AgentTeamAssociation.team_id.in_(allowed_teams))
+            agents_stmt1 = select(User.hubspot_owner_id).join(AgentTeamAssociation).where(
+                AgentTeamAssociation.team_id.in_(allowed_teams),
+                User.is_active == True,
+                func.lower(User.role).in_(["agent", "agente"])
+            )
             agents_res1 = await db.execute(agents_stmt1)
-            agents_stmt2 = select(User.hubspot_owner_id).where(User.primary_team_id.in_(allowed_teams))
+            agents_stmt2 = select(User.hubspot_owner_id).where(
+                User.primary_team_id.in_(allowed_teams),
+                User.is_active == True,
+                func.lower(User.role).in_(["agent", "agente"])
+            )
             agents_res2 = await db.execute(agents_stmt2)
             allowed_agents = [uid for uid in list(agents_res1.scalars().all()) + list(agents_res2.scalars().all()) if uid]
-            if user.hubspot_owner_id:
+            if user.hubspot_owner_id and norm_role == InternalRole.AGENT:
                 allowed_agents.append(user.hubspot_owner_id)
             allowed_agents = list(set(allowed_agents))
 
