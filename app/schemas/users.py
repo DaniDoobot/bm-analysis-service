@@ -304,6 +304,27 @@ class MePasswordUpdatePayload(BaseModel):
     new_password_confirm: str
 
 
+class ChangePasswordPayload(BaseModel):
+    current_password: str
+    new_password: str
+
+    @field_validator("current_password")
+    @classmethod
+    def validate_current_password(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Debe proporcionar su contraseña actual.")
+        return v
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("La nueva contraseña no puede estar vacía.")
+        if len(v.strip()) < 8:
+            raise ValueError("La nueva contraseña debe tener al menos 8 caracteres.")
+        return v.strip()
+
+
 class RevealPasswordPayload(BaseModel):
     current_password: str
 

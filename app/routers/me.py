@@ -20,6 +20,7 @@ from app.schemas.users import (
     RevealPasswordPayload,
     MeUpdatePayload,
     MePasswordUpdatePayload,
+    ChangePasswordPayload,
     RequestPasswordResetPayload,
     ResetPasswordPayload,
     PasswordResetConfirmPayload,
@@ -606,6 +607,61 @@ async def reveal_my_password(
     }
 
 
+@router.post("/me/change-password")
+async def self_change_password(
+    payload: ChangePasswordPayload,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)]
+):
+    """
+    Allow any authenticated user to change their own password.
+    Requires current password validation and minimum 8 characters for new password.
+    Clears must_reset_password flag and updates password_set_at timestamp.
+    No email sent.
+    """
+    # 1. Verify current password
+    if not verify_password(payload.current_password, current_user.password_hash):
+        logger.warning("Self-password change failed for user_id=%s: incorrect current password", current_user.user_id)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La contraseña actual es incorrecta."
+        )
+
+    # 2. Check that new password is not identical to current password
+    if payload.current_password == payload.new_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La nueva contraseña no puede ser igual a la contraseña actual."
+        )
+
+    # 3. Update password hashes and lifecycle fields
+    now = datetime.now(timezone.utc)
+    current_user.password_hash = hash_password(payload.new_password)
+    current_user.password_plain_dev = None
+    current_user.must_reset_password = False
+    current_user.password_set_at = now
+    current_user.reset_token = None
+    current_user.reset_token_expires_at = None
+
+    # 4. Revoke active PasswordResetToken entries if present
+    try:
+        stmt_tokens = select(PasswordResetToken).where(
+            PasswordResetToken.user_id == current_user.user_id,
+            PasswordResetToken.used_at == None,
+            PasswordResetToken.revoked_at == None
+        )
+        res_tokens = await db.execute(stmt_tokens)
+        for token_record in res_tokens.scalars().all():
+            token_record.revoked_at = now
+    except Exception as e_tok:
+        logger.warning("Could not revoke reset tokens for user %s: %s", current_user.user_id, e_tok)
+
+    await db.commit()
+
+    logger.info("User (user_id=%s, role=%s) changed their own password successfully.", current_user.user_id, current_user.role)
+    return {"ok": True, "detail": "Contraseña actualizada exitosamente."}
+
+
 @router.patch("/me/password")
 async def change_my_password(
     payload: MePasswordUpdatePayload,
@@ -627,10 +683,15 @@ async def change_my_password(
             detail="Contraseña actual incorrecta."
         )
         
-    # 3. Update hashes
+    # 3. Update hashes and lifecycle fields
+    now = datetime.now(timezone.utc)
     current_user.password_hash = hash_password(payload.new_password)
     current_user.password_plain_dev = None
-    
+    current_user.must_reset_password = False
+    current_user.password_set_at = now
+    current_user.reset_token = None
+    current_user.reset_token_expires_at = None
+
     await db.commit()
     return {"ok": True, "detail": "Contraseña actualizada exitosamente."}
 
