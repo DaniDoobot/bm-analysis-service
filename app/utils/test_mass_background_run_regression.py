@@ -270,6 +270,61 @@ class TestBackgroundRunNoMissingGreenlet(unittest.IsolatedAsyncioTestCase):
         self.assertIn(run.status, ("completed", "completed_with_errors", "failed"), f"Run status unexpected: {run.status}")
         self.assertIsNotNone(run.finished_at, "Run must have a finished_at timestamp")
 
+    async def test_background_run_random_quality_monitoring_no_missing_greenlet(self):
+        """Regression test for random_quality_monitoring: ensures background run completes without MissingGreenlet when reading run.effective_filters or run_summary."""
+        from app.services.mass_evaluation_service import MassEvaluationService
+
+        fake_audio = b"FAKE_MP3_BYTES"
+        filters_payload = {
+            "job_mode": "random_quality_monitoring",
+            "calls_per_day": 5,
+            "date_from": "2026-07-01T00:00:00Z",
+            "date_to": "2026-07-02T23:59:59Z"
+        }
+        calls = [
+            {
+                "call_id": "call-random-01",
+                "hs_object_id": "call-random-01",
+                "recording_url": "http://twilio.test/ok.mp3",
+                "hubspot_owner_id": "owner-1",
+                "call_timestamp": "2026-07-01T10:00:00Z",
+                "call_duration_seconds": 90,
+                "direction": "inbound",
+                "status": "completed",
+            }
+        ]
+
+        with (
+            patch("app.services.mass_evaluation_service.HubSpotService") as MockHS,
+            patch("app.services.mass_evaluation_service.TwilioService") as MockTS,
+            patch("app.services.mass_evaluation_service.analyze_audio_bytes") as MockGemini,
+        ):
+            hs_instance = MockHS.return_value
+            hs_instance.search_calls_for_mass_evaluation = AsyncMock(return_value=calls)
+            hs_instance.get_call = AsyncMock(return_value={})
+
+            ts_instance = MockTS.return_value
+            ts_instance.download_audio = AsyncMock(return_value=fake_audio)
+
+            MockGemini.return_value = '{"tipo_llamada": "front", "evaluacion_global": 9.0}'
+
+            await MassEvaluationService._execute_background_run(
+                job_id=1,
+                run_id=1,
+                filters_payload=filters_payload,
+            )
+
+        async with AsyncSession(self.engine) as db:
+            run_stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == 1)
+            run_res = await db.execute(run_stmt)
+            run = run_res.scalars().first()
+
+        self.assertIsNotNone(run)
+        self.assertIn(run.status, ("completed", "completed_with_errors"))
+        self.assertIsNotNone(run.run_summary)
+        self.assertIn("total_candidates", run.run_summary)
+        self.assertIn("total_selected", run.run_summary)
+
 
 if __name__ == "__main__":
     asyncio.run(unittest.main())

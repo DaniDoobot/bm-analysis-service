@@ -66,6 +66,22 @@ class MassEvaluationJobCreate(BaseModel):
                     return data[k], True
             return None, False
 
+        # Normalize relative_days
+        val, found = get_matching_value(["relative_days", "last_days", "days", "period_days", "last_n_days", "dias"])
+        if found and val is not None and val != "":
+            try:
+                data["relative_days"] = int(val)
+                data["date_mode"] = "relative"
+            except (ValueError, TypeError):
+                pass
+
+        # Normalize date_mode
+        val, found = get_matching_value(["date_mode", "period", "date_preset", "preset"])
+        if found and val:
+            val_str = str(val).strip().lower()
+            if val_str in ("relative", "previous_day", "previous_week", "custom", "fixed_range"):
+                data["date_mode"] = val_str
+
         # Normalize job_mode / selection_mode
         val, found = get_matching_value(["job_mode", "mode"])
         if found and val:
@@ -151,8 +167,8 @@ class MassEvaluationJobCreate(BaseModel):
         if self.job_mode == "random_quality_monitoring":
             if not self.calls_per_day or self.calls_per_day <= 0:
                 raise ValueError("Se requiere 'calls_per_day' mayor que 0 para la monitorización aleatoria de calidad.")
-            if not self.date_from or not self.date_to:
-                raise ValueError("date_from y date_to son obligatorios para la monitorización aleatoria de calidad.")
+            if not self.date_from and not self.date_to and not self.relative_days and self.date_mode not in ("relative", "previous_day", "previous_week"):
+                raise ValueError("Se requiere definir rango de fechas (date_from/date_to) o un período relativo para la monitorización aleatoria de calidad.")
 
         if self.date_from and self.date_to and self.date_to < self.date_from:
             raise ValueError("date_to no puede ser anterior a date_from.")

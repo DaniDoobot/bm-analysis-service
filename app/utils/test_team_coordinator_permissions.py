@@ -32,7 +32,7 @@ from httpx import AsyncClient, ASGITransport
 from app.db import get_engine, Base
 from app.models.companies import Company
 from app.models.services import Service
-from app.models.teams import Team, UserTeamAssociation, AgentTeamAssociation
+from app.models.teams import Team, UserTeamAssociation, AgentTeamAssociation, UserServiceAssociation
 from app.models.users import User
 from app.models.prompts import Prompt, PromptVersion
 from app.models.mass_evaluations import MassEvaluationJob, MassEvaluationRun, MassEvaluationResult

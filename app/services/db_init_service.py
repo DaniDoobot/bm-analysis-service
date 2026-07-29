@@ -553,28 +553,26 @@ async def init_db():
                 ("job_mode", "TEXT", "DEFAULT 'standard'"),
                 ("calls_per_day", "INTEGER", "NULL"),
             ]:
-                if is_sqlite:
-                    res_c = await conn.execute(text("PRAGMA table_info(bm_mass_evaluation_jobs);"))
-                    col_exists = col_name in {r[1] for r in res_c.all()}
-                else:
-                    res_c = await conn.execute(
-                        text(f"""
-                            SELECT EXISTS (
-                                SELECT FROM information_schema.columns 
-                                WHERE table_schema = 'public' 
-                                  AND table_name = 'bm_mass_evaluation_jobs' 
-                                  AND column_name = '{col_name}'
-                            );
-                        """)
-                    )
-                    col_exists = res_c.scalar()
-
-                if not col_exists:
-                    logger.info("Adding column '%s' to 'bm_mass_evaluation_jobs' table...", col_name)
-                    await conn.execute(
-                        text(f"ALTER TABLE bm_mass_evaluation_jobs ADD COLUMN {col_name} {col_type} {col_default};")
-                    )
-                    logger.info("Column '%s' added successfully to 'bm_mass_evaluation_jobs'.", col_name)
+                try:
+                    if is_sqlite:
+                        res_c = await conn.execute(text("PRAGMA table_info(bm_mass_evaluation_jobs);"))
+                        col_exists = col_name in {r[1] for r in res_c.all()}
+                        if not col_exists:
+                            logger.info("Adding column '%s' to 'bm_mass_evaluation_jobs' table...", col_name)
+                            await conn.execute(
+                                text(f"ALTER TABLE bm_mass_evaluation_jobs ADD COLUMN {col_name} {col_type} {col_default};")
+                            )
+                            logger.info("Column '%s' added successfully to 'bm_mass_evaluation_jobs'.", col_name)
+                    else:
+                        logger.info("Ensuring column '%s' exists on 'bm_mass_evaluation_jobs' table...", col_name)
+                        await conn.execute(
+                            text(f"ALTER TABLE bm_mass_evaluation_jobs ADD COLUMN IF NOT EXISTS {col_name} {col_type} {col_default};")
+                        )
+                except Exception as e_col:
+                    if "already exists" in str(e_col).lower():
+                        logger.info("Column '%s' already exists on 'bm_mass_evaluation_jobs' (concurrent worker startup).", col_name)
+                    else:
+                        logger.warning("Could not add column '%s' to 'bm_mass_evaluation_jobs': %s", col_name, e_col)
 
             # 1.6.8 Training voice roleplay support columns
             # 1.6.8.1 bm_training_agent_settings

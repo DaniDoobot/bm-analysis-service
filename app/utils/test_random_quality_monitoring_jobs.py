@@ -254,6 +254,31 @@ class TestRandomQualityMonitoringJobs(unittest.IsolatedAsyncioTestCase):
             r4 = await ac.post("/bm/mass-evaluation-jobs", json=p4, headers=headers)
             self.assertIn(r4.status_code, (400, 422))
 
+    async def test_create_random_job_with_relative_dates_and_max_calls(self):
+        token = self.make_token(101, "super@doobot.ai", "super_admin")
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # 1. Creation with relative date preset (last 2 days) and max_calls included
+        payload = {
+            "job_name": "Job Relativo 2 Días con max_calls",
+            "job_mode": "random_quality_monitoring",
+            "prompt_id": 100,
+            "calls_per_day": 10,
+            "relative_days": 2,
+            "max_calls": 50,
+            "agent_owner_ids": ["31499194"]
+        }
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            res = await ac.post("/bm/mass-evaluation-jobs", json=payload, headers=headers)
+            self.assertEqual(res.status_code, 201, res.text)
+            data = res.json()
+            self.assertEqual(data["job_name"], "Job Relativo 2 Días con max_calls")
+            self.assertEqual(data["job_mode"], "random_quality_monitoring")
+            self.assertEqual(data["calls_per_day"], 10)
+            self.assertEqual(data["relative_days"], 2)
+            self.assertEqual(data["date_mode"], "relative")
+
     async def test_role_permissions_for_random_quality_monitoring(self):
         # Agent role: 403 Forbidden
         agent_token = self.make_token(103, "maria@boston.es", "agent")

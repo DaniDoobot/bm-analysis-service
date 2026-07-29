@@ -339,9 +339,13 @@ class MassEvaluationService:
             c_per_day = job_data.get("calls_per_day")
             if not c_per_day or c_per_day <= 0:
                 raise ValueError("Se requiere 'calls_per_day' mayor que 0 para la monitorización aleatoria de calidad.")
-            if not job_data.get("date_from") or not job_data.get("date_to"):
-                raise ValueError("date_from y date_to son obligatorios para la monitorización aleatoria de calidad.")
-            if job_data.get("date_to") < job_data.get("date_from"):
+            d_from = job_data.get("date_from")
+            d_to = job_data.get("date_to")
+            rel_days = job_data.get("relative_days")
+            d_mode = job_data.get("date_mode")
+            if not d_from and not d_to and not rel_days and d_mode not in ("relative", "previous_day", "previous_week"):
+                raise ValueError("Se requiere definir rango de fechas (date_from/date_to) o un período relativo para la monitorización aleatoria de calidad.")
+            if d_from and d_to and d_to < d_from:
                 raise ValueError("date_to no puede ser anterior a date_from.")
 
         job = MassEvaluationJob(**job_data)
@@ -391,12 +395,14 @@ class MassEvaluationService:
             eff_calls_per_day = update_data.get("calls_per_day", job.calls_per_day)
             eff_date_from = update_data.get("date_from", job.date_from)
             eff_date_to = update_data.get("date_to", job.date_to)
+            eff_relative_days = update_data.get("relative_days", job.relative_days)
+            eff_date_mode = update_data.get("date_mode", job.date_mode)
 
             if not eff_calls_per_day or eff_calls_per_day <= 0:
                 raise ValueError("Se requiere 'calls_per_day' mayor que 0 para la monitorización aleatoria de calidad.")
-            if not eff_date_from or not eff_date_to:
-                raise ValueError("date_from y date_to son obligatorios para la monitorización aleatoria de calidad.")
-            if eff_date_to < eff_date_from:
+            if not eff_date_from and not eff_date_to and not eff_relative_days and eff_date_mode not in ("relative", "previous_day", "previous_week"):
+                raise ValueError("Se requiere definir rango de fechas (date_from/date_to) o un período relativo para la monitorización aleatoria de calidad.")
+            if eff_date_from and eff_date_to and eff_date_to < eff_date_from:
                 raise ValueError("date_to no puede ser anterior a date_from.")
 
         # If prompt_id is being updated, perform same checks
@@ -546,6 +552,11 @@ class MassEvaluationService:
 
         date_from = filters.get("date_from")
         date_to = filters.get("date_to")
+
+        if isinstance(date_from, str):
+            date_from = safe_parse_datetime(date_from)
+        if isinstance(date_to, str):
+            date_to = safe_parse_datetime(date_to)
 
         if not date_from or not date_to:
             raise ValueError("date_from y date_to son obligatorios para la monitorización aleatoria de calidad.")
@@ -812,6 +823,7 @@ class MassEvaluationService:
                 logger.error("Run ID %d not found in background task", run_id)
                 return
                 
+            effective_filters_snapshot = dict(run.effective_filters or {})
             run.heartbeat_at = datetime.now(timezone.utc)
             await db.commit()
                 
@@ -955,6 +967,7 @@ class MassEvaluationService:
                 hs_service = HubSpotService()
                 
                 not_found_call_ids = []
+                random_trace_metadata = None
                 if filters_payload.get("selection_mode") == "manual_call_ids":
                     calls = []
                     call_ids_list = filters_payload.get("call_ids") or []
@@ -983,6 +996,13 @@ class MassEvaluationService:
                     date_from = safe_parse_datetime(date_from_str) if date_from_str else None
                     date_to = safe_parse_datetime(date_to_str) if date_to_str else None
 
+                    if not date_from or not date_to:
+                        d_from, d_to = resolve_date_filters(job, timezone_name)
+                        if not date_from:
+                            date_from = d_from
+                        if not date_to:
+                            date_to = d_to
+
                     search_filters = {
                         "date_from": date_from,
                         "date_to": date_to,
@@ -1001,19 +1021,25 @@ class MassEvaluationService:
                         hs_service, search_filters
                     )
                     selected_calls = calls
-                    run.calls_found = random_trace_metadata.get("total_candidates", len(calls))
-                    run.calls_selected = len(selected_calls)
 
-                    eff_filters_dict = dict(run.effective_filters or {})
+                    eff_filters_dict = dict(effective_filters_snapshot)
                     eff_filters_dict.update(random_trace_metadata)
-                    run.effective_filters = eff_filters_dict
 
-                    run.run_summary = {
-                        "candidates_count_by_day": random_trace_metadata.get("candidates_count_by_day"),
-                        "selected_count_by_day": random_trace_metadata.get("selected_count_by_day"),
-                        "total_candidates": random_trace_metadata.get("total_candidates"),
-                        "total_selected": random_trace_metadata.get("total_selected"),
-                    }
+                    # Refetch run freshly to avoid ORM expiration & MissingGreenlet
+                    fresh_run_stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == run_id)
+                    fresh_run_res = await db.execute(fresh_run_stmt)
+                    fresh_run_obj = fresh_run_res.scalars().first()
+                    if fresh_run_obj:
+                        fresh_run_obj.calls_found = random_trace_metadata.get("total_candidates", len(calls))
+                        fresh_run_obj.calls_selected = len(selected_calls)
+                        fresh_run_obj.effective_filters = eff_filters_dict
+                        fresh_run_obj.run_summary = {
+                            "candidates_count_by_day": random_trace_metadata.get("candidates_count_by_day"),
+                            "selected_count_by_day": random_trace_metadata.get("selected_count_by_day"),
+                            "total_candidates": random_trace_metadata.get("total_candidates"),
+                            "total_selected": random_trace_metadata.get("total_selected"),
+                        }
+                    effective_filters_snapshot = eff_filters_dict
                     await db.commit()
                 else:
                     # Parse filter dates back to datetime
@@ -1453,13 +1479,21 @@ class MassEvaluationService:
                     fresh_run_obj.calls_failed = calls_failed
                     fresh_run_obj.status = final_status
                     fresh_run_obj.finished_at = datetime.now(timezone.utc)
-                    fresh_run_obj.run_summary = {
+                    run_summary_payload = {
                         "analyzed": calls_analyzed,
                         "skipped": calls_skipped,
                         "failed": calls_failed,
                         "total": len(selected_calls),
                         "not_found_call_ids": not_found_call_ids
                     }
+                    if random_trace_metadata:
+                        run_summary_payload.update({
+                            "candidates_count_by_day": random_trace_metadata.get("candidates_count_by_day"),
+                            "selected_count_by_day": random_trace_metadata.get("selected_count_by_day"),
+                            "total_candidates": random_trace_metadata.get("total_candidates"),
+                            "total_selected": random_trace_metadata.get("total_selected"),
+                        })
+                    fresh_run_obj.run_summary = run_summary_payload
 
                 if fresh_job_obj:
                     fresh_job_obj.last_run_at = datetime.now(timezone.utc)
