@@ -13,6 +13,8 @@ class MassEvaluationJobCreate(BaseModel):
     service_id: int | None = None
     prompt_version_id: int | None = None
     selection_mode: str = "filter"  # filter / manual_call_ids
+    job_mode: str = "standard"      # standard / random_quality_monitoring
+    calls_per_day: int | None = None
     call_ids: list[str] | None = None
 
     # Validation override flags
@@ -30,6 +32,8 @@ class MassEvaluationJobCreate(BaseModel):
     timezone: str = "Europe/Madrid"
     duration_min_seconds: int | None = None
     duration_max_seconds: int | None = None
+    min_duration_minutes: float | None = None
+    max_duration_minutes: float | None = None
     direction: str = "all"  # inbound / outbound / all
     only_with_recording: bool = True
     max_calls: int = 10
@@ -61,6 +65,48 @@ class MassEvaluationJobCreate(BaseModel):
                 if k in data:
                     return data[k], True
             return None, False
+
+        # Normalize job_mode / selection_mode
+        val, found = get_matching_value(["job_mode", "mode"])
+        if found and val:
+            val_str = str(val).strip().lower()
+            if val_str in ("random_quality_monitoring", "quality_monitoring", "random_quality"):
+                data["job_mode"] = "random_quality_monitoring"
+                data["selection_mode"] = "random_quality_monitoring"
+            elif val_str:
+                data["job_mode"] = val_str
+
+        # Normalize calls_per_day
+        val, found = get_matching_value(["calls_per_day", "random_calls_per_day", "llamadas_por_dia"])
+        if found and val is not None and val != "":
+            try:
+                data["calls_per_day"] = int(val)
+            except (ValueError, TypeError):
+                pass
+
+        # Normalize min/max duration in minutes -> seconds
+        val, found = get_matching_value(["min_duration_minutes", "duracion_minima_minutos", "min_duration"])
+        if found and val is not None and val != "":
+            try:
+                min_m = float(val)
+                data["min_duration_minutes"] = min_m
+                data["duration_min_seconds"] = int(min_m * 60)
+            except (ValueError, TypeError):
+                pass
+
+        val, found = get_matching_value(["max_duration_minutes", "duracion_maxima_minutos", "max_duration"])
+        if found and val is not None and val != "":
+            try:
+                max_m = float(val)
+                data["max_duration_minutes"] = max_m
+                data["duration_max_seconds"] = int(max_m * 60)
+            except (ValueError, TypeError):
+                pass
+
+        # Normalize direction
+        val, found = get_matching_value(["direction", "call_direction", "direccion"])
+        if found and val:
+            data["direction"] = str(val).strip().lower()
 
         # Normalize prompt_id
         val, found = get_matching_value(["prompt_id", "evaluation_structure_id", "structure_id", "prompt_structure_id"])
@@ -100,6 +146,30 @@ class MassEvaluationJobCreate(BaseModel):
 
         return data
 
+    @model_validator(mode="after")
+    def validate_quality_monitoring(self) -> "MassEvaluationJobCreate":
+        if self.job_mode == "random_quality_monitoring":
+            if not self.calls_per_day or self.calls_per_day <= 0:
+                raise ValueError("Se requiere 'calls_per_day' mayor que 0 para la monitorización aleatoria de calidad.")
+            if not self.date_from or not self.date_to:
+                raise ValueError("date_from y date_to son obligatorios para la monitorización aleatoria de calidad.")
+
+        if self.date_from and self.date_to and self.date_to < self.date_from:
+            raise ValueError("date_to no puede ser anterior a date_from.")
+
+        if self.time_window_start and self.time_window_end:
+            if self.time_window_end < self.time_window_start:
+                raise ValueError("time_to no puede ser anterior a time_from.")
+
+        if self.duration_min_seconds is not None and self.duration_max_seconds is not None:
+            if self.duration_max_seconds < self.duration_min_seconds:
+                raise ValueError("max_duration_minutes no puede ser menor que min_duration_minutes.")
+
+        if self.direction and self.direction.lower() not in ("all", "inbound", "outbound"):
+            raise ValueError("Dirección de llamada inválida. Debe ser 'all', 'inbound' o 'outbound'.")
+
+        return self
+
 
 class MassEvaluationJobUpdate(BaseModel):
     job_name: str | None = None
@@ -109,6 +179,8 @@ class MassEvaluationJobUpdate(BaseModel):
     company_id: int | None = None
     service_id: int | None = None
     prompt_version_id: int | None = None
+    job_mode: str | None = None
+    calls_per_day: int | None = None
 
     # Validation override flags
     allow_inactive_prompt: bool | None = None
@@ -125,6 +197,8 @@ class MassEvaluationJobUpdate(BaseModel):
     timezone: str | None = None
     duration_min_seconds: int | None = None
     duration_max_seconds: int | None = None
+    min_duration_minutes: float | None = None
+    max_duration_minutes: float | None = None
     direction: str | None = None
     only_with_recording: bool | None = None
     max_calls: int | None = None
@@ -153,6 +227,48 @@ class MassEvaluationJobUpdate(BaseModel):
                 if k in data:
                     return data[k], True
             return None, False
+
+        # Normalize job_mode / selection_mode
+        val, found = get_matching_value(["job_mode", "mode"])
+        if found and val:
+            val_str = str(val).strip().lower()
+            if val_str in ("random_quality_monitoring", "quality_monitoring", "random_quality"):
+                data["job_mode"] = "random_quality_monitoring"
+                data["selection_mode"] = "random_quality_monitoring"
+            elif val_str:
+                data["job_mode"] = val_str
+
+        # Normalize calls_per_day
+        val, found = get_matching_value(["calls_per_day", "random_calls_per_day", "llamadas_por_dia"])
+        if found and val is not None and val != "":
+            try:
+                data["calls_per_day"] = int(val)
+            except (ValueError, TypeError):
+                pass
+
+        # Normalize min/max duration in minutes -> seconds
+        val, found = get_matching_value(["min_duration_minutes", "duracion_minima_minutos", "min_duration"])
+        if found and val is not None and val != "":
+            try:
+                min_m = float(val)
+                data["min_duration_minutes"] = min_m
+                data["duration_min_seconds"] = int(min_m * 60)
+            except (ValueError, TypeError):
+                pass
+
+        val, found = get_matching_value(["max_duration_minutes", "duracion_maxima_minutos", "max_duration"])
+        if found and val is not None and val != "":
+            try:
+                max_m = float(val)
+                data["max_duration_minutes"] = max_m
+                data["duration_max_seconds"] = int(max_m * 60)
+            except (ValueError, TypeError):
+                pass
+
+        # Normalize direction
+        val, found = get_matching_value(["direction", "call_direction", "direccion"])
+        if found and val:
+            data["direction"] = str(val).strip().lower()
 
         # Normalize prompt_id
         val, found = get_matching_value(["prompt_id", "evaluation_structure_id", "structure_id", "prompt_structure_id"])
@@ -204,6 +320,8 @@ class MassEvaluationJobResponse(BaseModel):
     prompt_version_name: str | None
     prompt_version_label: str | None
     selection_mode: str | None = None
+    job_mode: str | None = "standard"
+    calls_per_day: int | None = None
     call_ids: list[str] | None = None
 
     agent_owner_ids: list[str] | None
@@ -217,6 +335,8 @@ class MassEvaluationJobResponse(BaseModel):
     timezone: str
     duration_min_seconds: int | None
     duration_max_seconds: int | None
+    min_duration_minutes: float | None = None
+    max_duration_minutes: float | None = None
     direction: str
     only_with_recording: bool
     max_calls: int
@@ -322,6 +442,14 @@ class MassEvaluationJobResponse(BaseModel):
 
         self.hour_from = t_start_str
         self.hour_to = t_end_str
+
+        if self.duration_min_seconds is not None and self.min_duration_minutes is None:
+            self.min_duration_minutes = round(self.duration_min_seconds / 60.0, 2)
+        if self.duration_max_seconds is not None and self.max_duration_minutes is None:
+            self.max_duration_minutes = round(self.duration_max_seconds / 60.0, 2)
+
+        if not self.job_mode:
+            self.job_mode = "standard"
 
         return self
 

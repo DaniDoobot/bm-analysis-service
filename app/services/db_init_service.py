@@ -547,6 +547,35 @@ async def init_db():
                 )
                 logger.info("Column 'job_id' added successfully to 'bm_mass_analysis_automations'.")
 
+            # Check for job_mode & calls_per_day in bm_mass_evaluation_jobs
+            is_sqlite = engine.dialect.name == "sqlite"
+            for col_name, col_type, col_default in [
+                ("job_mode", "TEXT", "DEFAULT 'standard'"),
+                ("calls_per_day", "INTEGER", "NULL"),
+            ]:
+                if is_sqlite:
+                    res_c = await conn.execute(text("PRAGMA table_info(bm_mass_evaluation_jobs);"))
+                    col_exists = col_name in {r[1] for r in res_c.all()}
+                else:
+                    res_c = await conn.execute(
+                        text(f"""
+                            SELECT EXISTS (
+                                SELECT FROM information_schema.columns 
+                                WHERE table_schema = 'public' 
+                                  AND table_name = 'bm_mass_evaluation_jobs' 
+                                  AND column_name = '{col_name}'
+                            );
+                        """)
+                    )
+                    col_exists = res_c.scalar()
+
+                if not col_exists:
+                    logger.info("Adding column '%s' to 'bm_mass_evaluation_jobs' table...", col_name)
+                    await conn.execute(
+                        text(f"ALTER TABLE bm_mass_evaluation_jobs ADD COLUMN {col_name} {col_type} {col_default};")
+                    )
+                    logger.info("Column '%s' added successfully to 'bm_mass_evaluation_jobs'.", col_name)
+
             # 1.6.8 Training voice roleplay support columns
             # 1.6.8.1 bm_training_agent_settings
             for col_name, col_type, col_default in [

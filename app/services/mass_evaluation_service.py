@@ -328,10 +328,21 @@ class MassEvaluationService:
             
             payload.call_ids = cleaned_ids
 
-        # Remove override flags from payload before db insert
+        # Remove override flags and transient fields from payload before db insert
         job_data = payload.model_dump()
         job_data.pop("allow_inactive_prompt", None)
         job_data.pop("test_mode", None)
+        job_data.pop("min_duration_minutes", None)
+        job_data.pop("max_duration_minutes", None)
+
+        if job_data.get("job_mode") == "random_quality_monitoring":
+            c_per_day = job_data.get("calls_per_day")
+            if not c_per_day or c_per_day <= 0:
+                raise ValueError("Se requiere 'calls_per_day' mayor que 0 para la monitorización aleatoria de calidad.")
+            if not job_data.get("date_from") or not job_data.get("date_to"):
+                raise ValueError("date_from y date_to son obligatorios para la monitorización aleatoria de calidad.")
+            if job_data.get("date_to") < job_data.get("date_from"):
+                raise ValueError("date_to no puede ser anterior a date_from.")
 
         job = MassEvaluationJob(**job_data)
         job.company_id = target_company_id
@@ -372,6 +383,21 @@ class MassEvaluationService:
         update_data = payload.model_dump(exclude_unset=True)
         allow_inactive = update_data.pop("allow_inactive_prompt", False) or False
         test_mode = update_data.pop("test_mode", False) or False
+        update_data.pop("min_duration_minutes", None)
+        update_data.pop("max_duration_minutes", None)
+
+        effective_job_mode = update_data.get("job_mode", job.job_mode)
+        if effective_job_mode == "random_quality_monitoring":
+            eff_calls_per_day = update_data.get("calls_per_day", job.calls_per_day)
+            eff_date_from = update_data.get("date_from", job.date_from)
+            eff_date_to = update_data.get("date_to", job.date_to)
+
+            if not eff_calls_per_day or eff_calls_per_day <= 0:
+                raise ValueError("Se requiere 'calls_per_day' mayor que 0 para la monitorización aleatoria de calidad.")
+            if not eff_date_from or not eff_date_to:
+                raise ValueError("date_from y date_to son obligatorios para la monitorización aleatoria de calidad.")
+            if eff_date_to < eff_date_from:
+                raise ValueError("date_to no puede ser anterior a date_from.")
 
         # If prompt_id is being updated, perform same checks
         prompt_id_to_check = update_data.get("prompt_id")
@@ -486,7 +512,106 @@ class MassEvaluationService:
         return res.scalars().first()
 
     @staticmethod
-    async def dry_run_job(db: AsyncSession, job_id: int, override_date_from: datetime | None = None, override_date_to: datetime | None = None) -> dict[str, Any]:
+    async def select_random_calls_for_quality_monitoring(
+        hs_service: HubSpotService,
+        filters: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """
+        Select random calls per day for quality monitoring auditing.
+        Iterates day-by-day between date_from and date_to.
+        For each day:
+          - Searches all candidate calls matching filters.
+          - Samples min(calls_per_day, len(candidates)) randomly using random.sample.
+          - Tracks candidate counts and selected call IDs per day.
+        Returns (selected_calls_list, trace_metadata_dict).
+        """
+        import random
+        import zoneinfo
+
+        calls_per_day = filters.get("calls_per_day") or 20
+        if isinstance(calls_per_day, str):
+            try:
+                calls_per_day = int(calls_per_day)
+            except ValueError:
+                calls_per_day = 20
+
+        if calls_per_day <= 0:
+            raise ValueError("Se requiere 'calls_per_day' mayor que 0 para la monitorización aleatoria de calidad.")
+
+        timezone_name = filters.get("timezone") or "Europe/Madrid"
+        try:
+            tz = zoneinfo.ZoneInfo(timezone_name)
+        except Exception:
+            tz = zoneinfo.ZoneInfo("Europe/Madrid")
+
+        date_from = filters.get("date_from")
+        date_to = filters.get("date_to")
+
+        if not date_from or not date_to:
+            raise ValueError("date_from y date_to son obligatorios para la monitorización aleatoria de calidad.")
+
+        date_from_local = date_from.astimezone(tz) if date_from.tzinfo else date_from.replace(tzinfo=tz)
+        date_to_local = date_to.astimezone(tz) if date_to.tzinfo else date_to.replace(tzinfo=tz)
+
+        start_date = date_from_local.date()
+        end_date = date_to_local.date()
+
+        if end_date < start_date:
+            raise ValueError("date_to no puede ser anterior a date_from.")
+
+        all_selected_calls = []
+        candidates_count_by_day = {}
+        selected_count_by_day = {}
+        selected_call_ids_by_day = {}
+
+        current_date = start_date
+        while current_date <= end_date:
+            day_str = current_date.strftime("%Y-%m-%d")
+
+            day_start = datetime.combine(current_date, time.min).replace(tzinfo=tz)
+            day_end = datetime.combine(current_date, time(23, 59, 59, 999000)).replace(tzinfo=tz)
+
+            day_filters = dict(filters)
+            day_filters["date_from"] = day_start
+            day_filters["date_to"] = day_end
+            day_filters["max_calls"] = 10000
+
+            candidates_day = await hs_service.search_calls_for_mass_evaluation(day_filters)
+            candidates_count = len(candidates_day)
+            candidates_count_by_day[day_str] = candidates_count
+
+            if candidates_count <= calls_per_day:
+                selected_day = list(candidates_day)
+            else:
+                selected_day = random.sample(candidates_day, calls_per_day)
+
+            selected_count_by_day[day_str] = len(selected_day)
+            selected_call_ids_by_day[day_str] = [c["call_id"] for c in selected_day]
+
+            all_selected_calls.extend(selected_day)
+            current_date += timedelta(days=1)
+
+        trace_metadata = {
+            "job_mode": "random_quality_monitoring",
+            "calls_per_day": calls_per_day,
+            "date_from": date_from_local.strftime("%Y-%m-%d"),
+            "date_to": date_to_local.strftime("%Y-%m-%d"),
+            "total_candidates": sum(candidates_count_by_day.values()),
+            "total_selected": len(all_selected_calls),
+            "candidates_count_by_day": candidates_count_by_day,
+            "selected_count_by_day": selected_count_by_day,
+            "selected_call_ids_by_day": selected_call_ids_by_day,
+        }
+
+        return all_selected_calls, trace_metadata
+
+    @staticmethod
+    async def search_calls_for_job_preview(
+        db: AsyncSession,
+        job_id: int,
+        override_date_from: datetime | None = None,
+        override_date_to: datetime | None = None
+    ) -> dict[str, Any]:
         stmt = select(MassEvaluationJob).where(MassEvaluationJob.job_id == job_id)
         res = await db.execute(stmt)
         job = res.scalars().first()
@@ -543,11 +668,32 @@ class MassEvaluationService:
             "direction": job.direction,
             "only_with_recording": job.only_with_recording,
             "max_calls": job.max_calls,
+            "calls_per_day": job.calls_per_day,
             "time_window_start": job.time_window_start,
             "time_window_end": job.time_window_end,
             "timezone": job.timezone,
         }
         
+        if job.job_mode == "random_quality_monitoring":
+            calls, trace_meta = await MassEvaluationService.select_random_calls_for_quality_monitoring(hs_service, filters)
+            effective_filters = dict(filters)
+            effective_filters["date_from"] = date_from.isoformat() if date_from else None
+            effective_filters["date_to"] = date_to.isoformat() if date_to else None
+            effective_filters["time_window_start"] = job.time_window_start.strftime("%H:%M:%S") if job.time_window_start else None
+            effective_filters["time_window_end"] = job.time_window_end.strftime("%H:%M:%S") if job.time_window_end else None
+            effective_filters.update(trace_meta)
+
+            return {
+                "job_id": job_id,
+                "calls_found": trace_meta.get("total_candidates", len(calls)),
+                "effective_filters": effective_filters,
+                "calls": [{"call_id": c["call_id"], "recording_url": c["recording_url"], "hubspot_owner_id": c["hubspot_owner_id"]} for c in calls],
+                "found_call_ids": [c["call_id"] for c in calls],
+                "not_found_call_ids": [],
+                "duplicate_input_call_ids": [],
+                "normalized_call_ids": [c["call_id"] for c in calls]
+            }
+
         calls = await hs_service.search_calls_for_mass_evaluation(filters)
         
         return {
@@ -602,6 +748,8 @@ class MassEvaluationService:
             }
         else:
             effective_filters = {
+                "job_mode": job.job_mode or "standard",
+                "calls_per_day": job.calls_per_day,
                 "date_from": date_from.isoformat() if date_from else None,
                 "date_to": date_to.isoformat() if date_to else None,
                 "agent_owner_ids": job.agent_owner_ids,
@@ -829,6 +977,44 @@ class MassEvaluationService:
                         except Exception as e_get:
                             logger.warning("Manual call ID %s not found in HubSpot during run: %s", cid, e_get)
                             not_found_call_ids.append(cid)
+                elif filters_payload.get("job_mode") == "random_quality_monitoring":
+                    date_from_str = filters_payload.get("date_from")
+                    date_to_str = filters_payload.get("date_to")
+                    date_from = safe_parse_datetime(date_from_str) if date_from_str else None
+                    date_to = safe_parse_datetime(date_to_str) if date_to_str else None
+
+                    search_filters = {
+                        "date_from": date_from,
+                        "date_to": date_to,
+                        "agent_owner_ids": filters_payload.get("agent_owner_ids"),
+                        "duration_min_seconds": duration_min_seconds,
+                        "duration_max_seconds": duration_max_seconds,
+                        "direction": filters_payload.get("direction"),
+                        "only_with_recording": filters_payload.get("only_with_recording"),
+                        "calls_per_day": filters_payload.get("calls_per_day") or 20,
+                        "time_window_start": filters_payload.get("time_window_start"),
+                        "time_window_end": filters_payload.get("time_window_end"),
+                        "timezone": timezone_name,
+                    }
+
+                    calls, random_trace_metadata = await MassEvaluationService.select_random_calls_for_quality_monitoring(
+                        hs_service, search_filters
+                    )
+                    selected_calls = calls
+                    run.calls_found = random_trace_metadata.get("total_candidates", len(calls))
+                    run.calls_selected = len(selected_calls)
+
+                    eff_filters_dict = dict(run.effective_filters or {})
+                    eff_filters_dict.update(random_trace_metadata)
+                    run.effective_filters = eff_filters_dict
+
+                    run.run_summary = {
+                        "candidates_count_by_day": random_trace_metadata.get("candidates_count_by_day"),
+                        "selected_count_by_day": random_trace_metadata.get("selected_count_by_day"),
+                        "total_candidates": random_trace_metadata.get("total_candidates"),
+                        "total_selected": random_trace_metadata.get("total_selected"),
+                    }
+                    await db.commit()
                 else:
                     # Parse filter dates back to datetime
                     date_from_str = filters_payload.get("date_from")
@@ -852,26 +1038,26 @@ class MassEvaluationService:
                     }
                     
                     calls = await hs_service.search_calls_for_mass_evaluation(search_filters)
-                run.calls_found = len(calls)
-                
-                # 3. Filter duplicates within the same execution and apply max_calls slicing
-                max_calls_val = filters_payload.get("max_calls")
-                if max_calls_val is None or max_calls_val <= 0:
-                    max_calls_val = 10
-                elif max_calls_val > 500:
-                    max_calls_val = 500
- 
-                seen_call_ids = set()
-                unique_calls = []
-                for c in calls:
-                    c_id = c["call_id"]
-                    if c_id not in seen_call_ids:
-                        seen_call_ids.add(c_id)
-                        unique_calls.append(c)
-                        
-                selected_calls = unique_calls[:max_calls_val]
-                run.calls_selected = len(selected_calls)
-                await db.commit()
+                    run.calls_found = len(calls)
+                    
+                    # 3. Filter duplicates within the same execution and apply max_calls slicing
+                    max_calls_val = filters_payload.get("max_calls")
+                    if max_calls_val is None or max_calls_val <= 0:
+                        max_calls_val = 10
+                    elif max_calls_val > 500:
+                        max_calls_val = 500
+     
+                    seen_call_ids = set()
+                    unique_calls = []
+                    for c in calls:
+                        c_id = c["call_id"]
+                        if c_id not in seen_call_ids:
+                            seen_call_ids.add(c_id)
+                            unique_calls.append(c)
+                            
+                    selected_calls = unique_calls[:max_calls_val]
+                    run.calls_selected = len(selected_calls)
+                    await db.commit()
                 
                 calls_analyzed = 0
                 calls_skipped = 0

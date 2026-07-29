@@ -67,6 +67,8 @@ class MassEvaluationJob(Base):
     max_calls: Mapped[int] = mapped_column(Integer, default=100, server_default="100")
 
     selection_mode: Mapped[str] = mapped_column(Text, default="filter", server_default="'filter'")
+    job_mode: Mapped[str] = mapped_column(Text, default="standard", server_default="'standard'")
+    calls_per_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
     call_ids: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
 
     # Scheduling
