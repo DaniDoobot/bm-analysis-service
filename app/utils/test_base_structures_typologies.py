@@ -4,7 +4,7 @@ import unittest
 from httpx import AsyncClient, ASGITransport
 
 # Force DATABASE_URL to a safe local SQLite DB before any app modules are loaded
-os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///base_structures_typologies_test.db"
+os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///./test_base_structs_unique_test.db"
 
 # Safety Confirmation Check
 db_url = os.environ.get("DATABASE_URL", "")
@@ -45,15 +45,10 @@ class TestBaseStructuresTypologies(unittest.IsolatedAsyncioTestCase):
         db_url_str = str(engine.url)
         assert "91.98.230.119" not in db_url_str, "CRITICAL: Database engine URL points to production host!"
 
-        if os.path.exists("base_structures_typologies_test.db"):
-            try:
-                os.remove("base_structures_typologies_test.db")
-            except Exception:
-                pass
-
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(lambda c: Base.metadata.create_all(c, checkfirst=True))
+            for table in reversed(Base.metadata.sorted_tables):
+                await conn.execute(table.delete())
 
         self.session_factory = get_engine()
         async with AsyncSession(self.session_factory) as db:

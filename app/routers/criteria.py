@@ -19,7 +19,7 @@ from app.schemas.criteria import (
 )
 from app.schemas.typologies import CriterionTypologyAssociation
 from app.services import criteria_service
-from app.services.prompts_service import PromptValidationError
+from app.services.prompts_service import PromptValidationError, MAX_PROMPT_CHARACTERS
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/bm", tags=["Criteria"])
@@ -28,9 +28,9 @@ router = APIRouter(prefix="/bm", tags=["Criteria"])
 def format_prompt_validation_error_detail(val_ex: PromptValidationError) -> dict:
     code = getattr(val_ex, "code", "PROMPT_VALIDATION_FAILED")
     prompt_length = getattr(val_ex, "prompt_length", None)
-    max_prompt_length = getattr(val_ex, "max_prompt_length", None)
+    max_prompt_length = getattr(val_ex, "max_prompt_length", None) or MAX_PROMPT_CHARACTERS
     largest_criteria = getattr(val_ex, "largest_criteria", [])
-    suggestion = getattr(val_ex, "suggestion", None) or "El prompt final supera el límite defensivo de 120,000 caracteres. Intente compactar las descripciones de los criterios o desactivar criterios redundantes."
+    suggestion = getattr(val_ex, "suggestion", None) or f"El prompt final supera el límite defensivo de {MAX_PROMPT_CHARACTERS:,} caracteres. Intente compactar las descripciones de los criterios o desactivar criterios redundantes."
 
     detail = {
         "code": code,

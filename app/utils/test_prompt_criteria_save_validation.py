@@ -119,9 +119,28 @@ class TestPromptCriteriaSaveValidation(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(c.allowed_values.count("cita"), 1)
             self.assertNotIn("  ", c.allowed_values)
 
+    async def test_prompt_length_150k_allowed(self):
+        # A prompt of ~150,000 characters should NOT fail (limit raised to 500,000)
+        large_description = "B" * 150000
+        resp = await self.client.post(
+            "/bm/prompt-criteria/save",
+            headers=self.headers,
+            json={
+                "prompt_id": 60,
+                "criterion_key": "large_150k_criterion",
+                "criterion_name": "Large 150k Criterion",
+                "criterion_description": large_description,
+                "criterion_type": "text",
+                "output_key": "large_150k_criterion"
+            }
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertTrue(data.get("ok"))
+
     async def test_prompt_length_exceeded_error_structure(self):
-        # Try to save a criterion with enormous description (> 120,000 chars)
-        huge_description = "A" * 125000
+        # Try to save a criterion with description causing prompt > 500,000 chars
+        huge_description = "A" * 505000
         resp = await self.client.post(
             "/bm/prompt-criteria/save",
             headers=self.headers,
@@ -137,10 +156,10 @@ class TestPromptCriteriaSaveValidation(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resp.status_code, 422)
         detail = resp.json().get("detail", {})
         self.assertEqual(detail.get("code"), "prompt_too_long")
-        self.assertGreater(detail.get("prompt_length", 0), 120000)
-        self.assertEqual(detail.get("max_prompt_length"), 120000)
+        self.assertGreater(detail.get("prompt_length", 0), 500000)
+        self.assertEqual(detail.get("max_prompt_length"), 500000)
         self.assertTrue(len(detail.get("largest_criteria", [])) > 0)
-        self.assertIn("suggestion", detail)
+        self.assertIn("500,000", detail.get("suggestion", ""))
 
 
 if __name__ == "__main__":

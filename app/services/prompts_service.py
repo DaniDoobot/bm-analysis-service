@@ -12,6 +12,8 @@ import re
 
 logger = logging.getLogger(__name__)
 
+MAX_PROMPT_CHARACTERS = 500_000
+
 
 class PromptValidationError(Exception):
     """Exception raised when prompt validation fails due to size limits or duplicate keys."""
@@ -453,8 +455,9 @@ async def sync_prompt_text_with_active_criteria(
             f"Prompt build failed: Duplicate criteria keys detected in finalized prompt: {dup_details}."
         )
 
-    # 6. Length check (120,000)
-    MAX_CHARACTERS_LIMIT = 120000
+    # 6. Length check (500,000)
+    MAX_PROMPT_CHARACTERS = 500_000
+    MAX_CHARACTERS_LIMIT = MAX_PROMPT_CHARACTERS
     if len(new_prompt_text) > MAX_CHARACTERS_LIMIT:
         # Determine the largest criteria
         crit_sizes = []
@@ -476,7 +479,7 @@ async def sync_prompt_text_with_active_criteria(
             prompt_length=len(new_prompt_text),
             max_prompt_length=MAX_CHARACTERS_LIMIT,
             largest_criteria=top_largest,
-            suggestion="El prompt resultante supera la longitud máxima permitida (120,000 caracteres). Intente acortar las descripciones de los criterios más extensos o desactivar criterios que no sean estrictamente necesarios."
+            suggestion=f"El prompt resultante supera la longitud máxima permitida ({MAX_CHARACTERS_LIMIT:,} caracteres). Intente acortar las descripciones de los criterios más extensos o desactivar criterios que no sean estrictamente necesarios."
         )
 
     return new_prompt_text, changed
