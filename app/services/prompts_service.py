@@ -15,7 +15,21 @@ logger = logging.getLogger(__name__)
 
 class PromptValidationError(Exception):
     """Exception raised when prompt validation fails due to size limits or duplicate keys."""
-    pass
+    def __init__(
+        self,
+        message: str,
+        code: str = "PROMPT_VALIDATION_FAILED",
+        prompt_length: int | None = None,
+        max_prompt_length: int | None = None,
+        largest_criteria: list[dict] | None = None,
+        suggestion: str | None = None,
+    ):
+        super().__init__(message)
+        self.code = code
+        self.prompt_length = prompt_length
+        self.max_prompt_length = max_prompt_length
+        self.largest_criteria = largest_criteria or []
+        self.suggestion = suggestion
 
 def clean_whitespaces(text: str) -> str:
     """
@@ -446,15 +460,23 @@ async def sync_prompt_text_with_active_criteria(
         crit_sizes = []
         for c in active_criteria:
             desc_len = len(c.criterion_description or "")
-            crit_sizes.append((c.criterion_name or c.output_key, desc_len))
-        crit_sizes.sort(key=lambda x: x[1], reverse=True)
-        largest_str = ", ".join(f"'{name}' ({size} chars)" for name, size in crit_sizes[:5])
+            crit_sizes.append({"name": c.criterion_name or c.output_key, "length": desc_len, "output_key": c.output_key})
+        crit_sizes.sort(key=lambda x: x["length"], reverse=True)
+        top_largest = crit_sizes[:5]
+        largest_str = ", ".join(f"'{item['name']}' ({item['length']} chars)" for item in top_largest)
         
         raise PromptValidationError(
-            f"Prompt build failed: Prompt length ({len(new_prompt_text)} characters) exceeds "
-            f"the maximum allowed defensive limit of {MAX_CHARACTERS_LIMIT} characters. "
-            f"Largest criteria: {largest_str}. "
-            f"Please compact active criteria descriptions or deactivate redundant criteria."
+            message=(
+                f"Prompt build failed: Prompt length ({len(new_prompt_text)} characters) exceeds "
+                f"the maximum allowed defensive limit of {MAX_CHARACTERS_LIMIT} characters. "
+                f"Largest criteria: {largest_str}. "
+                f"Please compact active criteria descriptions or deactivate redundant criteria."
+            ),
+            code="prompt_too_long",
+            prompt_length=len(new_prompt_text),
+            max_prompt_length=MAX_CHARACTERS_LIMIT,
+            largest_criteria=top_largest,
+            suggestion="El prompt resultante supera la longitud máxima permitida (120,000 caracteres). Intente acortar las descripciones de los criterios más extensos o desactivar criterios que no sean estrictamente necesarios."
         )
 
     return new_prompt_text, changed

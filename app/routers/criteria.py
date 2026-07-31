@@ -5,11 +5,13 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import get_db
+from app.dependencies import get_db, get_current_user
+from app.models.users import User
 from app.schemas.criteria import (
     CriteriaGroupedOut,
     CriterionOut,
     SaveCriterionRequest,
+    ReorderCriteriaRequest,
     ToggleCriterionRequest,
     DeleteCriterionRequest,
     AIDescriptionRequest,
@@ -21,6 +23,29 @@ from app.services.prompts_service import PromptValidationError
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/bm", tags=["Criteria"])
+
+
+def format_prompt_validation_error_detail(val_ex: PromptValidationError) -> dict:
+    code = getattr(val_ex, "code", "PROMPT_VALIDATION_FAILED")
+    prompt_length = getattr(val_ex, "prompt_length", None)
+    max_prompt_length = getattr(val_ex, "max_prompt_length", None)
+    largest_criteria = getattr(val_ex, "largest_criteria", [])
+    suggestion = getattr(val_ex, "suggestion", None) or "El prompt final supera el límite defensivo de 120,000 caracteres. Intente compactar las descripciones de los criterios o desactivar criterios redundantes."
+
+    detail = {
+        "code": code,
+        "error": code,
+        "message": str(val_ex),
+        "suggestion": suggestion
+    }
+    if prompt_length is not None:
+        detail["prompt_length"] = prompt_length
+    if max_prompt_length is not None:
+        detail["max_prompt_length"] = max_prompt_length
+    if largest_criteria:
+        detail["largest_criteria"] = largest_criteria
+
+    return detail
 
 
 @router.get("/prompt-criteria", response_model=CriteriaGroupedOut)
@@ -59,11 +84,7 @@ async def save_criterion(
         logger.warning(f"Prompt validation failed: {val_ex}")
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "error": "PROMPT_VALIDATION_FAILED",
-                "message": str(val_ex),
-                "suggestion": "El prompt final supera el límite defensivo de 120,000 caracteres. Intente compactar las descripciones de los criterios o desactivar criterios redundantes."
-            }
+            detail=format_prompt_validation_error_detail(val_ex)
         )
     except criteria_service.CriterionSyncError as e:
         return {
@@ -81,6 +102,33 @@ async def save_criterion(
             status_code=500,
             detail=f"Error interno del servidor al guardar el criterio: {str(e)}"
         )
+
+
+@router.post("/prompt-criteria/reorder")
+async def reorder_criteria(
+    body: ReorderCriteriaRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Bulk reorder criteria for a prompt via drag & drop."""
+    logger.info(f"Reordering criteria for prompt_id={body.prompt_id}. Count: {len(body.ordered_criterion_ids)}")
+    updated_criteria = await criteria_service.reorder_prompt_criteria(db, body.prompt_id, body.ordered_criterion_ids)
+    return {
+        "ok": True,
+        "prompt_id": body.prompt_id,
+        "criteria_count": len(updated_criteria),
+        "criteria": [CriterionOut.model_validate(c) for c in updated_criteria]
+    }
+
+
+@router.post("/prompt-criteria/normalize-categories")
+async def normalize_category_criteria(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    prompt_id: int | None = Query(None),
+):
+    """Normalize allowed_values for category criteria and tipo_llamada for a prompt or all prompts."""
+    return await criteria_service.normalize_all_category_criteria(db, prompt_id=prompt_id)
 
 
 @router.post("/prompt-criteria/toggle")
@@ -109,11 +157,7 @@ async def toggle_criterion(
         logger.warning(f"Prompt validation failed: {val_ex}")
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "error": "PROMPT_VALIDATION_FAILED",
-                "message": str(val_ex),
-                "suggestion": "El prompt final supera el límite defensivo de 120,000 caracteres. Intente compactar las descripciones de los criterios o desactivar criterios redundantes."
-            }
+            detail=format_prompt_validation_error_detail(val_ex)
         )
     except criteria_service.CriterionSyncError as e:
         return {
@@ -158,11 +202,7 @@ async def update_criterion_typologies(
         logger.warning(f"Prompt validation failed: {val_ex}")
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "error": "PROMPT_VALIDATION_FAILED",
-                "message": str(val_ex),
-                "suggestion": "El prompt final supera el límite defensivo de 120,000 caracteres. Intente compactar las descripciones de los criterios o desactivar criterios redundantes."
-            }
+            detail=format_prompt_validation_error_detail(val_ex)
         )
     except criteria_service.CriterionSyncError as e:
         return {
@@ -202,11 +242,7 @@ async def delete_criterion(
         logger.warning(f"Prompt validation failed: {val_ex}")
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "error": "PROMPT_VALIDATION_FAILED",
-                "message": str(val_ex),
-                "suggestion": "El prompt final supera el límite defensivo de 120,000 caracteres. Intente compactar las descripciones de los criterios o desactivar criterios redundantes."
-            }
+            detail=format_prompt_validation_error_detail(val_ex)
         )
     except criteria_service.CriterionSyncError as e:
         return {

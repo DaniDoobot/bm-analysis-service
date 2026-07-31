@@ -18,7 +18,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             await session.close()
 
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy import select
 from app.models.users import User
@@ -28,6 +28,7 @@ security_bearer = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(security_bearer),
     db: AsyncSession = Depends(get_db)
 ) -> User:
@@ -62,6 +63,20 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="La sesión ha expirado porque se ha cambiado el correo electrónico."
         )
+    if user.must_reset_password:
+        path = request.url.path.rstrip("/").lower()
+        allowed_paths = {
+            "/bm/me",
+            "/bm/me/tenant-context",
+            "/bm/me/branding",
+            "/bm/me/change-password",
+            "/bm/auth/logout",
+        }
+        if path not in allowed_paths:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="password_change_required"
+            )
     return user
 
 

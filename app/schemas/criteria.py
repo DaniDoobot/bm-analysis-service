@@ -50,6 +50,11 @@ class SaveCriterionRequest(BaseModel):
     is_active: bool = True
 
 
+class ReorderCriteriaRequest(BaseModel):
+    prompt_id: int
+    ordered_criterion_ids: list[int]
+
+
 class ToggleCriterionRequest(BaseModel):
     criterion_id: int
     is_active: bool

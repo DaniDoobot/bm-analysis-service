@@ -515,6 +515,109 @@ async def _sync_prompt_on_removal(db: AsyncSession, prompt_id: int, criterion) -
 CRITERION_TYPES = ["score_1_10", "percentage", "boolean", "text", "category", "number"]
 
 
+def normalize_category_allowed_values(allowed_values: Any) -> list[str] | Any:
+    """
+    Normalizes allowed_values for category criteria:
+    - Trims whitespace from strings
+    - Rejects empty strings
+    - Eliminates duplicates preserving original order
+    """
+    if isinstance(allowed_values, list):
+        seen = set()
+        normalized = []
+        for val in allowed_values:
+            if isinstance(val, str):
+                s = val.strip()
+                if s and s not in seen:
+                    seen.add(s)
+                    normalized.append(s)
+            elif val is not None:
+                if val not in seen:
+                    seen.add(val)
+                    normalized.append(val)
+        return normalized
+    return allowed_values
+
+
+async def sync_tipo_llamada_allowed_values(db: AsyncSession, prompt_id: int, criterion: PromptCriterion) -> None:
+    """
+    If criterion output_key is 'tipo_llamada', synchronize its allowed_values with the active typologies
+    associated with the prompt's service, preserving 'otros' without duplicates.
+    """
+    if criterion.output_key != "tipo_llamada":
+        return
+
+    from app.models.prompts import Prompt
+    from app.models.typologies import Typology
+    from app.models.services import Service
+
+    prompt_obj = await db.get(Prompt, prompt_id)
+    service_id = prompt_obj.service_id if prompt_obj else None
+    if not service_id:
+        s_res = await db.execute(select(Service.service_id).where(Service.service_key == "front"))
+        service_id = s_res.scalar()
+
+    typologies = []
+    if service_id:
+        t_res = await db.execute(
+            select(Typology)
+            .where(Typology.service_id == service_id, Typology.is_active == True)
+            .order_by(Typology.sort_order.asc())
+        )
+        typologies = list(t_res.scalars().all())
+
+    if typologies:
+        typo_keys = [t.typology_key for t in typologies if t.typology_key]
+        if "otros" not in typo_keys:
+            typo_keys.append("otros")
+        criterion.allowed_values = normalize_category_allowed_values(typo_keys)
+    else:
+        standard_keys = ["cita", "confirmacion", "cancelacion", "reagendo", "falta", "otros", "intento_contacto", "transferencia"]
+        criterion.allowed_values = normalize_category_allowed_values(standard_keys)
+
+
+async def normalize_all_category_criteria(db: AsyncSession, prompt_id: int | None = None) -> dict:
+    """
+    Normalizes allowed_values for all active category criteria and tipo_llamada criteria.
+    Deduplicates values, trims whitespace, removes empty items, and syncs tipo_llamada.
+    """
+    stmt = select(PromptCriterion).where(
+        PromptCriterion.is_active == True,
+        PromptCriterion.deleted_at.is_(None)
+    )
+    if prompt_id is not None:
+        stmt = stmt.where(PromptCriterion.prompt_id == prompt_id)
+
+    res = await db.execute(stmt)
+    criteria = list(res.scalars().all())
+
+    modified_count = 0
+    modified_ids = []
+
+    for c in criteria:
+        if c.criterion_type == "category" or c.output_key == "tipo_llamada":
+            old_val = list(c.allowed_values) if isinstance(c.allowed_values, list) else c.allowed_values
+            if c.output_key == "tipo_llamada":
+                await sync_tipo_llamada_allowed_values(db, c.prompt_id, c)
+            else:
+                c.allowed_values = normalize_category_allowed_values(c.allowed_values)
+
+            if old_val != c.allowed_values:
+                modified_count += 1
+                modified_ids.append(c.criterion_id)
+                db.add(c)
+
+    if modified_count > 0:
+        await db.commit()
+
+    return {
+        "ok": True,
+        "prompt_id": prompt_id,
+        "modified_count": modified_count,
+        "modified_criterion_ids": modified_ids
+    }
+
+
 async def _ensure_typology_associations(db: AsyncSession, criterion: PromptCriterion):
     """Ensure the criterion is associated with the active typologies for the prompt's service."""
     service_id = None
@@ -657,6 +760,11 @@ async def _sync_criterion_on_save(
             # Si se guarda como inactivo, remover de la versión activa y borradores
             await _sync_prompt_on_removal(db, prompt_id, criterion)
             return
+
+        if criterion.output_key == "tipo_llamada":
+            await sync_tipo_llamada_allowed_values(db, prompt_id, criterion)
+        elif criterion.criterion_type == "category":
+            criterion.allowed_values = normalize_category_allowed_values(criterion.allowed_values)
 
         # Cargar criterios activos una sola vez para la limpieza de huérfanos
         active_criteria_stmt = select(PromptCriterion).where(
@@ -1537,4 +1645,89 @@ async def generate_criterion_description_ai(db: AsyncSession, criterion_id: int 
         "description": cleaned_desc,
         "warnings": warnings
     }
+
+
+async def reorder_prompt_criteria(
+    db: AsyncSession,
+    prompt_id: int,
+    ordered_criterion_ids: list[int]
+) -> list[PromptCriterion]:
+    """
+    Reorder all active criteria for a prompt sequentially.
+    Validates:
+    - prompt_id exists
+    - ordered_criterion_ids does not contain duplicates
+    - ordered_criterion_ids includes ALL active non-deleted criteria for the prompt
+    Updates order_index to (index + 1) * 10 in a single transaction and rebuilds active prompt.
+    Returns the updated active criteria list in new order.
+    """
+    from datetime import datetime, timezone
+    from fastapi import HTTPException, status
+    from sqlalchemy import select
+    from app.models.criteria import PromptCriterion
+    from app.models.prompts import Prompt
+    from app.services.prompts_service import sync_prompt_text_with_active_criteria, _get_current_version
+
+    prompt = await db.get(Prompt, prompt_id)
+    if not prompt:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Estructura con ID {prompt_id} no encontrada."
+        )
+
+    if len(set(ordered_criterion_ids)) != len(ordered_criterion_ids):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La lista de IDs enviada contiene duplicados."
+        )
+
+    # Fetch active non-deleted criteria
+    stmt = select(PromptCriterion).where(
+        PromptCriterion.prompt_id == prompt_id,
+        PromptCriterion.is_active == True,
+        PromptCriterion.deleted_at.is_(None)
+    )
+    res = await db.execute(stmt)
+    active_criteria = list(res.scalars().all())
+    active_criteria = _deduplicate_criteria_list(active_criteria)
+
+    active_map = {c.criterion_id: c for c in active_criteria}
+    active_ids_set = set(active_map.keys())
+    ordered_set = set(ordered_criterion_ids)
+
+    if ordered_set != active_ids_set:
+        missing = active_ids_set - ordered_set
+        extra = ordered_set - active_ids_set
+        msg_parts = []
+        if missing:
+            msg_parts.append(f"Faltan criterios activos en la ordenación: {sorted(list(missing))}.")
+        if extra:
+            msg_parts.append(f"Se incluyeron IDs no válidos o inactivos: {sorted(list(extra))}.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=" ".join(msg_parts)
+        )
+
+    # Update order_index
+    ordered_criteria = []
+    for idx, cid in enumerate(ordered_criterion_ids):
+        criterion = active_map[cid]
+        criterion.order_index = (idx + 1) * 10
+        db.add(criterion)
+        ordered_criteria.append(criterion)
+
+    # Rebuild prompt text with active criteria in new order
+    current_version = await _get_current_version(db, prompt_id)
+    if current_version and current_version.prompt:
+        new_text, sync_changed = await sync_prompt_text_with_active_criteria(db, prompt_id, current_version.prompt)
+        if sync_changed or new_text != current_version.prompt:
+            current_version.prompt = new_text
+            current_version.updated_at = datetime.now(timezone.utc)
+            db.add(current_version)
+
+    await db.commit()
+    for c in ordered_criteria:
+        await db.refresh(c)
+
+    return ordered_criteria
 

@@ -74,15 +74,6 @@ async def login(
             detail="La cuenta de usuario está desactivada."
         )
 
-    if user.must_reset_password:
-        logger.info("Login blocked: user %s must reset password.", user.email)
-        return {
-            "ok": False,
-            "requires_password_reset": True,
-            "email": user.email,
-            "message": "Debes establecer una nueva contraseña para continuar."
-        }
-        
     if not verify_password(payload.password, user.password_hash):
         logger.warning("Invalid credentials for identifier: '%s'", identifier)
         raise HTTPException(
@@ -104,10 +95,14 @@ async def login(
         c_res = await db.execute(select(Company.company_name).where(Company.company_id == user.company_id))
         comp_name = c_res.scalar()
 
-    return {
+    must_reset = bool(user.must_reset_password)
+    response_data = {
         "ok": True,
         "access_token": token,
         "token_type": "bearer",
+        "must_reset_password": must_reset,
+        "requires_password_change": must_reset,
+        "password_change_required": must_reset,
         "user": {
             "user_id": user.user_id,
             "username": user.username,
@@ -118,8 +113,10 @@ async def login(
             "normalized_role": normalize_role(user.role).value,
             "company_id": user.company_id,
             "company_name": comp_name,
+            "must_reset_password": must_reset,
         }
     }
+    return response_data
 
 
 @router.post("/auth/bootstrap", status_code=status.HTTP_201_CREATED)
