@@ -457,9 +457,15 @@ async def get_dashboard_summary(
 ) -> dict[str, Any]:
     t_start = time.perf_counter()
     now = datetime.now(timezone.utc)
-    
+
     norm_t = normalize_typology(typology_key)
     norm_d = normalize_direction(direction)
+
+    logger.info(
+        "[dashboard_summary] typology_filter_raw=%r typology_filter_normalized=%r "
+        "direction_filter_raw=%r direction_filter_normalized=%r period=%r date_from=%r date_to=%r",
+        typology_key, norm_t, direction, norm_d, period, date_from, date_to
+    )
 
     # Resolve custom range or period
     dt_from = parse_date(date_from)
@@ -537,18 +543,25 @@ async def get_dashboard_summary(
     if typology_ids:
         stmt = stmt.where(MassEvaluationResult.typology_id.in_(typology_ids))
     elif norm_t:
+        # Match against: persisted typology_key, persisted typology_name (lower, single-word names),
+        # or result_json 'tipo_llamada' raw value from the LLM
         stmt = stmt.where(
             or_(
-                func.lower(MassEvaluationResult.typology_key) == norm_t,
-                func.lower(func.coalesce(MassEvaluationResult.result_json["tipo_llamada"].astext, "")) == norm_t
+                func.lower(func.coalesce(MassEvaluationResult.typology_key, "")) == norm_t,
+                func.lower(func.coalesce(MassEvaluationResult.typology_name, "")) == norm_t,
+                func.lower(func.coalesce(
+                    MassEvaluationResult.result_json["tipo_llamada"].astext, ""
+                )) == norm_t,
             )
         )
 
     if norm_d:
         stmt = stmt.where(
             or_(
-                func.lower(MassEvaluationResult.direction) == norm_d,
-                func.lower(func.coalesce(MassEvaluationResult.result_json["inbound_outbound"].astext, "")) == norm_d
+                func.lower(func.coalesce(MassEvaluationResult.direction, "")) == norm_d,
+                func.lower(func.coalesce(
+                    MassEvaluationResult.result_json["inbound_outbound"].astext, ""
+                )) == norm_d,
             )
         )
 
@@ -568,6 +581,11 @@ async def get_dashboard_summary(
 
     result = await db.execute(stmt)
     rows = list(result.scalars().all())
+    logger.info(
+        "[dashboard_summary] query returned %d total rows (covers anterior+actual window). "
+        "typology_filter=%r direction_filter=%r",
+        len(rows), norm_t, norm_d
+    )
 
     actual_rows = []
     anterior_rows = []
@@ -779,38 +797,84 @@ async def get_dashboard_summary(
             "avg_sentiment": avg_sent
         })
 
-    agent_data = {}
+    # ── Agent ranking accumulation — keep owner_id for initials lookup ──
+    # Key: hubspot_owner_id (preferred) or resolved display name as fallback
+    agent_data: dict[str, dict] = {}
     for r in actual_rows:
         resolved_name = resolve_agent_display(r.agent_name, r.hubspot_owner_id)
         if not resolved_name:
             resolved_name = "Desconocido"
-        if resolved_name not in agent_data:
-            agent_data[resolved_name] = {
+        # Use owner_id as primary key so same agent with different name variants merge correctly
+        bucket_key = str(r.hubspot_owner_id) if r.hubspot_owner_id else resolved_name
+        if bucket_key not in agent_data:
+            agent_data[bucket_key] = {
+                "name": resolved_name,
+                "hubspot_owner_id": r.hubspot_owner_id,
                 "evals": [],
                 "citas": 0,
                 "total_tipo": 0,
-                "total_analyses": 0
+                "total_analyses": 0,
             }
-        agent_data[resolved_name]["total_analyses"] += 1
+        agent_data[bucket_key]["total_analyses"] += 1
         v = extract_score_from_mass(r.result_json, r.items_json, "evaluacion_global")
         if v is not None:
-            agent_data[resolved_name]["evals"].append(to_float(v))
-        
+            agent_data[bucket_key]["evals"].append(to_float(v))
+
         tipo = r.result_json.get("tipo_llamada") if r.result_json else None
         if tipo is not None:
-            agent_data[resolved_name]["total_tipo"] += 1
+            agent_data[bucket_key]["total_tipo"] += 1
             if tipo == "cita":
-                agent_data[resolved_name]["citas"] += 1
+                agent_data[bucket_key]["citas"] += 1
+
+    # Lookup agent_initials from bm_users for all owner_ids in ranking
+    from app.models.users import User as _User
+    ranking_owner_ids = [
+        d["hubspot_owner_id"] for d in agent_data.values() if d["hubspot_owner_id"]
+    ]
+    user_initials_ranking: dict[str, tuple[str | None, str | None]] = {}
+    if ranking_owner_ids:
+        _u_stmt = select(_User.hubspot_owner_id, _User.agent_initials, _User.name).where(
+            _User.hubspot_owner_id.in_([str(x) for x in ranking_owner_ids if x])
+        )
+        _u_res = await db.execute(_u_stmt)
+        for _u_oid, _u_init, _u_name in _u_res.all():
+            if _u_oid:
+                user_initials_ranking[str(_u_oid)] = (_u_init, _u_name)
+
+    def _compute_initials(owner_id: str | None, display_name: str) -> str:
+        """Compute agent initials: prefer DB agent_initials, fallback to name split."""
+        if owner_id:
+            db_init, db_name = user_initials_ranking.get(str(owner_id), (None, None))
+            if db_init and db_init.strip():
+                computed = db_init.strip().upper()
+                logger.debug(
+                    "[dashboard_summary] initials for owner_id=%s: DB agent_initials=%r -> %r",
+                    owner_id, db_init, computed
+                )
+                return computed
+        # Fallback: first letter of first two words
+        parts = display_name.strip().split()
+        if len(parts) >= 2:
+            return (parts[0][0] + parts[1][0]).upper()
+        if len(parts) == 1:
+            return parts[0][:2].upper()
+        return "??"
 
     ranking = []
-    for name, data in agent_data.items():
+    for bucket_key, data in agent_data.items():
+        name = data["name"]
+        owner_id = data["hubspot_owner_id"]
         avg_eval_score = to_float(round(sum(data["evals"]) / len(data["evals"]), 1)) if data["evals"] else 0.0
         cita_rate_score = to_float(round((data["citas"] / data["total_tipo"]) * 100)) if data["total_tipo"] > 0 else 0.0
+        initials = _compute_initials(owner_id, name)
         ranking.append({
             "agente_telefonico": name,
+            "hubspot_owner_id": owner_id,
+            "initials": initials,
+            "agent_initials": initials,
             "total_analyses": to_float(data["total_analyses"]),
             "avg_evaluacion_global": avg_eval_score,
-            "cita_rate": cita_rate_score
+            "cita_rate": cita_rate_score,
         })
 
     ranking.sort(key=lambda x: (x["total_analyses"], x["avg_evaluacion_global"]), reverse=True)
@@ -835,10 +899,27 @@ async def get_dashboard_summary(
             "execution_source": r.execution_source
         })
 
+    processing_ms = round((time.perf_counter() - t_start) * 1000, 1)
+    logger.info(
+        "[dashboard_summary] actual_rows=%d anterior_rows=%d total_analyses=%.0f processing_ms=%s",
+        len(actual_rows), len(anterior_rows), total_analyses, processing_ms
+    )
+
     return {
         "period": period,
         "analysis_type": analysis_type,
         "generated_at": now.isoformat(),
+        "filters": {
+            "typology_key": norm_t,
+            "typology_key_raw": typology_key,
+            "direction": norm_d,
+            "direction_raw": direction,
+            "service_id": service_id,
+        },
+        "summary": {
+            "total_analyses": to_float(total_analyses),
+            "calls_analyzed": to_float(total_analyses),
+        },
         "kpis": {
             "total_analyses": to_float(total_analyses),
             "pending": 0.0,
@@ -855,7 +936,8 @@ async def get_dashboard_summary(
         "type_distribution": type_distribution,
         "sentiment_evolution": sentiment_evolution,
         "agent_ranking": agent_ranking,
-        "latest_analyses": latest_analyses
+        "latest_analyses": latest_analyses,
+        "processing_ms": processing_ms,
     }
 
 
