@@ -2,10 +2,11 @@
 
 import logging
 import decimal
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.analyses import Analysis
@@ -14,6 +15,7 @@ from app.models.services import Service
 from app.models.typologies import Typology
 from app.utils.hubspot_owners import resolve_agent_display, resolve_owner_name, OWNER_TO_NAME
 from app.core.tenant_context import TenantContext
+from app.utils.normalizers import normalize_typology, normalize_direction
 
 logger = logging.getLogger(__name__)
 
@@ -445,14 +447,20 @@ async def get_dashboard_summary(
     date_from: str | None = None,
     date_to: str | None = None,
     typology_ids: list[int] | None = None,
+    typology_key: str | None = None,
+    direction: str | None = None,
     duration_min_seconds: int | None = None,
     duration_max_seconds: int | None = None,
     avg_score_min: float | None = None,
     avg_score_max: float | None = None,
     context: TenantContext | None = None,
 ) -> dict[str, Any]:
+    t_start = time.perf_counter()
     now = datetime.now(timezone.utc)
     
+    norm_t = normalize_typology(typology_key)
+    norm_d = normalize_direction(direction)
+
     # Resolve custom range or period
     dt_from = parse_date(date_from)
     dt_to = parse_date(date_to)
@@ -528,6 +536,22 @@ async def get_dashboard_summary(
 
     if typology_ids:
         stmt = stmt.where(MassEvaluationResult.typology_id.in_(typology_ids))
+    elif norm_t:
+        stmt = stmt.where(
+            or_(
+                func.lower(MassEvaluationResult.typology_key) == norm_t,
+                func.lower(func.coalesce(MassEvaluationResult.result_json["tipo_llamada"].astext, "")) == norm_t
+            )
+        )
+
+    if norm_d:
+        stmt = stmt.where(
+            or_(
+                func.lower(MassEvaluationResult.direction) == norm_d,
+                func.lower(func.coalesce(MassEvaluationResult.result_json["inbound_outbound"].astext, "")) == norm_d
+            )
+        )
+
     if duration_min_seconds is not None:
         stmt = stmt.where(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
     if duration_max_seconds is not None:
@@ -845,10 +869,16 @@ async def get_agents_list(
     date_from: str | None = None,
     date_to: str | None = None,
     type: str | None = None,
+    typology_ids: list[int] | None = None,
+    typology_key: str | None = None,
+    direction: str | None = None,
     context: TenantContext | None = None,
 ) -> list[dict[str, Any]]:
     """Return agents list with metrics calculated from bm_mass_evaluation_results only."""
     from app.models.mass_evaluations import MassEvaluationResult
+
+    norm_t = normalize_typology(typology_key)
+    norm_d = normalize_direction(direction)
 
     # 1. Resolve timeframe
     if period or date_from or date_to:
@@ -895,6 +925,23 @@ async def get_agents_list(
                 MassEvaluationResult.call_timestamp,
                 MassEvaluationResult.analysis_timestamp,
             ) <= dt_to
+        )
+
+    if typology_ids:
+        agg_stmt = agg_stmt.where(MassEvaluationResult.typology_id.in_(typology_ids))
+    elif norm_t:
+        agg_stmt = agg_stmt.where(
+            or_(
+                func.lower(MassEvaluationResult.typology_key) == norm_t,
+                func.lower(func.coalesce(MassEvaluationResult.result_json["tipo_llamada"].astext, "")) == norm_t
+            )
+        )
+    if norm_d:
+        agg_stmt = agg_stmt.where(
+            or_(
+                func.lower(MassEvaluationResult.direction) == norm_d,
+                func.lower(func.coalesce(MassEvaluationResult.result_json["inbound_outbound"].astext, "")) == norm_d
+            )
         )
 
     agg_stmt = agg_stmt.group_by(
@@ -947,6 +994,23 @@ async def get_agents_list(
                 MassEvaluationResult.call_timestamp,
                 MassEvaluationResult.analysis_timestamp,
             ) <= dt_to
+        )
+
+    if typology_ids:
+        rj_stmt = rj_stmt.where(MassEvaluationResult.typology_id.in_(typology_ids))
+    elif norm_t:
+        rj_stmt = rj_stmt.where(
+            or_(
+                func.lower(MassEvaluationResult.typology_key) == norm_t,
+                func.lower(func.coalesce(MassEvaluationResult.result_json["tipo_llamada"].astext, "")) == norm_t
+            )
+        )
+    if norm_d:
+        rj_stmt = rj_stmt.where(
+            or_(
+                func.lower(MassEvaluationResult.direction) == norm_d,
+                func.lower(func.coalesce(MassEvaluationResult.result_json["inbound_outbound"].astext, "")) == norm_d
+            )
         )
 
     rj_res = await db.execute(rj_stmt)
@@ -1016,6 +1080,8 @@ async def get_agent_evolution(
     date_from: str | None = None,
     date_to: str | None = None,
     typology_ids: list[int] | None = None,
+    typology_key: str | None = None,
+    direction: str | None = None,
     duration_min_seconds: int | None = None,
     duration_max_seconds: int | None = None,
     avg_score_min: float | None = None,
@@ -1069,6 +1135,20 @@ async def get_agent_evolution(
 
     if typology_ids:
         stmt = stmt.where(MassEvaluationResult.typology_id.in_(typology_ids))
+    elif norm_t:
+        stmt = stmt.where(
+            or_(
+                func.lower(MassEvaluationResult.typology_key) == norm_t,
+                func.lower(func.coalesce(MassEvaluationResult.result_json["tipo_llamada"].astext, "")) == norm_t
+            )
+        )
+    if norm_d:
+        stmt = stmt.where(
+            or_(
+                func.lower(MassEvaluationResult.direction) == norm_d,
+                func.lower(func.coalesce(MassEvaluationResult.result_json["inbound_outbound"].astext, "")) == norm_d
+            )
+        )
     if duration_min_seconds is not None:
         stmt = stmt.where(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
     if duration_max_seconds is not None:
@@ -1330,12 +1410,16 @@ async def get_objections_breakdown(
     date_from: str | None = None,
     date_to: str | None = None,
     typology_ids: list[int] | None = None,
+    typology_key: str | None = None,
+    direction: str | None = None,
     duration_min_seconds: int | None = None,
     duration_max_seconds: int | None = None,
     avg_score_min: float | None = None,
     avg_score_max: float | None = None,
     context: TenantContext | None = None,
 ) -> dict[str, Any]:
+    norm_t = normalize_typology(typology_key or tipo_llamada)
+    norm_d = normalize_direction(direction)
     now = datetime.now(timezone.utc)
     
     dt_from, dt_to, _ = resolve_date_range(date_from, date_to, period, default_period="7d")
@@ -1383,6 +1467,20 @@ async def get_objections_breakdown(
 
     if typology_ids:
         stmt = stmt.where(MassEvaluationResult.typology_id.in_(typology_ids))
+    elif norm_t:
+        stmt = stmt.where(
+            or_(
+                func.lower(MassEvaluationResult.typology_key) == norm_t,
+                func.lower(func.coalesce(MassEvaluationResult.result_json["tipo_llamada"].astext, "")) == norm_t
+            )
+        )
+    if norm_d:
+        stmt = stmt.where(
+            or_(
+                func.lower(MassEvaluationResult.direction) == norm_d,
+                func.lower(func.coalesce(MassEvaluationResult.result_json["inbound_outbound"].astext, "")) == norm_d
+            )
+        )
     if duration_min_seconds is not None:
         stmt = stmt.where(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
     if duration_max_seconds is not None:
@@ -1662,6 +1760,7 @@ async def get_agents_comparison(
     service_key: str | None = None,
     typology_id: int | None = None,
     typology_key: str | None = None,
+    direction: str | None = None,
     period: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
@@ -1675,6 +1774,9 @@ async def get_agents_comparison(
     context: TenantContext | None = None,
 ) -> dict[str, Any]:
     """Retrieve multi-agent comparison analytics using MassEvaluationResult."""
+    t_start = time.perf_counter()
+    norm_t = normalize_typology(typology_key)
+    norm_d = normalize_direction(direction)
     now = datetime.now(timezone.utc)
     
     if not metric_key:
@@ -1775,8 +1877,20 @@ async def get_agents_comparison(
         stmt = stmt.where(MassEvaluationResult.typology_id.in_(typology_ids))
     elif typology_id is not None:
         stmt = stmt.where(MassEvaluationResult.typology_id == typology_id)
-    elif typology_key is not None:
-        stmt = stmt.where(MassEvaluationResult.typology_key == typology_key)
+    elif norm_t:
+        stmt = stmt.where(
+            or_(
+                func.lower(MassEvaluationResult.typology_key) == norm_t,
+                func.lower(func.coalesce(MassEvaluationResult.result_json["tipo_llamada"].astext, "")) == norm_t
+            )
+        )
+    if norm_d:
+        stmt = stmt.where(
+            or_(
+                func.lower(MassEvaluationResult.direction) == norm_d,
+                func.lower(func.coalesce(MassEvaluationResult.result_json["inbound_outbound"].astext, "")) == norm_d
+            )
+        )
 
     if duration_min_seconds is not None:
         stmt = stmt.where(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
@@ -1942,10 +2056,25 @@ async def get_agents_comparison(
         elif service_key is not None:
             stmt_crit = stmt_crit.where(MassEvaluationResult.service_key == service_key)
             
-        if typology_id is not None:
+        if typology_ids:
+            stmt_crit = stmt_crit.where(MassEvaluationResult.typology_id.in_(typology_ids))
+        elif typology_id is not None:
             stmt_crit = stmt_crit.where(MassEvaluationResult.typology_id == typology_id)
-        elif typology_key is not None:
-            stmt_crit = stmt_crit.where(MassEvaluationResult.typology_key == typology_key)
+        elif norm_t:
+            stmt_crit = stmt_crit.where(
+                or_(
+                    func.lower(MassEvaluationResult.typology_key) == norm_t,
+                    func.lower(func.coalesce(MassEvaluationResult.result_json["tipo_llamada"].astext, "")) == norm_t
+                )
+            )
+
+        if norm_d:
+            stmt_crit = stmt_crit.where(
+                or_(
+                    func.lower(MassEvaluationResult.direction) == norm_d,
+                    func.lower(func.coalesce(MassEvaluationResult.result_json["inbound_outbound"].astext, "")) == norm_d
+                )
+            )
             
         if hubspot_owner_ids:
             stmt_crit = stmt_crit.where(MassEvaluationResult.hubspot_owner_id.in_(hubspot_owner_ids))
@@ -2393,13 +2522,22 @@ async def get_agents_comparison(
         "hubspot_owner_ids": hubspot_owner_ids,
         "service_id": service_id,
         "service_key": service_key,
-        "typology_key": typology_key,
+        "typology_key": norm_t,
+        "direction": norm_d or "all",
         "period": period,
         "date_from": start_actual.isoformat() if start_actual else None,
         "date_to": end_actual.isoformat() if end_actual else None,
         "bucket": bucket_interval
     }
     
+    processing_ms = round((time.perf_counter() - t_start) * 1000, 2)
+    logger.info(
+        "Dashboard summary query: typology_filter_raw=%s, typology_filter_normalized=%s, "
+        "direction_filter_raw=%s, direction_filter_normalized=%s, total_rows_fetched=%d, "
+        "actual_rows=%d, processing_ms=%.2f",
+        typology_key, norm_t, direction, norm_d, len(rows), len(actual_rows), processing_ms
+    )
+
     return {
         "filters": filters,
         "summary": summary,

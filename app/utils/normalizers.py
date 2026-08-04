@@ -37,3 +37,57 @@ def normalize_text(value) -> str | None:
         return None
     s = str(value).strip()
     return s if s else None
+
+
+import re
+import unicodedata
+from fastapi import HTTPException, status
+
+
+def normalize_typology(typology_raw: str | None) -> str | None:
+    """
+    Normalize typology raw string parameter.
+    Returns normalized key string (e.g. 'falta', 'intento_contacto', 'transferencia', 'cita') or None.
+    Handles 'todos', 'all', '', None -> None.
+    """
+    if not typology_raw:
+        return None
+    s = str(typology_raw).strip()
+    if not s or s.lower() in ("todos", "todas", "all", "none", "null"):
+        return None
+
+    # Lowercase & strip accents
+    s_lower = s.lower()
+    nfkd_form = unicodedata.normalize('NFKD', s_lower)
+    s_no_accents = "".join([c for c in nfkd_form if not unicodedata.combining(c)])
+
+    # Replace non-alphanumeric chars with underscore
+    normalized = re.sub(r'[^a-z0-9]+', '_', s_no_accents).strip('_')
+    return normalized if normalized else None
+
+
+def normalize_direction(direction_raw: str | None) -> str | None:
+    """
+    Normalize direction raw parameter ('inbound', 'outbound', 'all').
+    Raises HTTPException(422) if invalid value is provided.
+    Returns 'inbound', 'outbound', or None if 'all'/empty.
+    """
+    if not direction_raw:
+        return None
+    s = str(direction_raw).strip().lower()
+    if s in ("all", "todas", "todos", "none", "null", ""):
+        return None
+
+    INBOUND_VALS = {"inbound", "entrante", "in", "inbound_call"}
+    OUTBOUND_VALS = {"outbound", "saliente", "out", "outbound_call"}
+
+    if s in INBOUND_VALS:
+        return "inbound"
+    if s in OUTBOUND_VALS:
+        return "outbound"
+
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail=f"Valor de dirección no válido '{direction_raw}'. Valores aceptados: all, inbound, outbound, entrante, saliente."
+    )
+

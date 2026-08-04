@@ -16,6 +16,8 @@ from app.schemas.service_evolution import (
     CriterionListItem,
 )
 
+from app.utils.normalizers import normalize_typology, normalize_direction
+
 logger = logging.getLogger(__name__)
 
 
@@ -233,6 +235,7 @@ class ServiceEvolutionService:
         date_to: str | None = None,
         granularity: str = "day",
         typology_key: str | None = None,
+        direction: str | None = None,
         agent_owner_id: str | None = None,
         criteria: str | None = None,
         typology_ids: list[int] | None = None,
@@ -304,12 +307,16 @@ class ServiceEvolutionService:
             granularity=granularity
         )
 
+        norm_t = normalize_typology(typology_key)
+        norm_d = normalize_direction(direction)
+
         params = {
             "service_id": service_id,
             "service_key": service_key,
             "date_from": parsed_date_from,
             "date_to": parsed_date_to,
-            "typology_key": typology_key,
+            "typology_key": norm_t,
+            "direction": norm_d,
             "agent_owner_id": agent_owner_id,
         }
 
@@ -342,6 +349,10 @@ class ServiceEvolutionService:
             if context.allowed_service_ids is not None:
                 typo_extra_where += f" AND service_id IN {_format_int_list(context.allowed_service_ids)}"
             typo_extra_where += ")"
+
+        if norm_d:
+            extra_sql += " AND (LOWER(COALESCE(r.direction, '')) = :direction OR LOWER(COALESCE(r.result_json->>'inbound_outbound', '')) = :direction)"
+            extra_sql_left_join += " AND (LOWER(COALESCE(r.direction, '')) = :direction OR LOWER(COALESCE(r.result_json->>'inbound_outbound', '')) = :direction)"
 
         if typology_ids:
             ids_str = ",".join(str(tid) for tid in typology_ids)

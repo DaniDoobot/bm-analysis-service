@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select, func, text
+from sqlalchemy import select, func, text, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_db, get_tenant_context
@@ -24,6 +24,7 @@ from app.schemas.analytics import (
 )
 from app.services.dashboard_service import resolve_date_range, extract_score_from_mass
 from app.utils.hubspot_owners import resolve_owner_name
+from app.utils.normalizers import normalize_typology, normalize_direction
 
 def _format_int_list(lst) -> str:
     if not lst:
@@ -346,6 +347,15 @@ async def get_agents_comparison(
     item_keys: Annotated[list[str] | None, Query(description="Filter compared item keys")] = None,
     item_keys_bracket: Annotated[list[str] | None, Query(alias="item_keys[]", description="Filter compared item keys (array format)")] = None,
     typology_ids: Annotated[str | None, Query(description="Comma-separated typology IDs")] = None,
+    typology: Annotated[str | None, Query(description="Filter by typology key/name")] = None,
+    typology_key: Annotated[str | None, Query(description="Filter by typology key")] = None,
+    tipo_llamada: Annotated[str | None, Query(description="Filter by call type")] = None,
+    call_type: Annotated[str | None, Query(description="Filter by call type")] = None,
+    selected_typology: Annotated[str | None, Query(description="Filter by selected typology")] = None,
+    typologies: Annotated[str | None, Query(description="Filter by typology")] = None,
+    direction: Annotated[str | None, Query(description="all | inbound | outbound")] = None,
+    call_direction: Annotated[str | None, Query(description="Filter by call direction")] = None,
+    inbound_outbound: Annotated[str | None, Query(description="Filter by inbound/outbound")] = None,
     duration_min_seconds: Annotated[int | None, Query(description="Min duration in seconds")] = None,
     duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
     avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
@@ -361,6 +371,11 @@ async def get_agents_comparison(
             detail="Acceso denegado: Se requiere rol de nivel superior."
         )
     try:
+        raw_typology = typology or typology_key or tipo_llamada or call_type or selected_typology or typologies
+        norm_t = normalize_typology(raw_typology)
+        raw_direction = direction or call_direction or inbound_outbound
+        norm_d = normalize_direction(raw_direction)
+
         # 1. Resolve timeframe
         dt_from, dt_to, _ = resolve_date_range(date_from, date_to, period=None, default_period="30d")
         
@@ -398,6 +413,21 @@ async def get_agents_comparison(
             typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
         if typo_ids:
             stmt = stmt.where(MassEvaluationResult.typology_id.in_(typo_ids))
+        elif norm_t:
+            stmt = stmt.where(
+                or_(
+                    func.lower(MassEvaluationResult.typology_key) == norm_t,
+                    func.lower(func.coalesce(MassEvaluationResult.result_json["tipo_llamada"].astext, "")) == norm_t
+                )
+            )
+
+        if norm_d:
+            stmt = stmt.where(
+                or_(
+                    func.lower(MassEvaluationResult.direction) == norm_d,
+                    func.lower(func.coalesce(MassEvaluationResult.result_json["inbound_outbound"].astext, "")) == norm_d
+                )
+            )
         if duration_min_seconds is not None:
             stmt = stmt.where(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
         if duration_max_seconds is not None:
@@ -533,6 +563,15 @@ async def get_items_evolution(
     item_keys_bracket: Annotated[list[str] | None, Query(alias="item_keys[]", description="Filter compared item keys (array format)")] = None,
     bucket: Annotated[str | None, Query(description="Timeline grouping interval: hour | day | week")] = None,
     typology_ids: Annotated[str | None, Query(description="Comma-separated typology IDs")] = None,
+    typology: Annotated[str | None, Query(description="Filter by typology key/name")] = None,
+    typology_key: Annotated[str | None, Query(description="Filter by typology key")] = None,
+    tipo_llamada: Annotated[str | None, Query(description="Filter by call type")] = None,
+    call_type: Annotated[str | None, Query(description="Filter by call type")] = None,
+    selected_typology: Annotated[str | None, Query(description="Filter by selected typology")] = None,
+    typologies: Annotated[str | None, Query(description="Filter by typology")] = None,
+    direction: Annotated[str | None, Query(description="all | inbound | outbound")] = None,
+    call_direction: Annotated[str | None, Query(description="Filter by call direction")] = None,
+    inbound_outbound: Annotated[str | None, Query(description="Filter by inbound/outbound")] = None,
     duration_min_seconds: Annotated[int | None, Query(description="Min duration in seconds")] = None,
     duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
     avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
@@ -548,6 +587,11 @@ async def get_items_evolution(
             detail="Acceso denegado: Se requiere rol de nivel superior."
         )
     try:
+        raw_typology = typology or typology_key or tipo_llamada or call_type or selected_typology or typologies
+        norm_t = normalize_typology(raw_typology)
+        raw_direction = direction or call_direction or inbound_outbound
+        norm_d = normalize_direction(raw_direction)
+
         # 1. Resolve timeframe
         dt_from, dt_to, recommended_bucket = resolve_date_range(date_from, date_to, period=None, default_period="30d")
         bucket_interval = bucket if bucket in ["hour", "day", "week"] else recommended_bucket
@@ -586,6 +630,21 @@ async def get_items_evolution(
             typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
         if typo_ids:
             stmt = stmt.where(MassEvaluationResult.typology_id.in_(typo_ids))
+        elif norm_t:
+            stmt = stmt.where(
+                or_(
+                    func.lower(MassEvaluationResult.typology_key) == norm_t,
+                    func.lower(func.coalesce(MassEvaluationResult.result_json["tipo_llamada"].astext, "")) == norm_t
+                )
+            )
+
+        if norm_d:
+            stmt = stmt.where(
+                or_(
+                    func.lower(MassEvaluationResult.direction) == norm_d,
+                    func.lower(func.coalesce(MassEvaluationResult.result_json["inbound_outbound"].astext, "")) == norm_d
+                )
+            )
         if duration_min_seconds is not None:
             stmt = stmt.where(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
         if duration_max_seconds is not None:

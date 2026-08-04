@@ -20,6 +20,7 @@ from app.services.dashboard_service import (
 )
 from app.schemas.dashboard import AgentComparisonResponse, AgentEvolutionResponse
 from app.utils.hubspot_owners import resolve_owner_id_by_email, resolve_owner_name
+from app.utils.normalizers import normalize_typology, normalize_direction
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/bm", tags=["Dashboard & Analytics"])
@@ -36,6 +37,15 @@ async def dashboard_summary(
     date_from: Annotated[str | None, Query(description="Custom start date (ISO or YYYY-MM-DD)")] = None,
     date_to: Annotated[str | None, Query(description="Custom end date (ISO or YYYY-MM-DD)")] = None,
     typology_ids: Annotated[str | None, Query(description="Comma-separated typology IDs")] = None,
+    typology: Annotated[str | None, Query(description="Filter by typology key/name")] = None,
+    typology_key: Annotated[str | None, Query(description="Filter by typology key")] = None,
+    tipo_llamada: Annotated[str | None, Query(description="Filter by call type")] = None,
+    call_type: Annotated[str | None, Query(description="Filter by call type")] = None,
+    selected_typology: Annotated[str | None, Query(description="Filter by selected typology")] = None,
+    typologies: Annotated[str | None, Query(description="Filter by typology")] = None,
+    direction: Annotated[str | None, Query(description="all | inbound | outbound")] = None,
+    call_direction: Annotated[str | None, Query(description="Filter by call direction")] = None,
+    inbound_outbound: Annotated[str | None, Query(description="Filter by inbound/outbound")] = None,
     duration_min_seconds: Annotated[int | None, Query(description="Min duration in seconds")] = None,
     duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
     avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
@@ -49,6 +59,17 @@ async def dashboard_summary(
     if typology_ids and typology_ids.strip():
         typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
 
+    raw_typology = typology or typology_key or tipo_llamada or call_type or selected_typology or typologies
+    norm_typology_key = normalize_typology(raw_typology)
+    analysis_type = type
+
+    if type and type not in ("audio", "text") and not raw_typology:
+        norm_typology_key = normalize_typology(type)
+        analysis_type = "audio"
+
+    raw_direction = direction or call_direction or inbound_outbound
+    norm_direction = normalize_direction(raw_direction)
+
     if service_id is not None and not context.is_super_admin:
         if context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
             raise HTTPException(
@@ -59,13 +80,15 @@ async def dashboard_summary(
     try:
         data = await get_dashboard_summary(
             db,
-            analysis_type=type,
+            analysis_type=analysis_type,
             period=period,
             service_id=service_id,
             service_key=service_key,
             date_from=date_from,
             date_to=date_to,
             typology_ids=typo_ids,
+            typology_key=norm_typology_key,
+            direction=norm_direction,
             duration_min_seconds=duration_min_seconds,
             duration_max_seconds=duration_max_seconds,
             avg_score_min=avg_score_min,
@@ -87,6 +110,14 @@ async def agents_comparison(
     service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
     typology_id: Annotated[int | None, Query(description="Filter by typology ID")] = None,
     typology_key: Annotated[str | None, Query(description="Filter by typology key")] = None,
+    typology: Annotated[str | None, Query(description="Filter by typology key/name")] = None,
+    tipo_llamada: Annotated[str | None, Query(description="Filter by call type")] = None,
+    call_type: Annotated[str | None, Query(description="Filter by call type")] = None,
+    selected_typology: Annotated[str | None, Query(description="Filter by selected typology")] = None,
+    typologies: Annotated[str | None, Query(description="Filter by typology")] = None,
+    direction: Annotated[str | None, Query(description="all | inbound | outbound")] = None,
+    call_direction: Annotated[str | None, Query(description="Filter by call direction")] = None,
+    inbound_outbound: Annotated[str | None, Query(description="Filter by inbound/outbound")] = None,
     period: Annotated[str | None, Query(description="24h | 7d | 30d | 90d | all")] = None,
     date_from: Annotated[str | None, Query(description="Custom start date (ISO or YYYY-MM-DD)")] = None,
     date_to: Annotated[str | None, Query(description="Custom end date (ISO or YYYY-MM-DD)")] = None,
@@ -108,6 +139,12 @@ async def agents_comparison(
     typo_ids = None
     if typology_ids and typology_ids.strip():
         typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
+
+    raw_typology = typology or typology_key or tipo_llamada or call_type or selected_typology or typologies
+    norm_typology_key = normalize_typology(raw_typology)
+    raw_direction = direction or call_direction or inbound_outbound
+    norm_direction = normalize_direction(raw_direction)
+
     try:
         data = await get_agents_comparison(
             db,
@@ -115,7 +152,8 @@ async def agents_comparison(
             service_id=service_id,
             service_key=service_key,
             typology_id=typology_id,
-            typology_key=typology_key,
+            typology_key=norm_typology_key,
+            direction=norm_direction,
             period=period,
             date_from=date_from,
             date_to=date_to,
@@ -144,10 +182,34 @@ async def list_agents(
     date_from: Annotated[str | None, Query(description="Start date (ISO or YYYY-MM-DD)")] = None,
     date_to: Annotated[str | None, Query(description="End date (ISO or YYYY-MM-DD)")] = None,
     type: Annotated[str | None, Query(description="Filter by analysis type (kept for compatibility)")] = None,
+    typology_ids: Annotated[str | None, Query(description="Comma-separated typology IDs")] = None,
+    typology: Annotated[str | None, Query(description="Filter by typology key/name")] = None,
+    typology_key: Annotated[str | None, Query(description="Filter by typology key")] = None,
+    tipo_llamada: Annotated[str | None, Query(description="Filter by call type")] = None,
+    call_type: Annotated[str | None, Query(description="Filter by call type")] = None,
+    selected_typology: Annotated[str | None, Query(description="Filter by selected typology")] = None,
+    typologies: Annotated[str | None, Query(description="Filter by typology")] = None,
+    direction: Annotated[str | None, Query(description="all | inbound | outbound")] = None,
+    call_direction: Annotated[str | None, Query(description="Filter by call direction")] = None,
+    inbound_outbound: Annotated[str | None, Query(description="Filter by inbound/outbound")] = None,
 ):
     """
     Get all active call center agents with their accumulated real metrics.
     """
+    typo_ids = None
+    if typology_ids and typology_ids.strip():
+        typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
+
+    raw_typology = typology or typology_key or tipo_llamada or call_type or selected_typology or typologies
+    norm_typology_key = normalize_typology(raw_typology)
+
+    if type and type not in ("audio", "text") and not raw_typology:
+        norm_typology_key = normalize_typology(type)
+        type = None
+
+    raw_direction = direction or call_direction or inbound_outbound
+    norm_direction = normalize_direction(raw_direction)
+
     try:
         data = await get_agents_list(
             db,
@@ -157,6 +219,9 @@ async def list_agents(
             date_from=date_from,
             date_to=date_to,
             type=type,
+            typology_ids=typo_ids,
+            typology_key=norm_typology_key,
+            direction=norm_direction,
             context=context,
         )
         return data
@@ -185,6 +250,15 @@ async def agent_evolution(
     date_from: Annotated[str | None, Query(description="Custom start date (ISO or YYYY-MM-DD)")] = None,
     date_to: Annotated[str | None, Query(description="Custom end date (ISO or YYYY-MM-DD)")] = None,
     typology_ids: Annotated[str | None, Query(description="Comma-separated typology IDs")] = None,
+    typology: Annotated[str | None, Query(description="Filter by typology key/name")] = None,
+    typology_key: Annotated[str | None, Query(description="Filter by typology key")] = None,
+    tipo_llamada: Annotated[str | None, Query(description="Filter by call type")] = None,
+    call_type: Annotated[str | None, Query(description="Filter by call type")] = None,
+    selected_typology: Annotated[str | None, Query(description="Filter by selected typology")] = None,
+    typologies: Annotated[str | None, Query(description="Filter by typology")] = None,
+    direction: Annotated[str | None, Query(description="all | inbound | outbound")] = None,
+    call_direction: Annotated[str | None, Query(description="Filter by call direction")] = None,
+    inbound_outbound: Annotated[str | None, Query(description="Filter by inbound/outbound")] = None,
     duration_min_seconds: Annotated[int | None, Query(description="Min duration in seconds")] = None,
     duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
     avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
@@ -204,10 +278,22 @@ async def agent_evolution(
         typo_ids = None
         if typology_ids and typology_ids.strip():
             typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
+
+        raw_typology = typology or typology_key or tipo_llamada or call_type or selected_typology or typologies
+        norm_typology_key = normalize_typology(raw_typology)
+        analysis_type = type
+
+        if type and type not in ("audio", "text") and not raw_typology:
+            norm_typology_key = normalize_typology(type)
+            analysis_type = "audio"
+
+        raw_direction = direction or call_direction or inbound_outbound
+        norm_direction = normalize_direction(raw_direction)
+
         data = await get_agent_evolution(
             db,
             hubspot_owner_id=hubspot_owner_id,
-            analysis_type=type,
+            analysis_type=analysis_type,
             period=period,
             bucket_param=bucket,
             prompt_version_id=prompt_version_id,
@@ -216,6 +302,8 @@ async def agent_evolution(
             date_from=date_from,
             date_to=date_to,
             typology_ids=typo_ids,
+            typology_key=norm_typology_key,
+            direction=norm_direction,
             duration_min_seconds=duration_min_seconds,
             duration_max_seconds=duration_max_seconds,
             avg_score_min=avg_score_min,
@@ -236,6 +324,14 @@ async def objections_breakdown(
     period: Annotated[str, Query(description="24h | 7d | 30d | 90d | all")] = "7d",
     agent_id: Annotated[str | None, Query(description="hubspot_owner_id")] = None,
     tipo_llamada: Annotated[str | None, Query(description="Type of call")] = None,
+    typology: Annotated[str | None, Query(description="Filter by typology key/name")] = None,
+    typology_key: Annotated[str | None, Query(description="Filter by typology key")] = None,
+    call_type: Annotated[str | None, Query(description="Filter by call type")] = None,
+    selected_typology: Annotated[str | None, Query(description="Filter by selected typology")] = None,
+    typologies: Annotated[str | None, Query(description="Filter by typology")] = None,
+    direction: Annotated[str | None, Query(description="all | inbound | outbound")] = None,
+    call_direction: Annotated[str | None, Query(description="Filter by call direction")] = None,
+    inbound_outbound: Annotated[str | None, Query(description="Filter by inbound/outbound")] = None,
     service_id: Annotated[int | None, Query(description="Filter by service ID")] = None,
     service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
     date_from: Annotated[str | None, Query(description="Custom start date (ISO or YYYY-MM-DD)")] = None,
@@ -253,18 +349,32 @@ async def objections_breakdown(
     typo_ids = None
     if typology_ids and typology_ids.strip():
         typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
+
+    raw_typology = typology or typology_key or tipo_llamada or call_type or selected_typology or typologies
+    norm_typology_key = normalize_typology(raw_typology)
+    analysis_type = type
+
+    if type and type not in ("audio", "text") and not raw_typology:
+        norm_typology_key = normalize_typology(type)
+        analysis_type = "audio"
+
+    raw_direction = direction or call_direction or inbound_outbound
+    norm_direction = normalize_direction(raw_direction)
+
     try:
         data = await get_objections_breakdown(
             db,
-            analysis_type=type,
+            analysis_type=analysis_type,
             period=period,
             agent_id=agent_id,
-            tipo_llamada=tipo_llamada,
+            tipo_llamada=norm_typology_key,
             service_id=service_id,
             service_key=service_key,
             date_from=date_from,
             date_to=date_to,
             typology_ids=typo_ids,
+            typology_key=norm_typology_key,
+            direction=norm_direction,
             duration_min_seconds=duration_min_seconds,
             duration_max_seconds=duration_max_seconds,
             avg_score_min=avg_score_min,
@@ -291,6 +401,15 @@ async def get_my_evolution(
     date_from: Annotated[str | None, Query(description="Custom start date (ISO or YYYY-MM-DD)")] = None,
     date_to: Annotated[str | None, Query(description="Custom end date (ISO or YYYY-MM-DD)")] = None,
     typology_ids: Annotated[str | None, Query(description="Comma-separated typology IDs")] = None,
+    typology: Annotated[str | None, Query(description="Filter by typology key/name")] = None,
+    typology_key: Annotated[str | None, Query(description="Filter by typology key")] = None,
+    tipo_llamada: Annotated[str | None, Query(description="Filter by call type")] = None,
+    call_type: Annotated[str | None, Query(description="Filter by call type")] = None,
+    selected_typology: Annotated[str | None, Query(description="Filter by selected typology")] = None,
+    typologies: Annotated[str | None, Query(description="Filter by typology")] = None,
+    direction: Annotated[str | None, Query(description="all | inbound | outbound")] = None,
+    call_direction: Annotated[str | None, Query(description="Filter by call direction")] = None,
+    inbound_outbound: Annotated[str | None, Query(description="Filter by inbound/outbound")] = None,
     duration_min_seconds: Annotated[int | None, Query(description="Min duration in seconds")] = None,
     duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
     avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
@@ -336,10 +455,22 @@ async def get_my_evolution(
         typo_ids = None
         if typology_ids and typology_ids.strip():
             typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
+
+        raw_typology = typology or typology_key or tipo_llamada or call_type or selected_typology or typologies
+        norm_typology_key = normalize_typology(raw_typology)
+        analysis_type = type
+
+        if type and type not in ("audio", "text") and not raw_typology:
+            norm_typology_key = normalize_typology(type)
+            analysis_type = "audio"
+
+        raw_direction = direction or call_direction or inbound_outbound
+        norm_direction = normalize_direction(raw_direction)
+
         data = await get_agent_evolution(
             db,
             hubspot_owner_id=owner_id,
-            analysis_type=type,
+            analysis_type=analysis_type,
             period=period,
             bucket_param=bucket,
             prompt_version_id=prompt_version_id,
@@ -348,6 +479,8 @@ async def get_my_evolution(
             date_from=date_from,
             date_to=date_to,
             typology_ids=typo_ids,
+            typology_key=norm_typology_key,
+            direction=norm_direction,
             duration_min_seconds=duration_min_seconds,
             duration_max_seconds=duration_max_seconds,
             avg_score_min=avg_score_min,

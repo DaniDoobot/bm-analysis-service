@@ -12,6 +12,7 @@ from app.schemas.service_evolution import (
     CriterionListItem,
 )
 from app.services.service_evolution_service import ServiceEvolutionService
+from app.utils.normalizers import normalize_typology, normalize_direction
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,14 @@ async def get_evolution(
     date_to: str | None = Query(None, description="Fecha de fin (ISO 8601 o YYYY-MM-DD)"),
     granularity: str = Query("day", description="Granularidad de agrupación: day | week | month"),
     typology_key: str | None = Query(None, description="Filtrar por clave de tipología"),
+    typology: str | None = Query(None, description="Filtrar por clave/nombre de tipología"),
+    tipo_llamada: str | None = Query(None, description="Filtrar por tipo de llamada"),
+    call_type: str | None = Query(None, description="Filtrar por tipo de llamada"),
+    selected_typology: str | None = Query(None, description="Filtrar por tipología seleccionada"),
+    typologies: str | None = Query(None, description="Filtrar por tipología"),
+    direction: str | None = Query(None, description="all | inbound | outbound"),
+    call_direction: str | None = Query(None, description="Filtrar por dirección de llamada"),
+    inbound_outbound: str | None = Query(None, description="Filtrar por dirección de llamada"),
     agent_owner_id: str | None = Query(None, description="Filtrar por ID de HubSpot del agente"),
     criteria: str | None = Query(None, description="Lista de criterion_key separados por comas a filtrar en el ranking"),
     typology_ids: str | None = Query(None, description="Comma-separated typology IDs to filter"),
@@ -95,6 +104,11 @@ async def get_evolution(
     if typology_ids and typology_ids.strip():
         typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
 
+    raw_typology = typology or typology_key or tipo_llamada or call_type or selected_typology or typologies
+    norm_typology_key = normalize_typology(raw_typology)
+    raw_direction = direction or call_direction or inbound_outbound
+    norm_direction = normalize_direction(raw_direction)
+
     if service_id is not None and not context.is_super_admin:
         if context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
             raise HTTPException(
@@ -109,7 +123,6 @@ async def get_evolution(
                     status_code=403,
                     detail="No tienes permiso para consultar la evolución de este agente."
                 )
-        # If they are restricted and no agent_owner_id is set, it will be filtered by context.allowed_agent_ids in the service layer
 
     try:
         return await ServiceEvolutionService.get_evolution(
@@ -119,7 +132,8 @@ async def get_evolution(
             date_from=date_from,
             date_to=date_to,
             granularity=granularity.lower(),
-            typology_key=typology_key,
+            typology_key=norm_typology_key,
+            direction=norm_direction,
             agent_owner_id=agent_owner_id,
             criteria=criteria,
             typology_ids=typo_ids,
