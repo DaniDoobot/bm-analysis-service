@@ -290,6 +290,25 @@ async def init_db():
             except Exception as e:
                 logger.error("Failed to check or apply hubspot_owner_id uniqueness migration: %s", e)
 
+        # 1.2.b-3 Ensure performance indexes for dashboard and analytics queries
+        async with AsyncSession(engine) as session:
+            try:
+                async with engine.begin() as conn:
+                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_bm_mass_eval_res_company_service ON bm_mass_evaluation_results (company_id, service_id);"))
+                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_bm_mass_eval_res_owner_id ON bm_mass_evaluation_results (hubspot_owner_id);"))
+                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_bm_mass_eval_res_call_timestamp ON bm_mass_evaluation_results (call_timestamp);"))
+                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_bm_mass_eval_res_status ON bm_mass_evaluation_results (status);"))
+
+                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_bm_analyses_company_service ON bm_analyses (company_id, service_id);"))
+                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_bm_analyses_hubspot_owner ON bm_analyses (hubspot_owner_id);"))
+                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_bm_analyses_call_date ON bm_analyses (call_date);"))
+
+                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_bm_call_analysis_current_company_service ON bm_call_analysis_current (company_id, service_id);"))
+                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_bm_call_analysis_current_owner ON bm_call_analysis_current (hubspot_owner_id);"))
+                logger.info("Performance indexes for dashboard/analytics ensured successfully.")
+            except Exception as e:
+                logger.error("Failed to apply performance indexes migration: %s", e)
+
         # 1.2.c Early dynamic column migration for bm_training_agent_settings (required before query/seeding)
         async with engine.begin() as conn:
             for col_name, col_type, col_default in [

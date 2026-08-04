@@ -587,7 +587,11 @@ class MassEvaluationService:
             day_filters["date_to"] = day_end
             day_filters["max_calls"] = 10000
 
-            candidates_day = await hs_service.search_calls_for_mass_evaluation(day_filters)
+            try:
+                candidates_day = await hs_service.search_calls_for_mass_evaluation(day_filters)
+            except Exception as e_hs:
+                logger.warning("HubSpot search failed for date %s: %s", day_str, e_hs)
+                candidates_day = []
             candidates_count = len(candidates_day)
             candidates_count_by_day[day_str] = candidates_count
 
@@ -705,7 +709,11 @@ class MassEvaluationService:
                 "normalized_call_ids": [c["call_id"] for c in calls]
             }
 
-        calls = await hs_service.search_calls_for_mass_evaluation(filters)
+        try:
+            calls = await hs_service.search_calls_for_mass_evaluation(filters)
+        except Exception as e_hs:
+            logger.warning("HubSpot search failed during preview for job %s: %s", job_id, e_hs)
+            calls = []
         
         return {
             "job_id": job_id,
@@ -726,6 +734,51 @@ class MassEvaluationService:
             "not_found_call_ids": [],
             "duplicate_input_call_ids": [],
             "normalized_call_ids": [c["call_id"] for c in calls]
+        }
+
+    @staticmethod
+    async def dry_run_job(
+        db: AsyncSession,
+        job_id: int,
+        override_date_from: datetime | None = None,
+        override_date_to: datetime | None = None
+    ) -> dict[str, Any]:
+        """
+        Simulate/dry-run a mass evaluation job without launching actual analysis.
+        Returns candidate counts, selected calls, and effective filters.
+        """
+        stmt = select(MassEvaluationJob).where(MassEvaluationJob.job_id == job_id)
+        res = await db.execute(stmt)
+        job = res.scalars().first()
+        if not job:
+            raise ValueError(f"Job ID {job_id} not found")
+
+        preview = await MassEvaluationService.search_calls_for_job_preview(
+            db=db,
+            job_id=job_id,
+            override_date_from=override_date_from,
+            override_date_to=override_date_to
+        )
+
+        eff_filters = preview.get("effective_filters") or {}
+        candidates_count = preview.get("calls_found", 0)
+        calls_list = preview.get("calls") or []
+        selected_count = len(calls_list)
+        selected_count_by_day = eff_filters.get("selected_count_by_day")
+
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "mode": job.job_mode or "standard",
+            "estimated_calls": candidates_count,
+            "candidates_count": candidates_count,
+            "selected_count": selected_count,
+            "selected_count_by_day": selected_count_by_day,
+            "filters": eff_filters,
+            "found_call_ids": preview.get("found_call_ids", []),
+            "not_found_call_ids": preview.get("not_found_call_ids", []),
+            "normalized_call_ids": preview.get("normalized_call_ids", []),
+            "calls": calls_list
         }
 
     @staticmethod

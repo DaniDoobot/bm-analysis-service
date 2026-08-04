@@ -1968,10 +1968,24 @@ async def get_agents_comparison(
         target_owner_ids.update(active_owner_ids)
         target_owner_ids.update(OWNER_TO_NAME.keys())
         
-    # Map owner IDs to display names & initials
+    # Map owner IDs to display names & initials (prefer User.agent_initials if set in DB)
+    from app.models.users import User
+    user_initials_map: dict[str, tuple[str | None, str | None]] = {}
+    if target_owner_ids:
+        u_stmt = select(User.hubspot_owner_id, User.agent_initials, User.name).where(
+            User.hubspot_owner_id.in_([str(x) for x in target_owner_ids if x])
+        )
+        u_res = await db.execute(u_stmt)
+        for u_oid, u_init, u_name in u_res.all():
+            if u_oid:
+                user_initials_map[str(u_oid)] = (u_init, u_name)
+
     agents_map = {}
     for oid in target_owner_ids:
-        disp_name = resolve_owner_name(oid)
+        oid_str = str(oid)
+        db_init, db_name = user_initials_map.get(oid_str, (None, None))
+
+        disp_name = db_name or resolve_owner_name(oid)
         if not disp_name:
             for r in rows:
                 if r.hubspot_owner_id == oid and r.agent_name and not r.agent_name.isdigit():
@@ -1979,15 +1993,18 @@ async def get_agents_comparison(
                     break
         if not disp_name:
             disp_name = f"Agente ({oid})"
-            
-        parts = disp_name.strip().split()
-        if len(parts) >= 2:
-            initials = (parts[0][0] + parts[1][0]).upper()
-        elif len(parts) == 1:
-            initials = parts[0][:2].upper()
+
+        if db_init and db_init.strip():
+            initials = db_init.strip().upper()
         else:
-            initials = "??"
-            
+            parts = disp_name.strip().split()
+            if len(parts) >= 2:
+                initials = (parts[0][0] + parts[1][0]).upper()
+            elif len(parts) == 1:
+                initials = parts[0][:2].upper()
+            else:
+                initials = "??"
+
         agents_map[oid] = {
             "name": disp_name,
             "initials": initials

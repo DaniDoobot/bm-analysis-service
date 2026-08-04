@@ -46,15 +46,15 @@ async def get_all_agents(db: AsyncSession) -> Dict[str, Dict[str, str]]:
             "initials": get_initials(name)
         }
 
-    # 2. Database users (role is agent/agente)
-    res = await db.execute(select(User).where(User.role.in_(["agent", "agente"])))
+    # 2. Database users (all users with hubspot_owner_id)
+    res = await db.execute(select(User).where(User.hubspot_owner_id.is_not(None)))
     for u in res.scalars().all():
         oid = u.hubspot_owner_id
         if oid:
             name = u.name or u.username or resolve_owner_name(oid) or oid
             agents[oid] = {
                 "name": name,
-                "initials": u.agent_initials or get_initials(name)
+                "initials": (u.agent_initials and u.agent_initials.strip()) or get_initials(name)
             }
 
     # 3. Training Agent Settings
