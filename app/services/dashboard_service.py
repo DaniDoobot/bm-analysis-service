@@ -453,11 +453,14 @@ async def get_dashboard_summary(
     duration_max_seconds: int | None = None,
     avg_score_min: float | None = None,
     avg_score_max: float | None = None,
+    item_filters: str | list | dict | None = None,
     context: TenantContext | None = None,
 ) -> dict[str, Any]:
+    from app.utils.item_score_filters import parse_item_score_filters, filter_mass_results_by_items
     t_start = time.perf_counter()
     now = datetime.now(timezone.utc)
 
+    parsed_item_filters = parse_item_score_filters(item_filters)
     norm_t = normalize_typology(typology_key)
     norm_d = normalize_direction(direction)
 
@@ -581,10 +584,12 @@ async def get_dashboard_summary(
 
     result = await db.execute(stmt)
     rows = list(result.scalars().all())
+    if parsed_item_filters:
+        rows = filter_mass_results_by_items(rows, parsed_item_filters)
     logger.info(
-        "[dashboard_summary] query returned %d total rows (covers anterior+actual window). "
-        "typology_filter=%r direction_filter=%r",
-        len(rows), norm_t, norm_d
+        "[dashboard_summary] query returned %d total rows after item score filtering. "
+        "typology_filter=%r direction_filter=%r item_filters=%r",
+        len(rows), norm_t, norm_d, parsed_item_filters
     )
 
     actual_rows = []
@@ -902,6 +907,7 @@ async def get_dashboard_summary(
             "direction": norm_d,
             "direction_raw": direction,
             "service_id": service_id,
+            "item_filters_normalized": parsed_item_filters,
         },
         "summary": {
             "total_analyses": to_float(total_analyses),
@@ -1161,6 +1167,8 @@ async def get_agent_evolution(
     from app.models.mass_evaluations import MassEvaluationResult
 
     now = datetime.now(timezone.utc)
+    norm_t = normalize_typology(typology_key)
+    norm_d = normalize_direction(direction)
 
     # 1. Resolve timeframe
     dt_from, dt_to, recommended_bucket = resolve_date_range(date_from, date_to, period, default_period="30d")

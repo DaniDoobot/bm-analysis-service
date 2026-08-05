@@ -1214,3 +1214,57 @@ async def list_automation_runs(
                 )
 
     return await MassEvaluationService.list_automation_runs(db, automation_id=automation_id, limit=limit)
+
+
+@router.get("/mass-analysis/automations/scheduler-status")
+async def get_automation_scheduler_status(
+    context: TenantContext = Depends(get_tenant_context),
+    db: AsyncSession = Depends(get_db)
+):
+    """Retrieve diagnostic status for the automation scheduler background worker and due automations count."""
+    from app.config import get_settings
+    settings = get_settings()
+
+    active_automations = await MassEvaluationService.list_automations(
+        db,
+        limit=1000,
+        company_ids=context.allowed_company_ids,
+        service_ids=context.allowed_service_ids
+    )
+
+    now = datetime.now(timezone.utc)
+    due_count = 0
+    for aut in active_automations:
+        interval_min = aut.interval_minutes or 30
+        if aut.last_run_at is None or (now - aut.last_run_at) >= timedelta(minutes=interval_min):
+            due_count += 1
+
+    return {
+        "enabled": settings.enable_automation_scheduler,
+        "mode": "background_loop" if settings.enable_automation_scheduler else "disabled_manual_or_cron",
+        "interval_seconds": 60,
+        "active_automations_count": len(active_automations),
+        "due_automations_count": due_count,
+        "hint": "Set ENABLE_AUTOMATION_SCHEDULER=true in .env to activate the internal background worker loop."
+    }
+
+
+@router.post("/mass-analysis/automations/run-due")
+async def trigger_run_due_automations(
+    context: TenantContext = Depends(get_tenant_context),
+    db: AsyncSession = Depends(get_db)
+):
+    """Manually or via cron trigger execution of all active automations that are due."""
+    if context.normalized_role == InternalRole.AGENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para ejecutar automatizaciones."
+        )
+
+    result = await MassEvaluationService.run_due_automations(
+        db,
+        company_ids=context.allowed_company_ids,
+        service_ids=context.allowed_service_ids
+    )
+    return result
+

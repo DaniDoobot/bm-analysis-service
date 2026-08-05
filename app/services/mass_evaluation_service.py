@@ -2409,26 +2409,42 @@ class MassEvaluationService:
         return auto_run
 
     @staticmethod
-    async def run_due_automations(db: AsyncSession) -> dict[str, int]:
-        """Finds all active automations that are due to execute and triggers them."""
+    async def run_due_automations(
+        db: AsyncSession,
+        company_ids: list[int] | None = None,
+        service_ids: list[int] | None = None,
+    ) -> dict[str, Any]:
+        """Finds all active automations that are due to execute and triggers them with scoping support."""
         now = datetime.now(timezone.utc)
-        
-        # Select all active automations
+        from app.models.services import Service
+
         stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.is_active == True)
+        if service_ids is not None:
+            stmt = stmt.where(MassAnalysisAutomation.service_id.in_(service_ids))
+        elif company_ids:
+            stmt = stmt.join(Service, Service.service_id == MassAnalysisAutomation.service_id).where(Service.company_id.in_(company_ids))
+
         res = await db.execute(stmt)
-        automations = res.scalars().all()
-        
+        automations_raw = res.scalars().all()
+
+        automations_list = []
+        for aut in automations_raw:
+            last_at = aut.last_run_at
+            if last_at and last_at.tzinfo is None:
+                last_at = last_at.replace(tzinfo=timezone.utc)
+            automations_list.append((
+                aut.automation_id,
+                aut.name,
+                aut.interval_minutes or 30,
+                last_at
+            ))
+
         due_count = 0
         launched_count = 0
-        
-        for aut in automations:
-            # Extract attributes locally to avoid expired attribute accesses on commit/expiration
-            automation_id = aut.automation_id
-            automation_name = aut.name
-            interval_minutes = aut.interval_minutes or 30
-            last_run_at = aut.last_run_at
+        skipped_count = 0
+        executions_detail = []
 
-            # Check if due based on interval
+        for automation_id, automation_name, interval_minutes, last_run_at in automations_list:
             is_due = False
             if last_run_at is None:
                 is_due = True
@@ -2436,13 +2452,12 @@ class MassEvaluationService:
                 elapsed = now - last_run_at
                 if elapsed >= timedelta(minutes=interval_minutes):
                     is_due = True
-                    
+
             if not is_due:
                 continue
-                
+
             due_count += 1
-            
-            # Check if already running using extracted automation_id
+
             stmt_lock = select(MassAnalysisAutomationRun).where(
                 MassAnalysisAutomationRun.automation_id == automation_id,
                 MassAnalysisAutomationRun.status == "running"
@@ -2450,18 +2465,50 @@ class MassEvaluationService:
             res_lock = await db.execute(stmt_lock)
             active_run = res_lock.scalars().first()
             if active_run:
-                logger.info("Automation scheduler skipped automation ID %d ('%s') because it is already running.", automation_id, automation_name)
+                skipped_count += 1
+                logger.info(
+                    "[automation_scheduler] skipped automation_id=%d ('%s') reason='already_running' run_id=%d",
+                    automation_id, automation_name, active_run.automation_run_id
+                )
+                executions_detail.append({
+                    "automation_id": automation_id,
+                    "automation_name": automation_name,
+                    "status": "skipped",
+                    "reason_skipped": f"Already running (Run ID {active_run.automation_run_id})",
+                })
                 continue
-                
+
             try:
-                # Trigger via automation_id to avoid lazy-loading issues
-                await MassEvaluationService.run_automation_run(db, automation_id, trigger_type="scheduled")
+                auto_run = await MassEvaluationService.run_automation_run(db, automation_id, trigger_type="scheduled")
                 launched_count += 1
-                logger.info("Automation scheduler successfully launched automation ID %d ('%s').", automation_id, automation_name)
+                logger.info(
+                    "[automation_scheduler] launched automation_id=%d ('%s') auto_run_id=%d job_id=%s run_id=%s",
+                    automation_id, automation_name, auto_run.automation_run_id, auto_run.job_id, auto_run.run_id
+                )
+                executions_detail.append({
+                    "automation_id": automation_id,
+                    "automation_name": automation_name,
+                    "status": "launched",
+                    "automation_run_id": auto_run.automation_run_id,
+                    "job_id": auto_run.job_id,
+                    "run_id": auto_run.run_id,
+                })
             except Exception as e:
-                logger.error("Automation scheduler failed to launch automation ID %d ('%s'): %s", automation_id, automation_name, e)
-                
-        return {"due_automations_count": due_count, "launched_automations_count": launched_count}
+                skipped_count += 1
+                logger.error("[automation_scheduler] failed automation_id=%d ('%s'): %s", automation_id, automation_name, e)
+                executions_detail.append({
+                    "automation_id": automation_id,
+                    "automation_name": automation_name,
+                    "status": "failed",
+                    "error_message": str(e),
+                })
+
+        return {
+            "due_automations_count": due_count,
+            "launched_automations_count": launched_count,
+            "skipped_automations_count": skipped_count,
+            "executions": executions_detail,
+        }
 
     @staticmethod
     async def list_automation_runs(db: AsyncSession, automation_id: int, limit: int = 100) -> list[MassAnalysisAutomationRun]:

@@ -50,11 +50,17 @@ async def dashboard_summary(
     duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
     avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
     avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
+    item_filters: Annotated[str | None, Query(description="JSON url-encoded item score filters")] = None,
+    criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
 ):
     """
     Get dashboard summary metrics including KPIs, evolution charts,
     agent rankings, and latest analyses.
     """
+    effective_item_filters = item_filters or criterion_filters or score_filters or item_score_filters
+
     typo_ids = None
     if typology_ids and typology_ids.strip():
         typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
@@ -93,6 +99,7 @@ async def dashboard_summary(
             duration_max_seconds=duration_max_seconds,
             avg_score_min=avg_score_min,
             avg_score_max=avg_score_max,
+            item_filters=effective_item_filters,
             context=context,
         )
         return data
@@ -559,4 +566,22 @@ async def get_latest_analysis_detail(
     except Exception as e:
         logger.exception("Failed to retrieve mass analysis detail")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/evaluation-items/filter-options")
+async def get_evaluation_items_filter_options(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+):
+    """
+    Retrieve available evaluation criteria item filter options dynamically for frontend UI.
+    """
+    from app.utils.item_score_filters import get_evaluation_item_filter_options
+    options = await get_evaluation_item_filter_options(
+        db,
+        company_ids=context.allowed_company_ids,
+        service_ids=context.allowed_service_ids
+    )
+    return {"items": options}
+
 
