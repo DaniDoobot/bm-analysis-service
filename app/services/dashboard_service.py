@@ -826,39 +826,10 @@ async def get_dashboard_summary(
             if tipo == "cita":
                 agent_data[bucket_key]["citas"] += 1
 
-    # Lookup agent_initials from bm_users for all owner_ids in ranking
-    from app.models.users import User as _User
-    ranking_owner_ids = [
-        d["hubspot_owner_id"] for d in agent_data.values() if d["hubspot_owner_id"]
-    ]
-    user_initials_ranking: dict[str, tuple[str | None, str | None]] = {}
-    if ranking_owner_ids:
-        _u_stmt = select(_User.hubspot_owner_id, _User.agent_initials, _User.name).where(
-            _User.hubspot_owner_id.in_([str(x) for x in ranking_owner_ids if x])
-        )
-        _u_res = await db.execute(_u_stmt)
-        for _u_oid, _u_init, _u_name in _u_res.all():
-            if _u_oid:
-                user_initials_ranking[str(_u_oid)] = (_u_init, _u_name)
+    # ── Agent ranking & initials resolution ──
+    from app.utils.agent_resolvers import build_user_initials_maps, resolve_agent_initials
 
-    def _compute_initials(owner_id: str | None, display_name: str) -> str:
-        """Compute agent initials: prefer DB agent_initials, fallback to name split."""
-        if owner_id:
-            db_init, db_name = user_initials_ranking.get(str(owner_id), (None, None))
-            if db_init and db_init.strip():
-                computed = db_init.strip().upper()
-                logger.debug(
-                    "[dashboard_summary] initials for owner_id=%s: DB agent_initials=%r -> %r",
-                    owner_id, db_init, computed
-                )
-                return computed
-        # Fallback: first letter of first two words
-        parts = display_name.strip().split()
-        if len(parts) >= 2:
-            return (parts[0][0] + parts[1][0]).upper()
-        if len(parts) == 1:
-            return parts[0][:2].upper()
-        return "??"
+    by_owner, by_name, users_list = await build_user_initials_maps(db, company_id=None)
 
     ranking = []
     for bucket_key, data in agent_data.items():
@@ -866,7 +837,13 @@ async def get_dashboard_summary(
         owner_id = data["hubspot_owner_id"]
         avg_eval_score = to_float(round(sum(data["evals"]) / len(data["evals"]), 1)) if data["evals"] else 0.0
         cita_rate_score = to_float(round((data["citas"] / data["total_tipo"]) * 100)) if data["total_tipo"] > 0 else 0.0
-        initials = _compute_initials(owner_id, name)
+        initials = resolve_agent_initials(
+            hubspot_owner_id=owner_id,
+            agent_name=name,
+            by_owner=by_owner,
+            by_name=by_name,
+            users_list=users_list,
+        )
         ranking.append({
             "agente_telefonico": name,
             "hubspot_owner_id": owner_id,
@@ -886,11 +863,21 @@ async def get_dashboard_summary(
         resolved_agent = resolve_agent_display(r.agent_name, r.hubspot_owner_id)
         eg = extract_score_from_mass(r.result_json, r.items_json, "evaluacion_global")
         tipo = r.result_json.get("tipo_llamada") if r.result_json else None
+        agent_inits = resolve_agent_initials(
+            hubspot_owner_id=r.hubspot_owner_id,
+            agent_name=resolved_agent or r.agent_name,
+            by_owner=by_owner,
+            by_name=by_name,
+            users_list=users_list,
+        )
         latest_analyses.append({
             "analysis_id": r.mass_analysis_id,
             "mass_result_id": r.mass_analysis_id,
             "call_id": r.call_id,
             "agente_telefonico": resolved_agent,
+            "hubspot_owner_id": r.hubspot_owner_id,
+            "initials": agent_inits,
+            "agent_initials": agent_inits,
             "tipo_llamada": tipo,
             "evaluacion_global": to_float(eg) if eg is not None else None,
             "fecha_eval": _effective_ts(r).isoformat() if _effective_ts(r) else None,
@@ -2177,24 +2164,17 @@ async def get_agents_comparison(
         target_owner_ids.update(hubspot_owner_ids)
     else:
         target_owner_ids.update(active_owner_ids)
-        target_owner_ids.update(OWNER_TO_NAME.keys())
-        
-    # Map owner IDs to display names & initials (prefer User.agent_initials if set in DB)
-    from app.models.users import User
-    user_initials_map: dict[str, tuple[str | None, str | None]] = {}
-    if target_owner_ids:
-        u_stmt = select(User.hubspot_owner_id, User.agent_initials, User.name).where(
-            User.hubspot_owner_id.in_([str(x) for x in target_owner_ids if x])
-        )
-        u_res = await db.execute(u_stmt)
-        for u_oid, u_init, u_name in u_res.all():
-            if u_oid:
-                user_initials_map[str(u_oid)] = (u_init, u_name)
+    from app.utils.agent_resolvers import build_user_initials_maps, resolve_agent_initials
+    by_owner, by_name, users_list = await build_user_initials_maps(db, company_id=None)
 
     agents_map = {}
     for oid in target_owner_ids:
         oid_str = str(oid)
-        db_init, db_name = user_initials_map.get(oid_str, (None, None))
+        db_name = None
+        for u in users_list:
+            if u.get("hubspot_owner_id") == oid_str:
+                db_name = u.get("name")
+                break
 
         disp_name = db_name or resolve_owner_name(oid)
         if not disp_name:
@@ -2205,16 +2185,13 @@ async def get_agents_comparison(
         if not disp_name:
             disp_name = f"Agente ({oid})"
 
-        if db_init and db_init.strip():
-            initials = db_init.strip().upper()
-        else:
-            parts = disp_name.strip().split()
-            if len(parts) >= 2:
-                initials = (parts[0][0] + parts[1][0]).upper()
-            elif len(parts) == 1:
-                initials = parts[0][:2].upper()
-            else:
-                initials = "??"
+        initials = resolve_agent_initials(
+            hubspot_owner_id=oid,
+            agent_name=disp_name,
+            by_owner=by_owner,
+            by_name=by_name,
+            users_list=users_list,
+        )
 
         agents_map[oid] = {
             "name": disp_name,

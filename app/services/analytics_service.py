@@ -37,13 +37,23 @@ def get_initials(name: str) -> str:
 
 async def get_all_agents(db: AsyncSession) -> Dict[str, Dict[str, str]]:
     """Retrieve all agents in the system (static list + db users + training settings)."""
+    from app.utils.agent_resolvers import build_user_initials_maps, resolve_agent_initials
+
+    by_owner, by_name, users_list = await build_user_initials_maps(db, company_id=None)
     agents = {}
 
     # 1. Static mapping
     for oid, name in OWNER_TO_NAME.items():
+        inits = resolve_agent_initials(
+            hubspot_owner_id=oid,
+            agent_name=name,
+            by_owner=by_owner,
+            by_name=by_name,
+            users_list=users_list,
+        )
         agents[oid] = {
             "name": name,
-            "initials": get_initials(name)
+            "initials": inits,
         }
 
     # 2. Database users (all users with hubspot_owner_id)
@@ -52,9 +62,17 @@ async def get_all_agents(db: AsyncSession) -> Dict[str, Dict[str, str]]:
         oid = u.hubspot_owner_id
         if oid:
             name = u.name or u.username or resolve_owner_name(oid) or oid
+            inits = resolve_agent_initials(
+                hubspot_owner_id=oid,
+                agent_name=name,
+                by_owner=by_owner,
+                by_name=by_name,
+                users_list=users_list,
+                persisted_initials=u.agent_initials,
+            )
             agents[oid] = {
                 "name": name,
-                "initials": (u.agent_initials and u.agent_initials.strip()) or get_initials(name)
+                "initials": inits,
             }
 
     # 3. Training Agent Settings
@@ -62,9 +80,17 @@ async def get_all_agents(db: AsyncSession) -> Dict[str, Dict[str, str]]:
     for t in res_t.scalars().all():
         oid = t.hubspot_owner_id
         if oid:
+            inits = resolve_agent_initials(
+                hubspot_owner_id=oid,
+                agent_name=t.agent_name,
+                by_owner=by_owner,
+                by_name=by_name,
+                users_list=users_list,
+                persisted_initials=t.agent_initials,
+            )
             agents[oid] = {
                 "name": t.agent_name or oid,
-                "initials": t.agent_initials or get_initials(t.agent_name)
+                "initials": inits,
             }
 
     return agents
