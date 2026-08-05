@@ -2480,19 +2480,32 @@ class MassEvaluationService:
 
             try:
                 auto_run = await MassEvaluationService.run_automation_run(db, automation_id, trigger_type="scheduled")
-                launched_count += 1
-                logger.info(
-                    "[automation_scheduler] launched automation_id=%d ('%s') auto_run_id=%d job_id=%s run_id=%s",
-                    automation_id, automation_name, auto_run.automation_run_id, auto_run.job_id, auto_run.run_id
-                )
-                executions_detail.append({
-                    "automation_id": automation_id,
-                    "automation_name": automation_name,
-                    "status": "launched",
-                    "automation_run_id": auto_run.automation_run_id,
-                    "job_id": auto_run.job_id,
-                    "run_id": auto_run.run_id,
-                })
+                if auto_run.status == "failed":
+                    skipped_count += 1
+                    logger.warning(
+                        "[automation_scheduler] failed automation_id=%d ('%s') auto_run_id=%d error='%s'",
+                        automation_id, automation_name, auto_run.automation_run_id, auto_run.error_message
+                    )
+                    executions_detail.append({
+                        "automation_id": automation_id,
+                        "automation_name": automation_name,
+                        "status": "failed",
+                        "error_message": auto_run.error_message,
+                    })
+                else:
+                    launched_count += 1
+                    logger.info(
+                        "[automation_scheduler] launched automation_id=%d ('%s') auto_run_id=%d job_id=%s run_id=%s",
+                        automation_id, automation_name, auto_run.automation_run_id, auto_run.job_id, auto_run.run_id
+                    )
+                    executions_detail.append({
+                        "automation_id": automation_id,
+                        "automation_name": automation_name,
+                        "status": "launched",
+                        "automation_run_id": auto_run.automation_run_id,
+                        "job_id": auto_run.job_id,
+                        "run_id": auto_run.run_id,
+                    })
             except Exception as e:
                 skipped_count += 1
                 logger.error("[automation_scheduler] failed automation_id=%d ('%s'): %s", automation_id, automation_name, e)

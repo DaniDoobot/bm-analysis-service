@@ -123,11 +123,15 @@ class TestAutomationScheduler(unittest.IsolatedAsyncioTestCase):
 
     async def test_run_due_automations_triggers_only_due_active(self):
         """run_due_automations triggers due active automations and updates metrics."""
-        async with AsyncSession(self.engine) as db:
-            res = await MassEvaluationService.run_due_automations(db, company_ids=[880])
-            self.assertEqual(res["due_automations_count"], 1)
-            self.assertEqual(res["launched_automations_count"], 1)
-            self.assertEqual(res["skipped_automations_count"], 0)
+        from unittest.mock import patch, AsyncMock, MagicMock
+        fake_run = MagicMock()
+        fake_run.run_id = 98801
+        with patch.object(MassEvaluationService, "run_job", new_callable=AsyncMock, return_value=fake_run):
+            async with AsyncSession(self.engine) as db:
+                res = await MassEvaluationService.run_due_automations(db, company_ids=[880])
+                self.assertEqual(res["due_automations_count"], 1)
+                self.assertEqual(res["launched_automations_count"], 1)
+                self.assertEqual(res["skipped_automations_count"], 0)
 
     async def test_anti_duplicate_lock_skips_running_automations(self):
         """If an automation is already in 'running' status, subsequent run-due skips it."""
