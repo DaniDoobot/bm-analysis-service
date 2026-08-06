@@ -103,6 +103,8 @@ async def dashboard_summary(
             context=context,
         )
         return data
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Failed to retrieve dashboard summary")
         raise HTTPException(status_code=500, detail=str(e))
