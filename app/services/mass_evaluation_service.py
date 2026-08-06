@@ -2289,12 +2289,24 @@ class MassEvaluationService:
     async def list_automations(
         db: AsyncSession,
         limit: int = 100,
+        active: str | None = None,
+        include_inactive: bool | None = None,
+        include_archived: bool = False,
         company_ids: list[int] | None = None,
         service_ids: list[int] | None = None,
     ) -> list[MassAnalysisAutomation]:
-        """List all active automation configurations."""
+        """List automation configurations with flexible active/inactive status filtering."""
         from app.models.services import Service
-        stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.is_active == True)
+        stmt = select(MassAnalysisAutomation)
+
+        active_norm = str(active).strip().lower() if active is not None else None
+        if active_norm in ("true", "1"):
+            stmt = stmt.where(MassAnalysisAutomation.is_active == True)
+        elif active_norm in ("false", "0"):
+            stmt = stmt.where(MassAnalysisAutomation.is_active == False)
+        elif include_inactive is False and active_norm is None:
+            stmt = stmt.where(MassAnalysisAutomation.is_active == True)
+        # Default (active=None or active='all'): return active and inactive automations
         
         if service_ids is not None:
             stmt = stmt.where(MassAnalysisAutomation.service_id.in_(service_ids))

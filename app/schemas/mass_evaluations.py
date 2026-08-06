@@ -611,6 +611,45 @@ class MassAnalysisAutomationResponse(BaseModel):
     last_error_at: datetime | None
     last_error_message: str | None
 
+    # Computed fields for UI contract
+    id: int | None = None
+    status: str = "active"
+    status_label: str = "Activa"
+    cadence: str | None = None
+    frequency: str | None = None
+    next_run_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def populate_computed_fields(self) -> 'MassAnalysisAutomationResponse':
+        self.id = self.automation_id
+        if self.is_active:
+            self.status = "active"
+            self.status_label = "Activa"
+        else:
+            self.status = "inactive"
+            self.status_label = "Desactivada"
+
+        min_int = self.interval_minutes or 30
+        if min_int < 60:
+            self.cadence = f"Cada {min_int} minutos"
+        elif min_int == 60:
+            self.cadence = "Cada hora"
+        elif min_int % 60 == 0:
+            self.cadence = f"Cada {min_int // 60} horas"
+        else:
+            self.cadence = f"Cada {min_int} minutos"
+        self.frequency = self.cadence
+
+        if self.is_active and self.last_run_at:
+            from datetime import timedelta
+            self.next_run_at = self.last_run_at + timedelta(minutes=min_int)
+        elif self.is_active and not self.last_run_at and self.created_at:
+            self.next_run_at = self.created_at
+        else:
+            self.next_run_at = None
+
+        return self
+
     class Config:
         from_attributes = True
 
