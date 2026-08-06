@@ -1436,17 +1436,30 @@ async def init_db():
                 )
 
                 # Backfill: associate all existing criteria with all active typologies of the service front (safe & concurrent-proof)
-                await db.execute(text("""
-                    INSERT INTO bm_prompt_criterion_typologies (criterion_id, typology_id)
-                    SELECT c.criterion_id, t.typology_id
-                    FROM bm_prompt_criteria c
-                    CROSS JOIN (
-                        SELECT typology_id 
-                        FROM bm_typologies 
-                        WHERE service_id = :front_id AND is_active = true
-                    ) t
-                    ON CONFLICT (criterion_id, typology_id) DO NOTHING
-                """), {"front_id": front_service_id})
+                is_sqlite = db.bind.dialect.name == "sqlite" if db.bind else False
+                if is_sqlite:
+                    await db.execute(text("""
+                        INSERT OR IGNORE INTO bm_prompt_criterion_typologies (criterion_id, typology_id)
+                        SELECT c.criterion_id, t.typology_id
+                        FROM bm_prompt_criteria c
+                        CROSS JOIN (
+                            SELECT typology_id 
+                            FROM bm_typologies 
+                            WHERE service_id = :front_id AND is_active = 1
+                        ) t
+                    """), {"front_id": front_service_id})
+                else:
+                    await db.execute(text("""
+                        INSERT INTO bm_prompt_criterion_typologies (criterion_id, typology_id)
+                        SELECT c.criterion_id, t.typology_id
+                        FROM bm_prompt_criteria c
+                        CROSS JOIN (
+                            SELECT typology_id 
+                            FROM bm_typologies 
+                            WHERE service_id = :front_id AND is_active = true
+                        ) t
+                        ON CONFLICT (criterion_id, typology_id) DO NOTHING
+                    """), {"front_id": front_service_id})
                 await db.flush()
                 logger.info("Atomic backfill of criteria associations completed successfully.")
 
