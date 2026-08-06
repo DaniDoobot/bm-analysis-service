@@ -280,8 +280,11 @@ class MassEvaluationService:
                     text("SELECT pg_try_advisory_lock(:key)"),
                     {"key": MassEvaluationService._SCHEDULER_LOCK_KEY}
                 )
-                return bool(result.scalar())
+                acquired = bool(result.scalar())
+                await db.commit()
+                return acquired
             except Exception:
+                await db.rollback()
                 pass  # Fall through to threading.Lock fallback
 
         # Non-PG / SQLite fallback: use in-process threading.Lock
@@ -309,8 +312,10 @@ class MassEvaluationService:
                     text("SELECT pg_advisory_unlock(:key)"),
                     {"key": MassEvaluationService._SCHEDULER_LOCK_KEY}
                 )
+                await db.commit()
                 return
             except Exception:
+                await db.rollback()
                 pass
 
         # Non-PG / SQLite fallback
@@ -935,7 +940,6 @@ class MassEvaluationService:
         task.add_done_callback(MassEvaluationService._running_tasks.discard)
         
         return run
-
     @staticmethod
     async def _execute_background_run(job_id: int, run_id: int, filters_payload: dict[str, Any]) -> None:
         """Background executor for mass analyses."""
@@ -944,29 +948,29 @@ class MassEvaluationService:
         
         # We need a new session in background
         async with AsyncSession(engine) as db:
-            run_stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == run_id)
-            run_res = await db.execute(run_stmt)
-            run = run_res.scalars().first()
-            if not run:
-                logger.error("Run ID %d not found in background task", run_id)
-                return
-                
-            effective_filters_snapshot = dict(run.effective_filters or {})
-            run.heartbeat_at = datetime.now(timezone.utc)
-            await db.commit()
-                
-            job_stmt = select(MassEvaluationJob).where(MassEvaluationJob.job_id == job_id)
-            job_res = await db.execute(job_stmt)
-            job = job_res.scalars().first()
-            if not job:
-                logger.error("Job ID %d not found in background task", job_id)
-                run.status = "failed"
-                run.error_message = f"Job ID {job_id} not found."
-                run.finished_at = datetime.now(timezone.utc)
-                await db.commit()
-                return
-
             try:
+                run_stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == run_id)
+                run_res = await db.execute(run_stmt)
+                run = run_res.scalars().first()
+                if not run:
+                    logger.error("Run ID %d not found in background task", run_id)
+                    return
+                    
+                effective_filters_snapshot = dict(run.effective_filters or {})
+                run.heartbeat_at = datetime.now(timezone.utc)
+                await db.commit()
+                    
+                job_stmt = select(MassEvaluationJob).where(MassEvaluationJob.job_id == job_id)
+                job_res = await db.execute(job_stmt)
+                job = job_res.scalars().first()
+                if not job:
+                    logger.error("Job ID %d not found in background task", job_id)
+                    run.status = "failed"
+                    run.error_message = f"Job ID {job_id} not found."
+                    run.finished_at = datetime.now(timezone.utc)
+                    await db.commit()
+                    return
+
                 # 1. Resolve and extract ALL parameters to local variables BEFORE any commits.
                 # This completely prevents any lazy-loading/expiration/greenlet errors.
                 # Snapshot ALL scalar job fields BEFORE any commit/await that would expire the ORM object.
@@ -1660,40 +1664,49 @@ class MassEvaluationService:
                     except Exception as e_hook:
                         logger.error("Failed to sync automation run status on success: %s", e_hook)
             except Exception as e_run:
+                await db.rollback()
                 logger.error("Mass evaluation job %d run %d failed in background: %s", job_id, run_id, e_run, exc_info=True)
                 try:
                     # Fetch fresh instance of run to write status safely using a new session
                     async with AsyncSession(engine) as fail_db:
-                        fresh_run_stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == run_id)
-                        fresh_run_res = await fail_db.execute(fresh_run_stmt)
-                        fresh_run_obj = fresh_run_res.scalars().first()
-                        if fresh_run_obj:
-                            fresh_run_obj.status = "failed"
-                            fresh_run_obj.error_message = str(e_run)
-                            fresh_run_obj.finished_at = datetime.now(timezone.utc)
-                            await fail_db.commit()
-    
-                            # Synchronization hook for MassAnalysisAutomationRun
-                            try:
-                                auto_stmt = select(MassAnalysisAutomationRun).where(MassAnalysisAutomationRun.run_id == run_id)
-                                auto_res = await fail_db.execute(auto_stmt)
-                                auto_run = auto_res.scalars().first()
-                                if auto_run:
-                                    auto_run.status = "failed"
-                                    auto_run.finished_at = datetime.now(timezone.utc)
-                                    auto_run.error_message = str(e_run)
-                                    
-                                    aut_stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id == auto_run.automation_id)
-                                    aut_res = await fail_db.execute(aut_stmt)
-                                    aut_obj = aut_res.scalars().first()
-                                    if aut_obj:
-                                        aut_obj.last_error_at = datetime.now(timezone.utc)
-                                        aut_obj.last_error_message = str(e_run)
-                                    await fail_db.commit()
-                            except Exception as e_hook_fail:
-                                logger.error("Failed to sync automation run failure status: %s", e_hook_fail)
+                        try:
+                            fresh_run_stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == run_id)
+                            fresh_run_res = await fail_db.execute(fresh_run_stmt)
+                            fresh_run_obj = fresh_run_res.scalars().first()
+                            if fresh_run_obj:
+                                fresh_run_obj.status = "failed"
+                                fresh_run_obj.error_message = str(e_run)
+                                fresh_run_obj.finished_at = datetime.now(timezone.utc)
+                                await fail_db.commit()
+
+                                # Synchronization hook for MassAnalysisAutomationRun
+                                try:
+                                    auto_stmt = select(MassAnalysisAutomationRun).where(MassAnalysisAutomationRun.run_id == run_id)
+                                    auto_res = await fail_db.execute(auto_stmt)
+                                    auto_run = auto_res.scalars().first()
+                                    if auto_run:
+                                        auto_run.status = "failed"
+                                        auto_run.finished_at = datetime.now(timezone.utc)
+                                        auto_run.error_message = str(e_run)
+                                        
+                                        aut_stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id == auto_run.automation_id)
+                                        aut_res = await fail_db.execute(aut_stmt)
+                                        aut_obj = aut_res.scalars().first()
+                                        if aut_obj:
+                                            aut_obj.last_error_at = datetime.now(timezone.utc)
+                                            aut_obj.last_error_message = str(e_run)
+                                        await fail_db.commit()
+                                except Exception as e_hook_fail:
+                                    logger.error("Failed to sync automation run failure status: %s", e_hook_fail)
+                        except Exception as e_fail_inner:
+                            await fail_db.rollback()
+                            raise e_fail_inner
+                        finally:
+                            await fail_db.close()
                 except Exception as e_inner:
                     logger.error("Failed to mark run as failed in database: %s", e_inner)
+            finally:
+                await db.close()
 
     @staticmethod
     async def list_runs(
@@ -2682,38 +2695,44 @@ class MassEvaluationService:
             # after run_job raised (greenlet/rollback issues). A fresh connection is always safe.
             try:
                 async with AsyncSession(engine) as fail_db:
-                    fail_stmt = select(MassAnalysisAutomationRun).where(
-                        MassAnalysisAutomationRun.automation_run_id == auto_run_id_snapshot
-                    )
-                    fail_res = await fail_db.execute(fail_stmt)
-                    fail_auto_run = fail_res.scalars().first()
-                    if fail_auto_run and fail_auto_run.status == "running":
-                        fail_auto_run.status = final_err_status
-                        fail_auto_run.finished_at = datetime.now(timezone.utc)
-                        fail_auto_run.error_message = err_str
+                    try:
+                        fail_stmt = select(MassAnalysisAutomationRun).where(
+                            MassAnalysisAutomationRun.automation_run_id == auto_run_id_snapshot
+                        )
+                        fail_res = await fail_db.execute(fail_stmt)
+                        fail_auto_run = fail_res.scalars().first()
+                        if fail_auto_run and fail_auto_run.status == "running":
+                            fail_auto_run.status = final_err_status
+                            fail_auto_run.finished_at = datetime.now(timezone.utc)
+                            fail_auto_run.error_message = err_str
 
-                    # Update parent automation metadata
-                    aut_stmt2 = select(MassAnalysisAutomation).where(
-                        MassAnalysisAutomation.automation_id == automation_id
-                    )
-                    aut_res2 = await fail_db.execute(aut_stmt2)
-                    aut_obj2 = aut_res2.scalars().first()
-                    if aut_obj2:
-                        aut_obj2.last_run_at = now
-                        if not is_already_running:
-                            aut_obj2.last_error_at = datetime.now(timezone.utc)
-                            aut_obj2.last_error_message = err_str
+                        # Update parent automation metadata
+                        aut_stmt2 = select(MassAnalysisAutomation).where(
+                            MassAnalysisAutomation.automation_id == automation_id
+                        )
+                        aut_res2 = await fail_db.execute(aut_stmt2)
+                        aut_obj2 = aut_res2.scalars().first()
+                        if aut_obj2:
+                            aut_obj2.last_run_at = now
+                            if not is_already_running:
+                                aut_obj2.last_error_at = datetime.now(timezone.utc)
+                                aut_obj2.last_error_message = err_str
 
-                    await fail_db.commit()
+                        await fail_db.commit()
 
-                    # Refresh auto_run from fresh session for the return value
-                    fail_stmt2 = select(MassAnalysisAutomationRun).where(
-                        MassAnalysisAutomationRun.automation_run_id == auto_run_id_snapshot
-                    )
-                    fail_res2 = await fail_db.execute(fail_stmt2)
-                    updated_auto_run = fail_res2.scalars().first()
-                    if updated_auto_run:
-                        return updated_auto_run
+                        # Refresh auto_run from fresh session for the return value
+                        fail_stmt2 = select(MassAnalysisAutomationRun).where(
+                            MassAnalysisAutomationRun.automation_run_id == auto_run_id_snapshot
+                        )
+                        fail_res2 = await fail_db.execute(fail_stmt2)
+                        updated_auto_run = fail_res2.scalars().first()
+                        if updated_auto_run:
+                            return updated_auto_run
+                    except Exception as e_fail_inner:
+                        await fail_db.rollback()
+                        raise e_fail_inner
+                    finally:
+                        await fail_db.close()
             except Exception as e_inner:
                 logger.error("Failed to update auto_run status in fallback session: %s", e_inner)
 

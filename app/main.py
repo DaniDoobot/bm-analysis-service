@@ -135,9 +135,15 @@ async def start_mass_evaluations_scheduler():
     while True:
         try:
             async with AsyncSession(engine) as db:
-                # Cleanup stale/abandoned runs first to release any concurrent locks
-                await MassEvaluationService.cleanup_stale_runs(db)
-                await MassEvaluationService.run_due_jobs(db)
+                try:
+                    # Cleanup stale/abandoned runs first to release any concurrent locks
+                    await MassEvaluationService.cleanup_stale_runs(db)
+                    await MassEvaluationService.run_due_jobs(db)
+                except Exception as e_inner:
+                    await db.rollback()
+                    raise e_inner
+                finally:
+                    await db.close()
             await asyncio.sleep(60)
         except asyncio.CancelledError:
             logger.info("Mass evaluations background scheduler task cancelled.")
@@ -163,7 +169,13 @@ async def start_automation_scheduler():
     while True:
         try:
             async with AsyncSession(engine) as db:
-                await MassEvaluationService.run_due_automations(db)
+                try:
+                    await MassEvaluationService.run_due_automations(db)
+                except Exception as e_inner:
+                    await db.rollback()
+                    raise e_inner
+                finally:
+                    await db.close()
             await asyncio.sleep(60)
         except asyncio.CancelledError:
             logger.info("Automations background scheduler task cancelled.")
@@ -189,7 +201,13 @@ async def start_training_scheduler():
     while True:
         try:
             async with AsyncSession(engine) as db:
-                await PersonalizedTrainingService.run_due_training_jobs(db)
+                try:
+                    await PersonalizedTrainingService.run_due_training_jobs(db)
+                except Exception as e_inner:
+                    await db.rollback()
+                    raise e_inner
+                finally:
+                    await db.close()
             await asyncio.sleep(3600)  # Check every hour
         except asyncio.CancelledError:
             logger.info("Personalized training background scheduler task cancelled.")

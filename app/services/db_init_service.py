@@ -602,9 +602,9 @@ async def init_db():
         # Drop and recreate PostgreSQL reporting/Looker views (skipped on SQLite)
         if engine.dialect.name != "sqlite":
             try:
-                conn = await engine.connect()
-                await conn.execute(text("DROP VIEW IF EXISTS vw_bm_analysis_criteria_flat CASCADE;"))
-                await conn.execute(text("DROP VIEW IF EXISTS vw_bm_analysis_results_pivot CASCADE;"))
+                async with engine.begin() as conn:
+                    await conn.execute(text("DROP VIEW IF EXISTS vw_bm_analysis_criteria_flat CASCADE;"))
+                    await conn.execute(text("DROP VIEW IF EXISTS vw_bm_analysis_results_pivot CASCADE;"))
 
                 await conn.execute(text("""
                         CREATE OR REPLACE VIEW vw_bm_analysis_criteria_flat AS
