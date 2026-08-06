@@ -658,6 +658,7 @@ class MassAnalysisAutomationRunResponse(BaseModel):
     automation_run_id: int
     automation_id: int
     status: str
+    status_label: str = ""
     started_at: datetime
     finished_at: datetime | None
     window_from: datetime | None
@@ -668,6 +669,20 @@ class MassAnalysisAutomationRunResponse(BaseModel):
     job_id: int | None
     run_id: int | None
     error_message: str | None
+
+    @model_validator(mode="after")
+    def populate_status_label(self) -> 'MassAnalysisAutomationRunResponse':
+        labels = {
+            "running": "En ejecución",
+            "completed": "Completada",
+            "failed": "Error",
+            "skipped": "Omitida",
+            "blocked": "Bloqueada",
+            "pending": "Pendiente",
+        }
+        if not self.status_label:
+            self.status_label = labels.get(self.status, self.status.capitalize())
+        return self
 
     class Config:
         from_attributes = True

@@ -247,6 +247,81 @@ async def enrich_job_prompt_info(db: AsyncSession, job: MassEvaluationJob) -> No
 class MassEvaluationService:
     _running_tasks: set[asyncio.Task] = set()
 
+    # Advisory lock key for single-worker enforcement of the automation scheduler.
+    # hash('speech_bm_automation_scheduler') mod 2^31 — any stable int is fine.
+    _SCHEDULER_LOCK_KEY: int = 1234567890
+    # threading.Lock used as fallback in SQLite test environments (no pg_advisory_lock).
+    # threading.Lock.acquire(blocking=False) is the non-blocking try-acquire method.
+    import threading as _threading
+    _threading_scheduler_lock: "threading.Lock" = _threading.Lock()
+    del _threading  # clean up class namespace after use
+
+
+    @staticmethod
+    async def _try_acquire_scheduler_lock(db: AsyncSession) -> bool:
+        """Try to acquire a global advisory lock so only one worker runs automation tick.
+        Returns True if lock acquired, False if another worker holds it.
+        Detects SQLite dialect and falls back to threading.Lock (no pg_advisory_lock in SQLite)."""
+        from sqlalchemy import text
+        import threading
+
+        # Detect dialect: skip PG advisory lock for SQLite/non-PG engines
+        is_postgresql = False
+        try:
+            bind = db.get_bind()
+            dialect_name = bind.dialect.name if bind else ""
+            is_postgresql = dialect_name == "postgresql"
+        except Exception:
+            pass
+
+        if is_postgresql:
+            try:
+                result = await db.execute(
+                    text("SELECT pg_try_advisory_lock(:key)"),
+                    {"key": MassEvaluationService._SCHEDULER_LOCK_KEY}
+                )
+                return bool(result.scalar())
+            except Exception:
+                pass  # Fall through to threading.Lock fallback
+
+        # Non-PG / SQLite fallback: use in-process threading.Lock
+        lock = MassEvaluationService._threading_scheduler_lock
+        if lock is None:
+            return True  # No lock available — allow execution
+        return lock.acquire(blocking=False)
+
+    @staticmethod
+    async def _release_scheduler_lock(db: AsyncSession) -> None:
+        """Release the advisory lock acquired by _try_acquire_scheduler_lock."""
+        from sqlalchemy import text
+
+        is_postgresql = False
+        try:
+            bind = db.get_bind()
+            dialect_name = bind.dialect.name if bind else ""
+            is_postgresql = dialect_name == "postgresql"
+        except Exception:
+            pass
+
+        if is_postgresql:
+            try:
+                await db.execute(
+                    text("SELECT pg_advisory_unlock(:key)"),
+                    {"key": MassEvaluationService._SCHEDULER_LOCK_KEY}
+                )
+                return
+            except Exception:
+                pass
+
+        # Non-PG / SQLite fallback
+        lock = MassEvaluationService._threading_scheduler_lock
+        if lock is not None:
+            try:
+                lock.release()
+            except RuntimeError:
+                pass
+
+
     @staticmethod
     async def create_job(
         db: AsyncSession,
@@ -2510,14 +2585,15 @@ class MassEvaluationService:
             db.add(automation)
 
         now = datetime.now(timezone.utc)
-        
+        automation_id = automation.automation_id
+
         # temporal window window_from to window_to based on delay and lookback
         window_from = now - timedelta(minutes=(automation.lookback_minutes or 30) + (automation.delay_minutes or 5))
         window_to = now - timedelta(minutes=(automation.delay_minutes or 5))
 
         # Check lock: verify if this automation already has a running automation execution
         stmt_lock = select(MassAnalysisAutomationRun).where(
-            MassAnalysisAutomationRun.automation_id == automation.automation_id,
+            MassAnalysisAutomationRun.automation_id == automation_id,
             MassAnalysisAutomationRun.status == "running"
         )
         res_lock = await db.execute(stmt_lock)
@@ -2533,7 +2609,7 @@ class MassEvaluationService:
             if age_minutes >= threshold_minutes:
                 logger.warning(
                     "[automation_scheduler] stale_running_marked_failed automation_id=%d run_id=%d age_minutes=%d threshold_minutes=%d",
-                    automation.automation_id, active_auto_run.automation_run_id, age_minutes, threshold_minutes
+                    automation_id, active_auto_run.automation_run_id, age_minutes, threshold_minutes
                 )
                 err_msg = f"Marked as stale after exceeding AUTOMATION_RUNNING_STALE_AFTER_MINUTES ({threshold_minutes} minutes)"
                 active_auto_run.status = "failed"
@@ -2543,11 +2619,13 @@ class MassEvaluationService:
                 automation.last_error_message = err_msg
                 await db.flush()
             else:
-                raise ValueError(f"La automatización {automation.automation_id} ya tiene una ejecución activa (Run ID {active_auto_run.automation_run_id})")
+                raise ValueError(f"La automatización {automation_id} ya tiene una ejecución activa (Run ID {active_auto_run.automation_run_id})")
 
-        # Create Run record
+        # Create Run record and COMMIT it immediately so it is persisted even if run_job fails.
+        # This avoids the greenlet_spawn error that occurs when the except block tries to commit
+        # after run_job raised an exception that left the session in an inconsistent state.
         auto_run = MassAnalysisAutomationRun(
-            automation_id=automation.automation_id,
+            automation_id=automation_id,
             status="running",
             started_at=now,
             window_from=window_from,
@@ -2559,35 +2637,165 @@ class MassEvaluationService:
         db.add(auto_run)
         await db.flush()
 
+        # Snapshot scalar fields from automation BEFORE committing — after commit, the ORM object
+        # is expired and lazy-loading outside an async greenlet causes greenlet_spawn errors.
+        job_id_snapshot = automation.job_id
+
+        await db.commit()       # Persist auto_run BEFORE calling run_job, so we have a valid ID
+        await db.refresh(auto_run)
+        auto_run_id_snapshot = auto_run.automation_run_id
+
+        from app.db import get_engine as _get_engine
+        engine = _get_engine()
+
         try:
             # Trigger underlying mass evaluation run (which launches background execution task)
             sub_run = await MassEvaluationService.run_job(
                 db,
-                job_id=automation.job_id,
+                job_id=job_id_snapshot,
                 trigger_type=trigger_type,
                 override_date_from=window_from,
                 override_date_to=window_to
             )
 
-            # Link run and job ids
-            auto_run.job_id = automation.job_id
+            # Link run and job ids (use snapshot to avoid expired ORM access)
+            auto_run.job_id = job_id_snapshot
             auto_run.run_id = sub_run.run_id
-            
-            automation.last_run_at = now
-            await db.commit()
-            
-        except Exception as e:
-            logger.error("Failed to launch mass evaluation run for automation %d: %s", automation.automation_id, e)
-            auto_run.status = "failed"
-            auto_run.finished_at = datetime.now(timezone.utc)
-            auto_run.error_message = str(e)
-            automation.last_run_at = now
-            automation.last_error_at = datetime.now(timezone.utc)
-            automation.last_error_message = str(e)
+            # Re-fetch automation to update last_run_at safely
+            aut_refresh_stmt = select(MassAnalysisAutomation).where(
+                MassAnalysisAutomation.automation_id == automation_id
+            )
+            aut_refresh_res = await db.execute(aut_refresh_stmt)
+            aut_fresh = aut_refresh_res.scalars().first()
+            if aut_fresh:
+                aut_fresh.last_run_at = now
             await db.commit()
 
-        await db.refresh(auto_run)
+        except Exception as e:
+            err_str = str(e)
+            logger.error("Failed to launch mass evaluation run for automation %d: %s", automation_id, err_str)
+            # Determine final status: 'skipped' for lock conflicts, 'failed' for real errors
+            is_already_running = "already running" in err_str.lower() or "already_running" in err_str.lower()
+            final_err_status = "skipped" if is_already_running else "failed"
+
+            # Use a FRESH session to update auto_run — the current session may be in a bad state
+            # after run_job raised (greenlet/rollback issues). A fresh connection is always safe.
+            try:
+                async with AsyncSession(engine) as fail_db:
+                    fail_stmt = select(MassAnalysisAutomationRun).where(
+                        MassAnalysisAutomationRun.automation_run_id == auto_run_id_snapshot
+                    )
+                    fail_res = await fail_db.execute(fail_stmt)
+                    fail_auto_run = fail_res.scalars().first()
+                    if fail_auto_run and fail_auto_run.status == "running":
+                        fail_auto_run.status = final_err_status
+                        fail_auto_run.finished_at = datetime.now(timezone.utc)
+                        fail_auto_run.error_message = err_str
+
+                    # Update parent automation metadata
+                    aut_stmt2 = select(MassAnalysisAutomation).where(
+                        MassAnalysisAutomation.automation_id == automation_id
+                    )
+                    aut_res2 = await fail_db.execute(aut_stmt2)
+                    aut_obj2 = aut_res2.scalars().first()
+                    if aut_obj2:
+                        aut_obj2.last_run_at = now
+                        if not is_already_running:
+                            aut_obj2.last_error_at = datetime.now(timezone.utc)
+                            aut_obj2.last_error_message = err_str
+
+                    await fail_db.commit()
+
+                    # Refresh auto_run from fresh session for the return value
+                    fail_stmt2 = select(MassAnalysisAutomationRun).where(
+                        MassAnalysisAutomationRun.automation_run_id == auto_run_id_snapshot
+                    )
+                    fail_res2 = await fail_db.execute(fail_stmt2)
+                    updated_auto_run = fail_res2.scalars().first()
+                    if updated_auto_run:
+                        return updated_auto_run
+            except Exception as e_inner:
+                logger.error("Failed to update auto_run status in fallback session: %s", e_inner)
+
+            # Return the in-memory auto_run (may not reflect DB state if fail_db also failed)
+            auto_run.status = final_err_status
+            auto_run.finished_at = datetime.now(timezone.utc)
+            auto_run.error_message = err_str
+            return auto_run
+
+        # Re-fetch to return consistent state
+        try:
+            await db.refresh(auto_run)
+        except Exception:
+            pass
         return auto_run
+
+    @staticmethod
+    async def sync_automation_runs_with_mass_runs(
+        db: AsyncSession, automation_id: int
+    ) -> int:
+        """
+        For each MassAnalysisAutomationRun in status='running' linked to a finished MassEvaluationRun,
+        syncs the automation run state to match. Also closes orphan runs (run_id=None) older than 10 min.
+        Returns the number of runs updated.
+        """
+        stmt = select(MassAnalysisAutomationRun).where(
+            MassAnalysisAutomationRun.automation_id == automation_id,
+            MassAnalysisAutomationRun.status == "running"
+        )
+        res = await db.execute(stmt)
+        running_auto_runs = res.scalars().all()
+
+        now = datetime.now(timezone.utc)
+        changed = 0
+        for auto_run in running_auto_runs:
+            if auto_run.run_id is not None:
+                # Sync with the underlying MassEvaluationRun
+                run_stmt = select(MassEvaluationRun).where(
+                    MassEvaluationRun.run_id == auto_run.run_id
+                )
+                run_res = await db.execute(run_stmt)
+                mass_run = run_res.scalars().first()
+                if mass_run and mass_run.status not in ("running", "pending"):
+                    # Mass run has finished — reflect its outcome in the automation run
+                    if mass_run.status in ("completed", "completed_with_errors"):
+                        auto_run.status = "completed"
+                        auto_run.error_message = None
+                    else:
+                        auto_run.status = "failed"
+                        auto_run.error_message = mass_run.error_message
+                    auto_run.finished_at = mass_run.finished_at or now
+                    auto_run.calls_found = mass_run.calls_found or 0
+                    auto_run.calls_selected = mass_run.calls_selected or 0
+                    changed += 1
+                    logger.info(
+                        "[automation_sync] synced auto_run_id=%d automation_id=%d mass_run_id=%d "
+                        "new_status=%s calls_found=%d",
+                        auto_run.automation_run_id, auto_run.automation_id,
+                        auto_run.run_id, auto_run.status, auto_run.calls_found
+                    )
+            else:
+                # Orphan run: no run_id linked — close it if older than 10 minutes
+                st_at = auto_run.started_at
+                if st_at and st_at.tzinfo is None:
+                    st_at = st_at.replace(tzinfo=timezone.utc)
+                age_minutes = int((now - st_at).total_seconds() / 60) if st_at else 999
+                if age_minutes >= 10:
+                    auto_run.status = "skipped"
+                    auto_run.finished_at = now
+                    auto_run.error_message = (
+                        auto_run.error_message or
+                        "Closed automatically: no mass evaluation run was linked within timeout"
+                    )
+                    changed += 1
+                    logger.warning(
+                        "[automation_sync] closed orphan auto_run_id=%d automation_id=%d age_minutes=%d",
+                        auto_run.automation_run_id, auto_run.automation_id, age_minutes
+                    )
+
+        if changed > 0:
+            await db.commit()
+        return changed
 
     @staticmethod
     async def run_due_automations(
@@ -2596,6 +2804,36 @@ class MassEvaluationService:
         service_ids: list[int] | None = None,
     ) -> dict[str, Any]:
         """Finds all active automations that are due to execute and triggers them with scoping support."""
+        from app.config import get_settings
+        settings = get_settings()
+
+        # 0. Global advisory lock: only one worker (process) should execute a scheduler tick.
+        lock_acquired = await MassEvaluationService._try_acquire_scheduler_lock(db)
+        if not lock_acquired:
+            logger.info("[automation_scheduler] skipped global lock held by another worker")
+            return {
+                "due_automations_count": 0,
+                "launched_automations_count": 0,
+                "skipped_automations_count": 0,
+                "stale_runs_closed": 0,
+                "skip_reason": "global_lock_held",
+                "executions": [],
+            }
+
+        try:
+            return await MassEvaluationService._run_due_automations_inner(
+                db, company_ids=company_ids, service_ids=service_ids
+            )
+        finally:
+            await MassEvaluationService._release_scheduler_lock(db)
+
+    @staticmethod
+    async def _run_due_automations_inner(
+        db: AsyncSession,
+        company_ids: list[int] | None = None,
+        service_ids: list[int] | None = None,
+    ) -> dict[str, Any]:
+        """Inner body of run_due_automations, executed only when global lock is held."""
         from app.config import get_settings
         settings = get_settings()
 
@@ -2729,8 +2967,18 @@ class MassEvaluationService:
 
     @staticmethod
     async def list_automation_runs(db: AsyncSession, automation_id: int, limit: int = 100) -> list[MassAnalysisAutomationRun]:
-        """List all execution logs / runs for a given automation configuration."""
-        stmt = select(MassAnalysisAutomationRun).where(MassAnalysisAutomationRun.automation_id == automation_id).order_by(desc(MassAnalysisAutomationRun.automation_run_id)).limit(limit)
+        """List all execution logs / runs for a given automation configuration.
+        Performs an on-read sync so any 'running' rows whose mass run has already
+        completed are updated to their final status before returning.
+        """
+        # On-read sync: fix running rows that should be completed/failed/skipped
+        try:
+            await MassEvaluationService.sync_automation_runs_with_mass_runs(db, automation_id)
+        except Exception as e_sync:
+            logger.warning("Failed to sync automation runs on read for automation_id=%d: %s", automation_id, e_sync)
+
+        stmt = select(MassAnalysisAutomationRun).where(
+            MassAnalysisAutomationRun.automation_id == automation_id
+        ).order_by(desc(MassAnalysisAutomationRun.automation_run_id)).limit(limit)
         res = await db.execute(stmt)
         return list(res.scalars().all())
-

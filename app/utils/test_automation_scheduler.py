@@ -32,7 +32,7 @@ from app.db import get_engine, Base
 from app.models.companies import Company
 from app.models.services import Service
 from app.models.prompts import Prompt, PromptVersion
-from app.models.mass_evaluations import MassEvaluationJob, MassAnalysisAutomation, MassAnalysisAutomationRun
+from app.models.mass_evaluations import MassEvaluationJob, MassAnalysisAutomation, MassAnalysisAutomationRun, MassEvaluationRun
 from app.services.mass_evaluation_service import MassEvaluationService
 
 
@@ -113,6 +113,7 @@ class TestAutomationScheduler(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         async with AsyncSession(self.engine) as db:
             await db.execute(delete(MassAnalysisAutomationRun).where(MassAnalysisAutomationRun.automation_id.in_([8801, 8802, 8803])))
+            await db.execute(delete(MassEvaluationRun).where(MassEvaluationRun.job_id == 881))
             await db.execute(delete(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id.in_([8801, 8802, 8803])))
             await db.execute(delete(MassEvaluationJob).where(MassEvaluationJob.job_id == 881))
             await db.execute(delete(PromptVersion).where(PromptVersion.id == 881))
@@ -195,6 +196,102 @@ class TestAutomationScheduler(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(updated)
             self.assertEqual(updated.status, "failed")
             self.assertIn("administrator", updated.error_message)
+
+    async def test_already_running_job_creates_skipped_auto_run(self):
+        """When run_job raises 'already running', auto_run ends up as 'skipped' with finished_at set, not stuck in 'running'."""
+        from unittest.mock import patch, AsyncMock
+        already_running_exc = ValueError("Job 881 is already running with run_id 999")
+        with patch.object(MassEvaluationService, "run_job", new_callable=AsyncMock, side_effect=already_running_exc):
+            async with AsyncSession(self.engine) as db:
+                auto_run = await MassEvaluationService.run_automation_run(db, 8801, trigger_type="scheduled")
+
+            self.assertIn(auto_run.status, ("skipped", "failed"),
+                          "auto_run must not stay 'running' when run_job raises already_running")
+            self.assertIsNotNone(auto_run.finished_at,
+                                  "finished_at must be set when run is not launched")
+
+            # Verify it is actually persisted in DB
+            async with AsyncSession(self.engine) as db:
+                from sqlalchemy import select as sa_select
+                stmt = sa_select(MassAnalysisAutomationRun).where(
+                    MassAnalysisAutomationRun.automation_run_id == auto_run.automation_run_id
+                )
+                res = await db.execute(stmt)
+                db_run = res.scalars().first()
+                self.assertIsNotNone(db_run)
+                self.assertNotEqual(db_run.status, "running",
+                                    "DB row must not remain 'running' after already_running error")
+                self.assertIsNotNone(db_run.finished_at)
+
+    async def test_sync_running_auto_run_with_completed_mass_run(self):
+        """list_automation_runs syncs a 'running' auto_run to 'completed' when its mass_run is already completed."""
+        from sqlalchemy import select as sa_select
+
+        # Create a MassEvaluationRun that is already completed
+        async with AsyncSession(self.engine) as db:
+            mass_run = MassEvaluationRun(
+                run_id=99900,
+                job_id=881,
+                trigger_type="scheduled",
+                status="completed",
+                started_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+                finished_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+                calls_found=10,
+                calls_selected=5,
+                calls_analyzed=5,
+            )
+            db.add(mass_run)
+            await db.flush()
+
+            # Create an auto_run still in 'running' linked to the completed mass_run
+            auto_run = MassAnalysisAutomationRun(
+                automation_run_id=99901,
+                automation_id=8801,
+                status="running",
+                started_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+                job_id=881,
+                run_id=99900,
+                calls_found=0,
+                calls_selected=0,
+            )
+            db.add(auto_run)
+            await db.commit()
+
+        # Call list_automation_runs — it should sync the running auto_run to completed
+        async with AsyncSession(self.engine) as db:
+            runs = await MassEvaluationService.list_automation_runs(db, automation_id=8801)
+
+        auto_run_result = next((r for r in runs if r.automation_run_id == 99901), None)
+        self.assertIsNotNone(auto_run_result, "auto_run_id=99901 should be in results")
+        self.assertEqual(auto_run_result.status, "completed",
+                         "auto_run should have been synced to 'completed' by list_automation_runs")
+        self.assertEqual(auto_run_result.calls_found, 10,
+                         "calls_found should be synced from the mass evaluation run")
+        self.assertEqual(auto_run_result.calls_selected, 5)
+        self.assertIsNotNone(auto_run_result.finished_at)
+
+    async def test_orphan_run_closed_on_listing(self):
+        """An orphan auto_run (run_id=None, >10 min old) is closed to 'skipped' when list_automation_runs is called."""
+        from sqlalchemy import select as sa_select
+
+        async with AsyncSession(self.engine) as db:
+            db.add(MassAnalysisAutomationRun(
+                automation_run_id=99910,
+                automation_id=8801,
+                status="running",
+                started_at=datetime.now(timezone.utc) - timedelta(minutes=15),
+                run_id=None,  # orphan: no mass run linked
+            ))
+            await db.commit()
+
+        async with AsyncSession(self.engine) as db:
+            runs = await MassEvaluationService.list_automation_runs(db, automation_id=8801)
+
+        orphan = next((r for r in runs if r.automation_run_id == 99910), None)
+        self.assertIsNotNone(orphan)
+        self.assertEqual(orphan.status, "skipped",
+                         "Orphan run_id=None older than 10 min should be closed to 'skipped'")
+        self.assertIsNotNone(orphan.finished_at)
 
 
 if __name__ == "__main__":
