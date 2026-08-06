@@ -36,19 +36,20 @@ EVALUATION_ITEMS_FALLBACK = [
 ]
 
 
-def parse_item_score_filters(raw_param: str | list | dict | None) -> list[dict[str, Any]]:
+def parse_item_score_filters_detailed(raw_param: str | list | dict | None) -> dict[str, Any]:
     """
-    Parses and validates evaluation item score filters.
+    Parses and validates evaluation item score filters, detecting neutral filters (0-10 range).
     
-    Accepts:
-      - JSON string: '[{"key": "empatia", "min": 1, "max": 5}]'
-      - List of dicts or single dict
-      
-    Returns list of dicts: [{"key": str, "min": float, "max": float}]
+    Returns a dict:
+      {
+        "raw_count": int,
+        "active_filters": list[dict[str, Any]],
+        "discarded_neutral_count": int
+      }
     Raises HTTP 422 if format, range or length rules (> 3 items) are violated.
     """
     if not raw_param:
-        return []
+        return {"raw_count": 0, "active_filters": [], "discarded_neutral_count": 0}
 
     data = raw_param
     if isinstance(raw_param, str):
@@ -69,13 +70,16 @@ def parse_item_score_filters(raw_param: str | list | dict | None) -> list[dict[s
             detail="item_filters debe ser una lista de filtros por ítem."
         )
 
-    if len(data) > 3:
+    raw_count = len(data)
+    if raw_count > 3:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Se permite un máximo de 3 filtros por ítems de evaluación por consulta."
         )
 
-    parsed_filters = []
+    active_filters = []
+    discarded_neutral_count = 0
+
     for idx, item in enumerate(data):
         if not isinstance(item, dict):
             raise HTTPException(
@@ -113,19 +117,42 @@ def parse_item_score_filters(raw_param: str | list | dict | None) -> list[dict[s
                 detail=f"Filtro '{key}': el valor mínimo ({min_flt}) no puede ser mayor que el máximo ({max_flt})."
             )
 
-        parsed_filters.append({
+        # Detect neutral filter: range spans 0.0 to 10.0 (or wider) which matches all valid scores
+        if min_flt <= 0.0 and max_flt >= 10.0:
+            discarded_neutral_count += 1
+            logger.info(
+                "[item_score_filters] Discarded neutral filter for key='%s' min=%.1f max=%.1f",
+                key, min_flt, max_flt
+            )
+            continue
+
+        active_filters.append({
             "key": key.strip().lower(),
             "min": min_flt,
             "max": max_flt
         })
 
-    return parsed_filters
+    return {
+        "raw_count": raw_count,
+        "active_filters": active_filters,
+        "discarded_neutral_count": discarded_neutral_count
+    }
+
+
+def parse_item_score_filters(raw_param: str | list | dict | None) -> list[dict[str, Any]]:
+    """
+    Parses and validates evaluation item score filters.
+    Discards neutral filters (0-10 range) and returns only active filtering criteria.
+    Raises HTTP 422 if format, range or length rules (> 3 items) are violated.
+    """
+    parsed_info = parse_item_score_filters_detailed(raw_param)
+    return parsed_info["active_filters"]
 
 
 def filter_mass_results_by_items(results: list[Any], item_filters: list[dict[str, Any]]) -> list[Any]:
     """
     Filters a list of MassEvaluationResult rows in memory using strict AND logic.
-    Each item in item_filters must be satisfied by the conversation result.
+    If item_filters is empty (or only contained neutral 0-10 filters), returns results immediately.
     """
     if not item_filters:
         return results
@@ -157,6 +184,20 @@ def filter_mass_results_by_items(results: list[Any], item_filters: list[dict[str
             filtered.append(r)
 
     return filtered
+
+
+def apply_item_score_filters_sql_or_python(
+    results: list[Any],
+    item_filters: list[dict[str, Any]]
+) -> list[Any]:
+    """
+    Unified helper for item score filtering.
+    Optimized: Returns original results list immediately if item_filters is empty,
+    avoiding any Python JSON inspection overhead.
+    """
+    if not item_filters:
+        return results
+    return filter_mass_results_by_items(results, item_filters)
 
 
 async def get_evaluation_item_filter_options(

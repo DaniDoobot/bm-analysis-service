@@ -456,18 +456,19 @@ async def get_dashboard_summary(
     item_filters: str | list | dict | None = None,
     context: TenantContext | None = None,
 ) -> dict[str, Any]:
-    from app.utils.item_score_filters import parse_item_score_filters, filter_mass_results_by_items
+    from app.utils.item_score_filters import parse_item_score_filters_detailed, apply_item_score_filters_sql_or_python
     t_start = time.perf_counter()
     now = datetime.now(timezone.utc)
 
-    parsed_item_filters = parse_item_score_filters(item_filters)
+    item_filter_info = parse_item_score_filters_detailed(item_filters)
+    parsed_item_filters = item_filter_info["active_filters"]
     norm_t = normalize_typology(typology_key)
     norm_d = normalize_direction(direction)
 
     logger.info(
         "[dashboard_summary] typology_filter_raw=%r typology_filter_normalized=%r "
-        "direction_filter_raw=%r direction_filter_normalized=%r period=%r date_from=%r date_to=%r",
-        typology_key, norm_t, direction, norm_d, period, date_from, date_to
+        "direction_filter_raw=%r direction_filter_normalized=%r period=%r date_from=%r date_to=%r item_filters_info=%s",
+        typology_key, norm_t, direction, norm_d, period, date_from, date_to, item_filter_info
     )
 
     # Resolve custom range or period
@@ -582,14 +583,21 @@ async def get_dashboard_summary(
     if score_max_scaled is not None:
         stmt = stmt.where(MassEvaluationResult.evaluacion_global <= score_max_scaled)
 
+    t_db_start = time.perf_counter()
     result = await db.execute(stmt)
     rows = list(result.scalars().all())
-    if parsed_item_filters:
-        rows = filter_mass_results_by_items(rows, parsed_item_filters)
+    t_db_end = time.perf_counter()
+    db_query_ms = (t_db_end - t_db_start) * 1000.0
+
+    t_filter_start = time.perf_counter()
+    rows = apply_item_score_filters_sql_or_python(rows, parsed_item_filters)
+    t_filter_end = time.perf_counter()
+    item_filter_ms = (t_filter_end - t_filter_start) * 1000.0
+
     logger.info(
         "[dashboard_summary] query returned %d total rows after item score filtering. "
-        "typology_filter=%r direction_filter=%r item_filters=%r",
-        len(rows), norm_t, norm_d, parsed_item_filters
+        "db_ms=%.1f item_filter_ms=%.1f typology_filter=%r direction_filter=%r active_item_filters=%r",
+        len(rows), db_query_ms, item_filter_ms, norm_t, norm_d, parsed_item_filters
     )
 
     actual_rows = []
@@ -891,23 +899,29 @@ async def get_dashboard_summary(
             "execution_source": r.execution_source
         })
 
-    processing_ms = round((time.perf_counter() - t_start) * 1000, 1)
+    t_end = time.perf_counter()
+    total_processing_ms = round((t_end - t_start) * 1000.0, 1)
+    aggregation_ms = round(max(0.0, total_processing_ms - db_query_ms - item_filter_ms), 1)
+
     logger.info(
-        "[dashboard_summary] actual_rows=%d anterior_rows=%d total_analyses=%.0f processing_ms=%s",
-        len(actual_rows), len(anterior_rows), total_analyses, processing_ms
+        "[perf.dashboard_summary] total_ms=%.1f db_ms=%.1f item_filter_ms=%.1f aggregation_ms=%.1f rows=%d filters=%s",
+        total_processing_ms, db_query_ms, item_filter_ms, aggregation_ms, len(actual_rows), item_filter_info
     )
 
     return {
         "period": period,
         "analysis_type": analysis_type,
         "generated_at": now.isoformat(),
+        "processing_ms": total_processing_ms,
         "filters": {
             "typology_key": norm_t,
             "typology_key_raw": typology_key,
             "direction": norm_d,
             "direction_raw": direction,
             "service_id": service_id,
+            "item_filters_raw_count": item_filter_info["raw_count"],
             "item_filters_normalized": parsed_item_filters,
+            "item_filters_discarded_neutral_count": item_filter_info["discarded_neutral_count"],
         },
         "summary": {
             "total_analyses": to_float(total_analyses),
@@ -930,7 +944,7 @@ async def get_dashboard_summary(
         "sentiment_evolution": sentiment_evolution,
         "agent_ranking": agent_ranking,
         "latest_analyses": latest_analyses,
-        "processing_ms": processing_ms,
+        "processing_ms": total_processing_ms,
     }
 
 
@@ -962,12 +976,14 @@ async def get_agents_list(
         dt_from = None
         dt_to = None
 
-    # 2. Per-agent aggregates (count + last timestamp)
+    # 2. Per-agent aggregates (count + last timestamp + avg evaluacion_global)
+    t_start = time.perf_counter()
     agg_stmt = select(
         MassEvaluationResult.hubspot_owner_id,
         MassEvaluationResult.agent_name,
         func.count(MassEvaluationResult.mass_analysis_id).label("total_analyses"),
         func.max(MassEvaluationResult.analysis_timestamp).label("last_analysis_at"),
+        func.avg(MassEvaluationResult.evaluacion_global).label("avg_eval"),
     ).where(
         MassEvaluationResult.status == "completed",
         MassEvaluationResult.hubspot_owner_id.is_not(None),
@@ -1023,8 +1039,11 @@ async def get_agents_list(
         MassEvaluationResult.hubspot_owner_id,
         MassEvaluationResult.agent_name,
     )
+    t_db_start = time.perf_counter()
     agg_res = await db.execute(agg_stmt)
     agg_rows = agg_res.fetchall()
+    t_db_end = time.perf_counter()
+    db_ms = (t_db_end - t_db_start) * 1000.0
 
     # Collapse multiple agent_name variants per owner → keep highest count
     db_stats: dict[str, Any] = {}
@@ -1033,76 +1052,8 @@ async def get_agents_list(
         if oid not in db_stats or r.total_analyses > db_stats[oid].total_analyses:
             db_stats[oid] = r
 
-    # 3. Fetch result_json to compute avg_evaluacion_global in Python
-    rj_stmt = select(
-        MassEvaluationResult.hubspot_owner_id,
-        MassEvaluationResult.result_json,
-    ).where(
-        MassEvaluationResult.status == "completed",
-        MassEvaluationResult.hubspot_owner_id.is_not(None),
-    )
-    if context:
-        rj_stmt = rj_stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
-        if context.allowed_service_ids is not None:
-            rj_stmt = rj_stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
-        if context.allowed_agent_ids is not None:
-            rj_stmt = rj_stmt.where(MassEvaluationResult.hubspot_owner_id.in_(context.allowed_agent_ids))
-
-    if service_id is not None:
-        if context and context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
-            rj_stmt = rj_stmt.where(MassEvaluationResult.service_id == -1)
-        else:
-            rj_stmt = rj_stmt.where(MassEvaluationResult.service_id == service_id)
-    elif service_key is not None:
-        rj_stmt = rj_stmt.where(MassEvaluationResult.service_key == service_key)
-
-    if dt_from:
-        rj_stmt = rj_stmt.where(
-            func.coalesce(
-                MassEvaluationResult.call_timestamp,
-                MassEvaluationResult.analysis_timestamp,
-            ) >= dt_from
-        )
-    if dt_to:
-        rj_stmt = rj_stmt.where(
-            func.coalesce(
-                MassEvaluationResult.call_timestamp,
-                MassEvaluationResult.analysis_timestamp,
-            ) <= dt_to
-        )
-
-    if typology_ids:
-        rj_stmt = rj_stmt.where(MassEvaluationResult.typology_id.in_(typology_ids))
-    elif norm_t:
-        rj_stmt = rj_stmt.where(
-            or_(
-                func.lower(MassEvaluationResult.typology_key) == norm_t,
-                func.lower(func.coalesce(MassEvaluationResult.result_json["tipo_llamada"].astext, "")) == norm_t
-            )
-        )
-    if norm_d:
-        rj_stmt = rj_stmt.where(
-            or_(
-                func.lower(MassEvaluationResult.direction) == norm_d,
-                func.lower(func.coalesce(MassEvaluationResult.result_json["inbound_outbound"].astext, "")) == norm_d
-            )
-        )
-
-    rj_res = await db.execute(rj_stmt)
-    owner_evals: dict[str, list[float]] = {}
-    for r in rj_res.fetchall():
-        rj = r.result_json
-        if rj and isinstance(rj, dict):
-            v = rj.get("evaluacion_global")
-            if v is not None:
-                try:
-                    owner_evals.setdefault(r.hubspot_owner_id, []).append(to_float(v))
-                except (ValueError, TypeError):
-                    pass
-
     def _fmt(stats: Any, oid: str, name: str) -> dict:
-        evals = owner_evals.get(oid, [])
-        avg_eval = to_float(round(sum(evals) / len(evals), 1)) if evals else 0.0
+        avg_eval = to_float(round(stats.avg_eval, 1)) if (stats and stats.avg_eval is not None) else 0.0
         last_at = None
         if stats and stats.last_analysis_at:
             raw = stats.last_analysis_at
@@ -1137,6 +1088,12 @@ async def get_agents_list(
             if disp_name.startswith("Agente no identificado") or disp_name.isdigit():
                 continue
             results.append(_fmt(row, oid, disp_name))
+
+    total_ms = (time.perf_counter() - t_start) * 1000.0
+    logger.info(
+        "[perf.get_agents_list] total_ms=%.1f db_ms=%.1f count=%d",
+        total_ms, db_ms, len(results)
+    )
 
     return results
 

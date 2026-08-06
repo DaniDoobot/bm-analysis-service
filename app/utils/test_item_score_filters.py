@@ -74,6 +74,28 @@ class TestItemScoreFilters(unittest.TestCase):
         self.assertEqual(len(res2), 1)
         self.assertEqual(res2[0].mass_analysis_id, 2)
 
+    def test_neutral_0_to_10_filters_discarded(self):
+        from app.utils.item_score_filters import parse_item_score_filters_detailed
+        
+        # Single 0-10 neutral filter -> discarded
+        info1 = parse_item_score_filters_detailed('[{"key": "empatia", "min": 0, "max": 10}]')
+        self.assertEqual(info1["raw_count"], 1)
+        self.assertEqual(info1["discarded_neutral_count"], 1)
+        self.assertEqual(info1["active_filters"], [])
+
+        # Three 0-10 neutral filters -> all discarded
+        info3 = parse_item_score_filters_detailed('[{"key": "empatia", "min": 0, "max": 10}, {"key": "claridad", "min": 0, "max": 10}, {"key": "procedimiento", "min": 0, "max": 10}]')
+        self.assertEqual(info3["raw_count"], 3)
+        self.assertEqual(info3["discarded_neutral_count"], 3)
+        self.assertEqual(info3["active_filters"], [])
+
+        # Mixed: empatia 0-10 (neutral) + uso_preguntas 0-8 (active) -> 1 active
+        info_mixed = parse_item_score_filters_detailed('[{"key": "empatia", "min": 0, "max": 10}, {"key": "uso_preguntas", "min": 0, "max": 8}]')
+        self.assertEqual(info_mixed["raw_count"], 2)
+        self.assertEqual(info_mixed["discarded_neutral_count"], 1)
+        self.assertEqual(len(info_mixed["active_filters"]), 1)
+        self.assertEqual(info_mixed["active_filters"][0]["key"], "uso_preguntas")
+
 
 if __name__ == "__main__":
     unittest.main()

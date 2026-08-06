@@ -86,13 +86,102 @@ DEFAULT_STRUCTURES = [
     }
 ]
 
-FALLBACK_BOSTON_PROMPT = (
-    "### ESTRUCTURA DE PROMPT BASE - BOSTON MEDICAL\n"
-    "Eres un analizador experto de llamadas comerciales para Boston Medical Group (clínica de salud sexual masculina). "
-    "Tu tarea es evaluar el desempeño del agente telefónico en base a los criterios definidos y clasificar la llamada.\n\n"
-    "### FORMATO DE SALIDA JSON\n"
-    "Debes devolver la evaluación en formato JSON estructurado, incluyendo la clasificación del tipo de llamada, el valor/justificación de cada criterio y obligatoriamente una clave 'resumen' (string | null) de 2-4 frases que sintetice qué ocurrió, la actitud del paciente, la actuación del agente y el resultado final."
-)
+async def ensure_performance_index_safely(
+    conn,
+    index_name: str,
+    table_name: str,
+    column_names: list[str],
+    where_clause: str | None = None
+) -> str:
+    """
+    Safely creates an index if table and all specified columns exist.
+    Returns status: 'ensured', 'skipped_missing_table', 'skipped_missing_column', or 'failed_unexpected'.
+    Logs each action with specific diagnostic details.
+    """
+    is_sqlite = conn.dialect.name == "sqlite"
+    
+    # 1. Verify table existence
+    try:
+        if is_sqlite:
+            res_tbl = await conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name=:tbl;"), {"tbl": table_name})
+            tbl_exists = bool(res_tbl.scalar())
+        else:
+            res_tbl = await conn.execute(text("""
+                SELECT EXISTS (
+                    SELECT 1 FROM information_schema.tables 
+                    WHERE table_schema = 'public' AND table_name = :tbl
+                );
+            """), {"tbl": table_name})
+            tbl_exists = bool(res_tbl.scalar())
+    except Exception as e_tbl:
+        logger.warning("[performance_indexes] skipped_missing_table index_name='%s' table='%s' error=%s", index_name, table_name, e_tbl)
+        return "skipped_missing_table"
+
+    if not tbl_exists:
+        logger.info("[performance_indexes] skipped_missing_table index_name='%s' table='%s'", index_name, table_name)
+        return "skipped_missing_table"
+
+    # 2. Verify all columns existence
+    existing_cols = set()
+    try:
+        if is_sqlite:
+            res_cols = await conn.execute(text(f"PRAGMA table_info({table_name});"))
+            existing_cols = {row[1].lower() for row in res_cols.fetchall()}
+        else:
+            res_cols = await conn.execute(text("""
+                SELECT column_name FROM information_schema.columns 
+                WHERE table_schema = 'public' AND table_name = :tbl;
+            """), {"tbl": table_name})
+            existing_cols = {row[0].lower() for row in res_cols.fetchall()}
+    except Exception as e_cols:
+        logger.warning("[performance_indexes] failed_unexpected checking columns index_name='%s' table='%s': %s", index_name, table_name, e_cols)
+        return "failed_unexpected"
+
+    missing_cols = [c for c in column_names if c.lower() not in existing_cols]
+    if missing_cols:
+        logger.info(
+            "[performance_indexes] skipped_missing_column index_name='%s' table='%s' missing_columns=%s",
+            index_name, table_name, missing_cols
+        )
+        return "skipped_missing_column"
+
+    # 3. Create index safely
+    cols_str = ", ".join(column_names)
+    where_str = f" WHERE {where_clause}" if where_clause else ""
+    sql_stmt = f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name} ({cols_str}){where_str};"
+    
+    try:
+        await conn.execute(text(sql_stmt))
+        logger.info("[performance_indexes] ensured index_name='%s' table='%s' columns=%s", index_name, table_name, column_names)
+        return "ensured"
+    except Exception as e_idx:
+        logger.error("[performance_indexes] failed_unexpected index_name='%s' table='%s': %s", index_name, table_name, e_idx)
+        return "failed_unexpected"
+
+
+async def check_column_exists_safely(conn, table_name: str, column_name: str) -> bool:
+    """Safely checks if column_name exists on table_name in both SQLite and PostgreSQL."""
+    is_sqlite = conn.dialect.name == "sqlite"
+    try:
+        if is_sqlite:
+            res = await conn.execute(text(f"PRAGMA table_info({table_name});"))
+            return column_name.lower() in {row[1].lower() for row in res.fetchall()}
+        else:
+            res = await conn.execute(
+                text("""
+                    SELECT EXISTS (
+                        SELECT 1 FROM information_schema.columns 
+                        WHERE table_schema = 'public' 
+                          AND table_name = :tbl 
+                          AND column_name = :col
+                    );
+                """),
+                {"tbl": table_name, "col": column_name}
+            )
+            return bool(res.scalar())
+    except Exception as e:
+        logger.warning("[check_column_exists_safely] Error checking column '%s' on '%s': %s", column_name, table_name, e)
+        return False
 
 
 async def init_db():
@@ -125,17 +214,7 @@ async def init_db():
                 ("primary_service_id", "INTEGER NULL"),
                 ("primary_team_id", "INTEGER NULL"),
             ]:
-                res = await conn.execute(
-                    text(f"""
-                        SELECT EXISTS (
-                            SELECT FROM information_schema.columns 
-                            WHERE table_schema = 'public' 
-                              AND table_name = 'bm_users' 
-                              AND column_name = '{col_name}'
-                        );
-                    """)
-                )
-                col_exists = res.scalar()
+                col_exists = await check_column_exists_safely(conn, "bm_users", col_name)
                 if not col_exists:
                     logger.info("Adding column '%s' to 'bm_users' table...", col_name)
                     await conn.execute(
@@ -170,22 +249,7 @@ async def init_db():
                 ("custom_welcome_subtitle", "TEXT NULL"),
             ]
             for col_name, col_type in branding_cols:
-                if is_sqlite:
-                    res = await conn.execute(text("PRAGMA table_info(bm_companies);"))
-                    cols = [row[1] for row in res.fetchall()]
-                    col_exists = col_name in cols
-                else:
-                    res = await conn.execute(
-                        text(f"""
-                            SELECT EXISTS (
-                                SELECT FROM information_schema.columns 
-                                WHERE table_schema = 'public' 
-                                  AND table_name = 'bm_companies' 
-                                  AND column_name = '{col_name}'
-                            );
-                        """)
-                    )
-                    col_exists = res.scalar()
+                col_exists = await check_column_exists_safely(conn, "bm_companies", col_name)
 
                 if not col_exists:
                     logger.info("Adding column '%s' to 'bm_companies' table...", col_name)
@@ -294,20 +358,30 @@ async def init_db():
         async with AsyncSession(engine) as session:
             try:
                 async with engine.begin() as conn:
-                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_bm_mass_eval_res_company_service ON bm_mass_evaluation_results (company_id, service_id);"))
-                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_bm_mass_eval_res_owner_id ON bm_mass_evaluation_results (hubspot_owner_id);"))
-                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_bm_mass_eval_res_call_timestamp ON bm_mass_evaluation_results (call_timestamp);"))
-                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_bm_mass_eval_res_status ON bm_mass_evaluation_results (status);"))
+                    indexes_to_ensure = [
+                        ("idx_bm_mass_eval_res_company_service", "bm_mass_evaluation_results", ["company_id", "service_id"], None),
+                        ("idx_bm_mass_eval_res_owner_id", "bm_mass_evaluation_results", ["hubspot_owner_id"], None),
+                        ("idx_bm_mass_eval_res_call_timestamp", "bm_mass_evaluation_results", ["call_timestamp"], None),
+                        ("idx_bm_mass_eval_res_status", "bm_mass_evaluation_results", ["status"], None),
+                        ("idx_bm_mass_eval_res_typo_dir", "bm_mass_evaluation_results", ["typology_key", "direction", "status"], None),
+                        ("idx_bm_mass_eval_res_comp_serv_status_ts", "bm_mass_evaluation_results", ["company_id", "service_id", "status", "call_timestamp"], None),
 
-                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_bm_analyses_company_service ON bm_analyses (company_id, service_id);"))
-                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_bm_analyses_hubspot_owner ON bm_analyses (hubspot_owner_id);"))
-                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_bm_analyses_call_date ON bm_analyses (call_date);"))
+                        ("idx_bm_mass_eval_crit_mass_id_key", "bm_mass_evaluation_criterion_results", ["mass_analysis_id", "criterion_key", "numeric_value"], None),
+                        ("idx_bm_mass_eval_crit_service_key", "bm_mass_evaluation_criterion_results", ["service_id", "criterion_key", "numeric_value"], None),
 
-                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_bm_call_analysis_current_company_service ON bm_call_analysis_current (company_id, service_id);"))
-                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_bm_call_analysis_current_owner ON bm_call_analysis_current (hubspot_owner_id);"))
-                logger.info("Performance indexes for dashboard/analytics ensured successfully.")
+                        ("idx_bm_analyses_company_service", "bm_analyses", ["company_id", "service_id"], None),
+                        ("idx_bm_analyses_hubspot_owner", "bm_analyses", ["hubspot_owner_id"], None),
+                        ("idx_bm_analyses_call_timestamp", "bm_analyses", ["call_timestamp"], None),
+                        ("idx_bm_analyses_created_at", "bm_analyses", ["created_at"], None),
+
+                        ("idx_bm_call_analysis_current_company_service", "bm_call_analysis_current", ["company_id", "service_id"], None),
+                        ("idx_bm_call_analysis_current_owner", "bm_call_analysis_current", ["hubspot_owner_id"], None),
+                    ]
+                    for idx_name, tbl_name, cols, where_cl in indexes_to_ensure:
+                        await ensure_performance_index_safely(conn, idx_name, tbl_name, cols, where_cl)
+                logger.info("Performance indexes check completed successfully.")
             except Exception as e:
-                logger.error("Failed to apply performance indexes migration: %s", e)
+                logger.error("Failed during performance indexes migration block: %s", e)
 
         # 1.2.c Early dynamic column migration for bm_training_agent_settings (required before query/seeding)
         async with engine.begin() as conn:
@@ -317,17 +391,7 @@ async def init_db():
                 ("training_code_enabled", "BOOLEAN", "DEFAULT TRUE NOT NULL"),
                 ("training_code_updated_at", "TIMESTAMPTZ", "DEFAULT CURRENT_TIMESTAMP NOT NULL"),
             ]:
-                res = await conn.execute(
-                    text(f"""
-                        SELECT EXISTS (
-                            SELECT FROM information_schema.columns 
-                            WHERE table_schema = 'public' 
-                              AND table_name = 'bm_training_agent_settings' 
-                              AND column_name = '{col_name}'
-                        );
-                    """)
-                )
-                if not res.scalar():
+                if not await check_column_exists_safely(conn, "bm_training_agent_settings", col_name):
                     logger.info("Early adding column '%s' to 'bm_training_agent_settings' table...", col_name)
                     await conn.execute(
                         text(f"ALTER TABLE bm_training_agent_settings ADD COLUMN {col_name} {col_type} {col_default};")
@@ -380,17 +444,7 @@ async def init_db():
                 ("base_structure_key", "TEXT"),
                 ("base_structure_name", "TEXT"),
             ]:
-                res = await conn.execute(
-                    text(f"""
-                        SELECT EXISTS (
-                            SELECT FROM information_schema.columns 
-                            WHERE table_schema = 'public' 
-                              AND table_name = 'bm_prompts' 
-                              AND column_name = '{col_name}'
-                        );
-                    """)
-                )
-                col_exists = res.scalar()
+                col_exists = await check_column_exists_safely(conn, "bm_prompts", col_name)
                 if not col_exists:
                     logger.info("Adding column '%s' to 'bm_prompts' table...", col_name)
                     await conn.execute(
@@ -406,33 +460,13 @@ async def init_db():
         # 1.6. Ensure service and typology columns exist on other tables dynamically and non-destructively
         async with engine.begin() as conn:
             # 1.6.1 bm_prompt_base_structures
-            res = await conn.execute(
-                text("""
-                    SELECT EXISTS (
-                        SELECT FROM information_schema.columns 
-                        WHERE table_schema = 'public' 
-                          AND table_name = 'bm_prompt_base_structures' 
-                          AND column_name = 'service_id'
-                    );
-                """)
-            )
-            if not res.scalar():
+            if not await check_column_exists_safely(conn, "bm_prompt_base_structures", "service_id"):
                 logger.info("Adding column 'service_id' to 'bm_prompt_base_structures' table...")
                 await conn.execute(text("ALTER TABLE bm_prompt_base_structures ADD COLUMN service_id INTEGER NULL;"))
                 logger.info("Column 'service_id' added successfully to 'bm_prompt_base_structures'.")
 
             # 1.6.2 bm_prompts
-            res = await conn.execute(
-                text("""
-                    SELECT EXISTS (
-                        SELECT FROM information_schema.columns 
-                        WHERE table_schema = 'public' 
-                          AND table_name = 'bm_prompts' 
-                          AND column_name = 'service_id'
-                    );
-                """)
-            )
-            if not res.scalar():
+            if not await check_column_exists_safely(conn, "bm_prompts", "service_id"):
                 logger.info("Adding column 'service_id' to 'bm_prompts' table...")
                 await conn.execute(text("ALTER TABLE bm_prompts ADD COLUMN service_id INTEGER NULL;"))
                 logger.info("Column 'service_id' added successfully to 'bm_prompts'.")
@@ -447,23 +481,10 @@ async def init_db():
                 ("typology_name", "TEXT"),
                 ("evaluacion_global", "NUMERIC(5, 2)"),
             ]:
-                res = await conn.execute(
-                    text(f"""
-                        SELECT EXISTS (
-                            SELECT FROM information_schema.columns 
-                            WHERE table_schema = 'public' 
-                              AND table_name = 'bm_mass_evaluation_results' 
-                              AND column_name = '{col_name}'
-                        );
-                    """)
-                )
-                if not res.scalar():
+                if not await check_column_exists_safely(conn, "bm_mass_evaluation_results", col_name):
                     logger.info("Adding column '%s' to 'bm_mass_evaluation_results' table...", col_name)
                     await conn.execute(text(f"ALTER TABLE bm_mass_evaluation_results ADD COLUMN {col_name} {col_type} NULL;"))
                     logger.info("Column '%s' added successfully to 'bm_mass_evaluation_results'.", col_name)
-
-
-
 
             # 1.6.4 bm_prompt_versions — archiving support columns
             for col_name, col_type, col_default in [
@@ -471,17 +492,7 @@ async def init_db():
                 ("archived_at", "TIMESTAMPTZ", "NULL"),
                 ("archived_by_email", "TEXT", "NULL"),
             ]:
-                res = await conn.execute(
-                    text(f"""
-                        SELECT EXISTS (
-                            SELECT FROM information_schema.columns
-                            WHERE table_schema = 'public'
-                              AND table_name = 'bm_prompt_versions'
-                              AND column_name = '{col_name}'
-                        );
-                    """)
-                )
-                if not res.scalar():
+                if not await check_column_exists_safely(conn, "bm_prompt_versions", col_name):
                     logger.info("Adding column '%s' to 'bm_prompt_versions' table...", col_name)
                     await conn.execute(text(f"ALTER TABLE bm_prompt_versions ADD COLUMN {col_name} {col_type} {col_default};"))
                     logger.info("Column '%s' added successfully to 'bm_prompt_versions'.", col_name)
@@ -491,17 +502,7 @@ async def init_db():
                 ("deleted_at", "TIMESTAMPTZ", "NULL"),
                 ("deleted_by_email", "TEXT", "NULL"),
             ]:
-                res = await conn.execute(
-                    text(f"""
-                        SELECT EXISTS (
-                            SELECT FROM information_schema.columns
-                            WHERE table_schema = 'public'
-                              AND table_name = 'bm_prompt_criteria'
-                              AND column_name = '{col_name}'
-                        );
-                    """)
-                )
-                if not res.scalar():
+                if not await check_column_exists_safely(conn, "bm_prompt_criteria", col_name):
                     logger.info("Adding column '%s' to 'bm_prompt_criteria' table...", col_name)
                     await conn.execute(text(f"ALTER TABLE bm_prompt_criteria ADD COLUMN {col_name} {col_type} {col_default};"))
                     logger.info("Column '%s' added successfully to 'bm_prompt_criteria'.", col_name)
@@ -513,17 +514,7 @@ async def init_db():
                 "bm_mass_evaluation_results",
                 "bm_mass_evaluation_criterion_results"
             ]:
-                res = await conn.execute(
-                    text(f"""
-                        SELECT EXISTS (
-                            SELECT FROM information_schema.columns 
-                            WHERE table_schema = 'public' 
-                              AND table_name = '{table_name}' 
-                              AND column_name = 'execution_source'
-                        );
-                    """)
-                )
-                if not res.scalar():
+                if not await check_column_exists_safely(conn, table_name, "execution_source"):
                     logger.info("Adding column 'execution_source' to '%s' table...", table_name)
                     await conn.execute(
                         text(f"ALTER TABLE {table_name} ADD COLUMN execution_source TEXT DEFAULT 'on_demand';")
@@ -531,17 +522,7 @@ async def init_db():
                     logger.info("Column 'execution_source' added successfully to '%s'.", table_name)
 
             # Check for heartbeat_at in bm_mass_evaluation_runs
-            res_heartbeat = await conn.execute(
-                text("""
-                    SELECT EXISTS (
-                        SELECT FROM information_schema.columns 
-                        WHERE table_schema = 'public' 
-                          AND table_name = 'bm_mass_evaluation_runs' 
-                          AND column_name = 'heartbeat_at'
-                    );
-                """)
-            )
-            if not res_heartbeat.scalar():
+            if not await check_column_exists_safely(conn, "bm_mass_evaluation_runs", "heartbeat_at"):
                 logger.info("Adding column 'heartbeat_at' to 'bm_mass_evaluation_runs' table...")
                 await conn.execute(
                     text("ALTER TABLE bm_mass_evaluation_runs ADD COLUMN heartbeat_at TIMESTAMPTZ NULL;")
@@ -549,17 +530,7 @@ async def init_db():
                 logger.info("Column 'heartbeat_at' added successfully to 'bm_mass_evaluation_runs'.")
 
             # 1.6.7 bm_mass_analysis_automations — job_id support column
-            res = await conn.execute(
-                text("""
-                    SELECT EXISTS (
-                        SELECT FROM information_schema.columns 
-                        WHERE table_schema = 'public' 
-                          AND table_name = 'bm_mass_analysis_automations' 
-                          AND column_name = 'job_id'
-                    );
-                """)
-            )
-            if not res.scalar():
+            if not await check_column_exists_safely(conn, "bm_mass_analysis_automations", "job_id"):
                 logger.info("Adding column 'job_id' to 'bm_mass_analysis_automations' table...")
                 await conn.execute(
                     text("ALTER TABLE bm_mass_analysis_automations ADD COLUMN job_id INTEGER NULL;")
@@ -573,20 +544,12 @@ async def init_db():
                 ("calls_per_day", "INTEGER", "NULL"),
             ]:
                 try:
-                    if is_sqlite:
-                        res_c = await conn.execute(text("PRAGMA table_info(bm_mass_evaluation_jobs);"))
-                        col_exists = col_name in {r[1] for r in res_c.all()}
-                        if not col_exists:
-                            logger.info("Adding column '%s' to 'bm_mass_evaluation_jobs' table...", col_name)
-                            await conn.execute(
-                                text(f"ALTER TABLE bm_mass_evaluation_jobs ADD COLUMN {col_name} {col_type} {col_default};")
-                            )
-                            logger.info("Column '%s' added successfully to 'bm_mass_evaluation_jobs'.", col_name)
-                    else:
-                        logger.info("Ensuring column '%s' exists on 'bm_mass_evaluation_jobs' table...", col_name)
+                    if not await check_column_exists_safely(conn, "bm_mass_evaluation_jobs", col_name):
+                        logger.info("Adding column '%s' to 'bm_mass_evaluation_jobs' table...", col_name)
                         await conn.execute(
-                            text(f"ALTER TABLE bm_mass_evaluation_jobs ADD COLUMN IF NOT EXISTS {col_name} {col_type} {col_default};")
+                            text(f"ALTER TABLE bm_mass_evaluation_jobs ADD COLUMN {col_name} {col_type} {col_default};")
                         )
+                        logger.info("Column '%s' added successfully to 'bm_mass_evaluation_jobs'.", col_name)
                 except Exception as e_col:
                     if "already exists" in str(e_col).lower():
                         logger.info("Column '%s' already exists on 'bm_mass_evaluation_jobs' (concurrent worker startup).", col_name)
@@ -601,17 +564,7 @@ async def init_db():
                 ("training_code_enabled", "BOOLEAN", "DEFAULT TRUE NOT NULL"),
                 ("training_code_updated_at", "TIMESTAMPTZ", "DEFAULT CURRENT_TIMESTAMP NOT NULL"),
             ]:
-                res = await conn.execute(
-                    text(f"""
-                        SELECT EXISTS (
-                            SELECT FROM information_schema.columns 
-                            WHERE table_schema = 'public' 
-                              AND table_name = 'bm_training_agent_settings' 
-                              AND column_name = '{col_name}'
-                        );
-                    """)
-                )
-                if not res.scalar():
+                if not await check_column_exists_safely(conn, "bm_training_agent_settings", col_name):
                     logger.info("Adding column '%s' to 'bm_training_agent_settings' table...", col_name)
                     await conn.execute(
                         text(f"ALTER TABLE bm_training_agent_settings ADD COLUMN {col_name} {col_type} {col_default};")
@@ -625,17 +578,7 @@ async def init_db():
                     logger.info("Column '%s' added successfully to 'bm_training_agent_settings'.", col_name)
 
             # 1.6.8.2 bm_training_agent_reports
-            res = await conn.execute(
-                text("""
-                    SELECT EXISTS (
-                        SELECT FROM information_schema.columns 
-                        WHERE table_schema = 'public' 
-                          AND table_name = 'bm_training_agent_reports' 
-                          AND column_name = 'final_report_json'
-                    );
-                """)
-            )
-            if not res.scalar():
+            if not await check_column_exists_safely(conn, "bm_training_agent_reports", "final_report_json"):
                 logger.info("Adding column 'final_report_json' to 'bm_training_agent_reports' table...")
                 await conn.execute(
                     text("ALTER TABLE bm_training_agent_reports ADD COLUMN final_report_json JSONB NULL;")
@@ -647,196 +590,188 @@ async def init_db():
                 ("call_session_id", "INTEGER", "REFERENCES bm_training_call_sessions(session_id) ON DELETE SET NULL"),
                 ("evaluation_id", "INTEGER", "REFERENCES bm_training_call_evaluations(evaluation_id) ON DELETE SET NULL"),
             ]:
-                res = await conn.execute(
-                    text(f"""
-                        SELECT EXISTS (
-                            SELECT FROM information_schema.columns 
-                            WHERE table_schema = 'public' 
-                              AND table_name = 'bm_training_completion_status' 
-                              AND column_name = '{col_name}'
-                        );
-                    """)
-                )
-                if not res.scalar():
+                if not await check_column_exists_safely(conn, "bm_training_completion_status", col_name):
                     logger.info("Adding column '%s' to 'bm_training_completion_status' table...", col_name)
                     await conn.execute(
                         text(f"ALTER TABLE bm_training_completion_status ADD COLUMN {col_name} {col_type} {col_ref};")
                     )
                     logger.info("Column '%s' added successfully to 'bm_training_completion_status'.", col_name)
 
-            # Drop individual views first to avoid InvalidTableDefinitionError if column names or positions changed
-            await conn.execute(text("DROP VIEW IF EXISTS vw_bm_analysis_criteria_flat CASCADE;"))
-            await conn.execute(text("DROP VIEW IF EXISTS vw_bm_analysis_results_pivot CASCADE;"))
+            logger.info("Dynamic column migrations completed successfully.")
 
-            await conn.execute(text("""
-                CREATE OR REPLACE VIEW vw_bm_analysis_criteria_flat AS
-                SELECT
-                    a.analysis_id,
-                    a.call_id,
-                    a.created_at AS analyzed_at,
-                    c.service_id,
-                    c.service_key,
-                    c.service_name,
-                    c.typology_id,
-                    c.typology_key,
-                    c.typology_name,
-                    c.criterion_id,
-                    c.criterion_key,
-                    c.criterion_name,
-                    c.criterion_type,
-                    c.numeric_value,
-                    c.boolean_value,
-                    c.text_value,
-                    c.category_value,
-                    c.percentage_value,
-                    c.feedback,
-                    c.is_applicable,
-                    c.not_applicable,
-                    c.created_at,
-                    c.updated_at
-                FROM bm_analyses a
-                JOIN bm_analysis_criterion_results c ON a.analysis_id = c.analysis_id;
-            """))
+        # Drop and recreate PostgreSQL reporting/Looker views (skipped on SQLite)
+        if engine.dialect.name != "sqlite":
+            try:
+                conn = await engine.connect()
+                await conn.execute(text("DROP VIEW IF EXISTS vw_bm_analysis_criteria_flat CASCADE;"))
+                await conn.execute(text("DROP VIEW IF EXISTS vw_bm_analysis_results_pivot CASCADE;"))
 
-            await conn.execute(text("""
-                CREATE OR REPLACE VIEW vw_bm_analysis_results_pivot AS
-                SELECT
-                    a.analysis_id,
-                    a.call_id,
-                    MAX(c.hs_object_id) AS hs_object_id,
-                    a.created_at AS analyzed_at,
-                    a.created_at,
-                    a.call_timestamp,
-                    a.call_timestamp::date AS call_date,
-                    NULL::integer AS duration_seconds,
-                    a.call_direction AS direction,
-                    a.hubspot_owner_id AS agent_owner_id,
-                    a.agente_telefonico AS agent_name,
-                    a.status,
-                    a.error_message,
-                    
-                    -- Prompt details
-                    a.prompt_id,
-                    p.prompt_name,
-                    a.prompt_version_id,
-                    pv.version_name AS prompt_version_name,
-                    pv.version_label AS prompt_version_label,
+                await conn.execute(text("""
+                        CREATE OR REPLACE VIEW vw_bm_analysis_criteria_flat AS
+                        SELECT
+                            a.analysis_id,
+                            a.call_id,
+                            a.created_at AS analyzed_at,
+                            c.service_id,
+                            c.service_key,
+                            c.service_name,
+                            c.typology_id,
+                            c.typology_key,
+                            c.typology_name,
+                            c.criterion_id,
+                            c.criterion_key,
+                            c.criterion_name,
+                            c.criterion_type,
+                            c.numeric_value,
+                            c.boolean_value,
+                            c.text_value,
+                            c.category_value,
+                            c.percentage_value,
+                            c.feedback,
+                            c.is_applicable,
+                            c.not_applicable,
+                            c.created_at,
+                            c.updated_at
+                        FROM bm_analyses a
+                        JOIN bm_analysis_criterion_results c ON a.analysis_id = c.analysis_id;
+                    """))
 
-                    -- Service / typology
-                    MAX(c.service_id) AS service_id,
-                    MAX(c.service_key) AS service_key,
-                    MAX(c.service_name) AS service_name,
-                    MAX(c.typology_id) AS typology_id,
-                    MAX(c.typology_key) AS typology_key,
-                    MAX(c.typology_name) AS typology_name,
+                await conn.execute(text("""
+                        CREATE OR REPLACE VIEW vw_bm_analysis_results_pivot AS
+                        SELECT
+                            a.analysis_id,
+                            a.call_id,
+                            MAX(c.hs_object_id) AS hs_object_id,
+                            a.created_at AS analyzed_at,
+                            a.created_at,
+                            a.call_timestamp,
+                            a.call_timestamp::date AS call_date,
+                            NULL::integer AS duration_seconds,
+                            a.call_direction AS direction,
+                            a.hubspot_owner_id AS agent_owner_id,
+                            a.agente_telefonico AS agent_name,
+                            a.status,
+                            a.error_message,
+                            
+                            -- Prompt details
+                            a.prompt_id,
+                            p.prompt_name,
+                            a.prompt_version_id,
+                            pv.version_name AS prompt_version_name,
+                            pv.version_label AS prompt_version_label,
 
-                    -- Scores numéricos
-                    MAX(CASE WHEN c.criterion_key = 'sentiment' AND c.is_applicable = true THEN c.numeric_value END) AS sentiment,
-                    MAX(CASE WHEN c.criterion_key = 'evaluacion_global' AND c.is_applicable = true THEN c.numeric_value END) AS evaluacion_global,
-                    MAX(CASE WHEN c.criterion_key = 'empatia' AND c.is_applicable = true THEN c.numeric_value END) AS empatia,
-                    MAX(CASE WHEN c.criterion_key = 'simpatia' AND c.is_applicable = true THEN c.numeric_value END) AS simpatia,
-                    MAX(CASE WHEN c.criterion_key = 'claridad' AND c.is_applicable = true THEN c.numeric_value END) AS claridad,
-                    MAX(CASE WHEN c.criterion_key = 'procedimiento' AND c.is_applicable = true THEN c.numeric_value END) AS procedimiento,
-                    MAX(CASE WHEN c.criterion_key = 'saludo_inicio' AND c.is_applicable = true THEN c.numeric_value END) AS saludo_inicio,
-                    MAX(CASE WHEN c.criterion_key = 'trato_usted' AND c.is_applicable = true THEN c.numeric_value END) AS trato_usted,
-                    MAX(CASE WHEN c.criterion_key = 'explicaciones_medicas' AND c.is_applicable = true THEN c.numeric_value END) AS explicaciones_medicas,
-                    MAX(CASE WHEN c.criterion_key = 'claridad_explicacion_economica' AND c.is_applicable = true THEN c.numeric_value END) AS claridad_explicacion_economica,
-                    MAX(CASE WHEN c.criterion_key = 'n3_preguntas' AND c.is_applicable = true THEN c.numeric_value END) AS n3_preguntas,
-                    MAX(CASE WHEN c.criterion_key = 'claridad_de_explicacion_de_precio_en_consulta' AND c.is_applicable = true THEN c.numeric_value END) AS claridad_de_explicacion_de_precio_en_consulta,
-                    MAX(CASE WHEN c.criterion_key = 'interrupciones' AND c.is_applicable = true THEN c.numeric_value END) AS interrupciones,
-                    MAX(CASE WHEN c.criterion_key = 'velocidad_hablando_agente' AND c.is_applicable = true THEN c.numeric_value END) AS velocidad_hablando_agente,
-                    MAX(CASE WHEN c.criterion_key = 'despedida_con_refuerzo' AND c.is_applicable = true THEN c.numeric_value END) AS despedida_con_refuerzo,
-                    MAX(CASE WHEN c.criterion_key = 'siguiente_paso' AND c.is_applicable = true THEN c.numeric_value END) AS siguiente_paso,
-                    MAX(CASE WHEN c.criterion_key = 'gestion_objeciones' AND c.is_applicable = true THEN c.numeric_value END) AS gestion_objeciones,
-                    MAX(CASE WHEN c.criterion_key = 'uso_nombre_paciente' AND c.is_applicable = true THEN c.numeric_value END) AS uso_nombre_paciente,
-                    MAX(CASE WHEN c.criterion_key = 'uso_preguntas' AND c.is_applicable = true THEN c.numeric_value END) AS uso_preguntas,
-                    MAX(CASE WHEN c.criterion_key = 'propension' AND c.is_applicable = true THEN c.numeric_value END) AS propension,
+                            -- Service / typology
+                            MAX(c.service_id) AS service_id,
+                            MAX(c.service_key) AS service_key,
+                            MAX(c.service_name) AS service_name,
+                            MAX(c.typology_id) AS typology_id,
+                            MAX(c.typology_key) AS typology_key,
+                            MAX(c.typology_name) AS typology_name,
 
-                    -- Feedbacks
-                    MAX(CASE WHEN (c.criterion_key = 'sentiment' OR c.feed_key = 'sentiment_feed') AND c.is_applicable = true THEN c.feedback END) AS sentiment_feed,
-                    MAX(CASE WHEN (c.criterion_key = 'empatia' OR c.feed_key = 'empatia_feed') AND c.is_applicable = true THEN c.feedback END) AS empatia_feed,
-                    MAX(CASE WHEN (c.criterion_key = 'simpatia' OR c.feed_key = 'simpatia_feed') AND c.is_applicable = true THEN c.feedback END) AS simpatia_feed,
-                    MAX(CASE WHEN (c.criterion_key = 'claridad' OR c.feed_key = 'claridad_feed') AND c.is_applicable = true THEN c.feedback END) AS claridad_feed,
-                    MAX(CASE WHEN (c.criterion_key = 'saludo_inicio' OR c.feed_key = 'saludo_inicio_feed') AND c.is_applicable = true THEN c.feedback END) AS saludo_inicio_feed,
-                    MAX(CASE WHEN (c.criterion_key = 'trato_usted' OR c.feed_key = 'trato_usted_feed') AND c.is_applicable = true THEN c.feedback END) AS trato_usted_feed,
-                    MAX(CASE WHEN (c.criterion_key = 'explicaciones_medicas' OR c.feed_key = 'explicaciones_medicas_feed') AND c.is_applicable = true THEN c.feedback END) AS explicaciones_medicas_feed,
-                    MAX(CASE WHEN (c.criterion_key = 'claridad_explicacion_economica' OR c.feed_key = 'claridad_explicacion_economica_feed') AND c.is_applicable = true THEN c.feedback END) AS claridad_explicacion_economica_feed,
-                    MAX(CASE WHEN (c.criterion_key = 'n3_preguntas' OR c.feed_key = 'n3_preguntas_feedback') AND c.is_applicable = true THEN c.feedback END) AS n3_preguntas_feedback,
-                    MAX(CASE WHEN (c.criterion_key = 'claridad_de_explicacion_de_precio_en_consulta' OR c.feed_key = 'claridad_de_explicacion_de_precio_en_consulta_feed') AND c.is_applicable = true THEN c.feedback END) AS claridad_de_explicacion_de_precio_en_consulta_feed,
-                    MAX(CASE WHEN (c.criterion_key = 'interrupciones' OR c.feed_key = 'interrupciones_feed') AND c.is_applicable = true THEN c.feedback END) AS interrupciones_feed,
-                    MAX(CASE WHEN (c.criterion_key = 'velocidad_hablando_agente' OR c.feed_key = 'velocidad_hablando_agente_feed') AND c.is_applicable = true THEN c.feedback END) AS velocidad_hablando_agente_feed,
-                    MAX(CASE WHEN (c.criterion_key = 'despedida_con_refuerzo' OR c.feed_key = 'despedida_con_refuerzo_feed') AND c.is_applicable = true THEN c.feedback END) AS despedida_con_refuerzo_feed,
-                    MAX(CASE WHEN (c.criterion_key = 'gestion_objeciones' OR c.feed_key = 'gestion_objeciones_feed') AND c.is_applicable = true THEN c.feedback END) AS gestion_objeciones_feed,
-                    MAX(CASE WHEN (c.criterion_key = 'uso_nombre_paciente' OR c.feed_key = 'uso_nombre_paciente_feed') AND c.is_applicable = true THEN c.feedback END) AS uso_nombre_paciente_feed,
-                    MAX(CASE WHEN (c.criterion_key = 'uso_preguntas' OR c.feed_key = 'uso_preguntas_feed') AND c.is_applicable = true THEN c.feedback END) AS uso_preguntas_feed,
+                            -- Scores numéricos
+                            MAX(CASE WHEN c.criterion_key = 'sentiment' AND c.is_applicable = true THEN c.numeric_value END) AS sentiment,
+                            MAX(CASE WHEN c.criterion_key = 'evaluacion_global' AND c.is_applicable = true THEN c.numeric_value END) AS evaluacion_global,
+                            MAX(CASE WHEN c.criterion_key = 'empatia' AND c.is_applicable = true THEN c.numeric_value END) AS empatia,
+                            MAX(CASE WHEN c.criterion_key = 'simpatia' AND c.is_applicable = true THEN c.numeric_value END) AS simpatia,
+                            MAX(CASE WHEN c.criterion_key = 'claridad' AND c.is_applicable = true THEN c.numeric_value END) AS claridad,
+                            MAX(CASE WHEN c.criterion_key = 'procedimiento' AND c.is_applicable = true THEN c.numeric_value END) AS procedimiento,
+                            MAX(CASE WHEN c.criterion_key = 'saludo_inicio' AND c.is_applicable = true THEN c.numeric_value END) AS saludo_inicio,
+                            MAX(CASE WHEN c.criterion_key = 'trato_usted' AND c.is_applicable = true THEN c.numeric_value END) AS trato_usted,
+                            MAX(CASE WHEN c.criterion_key = 'explicaciones_medicas' AND c.is_applicable = true THEN c.numeric_value END) AS explicaciones_medicas,
+                            MAX(CASE WHEN c.criterion_key = 'claridad_explicacion_economica' AND c.is_applicable = true THEN c.numeric_value END) AS claridad_explicacion_economica,
+                            MAX(CASE WHEN c.criterion_key = 'n3_preguntas' AND c.is_applicable = true THEN c.numeric_value END) AS n3_preguntas,
+                            MAX(CASE WHEN c.criterion_key = 'claridad_de_explicacion_de_precio_en_consulta' AND c.is_applicable = true THEN c.numeric_value END) AS claridad_de_explicacion_de_precio_en_consulta,
+                            MAX(CASE WHEN c.criterion_key = 'interrupciones' AND c.is_applicable = true THEN c.numeric_value END) AS interrupciones,
+                            MAX(CASE WHEN c.criterion_key = 'velocidad_hablando_agente' AND c.is_applicable = true THEN c.numeric_value END) AS velocidad_hablando_agente,
+                            MAX(CASE WHEN c.criterion_key = 'despedida_con_refuerzo' AND c.is_applicable = true THEN c.numeric_value END) AS despedida_con_refuerzo,
+                            MAX(CASE WHEN c.criterion_key = 'siguiente_paso' AND c.is_applicable = true THEN c.numeric_value END) AS siguiente_paso,
+                            MAX(CASE WHEN c.criterion_key = 'gestion_objeciones' AND c.is_applicable = true THEN c.numeric_value END) AS gestion_objeciones,
+                            MAX(CASE WHEN c.criterion_key = 'uso_nombre_paciente' AND c.is_applicable = true THEN c.numeric_value END) AS uso_nombre_paciente,
+                            MAX(CASE WHEN c.criterion_key = 'uso_preguntas' AND c.is_applicable = true THEN c.numeric_value END) AS uso_preguntas,
+                            MAX(CASE WHEN c.criterion_key = 'propension' AND c.is_applicable = true THEN c.numeric_value END) AS propension,
 
-                    -- Porcentajes / números
-                    MAX(CASE WHEN c.criterion_key = 'hablando_agente' AND c.is_applicable = true THEN COALESCE(c.percentage_value, c.numeric_value) END) AS hablando_agente,
-                    MAX(CASE WHEN c.criterion_key = 'hablando_paciente' AND c.is_applicable = true THEN COALESCE(c.percentage_value, c.numeric_value) END) AS hablando_paciente,
-                    MAX(CASE WHEN c.criterion_key = 'palabras_minuto_agente' AND c.is_applicable = true THEN c.numeric_value END) AS palabras_minuto_agente,
-                    MAX(CASE WHEN c.criterion_key = 'meses_patologia' AND c.is_applicable = true THEN c.numeric_value END) AS meses_patologia,
-                    MAX(CASE WHEN c.criterion_key = 'edad' AND c.is_applicable = true THEN c.numeric_value END) AS edad,
+                            -- Feedbacks
+                            MAX(CASE WHEN (c.criterion_key = 'sentiment' OR c.feed_key = 'sentiment_feed') AND c.is_applicable = true THEN c.feedback END) AS sentiment_feed,
+                            MAX(CASE WHEN (c.criterion_key = 'empatia' OR c.feed_key = 'empatia_feed') AND c.is_applicable = true THEN c.feedback END) AS empatia_feed,
+                            MAX(CASE WHEN (c.criterion_key = 'simpatia' OR c.feed_key = 'simpatia_feed') AND c.is_applicable = true THEN c.feedback END) AS simpatia_feed,
+                            MAX(CASE WHEN (c.criterion_key = 'claridad' OR c.feed_key = 'claridad_feed') AND c.is_applicable = true THEN c.feedback END) AS claridad_feed,
+                            MAX(CASE WHEN (c.criterion_key = 'saludo_inicio' OR c.feed_key = 'saludo_inicio_feed') AND c.is_applicable = true THEN c.feedback END) AS saludo_inicio_feed,
+                            MAX(CASE WHEN (c.criterion_key = 'trato_usted' OR c.feed_key = 'trato_usted_feed') AND c.is_applicable = true THEN c.feedback END) AS trato_usted_feed,
+                            MAX(CASE WHEN (c.criterion_key = 'explicaciones_medicas' OR c.feed_key = 'explicaciones_medicas_feed') AND c.is_applicable = true THEN c.feedback END) AS explicaciones_medicas_feed,
+                            MAX(CASE WHEN (c.criterion_key = 'claridad_explicacion_economica' OR c.feed_key = 'claridad_explicacion_economica_feed') AND c.is_applicable = true THEN c.feedback END) AS claridad_explicacion_economica_feed,
+                            MAX(CASE WHEN (c.criterion_key = 'n3_preguntas' OR c.feed_key = 'n3_preguntas_feedback') AND c.is_applicable = true THEN c.feedback END) AS n3_preguntas_feedback,
+                            MAX(CASE WHEN (c.criterion_key = 'claridad_de_explicacion_de_precio_en_consulta' OR c.feed_key = 'claridad_de_explicacion_de_precio_en_consulta_feed') AND c.is_applicable = true THEN c.feedback END) AS claridad_de_explicacion_de_precio_en_consulta_feed,
+                            MAX(CASE WHEN (c.criterion_key = 'interrupciones' OR c.feed_key = 'interrupciones_feed') AND c.is_applicable = true THEN c.feedback END) AS interrupciones_feed,
+                            MAX(CASE WHEN (c.criterion_key = 'velocidad_hablando_agente' OR c.feed_key = 'velocidad_hablando_agente_feed') AND c.is_applicable = true THEN c.feedback END) AS velocidad_hablando_agente_feed,
+                            MAX(CASE WHEN (c.criterion_key = 'despedida_con_refuerzo' OR c.feed_key = 'despedida_con_refuerzo_feed') AND c.is_applicable = true THEN c.feedback END) AS despedida_con_refuerzo_feed,
+                            MAX(CASE WHEN (c.criterion_key = 'gestion_objeciones' OR c.feed_key = 'gestion_objeciones_feed') AND c.is_applicable = true THEN c.feedback END) AS gestion_objeciones_feed,
+                            MAX(CASE WHEN (c.criterion_key = 'uso_nombre_paciente' OR c.feed_key = 'uso_nombre_paciente_feed') AND c.is_applicable = true THEN c.feedback END) AS uso_nombre_paciente_feed,
+                            MAX(CASE WHEN (c.criterion_key = 'uso_preguntas' OR c.feed_key = 'uso_preguntas_feed') AND c.is_applicable = true THEN c.feedback END) AS uso_preguntas_feed,
 
-                    -- Booleanos
-                    BOOL_OR(CASE WHEN c.criterion_key = 'verifica_patologia' AND c.is_applicable = true THEN c.boolean_value END) AS verifica_patologia,
-                    BOOL_OR(CASE WHEN c.criterion_key = 'reformula_patologia' AND c.is_applicable = true THEN c.boolean_value END) AS reformula_patologia,
-                    BOOL_OR(CASE WHEN c.criterion_key = 'medio' AND c.is_applicable = true THEN c.boolean_value END) AS medio,
-                    BOOL_OR(CASE WHEN c.criterion_key = 'precio_consulta' AND c.is_applicable = true THEN c.boolean_value END) AS precio_consulta,
-                    BOOL_OR(CASE WHEN c.criterion_key = 'tratamiento_no_en_precio' AND c.is_applicable = true THEN c.boolean_value END) AS tratamiento_no_en_precio,
-                    BOOL_OR(CASE WHEN c.criterion_key = 'duracion_consulta' AND c.is_applicable = true THEN c.boolean_value END) AS duracion_consulta,
-                    BOOL_OR(CASE WHEN c.criterion_key = 'direccion_y_referencias' AND c.is_applicable = true THEN c.boolean_value END) AS direccion_y_referencias,
-                    BOOL_OR(CASE WHEN (c.criterion_key = 'puntalidad' OR c.criterion_key = 'puntualidad') AND c.is_applicable = true THEN c.boolean_value END) AS puntualidad,
-                    BOOL_OR(CASE WHEN c.criterion_key = 'cierre_cita' AND c.is_applicable = true THEN c.boolean_value END) AS cierre_cita,
-                    BOOL_OR(CASE WHEN c.criterion_key = 'conocimiento_boston_medical' AND c.is_applicable = true THEN c.boolean_value END) AS conocimiento_boston_medical,
-                    BOOL_OR(CASE WHEN c.criterion_key = 'puede_adelantar_cita' AND c.is_applicable = true THEN c.boolean_value END) AS puede_adelantar_cita,
-                    BOOL_OR(CASE WHEN c.criterion_key = 'pregunta_pareja' AND c.is_applicable = true THEN c.boolean_value END) AS pregunta_pareja,
-                    BOOL_OR(CASE WHEN c.criterion_key = 'recomienda_pareja' AND c.is_applicable = true THEN c.boolean_value END) AS recomienda_pareja,
-                    BOOL_OR(CASE WHEN c.criterion_key = 'pareja_conocedora' AND c.is_applicable = true THEN c.boolean_value END) AS pareja_conocedora,
-                    BOOL_OR(CASE WHEN c.criterion_key = 'pareja_asistira' AND c.is_applicable = true THEN c.boolean_value END) AS pareja_asistira,
+                            -- Porcentajes / números
+                            MAX(CASE WHEN c.criterion_key = 'hablando_agente' AND c.is_applicable = true THEN COALESCE(c.percentage_value, c.numeric_value) END) AS hablando_agente,
+                            MAX(CASE WHEN c.criterion_key = 'hablando_paciente' AND c.is_applicable = true THEN COALESCE(c.percentage_value, c.numeric_value) END) AS hablando_paciente,
+                            MAX(CASE WHEN c.criterion_key = 'palabras_minuto_agente' AND c.is_applicable = true THEN c.numeric_value END) AS palabras_minuto_agente,
+                            MAX(CASE WHEN c.criterion_key = 'meses_patologia' AND c.is_applicable = true THEN c.numeric_value END) AS meses_patologia,
+                            MAX(CASE WHEN c.criterion_key = 'edad' AND c.is_applicable = true THEN c.numeric_value END) AS edad,
 
-                    -- Categorías / textos
-                    MAX(CASE WHEN c.criterion_key = 'tipo_llamada' AND c.is_applicable = true THEN COALESCE(c.category_value, c.text_value) END) AS tipo_llamada,
-                    MAX(CASE WHEN c.criterion_key = 'patologia' AND c.is_applicable = true THEN COALESCE(c.category_value, c.text_value) END) AS patologia,
-                    MAX(CASE WHEN c.criterion_key = 'objeciones' AND c.is_applicable = true THEN c.text_value END) AS objeciones,
-                    MAX(CASE WHEN c.criterion_key = 'objecion_1' AND c.is_applicable = true THEN COALESCE(c.category_value, c.text_value) END) AS objecion_1,
-                    MAX(CASE WHEN c.criterion_key = 'objecion_2' AND c.is_applicable = true THEN COALESCE(c.category_value, c.text_value) END) AS objecion_2,
-                    MAX(CASE WHEN c.criterion_key = 'objecion_3' AND c.is_applicable = true THEN COALESCE(c.category_value, c.text_value) END) AS objecion_3,
-                    MAX(CASE WHEN c.criterion_key = 'motivo_no_cita' AND c.is_applicable = true THEN COALESCE(c.category_value, c.text_value) END) AS motivo_no_cita,
-                    MAX(CASE WHEN c.criterion_key = 'cuanto_tiempo' AND c.is_applicable = true THEN c.text_value END) AS cuanto_tiempo,
-                    MAX(CASE WHEN c.criterion_key = 'por_que_ahora' AND c.is_applicable = true THEN c.text_value END) AS por_que_ahora
+                            -- Booleanos
+                            BOOL_OR(CASE WHEN c.criterion_key = 'verifica_patologia' AND c.is_applicable = true THEN c.boolean_value END) AS verifica_patologia,
+                            BOOL_OR(CASE WHEN c.criterion_key = 'reformula_patologia' AND c.is_applicable = true THEN c.boolean_value END) AS reformula_patologia,
+                            BOOL_OR(CASE WHEN c.criterion_key = 'medio' AND c.is_applicable = true THEN c.boolean_value END) AS medio,
+                            BOOL_OR(CASE WHEN c.criterion_key = 'precio_consulta' AND c.is_applicable = true THEN c.boolean_value END) AS precio_consulta,
+                            BOOL_OR(CASE WHEN c.criterion_key = 'tratamiento_no_en_precio' AND c.is_applicable = true THEN c.boolean_value END) AS tratamiento_no_en_precio,
+                            BOOL_OR(CASE WHEN c.criterion_key = 'duracion_consulta' AND c.is_applicable = true THEN c.boolean_value END) AS duracion_consulta,
+                            BOOL_OR(CASE WHEN c.criterion_key = 'direccion_y_referencias' AND c.is_applicable = true THEN c.boolean_value END) AS direccion_y_referencias,
+                            BOOL_OR(CASE WHEN (c.criterion_key = 'puntalidad' OR c.criterion_key = 'puntualidad') AND c.is_applicable = true THEN c.boolean_value END) AS puntualidad,
+                            BOOL_OR(CASE WHEN c.criterion_key = 'cierre_cita' AND c.is_applicable = true THEN c.boolean_value END) AS cierre_cita,
+                            BOOL_OR(CASE WHEN c.criterion_key = 'conocimiento_boston_medical' AND c.is_applicable = true THEN c.boolean_value END) AS conocimiento_boston_medical,
+                            BOOL_OR(CASE WHEN c.criterion_key = 'puede_adelantar_cita' AND c.is_applicable = true THEN c.boolean_value END) AS puede_adelantar_cita,
+                            BOOL_OR(CASE WHEN c.criterion_key = 'pregunta_pareja' AND c.is_applicable = true THEN c.boolean_value END) AS pregunta_pareja,
+                            BOOL_OR(CASE WHEN c.criterion_key = 'recomienda_pareja' AND c.is_applicable = true THEN c.boolean_value END) AS recomienda_pareja,
+                            BOOL_OR(CASE WHEN c.criterion_key = 'pareja_conocedora' AND c.is_applicable = true THEN c.boolean_value END) AS pareja_conocedora,
+                            BOOL_OR(CASE WHEN c.criterion_key = 'pareja_asistira' AND c.is_applicable = true THEN c.boolean_value END) AS pareja_asistira,
 
-                FROM bm_analyses a
-                JOIN bm_analysis_criterion_results c ON a.analysis_id = c.analysis_id
-                LEFT JOIN bm_prompts p ON a.prompt_id = p.prompt_id
-                LEFT JOIN bm_prompt_versions pv ON a.prompt_version_id = pv.id
-                GROUP BY
-                    a.analysis_id,
-                    a.call_id,
-                    a.created_at,
-                    a.call_timestamp,
-                    a.call_direction,
-                    a.hubspot_owner_id,
-                    a.agente_telefonico,
-                    a.status,
-                    a.error_message,
-                    a.prompt_id,
-                    p.prompt_name,
-                    a.prompt_version_id,
-                    pv.version_name,
-                    pv.version_label;
-            """))
+                            -- Categorías / textos
+                            MAX(CASE WHEN c.criterion_key = 'tipo_llamada' AND c.is_applicable = true THEN COALESCE(c.category_value, c.text_value) END) AS tipo_llamada,
+                            MAX(CASE WHEN c.criterion_key = 'patologia' AND c.is_applicable = true THEN COALESCE(c.category_value, c.text_value) END) AS patologia,
+                            MAX(CASE WHEN c.criterion_key = 'objeciones' AND c.is_applicable = true THEN c.text_value END) AS objeciones,
+                            MAX(CASE WHEN c.criterion_key = 'objecion_1' AND c.is_applicable = true THEN COALESCE(c.category_value, c.text_value) END) AS objecion_1,
+                            MAX(CASE WHEN c.criterion_key = 'objecion_2' AND c.is_applicable = true THEN COALESCE(c.category_value, c.text_value) END) AS objecion_2,
+                            MAX(CASE WHEN c.criterion_key = 'objecion_3' AND c.is_applicable = true THEN COALESCE(c.category_value, c.text_value) END) AS objecion_3,
+                            MAX(CASE WHEN c.criterion_key = 'motivo_no_cita' AND c.is_applicable = true THEN COALESCE(c.category_value, c.text_value) END) AS motivo_no_cita,
+                            MAX(CASE WHEN c.criterion_key = 'cuanto_tiempo' AND c.is_applicable = true THEN c.text_value END) AS cuanto_tiempo,
+                            MAX(CASE WHEN c.criterion_key = 'por_que_ahora' AND c.is_applicable = true THEN c.text_value END) AS por_que_ahora
 
-            # ── Looker-ready views: drop first (column order may have changed) ──────
-            await conn.execute(text("DROP VIEW IF EXISTS vw_bm_mass_evaluation_criteria_flat CASCADE;"))
-            await conn.execute(text("DROP VIEW IF EXISTS vw_bm_mass_evaluation_results_pivot CASCADE;"))
-            await conn.execute(text("DROP VIEW IF EXISTS vw_bm_mass_evaluation_calls_summary CASCADE;"))
-            await conn.execute(text("DROP VIEW IF EXISTS vw_bm_mass_evaluation_daily_summary CASCADE;"))
+                        FROM bm_analyses a
+                        JOIN bm_analysis_criterion_results c ON a.analysis_id = c.analysis_id
+                        LEFT JOIN bm_prompts p ON a.prompt_id = p.prompt_id
+                        LEFT JOIN bm_prompt_versions pv ON a.prompt_version_id = pv.id
+                        GROUP BY
+                            a.analysis_id,
+                            a.call_id,
+                            a.created_at,
+                            a.call_timestamp,
+                            a.call_direction,
+                            a.hubspot_owner_id,
+                            a.agente_telefonico,
+                            a.status,
+                            a.error_message,
+                            a.prompt_id,
+                            p.prompt_name,
+                            a.prompt_version_id,
+                            pv.version_name,
+                            pv.version_label;
+                    """))
 
-            # A) vw_bm_mass_evaluation_criteria_flat
-            #    One row per (call × criterion). Safe for Looker exploration.
-            #    evaluacion_global is NOT a criterion row; it lives in result_json.
-            await conn.execute(text("""
-                CREATE OR REPLACE VIEW vw_bm_mass_evaluation_criteria_flat AS
+                # Looker-ready views: drop first
+                await conn.execute(text("DROP VIEW IF EXISTS vw_bm_mass_evaluation_criteria_flat CASCADE;"))
+                await conn.execute(text("DROP VIEW IF EXISTS vw_bm_mass_evaluation_results_pivot CASCADE;"))
+                await conn.execute(text("DROP VIEW IF EXISTS vw_bm_mass_evaluation_calls_summary CASCADE;"))
+                await conn.execute(text("DROP VIEW IF EXISTS vw_bm_mass_evaluation_daily_summary CASCADE;"))
+
+                await conn.execute(text("""
+                        CREATE OR REPLACE VIEW vw_bm_mass_evaluation_criteria_flat AS
                 SELECT
                     r.mass_analysis_id          AS mass_evaluation_result_id,
                     r.call_id                   AS conversation_id,
@@ -947,7 +882,7 @@ async def init_db():
             # B) vw_bm_mass_evaluation_calls_summary
             #    One row per call; key criteria pivoted as columns.
             #    evaluacion_global extracted from result_json JSONB.
-            await conn.execute(text("""
+                await conn.execute(text("""
                 CREATE OR REPLACE VIEW vw_bm_mass_evaluation_calls_summary AS
                 SELECT
                     r.mass_analysis_id          AS mass_evaluation_result_id,
@@ -1035,7 +970,7 @@ async def init_db():
             """))
 
             # C) vw_bm_mass_evaluation_daily_summary  (operational aggregation, unchanged)
-            await conn.execute(text("""
+                await conn.execute(text("""
                 CREATE OR REPLACE VIEW vw_bm_mass_evaluation_daily_summary AS
                 SELECT
                     c.created_at::date AS analysis_date,
@@ -1086,15 +1021,15 @@ async def init_db():
                     c.criterion_name,
                     c.criterion_type;
             """))
-            logger.info("Reporting views ensured (criteria_flat, calls_summary, daily_summary).")
+                logger.info("Reporting views ensured (criteria_flat, calls_summary, daily_summary).")
 
-            # ── Individual analysis Looker views ──────────────────────────────
-            await conn.execute(text("DROP VIEW IF EXISTS vw_bm_individual_analysis_criteria_flat CASCADE;"))
-            await conn.execute(text("DROP VIEW IF EXISTS vw_bm_individual_analysis_summary CASCADE;"))
-            await conn.execute(text("DROP VIEW IF EXISTS vw_bm_all_analysis_criteria_flat CASCADE;"))
+                # ── Individual analysis Looker views ──────────────────────────────
+                await conn.execute(text("DROP VIEW IF EXISTS vw_bm_individual_analysis_criteria_flat CASCADE;"))
+                await conn.execute(text("DROP VIEW IF EXISTS vw_bm_individual_analysis_summary CASCADE;"))
+                await conn.execute(text("DROP VIEW IF EXISTS vw_bm_all_analysis_criteria_flat CASCADE;"))
 
             # C) vw_bm_individual_analysis_criteria_flat
-            await conn.execute(text("""
+                await conn.execute(text("""
                 CREATE OR REPLACE VIEW vw_bm_individual_analysis_criteria_flat AS
                 SELECT
                     a.analysis_id,
@@ -1283,7 +1218,7 @@ async def init_db():
             """))
 
             # D) vw_bm_individual_analysis_summary
-            await conn.execute(text("""
+                await conn.execute(text("""
                 CREATE OR REPLACE VIEW vw_bm_individual_analysis_summary AS
                 SELECT
                     a.analysis_id,
@@ -1374,7 +1309,7 @@ async def init_db():
             """))
 
             # E) vw_bm_all_analysis_criteria_flat (unified UNION ALL)
-            await conn.execute(text("""
+                await conn.execute(text("""
                 CREATE OR REPLACE VIEW vw_bm_all_analysis_criteria_flat AS
                 SELECT
                     mass_evaluation_result_id AS analysis_id, conversation_id,
@@ -1400,30 +1335,29 @@ async def init_db():
                     percentage_value, feedback, TRUE AS is_applicable, analysis_timestamp
                 FROM vw_bm_individual_analysis_criteria_flat;
             """))
-            logger.info("Individual analysis Looker views ensured (individual_criteria_flat, individual_summary, all_analysis_criteria_flat).")
+                logger.info("Individual analysis Looker views ensured (individual_criteria_flat, individual_summary, all_analysis_criteria_flat).")
 
-            # F) vw_bm_mass_evaluation_report_wide & vw_bm_individual_analysis_report_wide
-            import os
-            migration_path = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-                "migrations",
-                "v004_looker_wide_views.sql"
-            )
-            if os.path.exists(migration_path):
-                logger.info(f"Applying Looker wide reporting views migration from {migration_path}...")
-                with open(migration_path, "r", encoding="utf-8") as mf:
-                    sql_content = mf.read()
-                # Split statements by semicolon and execute them
-                statements = [stmt.strip() for stmt in sql_content.split(";") if stmt.strip()]
-                for stmt in statements:
-                    await conn.execute(text(stmt))
-                logger.info("Looker wide reporting views migration applied successfully.")
-            else:
-                msg = f"CRITICAL: Looker wide reporting views migration file not found at {migration_path}! Rolling back transaction."
-                logger.error(msg)
-                raise FileNotFoundError(msg)
-
-
+                # F) vw_bm_mass_evaluation_report_wide & vw_bm_individual_analysis_report_wide
+                import os
+                migration_path = os.path.join(
+                    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                    "migrations",
+                    "v004_looker_wide_views.sql"
+                )
+                if os.path.exists(migration_path):
+                    logger.info(f"Applying Looker wide reporting views migration from {migration_path}...")
+                    with open(migration_path, "r", encoding="utf-8") as mf:
+                        sql_content = mf.read()
+                    # Split statements by semicolon and execute them
+                    statements = [stmt.strip() for stmt in sql_content.split(";") if stmt.strip()]
+                    for stmt in statements:
+                        await conn.execute(text(stmt))
+                    logger.info("Looker wide reporting views migration applied successfully.")
+                else:
+                    msg = f"CRITICAL: Looker wide reporting views migration file not found at {migration_path}! Rolling back transaction."
+                    raise FileNotFoundError(msg)
+            except Exception as e_vw:
+                logger.warning("[db_init_service] Skipped PostgreSQL-specific views on non-PG database: %s", e_vw)
 
         # Isolated backfill block was removed to prevent destructive wiping of base structure criteria and prompt types on startup.
         logger.info("Skipping legacy isolated backfill to preserve custom base structures and criteria.")
