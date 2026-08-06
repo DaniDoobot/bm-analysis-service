@@ -920,7 +920,11 @@ async def get_automation_scheduler_status(
 ):
     """Retrieve diagnostic status for the automation scheduler background worker and due automations count."""
     from app.config import get_settings
+    from app.models.mass_evaluations import MassAnalysisAutomation, MassAnalysisAutomationRun
+    from sqlalchemy import or_
     settings = get_settings()
+
+    stale_threshold_min = settings.automation_running_stale_after_minutes or 60
 
     all_automations = await MassEvaluationService.list_automations(
         db,
@@ -943,6 +947,42 @@ async def get_automation_scheduler_status(
         if last_at is None or (now - last_at) >= timedelta(minutes=interval_min):
             due_count += 1
 
+    # Query active running automation runs
+    running_stmt = select(MassAnalysisAutomationRun).where(MassAnalysisAutomationRun.status == "running")
+    if context.allowed_service_ids is not None or context.allowed_company_ids is not None:
+        from app.models.services import Service
+        running_stmt = running_stmt.join(MassAnalysisAutomation, MassAnalysisAutomation.automation_id == MassAnalysisAutomationRun.automation_id)
+        if context.allowed_service_ids is not None:
+            running_stmt = running_stmt.where(MassAnalysisAutomation.service_id.in_(context.allowed_service_ids))
+        elif context.allowed_company_ids:
+            running_stmt = running_stmt.join(Service, Service.service_id == MassAnalysisAutomation.service_id).where(Service.company_id.in_(context.allowed_company_ids))
+
+    res_running = await db.execute(running_stmt)
+    running_runs = res_running.scalars().all()
+
+    running_automations_count = len(running_runs)
+    stale_running_automations_count = 0
+    blocked_automations_count = len(set(r.automation_id for r in running_runs))
+    blocked_runs = []
+
+    for r in running_runs:
+        st_at = r.started_at
+        if st_at and st_at.tzinfo is None:
+            st_at = st_at.replace(tzinfo=timezone.utc)
+        age_min = int((now - st_at).total_seconds() / 60) if st_at else 0
+        if age_min >= stale_threshold_min:
+            stale_running_automations_count += 1
+
+        blocked_runs.append({
+            "automation_id": r.automation_id,
+            "automation_run_id": r.automation_run_id,
+            "run_id": r.run_id,
+            "status": r.status,
+            "age_minutes": age_min,
+            "is_stale": age_min >= stale_threshold_min,
+            "started_at": r.started_at.isoformat() if r.started_at else None
+        })
+
     return {
         "enabled": settings.enable_automation_scheduler,
         "mode": "background_loop" if settings.enable_automation_scheduler else "disabled_manual_or_cron",
@@ -951,6 +991,11 @@ async def get_automation_scheduler_status(
         "inactive_automations_count": len(inactive_automations),
         "total_automations_count": len(all_automations),
         "due_automations_count": due_count,
+        "running_automations_count": running_automations_count,
+        "stale_running_automations_count": stale_running_automations_count,
+        "blocked_automations_count": blocked_automations_count,
+        "blocked_runs": blocked_runs,
+        "stale_threshold_minutes": stale_threshold_min,
         "hint": "Set ENABLE_AUTOMATION_SCHEDULER=true in .env to activate the internal background worker loop."
     }
 
@@ -973,6 +1018,27 @@ async def trigger_run_due_automations(
         service_ids=context.allowed_service_ids
     )
     return result
+
+
+@router.post("/mass-analysis/automations/runs/{run_id}/mark-stale-failed", response_model=MassAnalysisAutomationRunResponse)
+async def mark_automation_run_stale_failed(
+    run_id: int,
+    context: TenantContext = Depends(get_tenant_context),
+    db: AsyncSession = Depends(get_db)
+):
+    """Manually mark a stuck or stale running automation execution run as failed."""
+    if context.normalized_role == InternalRole.AGENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para modificar ejecuciones de automatizaciones."
+        )
+    run = await MassEvaluationService.mark_automation_run_stale_failed(db, run_id=run_id, context=context)
+    if not run:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Automation run with ID {run_id} not found."
+        )
+    return run
 
 
 @router.get("/mass-analysis/automations/{automation_id}", response_model=MassAnalysisAutomationResponse)

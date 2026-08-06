@@ -134,14 +134,14 @@ class TestAutomationScheduler(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(res["skipped_automations_count"], 0)
 
     async def test_anti_duplicate_lock_skips_running_automations(self):
-        """If an automation is already in 'running' status, subsequent run-due skips it."""
+        """If an automation is in recent 'running' status (<60 min), subsequent run-due skips it."""
         async with AsyncSession(self.engine) as db:
-            # Seed active running run for automation 8801
+            # Seed active running run for automation 8801 (started 5 min ago)
             db.add(MassAnalysisAutomationRun(
                 automation_run_id=99001,
                 automation_id=8801,
                 status="running",
-                started_at=datetime.now(timezone.utc)
+                started_at=datetime.now(timezone.utc) - timedelta(minutes=5)
             ))
             await db.commit()
 
@@ -150,6 +150,51 @@ class TestAutomationScheduler(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(res["due_automations_count"], 1)
             self.assertEqual(res["launched_automations_count"], 0)
             self.assertEqual(res["skipped_automations_count"], 1)
+            self.assertEqual(res["executions"][0]["reason_skipped"], "already_running")
+            self.assertEqual(res["executions"][0]["is_stale"], False)
+
+    async def test_stale_running_automation_is_recovered_and_retriggered(self):
+        """If an automation run is stuck in 'running' for >60 min, it is marked failed and new run is triggered."""
+        from unittest.mock import patch, AsyncMock, MagicMock
+        async with AsyncSession(self.engine) as db:
+            # Seed stale running run (started 90 minutes ago)
+            db.add(MassAnalysisAutomationRun(
+                automation_run_id=99002,
+                automation_id=8801,
+                status="running",
+                started_at=datetime.now(timezone.utc) - timedelta(minutes=90)
+            ))
+            await db.commit()
+
+        fake_run = MagicMock()
+        fake_run.run_id = 98802
+        with patch.object(MassEvaluationService, "run_job", new_callable=AsyncMock, return_value=fake_run):
+            async with AsyncSession(self.engine) as db:
+                res = await MassEvaluationService.run_due_automations(db, company_ids=[880])
+                self.assertEqual(res["stale_runs_closed"], 1)
+                self.assertEqual(res["launched_automations_count"], 1)
+
+            async with AsyncSession(self.engine) as db:
+                stale_run = await db.get(MassAnalysisAutomationRun, 99002)
+                self.assertEqual(stale_run.status, "failed")
+                self.assertIn("AUTOMATION_RUNNING_STALE_AFTER_MINUTES", stale_run.error_message)
+
+    async def test_manual_mark_stale_failed(self):
+        """Administrator can manually mark a stuck running execution as failed via mark_automation_run_stale_failed."""
+        async with AsyncSession(self.engine) as db:
+            db.add(MassAnalysisAutomationRun(
+                automation_run_id=99003,
+                automation_id=8801,
+                status="running",
+                started_at=datetime.now(timezone.utc) - timedelta(minutes=10)
+            ))
+            await db.commit()
+
+        async with AsyncSession(self.engine) as db:
+            updated = await MassEvaluationService.mark_automation_run_stale_failed(db, run_id=99003)
+            self.assertIsNotNone(updated)
+            self.assertEqual(updated.status, "failed")
+            self.assertIn("administrator", updated.error_message)
 
 
 if __name__ == "__main__":

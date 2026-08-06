@@ -55,6 +55,7 @@ class Settings(BaseSettings):
 
     # ── Automation Scheduler ──────────────────────────────────────────────────
     enable_automation_scheduler: bool = False
+    automation_running_stale_after_minutes: int = 60
 
     # ── Personalized Training Scheduler ───────────────────────────────────────
     enable_training_scheduler: bool = True

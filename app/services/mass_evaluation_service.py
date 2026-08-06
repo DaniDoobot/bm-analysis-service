@@ -2347,6 +2347,155 @@ class MassEvaluationService:
         return True
 
     @staticmethod
+    async def cleanup_stale_automation_runs(
+        db: AsyncSession,
+        threshold_minutes: int | None = None,
+        company_ids: list[int] | None = None,
+        service_ids: list[int] | None = None,
+    ) -> int:
+        """
+        Finds MassAnalysisAutomationRun records with status 'running' that have been running
+        longer than threshold_minutes (defaulting to Settings.automation_running_stale_after_minutes),
+        marks them as 'failed' with error_message='Marked as stale after exceeding AUTOMATION_RUNNING_STALE_AFTER_MINUTES',
+        updates finished_at and updates the associated automation and underlying MassEvaluationRun if applicable.
+        """
+        from datetime import datetime, timedelta, timezone
+        from app.config import get_settings
+        settings = get_settings()
+
+        if threshold_minutes is None:
+            threshold_minutes = settings.automation_running_stale_after_minutes or 60
+
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(minutes=threshold_minutes)
+
+        stmt = select(MassAnalysisAutomationRun).where(
+            MassAnalysisAutomationRun.status == "running",
+            MassAnalysisAutomationRun.started_at <= cutoff
+        )
+        if service_ids is not None or company_ids is not None:
+            from app.models.services import Service
+            stmt = stmt.join(MassAnalysisAutomation, MassAnalysisAutomation.automation_id == MassAnalysisAutomationRun.automation_id)
+            if service_ids is not None:
+                stmt = stmt.where(MassAnalysisAutomation.service_id.in_(service_ids))
+            elif company_ids:
+                stmt = stmt.join(Service, Service.service_id == MassAnalysisAutomation.service_id).where(Service.company_id.in_(company_ids))
+
+        res = await db.execute(stmt)
+        stale_auto_runs = res.scalars().all()
+
+        cleaned_count = 0
+        for auto_run in stale_auto_runs:
+            started_at = auto_run.started_at
+            if started_at and started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            age_minutes = int((now - started_at).total_seconds() / 60) if started_at else threshold_minutes
+
+            logger.warning(
+                "[automation_scheduler] stale_running_marked_failed automation_id=%d run_id=%d age_minutes=%d threshold_minutes=%d",
+                auto_run.automation_id, auto_run.automation_run_id, age_minutes, threshold_minutes
+            )
+
+            err_msg = f"Marked as stale after exceeding AUTOMATION_RUNNING_STALE_AFTER_MINUTES ({threshold_minutes} minutes)"
+            auto_run.status = "failed"
+            auto_run.finished_at = now
+            auto_run.error_message = err_msg
+
+            # Update parent automation
+            aut_stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id == auto_run.automation_id)
+            aut_res = await db.execute(aut_stmt)
+            aut_obj = aut_res.scalars().first()
+            if aut_obj:
+                aut_obj.last_error_at = now
+                aut_obj.last_error_message = err_msg
+
+            # Also update associated MassEvaluationRun if present
+            if auto_run.run_id:
+                try:
+                    run_stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == auto_run.run_id)
+                    run_res = await db.execute(run_stmt)
+                    sub_run = run_res.scalars().first()
+                    if sub_run and sub_run.status == "running":
+                        sub_run.status = "failed"
+                        sub_run.finished_at = now
+                        sub_run.error_message = err_msg
+                except Exception as e_sub:
+                    logger.error("Failed to mark associated MassEvaluationRun %s as failed: %s", auto_run.run_id, e_sub)
+
+            cleaned_count += 1
+
+        if cleaned_count > 0:
+            await db.commit()
+
+        return cleaned_count
+
+    @staticmethod
+    async def mark_automation_run_stale_failed(
+        db: AsyncSession,
+        run_id: int,
+        context: Any = None
+    ) -> MassAnalysisAutomationRun | None:
+        """
+        Manually marks an automation run (matched by automation_run_id OR linked run_id)
+        as failed if stuck in running or stale state.
+        """
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+
+        stmt = select(MassAnalysisAutomationRun).where(
+            or_(
+                MassAnalysisAutomationRun.automation_run_id == run_id,
+                MassAnalysisAutomationRun.run_id == run_id
+            )
+        )
+        res = await db.execute(stmt)
+        auto_run = res.scalars().first()
+        if not auto_run:
+            return None
+
+        # Scoping validation
+        if context and not context.is_super_admin:
+            aut_stmt = select(MassAnalysisAutomation.service_id).where(MassAnalysisAutomation.automation_id == auto_run.automation_id)
+            aut_res = await db.execute(aut_stmt)
+            service_id = aut_res.scalar()
+            if context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+                from fastapi import HTTPException
+                raise HTTPException(
+                    status_code=403,
+                    detail="Acceso denegado: esta automatización pertenece a un servicio no asignado."
+                )
+
+        err_msg = "Manually marked as stale/failed by administrator"
+        auto_run.status = "failed"
+        auto_run.finished_at = now
+        auto_run.error_message = err_msg
+
+        # Update parent automation
+        aut_stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id == auto_run.automation_id)
+        aut_res = await db.execute(aut_stmt)
+        aut_obj = aut_res.scalars().first()
+        if aut_obj:
+            aut_obj.last_error_at = now
+            aut_obj.last_error_message = err_msg
+
+        # Update linked MassEvaluationRun
+        if auto_run.run_id:
+            try:
+                run_stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == auto_run.run_id)
+                run_res = await db.execute(run_stmt)
+                sub_run = run_res.scalars().first()
+                if sub_run:
+                    sub_run.status = "failed"
+                    sub_run.finished_at = now
+                    sub_run.error_message = err_msg
+            except Exception as e_sub:
+                logger.error("Failed to mark associated MassEvaluationRun as failed: %s", e_sub)
+
+        await db.commit()
+        await db.refresh(auto_run)
+        return auto_run
+
+    @staticmethod
     async def run_automation_run(
         db: AsyncSession, automation: MassAnalysisAutomation | int, trigger_type: str = "scheduled"
     ) -> MassAnalysisAutomationRun:
@@ -2374,7 +2523,27 @@ class MassEvaluationService:
         res_lock = await db.execute(stmt_lock)
         active_auto_run = res_lock.scalars().first()
         if active_auto_run:
-            raise ValueError(f"La automatización {automation.automation_id} ya tiene una ejecución activa (Run ID {active_auto_run.automation_run_id})")
+            from app.config import get_settings
+            threshold_minutes = get_settings().automation_running_stale_after_minutes or 60
+            st_at = active_auto_run.started_at
+            if st_at and st_at.tzinfo is None:
+                st_at = st_at.replace(tzinfo=timezone.utc)
+            age_minutes = int((now - st_at).total_seconds() / 60) if st_at else 0
+
+            if age_minutes >= threshold_minutes:
+                logger.warning(
+                    "[automation_scheduler] stale_running_marked_failed automation_id=%d run_id=%d age_minutes=%d threshold_minutes=%d",
+                    automation.automation_id, active_auto_run.automation_run_id, age_minutes, threshold_minutes
+                )
+                err_msg = f"Marked as stale after exceeding AUTOMATION_RUNNING_STALE_AFTER_MINUTES ({threshold_minutes} minutes)"
+                active_auto_run.status = "failed"
+                active_auto_run.finished_at = now
+                active_auto_run.error_message = err_msg
+                automation.last_error_at = now
+                automation.last_error_message = err_msg
+                await db.flush()
+            else:
+                raise ValueError(f"La automatización {automation.automation_id} ya tiene una ejecución activa (Run ID {active_auto_run.automation_run_id})")
 
         # Create Run record
         auto_run = MassAnalysisAutomationRun(
@@ -2427,6 +2596,16 @@ class MassEvaluationService:
         service_ids: list[int] | None = None,
     ) -> dict[str, Any]:
         """Finds all active automations that are due to execute and triggers them with scoping support."""
+        from app.config import get_settings
+        settings = get_settings()
+
+        # 1. Automatic stale running cleanup before evaluating locks
+        stale_closed_count = await MassEvaluationService.cleanup_stale_automation_runs(
+            db,
+            company_ids=company_ids,
+            service_ids=service_ids
+        )
+
         now = datetime.now(timezone.utc)
         from app.models.services import Service
 
@@ -2456,6 +2635,8 @@ class MassEvaluationService:
         skipped_count = 0
         executions_detail = []
 
+        threshold_minutes = settings.automation_running_stale_after_minutes or 60
+
         for automation_id, automation_name, interval_minutes, last_run_at in automations_list:
             is_due = False
             if last_run_at is None:
@@ -2477,16 +2658,26 @@ class MassEvaluationService:
             res_lock = await db.execute(stmt_lock)
             active_run = res_lock.scalars().first()
             if active_run:
+                st_at = active_run.started_at
+                if st_at and st_at.tzinfo is None:
+                    st_at = st_at.replace(tzinfo=timezone.utc)
+                age_minutes = int((now - st_at).total_seconds() / 60) if st_at else 0
+                is_stale = age_minutes >= threshold_minutes
+
                 skipped_count += 1
                 logger.info(
-                    "[automation_scheduler] skipped automation_id=%d ('%s') reason='already_running' run_id=%d",
-                    automation_id, automation_name, active_run.automation_run_id
+                    "[automation_scheduler] skipped automation_id=%d ('%s') reason='already_running' run_id=%d age_minutes=%d is_stale=%s",
+                    automation_id, automation_name, active_run.automation_run_id, age_minutes, is_stale
                 )
                 executions_detail.append({
                     "automation_id": automation_id,
                     "automation_name": automation_name,
                     "status": "skipped",
-                    "reason_skipped": f"Already running (Run ID {active_run.automation_run_id})",
+                    "reason_skipped": "already_running",
+                    "blocking_run_id": active_run.automation_run_id,
+                    "blocking_run_started_at": active_run.started_at.isoformat() if active_run.started_at else None,
+                    "blocking_run_age_minutes": age_minutes,
+                    "is_stale": is_stale,
                 })
                 continue
 
@@ -2532,6 +2723,7 @@ class MassEvaluationService:
             "due_automations_count": due_count,
             "launched_automations_count": launched_count,
             "skipped_automations_count": skipped_count,
+            "stale_runs_closed": stale_closed_count,
             "executions": executions_detail,
         }
 
