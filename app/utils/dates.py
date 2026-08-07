@@ -73,6 +73,25 @@ def safe_parse_datetime(value: Any) -> datetime | None:
         except ValueError:
             pass
 
+        # Try European / Slash formats (e.g., "07/01/2026", "08/07/2026", "07-01-2026")
+        for sep in ("/", "-"):
+            if sep in value:
+                parts = [p.strip() for p in value.split(sep) if p.strip()]
+                if len(parts) == 3:
+                    try:
+                        # Check if last part is 4-digit year (DD/MM/YYYY)
+                        if len(parts[2]) == 4:
+                            y, m, d = int(parts[2]), int(parts[1]), int(parts[0])
+                        # Check if first part is 4-digit year (YYYY/MM/DD)
+                        elif len(parts[0]) == 4:
+                            y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
+                        else:
+                            continue
+                        if 1 <= m <= 12 and 1 <= d <= 31:
+                            return datetime(y, m, d, tzinfo=timezone.utc)
+                    except ValueError:
+                        pass
+
         # Try millisecond or second string
         try:
             val_int = int(value)

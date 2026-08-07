@@ -12,7 +12,9 @@ from app.core.roles import InternalRole
 from app.models.users import User
 from app.models.prompts import Prompt
 from app.models.services import Service
+import time
 from app.utils.hubspot_owners import resolve_owner_id_by_email
+from app.utils.normalizers import normalize_direction
 from app.schemas.mass_evaluations import (
     MassEvaluationJobCreate,
     MassEvaluationJobManualRunRequest,
@@ -605,10 +607,13 @@ async def get_my_analysis_results(
     context: TenantContext = Depends(get_tenant_context),
     run_id: int | None = Query(None),
     job_id: int | None = Query(None),
+    automation_id: int | None = Query(None, description="Filter by automation ID"),
     agent_owner_id: str | None = Query(None, description="For backwards compatibility, ignored for agents"),
     call_id: str | None = Query(None),
     date_from: datetime | None = Query(None),
     date_to: datetime | None = Query(None),
+    created_from: datetime | None = Query(None, description="Filter by result creation date from"),
+    created_to: datetime | None = Query(None, description="Filter by result creation date to"),
     execution_source: str | None = Query(None, description="on_demand | automation"),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
@@ -618,11 +623,22 @@ async def get_my_analysis_results(
     service_key: str | None = Query(None, description="Filter by service key"),
     typology_key: str | None = Query(None, description="Filter by typology key"),
     typology_ids: str | None = Query(None, description="Comma-separated typology IDs to filter"),
+    direction: str | None = Query(None, description="all | inbound | outbound"),
+    call_direction: str | None = Query(None, description="Filter by call direction"),
+    inbound_outbound: str | None = Query(None, description="Filter by inbound/outbound"),
     duration_min_seconds: int | None = Query(None, description="Min duration in seconds"),
     duration_max_seconds: int | None = Query(None, description="Max duration in seconds"),
     db: AsyncSession = Depends(get_db)
 ):
     """List detailed mass analysis call results for the logged-in agent with filters."""
+    if automation_id is not None and job_id is None:
+        from app.models.mass_evaluations import MassAnalysisAutomation
+        aut_stmt = select(MassAnalysisAutomation.job_id).where(MassAnalysisAutomation.automation_id == automation_id)
+        aut_res = await db.execute(aut_stmt)
+        job_id = aut_res.scalar()
+    raw_direction = direction or call_direction or inbound_outbound
+    norm_d = normalize_direction(raw_direction)
+
     # Enforce agent scope
     if context.normalized_role == InternalRole.AGENT:
         effective_owner_id = context.allowed_agent_ids[0] if context.allowed_agent_ids else None
@@ -664,6 +680,7 @@ async def get_my_analysis_results(
                 detail="No tienes acceso al servicio seleccionado."
             )
 
+    t_start = time.perf_counter()
     total = await MassEvaluationService.count_results(
         db,
         run_id=run_id,
@@ -672,6 +689,8 @@ async def get_my_analysis_results(
         call_id=call_id,
         date_from=date_from,
         date_to=date_to,
+        created_from=created_from,
+        created_to=created_to,
         execution_source=execution_source,
         global_score_min=global_score_min,
         global_score_max=global_score_max,
@@ -681,7 +700,8 @@ async def get_my_analysis_results(
         typology_ids=typo_ids,
         duration_min_seconds=duration_min_seconds,
         duration_max_seconds=duration_max_seconds,
-        company_ids=context.allowed_company_ids,
+        direction=norm_d,
+        company_ids=None if context.is_super_admin else context.allowed_company_ids,
         service_ids=context.allowed_service_ids,
         allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None
     )
@@ -695,6 +715,8 @@ async def get_my_analysis_results(
         call_id=call_id,
         date_from=date_from,
         date_to=date_to,
+        created_from=created_from,
+        created_to=created_to,
         execution_source=execution_source,
         limit=limit,
         global_score_min=global_score_min,
@@ -706,7 +728,8 @@ async def get_my_analysis_results(
         typology_ids=typo_ids,
         duration_min_seconds=duration_min_seconds,
         duration_max_seconds=duration_max_seconds,
-        company_ids=context.allowed_company_ids,
+        direction=norm_d,
+        company_ids=None if context.is_super_admin else context.allowed_company_ids,
         service_ids=context.allowed_service_ids,
         allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None
     )
@@ -718,6 +741,13 @@ async def get_my_analysis_results(
         if d.execution_source is None:
             d.execution_source = "on_demand"
         items_out.append(d)
+
+    total_ms = round((time.perf_counter() - t_start) * 1000.0, 1)
+    import logging
+    logging.getLogger(__name__).info(
+        "[perf.mass_evaluation_results] endpoint=/bm/me/analysis-results total_ms=%.1f rows=%d total=%d limit=%d offset=%d direction=%s",
+        total_ms, len(items_out), total, limit, offset, norm_d
+    )
 
     return PagedMassEvaluationResultResponse(
         items=items_out,
@@ -732,10 +762,13 @@ async def list_results(
     context: TenantContext = Depends(get_tenant_context),
     run_id: int | None = Query(None),
     job_id: int | None = Query(None),
+    automation_id: int | None = Query(None, description="Filter by automation ID"),
     agent_owner_id: str | None = Query(None),
     call_id: str | None = Query(None),
     date_from: datetime | None = Query(None),
     date_to: datetime | None = Query(None),
+    created_from: datetime | None = Query(None, description="Filter by result creation date from"),
+    created_to: datetime | None = Query(None, description="Filter by result creation date to"),
     execution_source: str | None = Query(None, description="on_demand | automation"),
     limit: int = Query(100, ge=1, le=1000),
     global_score_min: float | None = Query(None, ge=0.0, le=10.0),
@@ -744,11 +777,22 @@ async def list_results(
     service_key: str | None = Query(None, description="Filter by service key"),
     typology_key: str | None = Query(None, description="Filter by typology key"),
     typology_ids: str | None = Query(None, description="Comma-separated typology IDs to filter"),
+    direction: str | None = Query(None, description="all | inbound | outbound"),
+    call_direction: str | None = Query(None, description="Filter by call direction"),
+    inbound_outbound: str | None = Query(None, description="Filter by inbound/outbound"),
     duration_min_seconds: int | None = Query(None, description="Min duration in seconds"),
     duration_max_seconds: int | None = Query(None, description="Max duration in seconds"),
     db: AsyncSession = Depends(get_db)
 ):
     """List detailed mass analysis call results with advanced filtering options."""
+    if automation_id is not None and job_id is None:
+        from app.models.mass_evaluations import MassAnalysisAutomation
+        aut_stmt = select(MassAnalysisAutomation.job_id).where(MassAnalysisAutomation.automation_id == automation_id)
+        aut_res = await db.execute(aut_stmt)
+        job_id = aut_res.scalar()
+    raw_direction = direction or call_direction or inbound_outbound
+    norm_d = normalize_direction(raw_direction)
+
     if context.normalized_role == InternalRole.AGENT:
         effective_owner_id = context.allowed_agent_ids[0] if context.allowed_agent_ids else None
         if not effective_owner_id:
@@ -790,6 +834,7 @@ async def list_results(
     if typology_ids and typology_ids.strip():
         typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
 
+    t_start = time.perf_counter()
     results = await MassEvaluationService.list_results(
         db,
         run_id=run_id,
@@ -798,6 +843,8 @@ async def list_results(
         call_id=call_id,
         date_from=date_from,
         date_to=date_to,
+        created_from=created_from,
+        created_to=created_to,
         execution_source=execution_source,
         limit=limit,
         global_score_min=global_score_min,
@@ -808,7 +855,8 @@ async def list_results(
         typology_ids=typo_ids,
         duration_min_seconds=duration_min_seconds,
         duration_max_seconds=duration_max_seconds,
-        company_ids=context.allowed_company_ids,
+        direction=norm_d,
+        company_ids=None if context.is_super_admin else context.allowed_company_ids,
         service_ids=context.allowed_service_ids,
         allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None
     )
@@ -820,6 +868,14 @@ async def list_results(
         if d.execution_source is None:
             d.execution_source = "on_demand"
         out.append(d)
+
+    total_ms = round((time.perf_counter() - t_start) * 1000.0, 1)
+    import logging
+    logging.getLogger(__name__).info(
+        "[perf.mass_evaluation_results] endpoint=/bm/mass-evaluation-results total_ms=%.1f rows=%d limit=%d direction=%s",
+        total_ms, len(out), limit, norm_d
+    )
+
     return out
 
 

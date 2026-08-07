@@ -1,5 +1,6 @@
 """API Router for Analytics v2."""
 import logging
+import time
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
@@ -370,6 +371,7 @@ async def get_agents_comparison(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: Se requiere rol de nivel superior."
         )
+    t_start = time.perf_counter()
     try:
         raw_typology = typology or typology_key or tipo_llamada or call_type or selected_typology or typologies
         norm_t = normalize_typology(raw_typology)
@@ -457,8 +459,10 @@ async def get_agents_comparison(
                 stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(owner_ids))
 
         # Query Results
+        t_db_start = time.perf_counter()
         res = await db.execute(stmt)
         results = res.scalars().all()
+        db_ms = (time.perf_counter() - t_db_start) * 1000.0
 
         # 3. Query associated criteria results for the matched analyses
         analysis_ids = [r.mass_analysis_id for r in results]
@@ -472,7 +476,10 @@ async def get_agents_comparison(
             for c in res_crit.scalars().all():
                 criteria_by_analysis.setdefault(c.mass_analysis_id, []).append(c)
 
-        # 4. Resolve unique list of agents
+        # 4. Resolve unique list of available agents for scope
+        available_catalog = await get_available_agents(db, context=context, service_id=service_id)
+        cat_by_oid = {a.hubspot_owner_id: a for a in available_catalog}
+
         agents_found = {}
         for r in results:
             oid = r.hubspot_owner_id
@@ -484,10 +491,26 @@ async def get_agents_comparison(
                     name = oid
                 agents_found[oid] = name
 
-        agents_list = [
-            AgentInfo(hubspot_owner_id=oid, agent_name=name)
-            for oid, name in sorted(agents_found.items(), key=lambda x: x[1])
-        ]
+        if agents_found:
+            agents_list = []
+            for oid, name in sorted(agents_found.items(), key=lambda x: x[1]):
+                if oid in cat_by_oid:
+                    agents_list.append(cat_by_oid[oid])
+                else:
+                    agents_list.append(
+                        AgentInfo(
+                            hubspot_owner_id=oid,
+                            agent_name=name,
+                            name=name,
+                            agent_initials=None,
+                            initials=None,
+                            label=name,
+                            service_id=service_id,
+                            service_name=None,
+                        )
+                    )
+        else:
+            agents_list = available_catalog
 
         # 5. Filter items catalogue
         all_metrics = await get_all_metrics(db, context=context)
@@ -526,6 +549,15 @@ async def get_agents_comparison(
                         count=count
                     )
                 )
+
+        t_end = time.perf_counter()
+        total_processing_ms = round((t_end - t_start) * 1000.0, 1)
+        aggregation_ms = round(max(0.0, total_processing_ms - db_ms), 1)
+
+        logger.info(
+            "[perf.agents_comparison] endpoint=/bm/analytics/agents-comparison company_id=%s service_id=%s date_from=%s date_to=%s agents_count=%d items_count=%d mode=scores direction=%s rows_scanned=%d rows_returned=%d db_ms=%.1f aggregation_ms=%.1f total_ms=%.1f",
+            context.allowed_company_ids if context else None, service_id, date_from, date_to, len(agents_list), len(items_list), norm_d, len(results), len(comparison_rows), db_ms, aggregation_ms, total_processing_ms
+        )
 
         return AgentComparisonResponse(
             agents=agents_list,
@@ -761,6 +793,143 @@ async def get_items_evolution(
 
 
 
+async def get_available_agents(
+    db: AsyncSession,
+    context: TenantContext | None = None,
+    service_id: int | None = None,
+) -> list[AgentInfo]:
+    """
+    Retrieve all available call center agents for the current scope/service,
+    returning full metadata including initials and label for frontend selectors.
+    """
+    from app.utils.agent_resolvers import build_user_initials_maps, resolve_agent_initials
+    from app.utils.hubspot_owners import OWNER_TO_NAME, resolve_owner_name
+
+    by_owner, by_name, users_list = await build_user_initials_maps(db, company_id=None)
+
+    query = """
+        SELECT DISTINCT hubspot_owner_id, agent_name, service_id, service_name
+        FROM bm_mass_evaluation_results
+        WHERE status = 'completed' AND hubspot_owner_id IS NOT NULL
+    """
+    params = {}
+    if context:
+        query += f" AND company_id IN {_format_int_list(context.allowed_company_ids)}"
+        if context.allowed_service_ids is not None:
+            query += f" AND service_id IN {_format_int_list(context.allowed_service_ids)}"
+        if context.allowed_agent_ids is not None:
+            query += f" AND hubspot_owner_id IN {_format_str_list(context.allowed_agent_ids)}"
+
+    if service_id is not None:
+        if context and context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+            query += " AND service_id = -1"
+        else:
+            query += " AND service_id = :service_id"
+            params["service_id"] = service_id
+
+    res = await db.execute(text(query), params)
+    db_rows = res.fetchall()
+
+    agents_map: dict[str, dict[str, Any]] = {}
+
+    # Standard known mapping
+    for oid, name in OWNER_TO_NAME.items():
+        if context and context.allowed_agent_ids is not None and oid not in context.allowed_agent_ids:
+            continue
+        initials = resolve_agent_initials(
+            hubspot_owner_id=oid,
+            agent_name=name,
+            by_owner=by_owner,
+            by_name=by_name,
+            users_list=users_list,
+        )
+        label = f"{initials} · {name}" if initials else name
+        agents_map[oid] = {
+            "hubspot_owner_id": oid,
+            "agent_name": name,
+            "name": name,
+            "agent_initials": initials,
+            "initials": initials,
+            "label": label,
+            "service_id": service_id,
+            "service_name": None,
+        }
+
+    # Add agents from DB results
+    for row in db_rows:
+        oid = str(row[0]).strip()
+        r_name = row[1]
+        svc_id = row[2]
+        svc_name = row[3]
+
+        if context and context.allowed_agent_ids is not None and oid not in context.allowed_agent_ids:
+            continue
+
+        disp_name = resolve_owner_name(oid) or (r_name if r_name and not r_name.isdigit() else oid)
+        if disp_name.startswith("Agente no identificado") and oid not in OWNER_TO_NAME:
+            pass
+
+        initials = resolve_agent_initials(
+            hubspot_owner_id=oid,
+            agent_name=disp_name,
+            by_owner=by_owner,
+            by_name=by_name,
+            users_list=users_list,
+        )
+        label = f"{initials} · {disp_name}" if initials else disp_name
+
+        if oid not in agents_map:
+            agents_map[oid] = {
+                "hubspot_owner_id": oid,
+                "agent_name": disp_name,
+                "name": disp_name,
+                "agent_initials": initials,
+                "initials": initials,
+                "label": label,
+                "service_id": svc_id or service_id,
+                "service_name": svc_name,
+            }
+        else:
+            if svc_id and not agents_map[oid]["service_id"]:
+                agents_map[oid]["service_id"] = svc_id
+            if svc_name and not agents_map[oid]["service_name"]:
+                agents_map[oid]["service_name"] = svc_name
+
+    # Add users from bm_users with hubspot_owner_id
+    for u in users_list:
+        oid = u.get("hubspot_owner_id")
+        if not oid:
+            continue
+        if context and context.allowed_agent_ids is not None and oid not in context.allowed_agent_ids:
+            continue
+        u_name = u.get("name") or u.get("username") or resolve_owner_name(oid) or oid
+        u_inits = u.get("agent_initials") or resolve_agent_initials(
+            hubspot_owner_id=oid,
+            agent_name=u_name,
+            by_owner=by_owner,
+            by_name=by_name,
+            users_list=users_list,
+        )
+        label = f"{u_inits} · {u_name}" if u_inits else u_name
+        if oid not in agents_map:
+            agents_map[oid] = {
+                "hubspot_owner_id": oid,
+                "agent_name": u_name,
+                "name": u_name,
+                "agent_initials": u_inits,
+                "initials": u_inits,
+                "label": label,
+                "service_id": u.get("service_id") or service_id,
+                "service_name": None,
+            }
+
+    agents_list = [
+        AgentInfo(**item)
+        for item in sorted(list(agents_map.values()), key=lambda x: x["name"])
+    ]
+    return agents_list
+
+
 @router.get("/analytics/filter-options")
 @router.get("/filter-options")
 async def get_filter_options(
@@ -769,10 +938,13 @@ async def get_filter_options(
     db: Annotated[AsyncSession, Depends(get_db)] = None,
 ):
     """
-    Retrieve filter configuration options: active typologies, duration range, and score bounds.
+    Retrieve filter configuration options: active typologies, agents, duration range, and score bounds.
     """
     try:
-        # 1. Fetch active typologies per service
+        # 1. Fetch available agents list for current scope
+        available_agents = await get_available_agents(db, context=context, service_id=service_id)
+
+        # 2. Fetch active typologies per service
         typo_query = f"SELECT t.typology_id, t.typology_key, t.typology_name, t.service_id, s.service_key FROM bm_typologies t JOIN bm_services s ON t.service_id = s.service_id WHERE t.is_active = true AND s.company_id IN {_format_int_list(context.allowed_company_ids)}"
         params = {}
         if context.allowed_service_ids is not None:
@@ -797,7 +969,7 @@ async def get_filter_options(
                 "service_key": row[4]
             })
 
-        # 2. Fetch min and max call duration
+        # 3. Fetch min and max call duration
         dur_query = f"SELECT MIN(call_duration_seconds), MAX(call_duration_seconds) FROM bm_mass_evaluation_results WHERE status = 'completed' AND company_id IN {_format_int_list(context.allowed_company_ids)}"
         dur_params = {}
         if context.allowed_service_ids is not None:
@@ -817,6 +989,7 @@ async def get_filter_options(
                 max_seconds = int(dur_row[1])
 
         return {
+            "agents": available_agents,
             "typologies": typologies_list,
             "duration": {
                 "min_seconds": min_seconds,

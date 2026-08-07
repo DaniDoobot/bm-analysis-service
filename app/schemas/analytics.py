@@ -12,6 +12,12 @@ class AnalyticsItem(BaseModel):
 class AgentInfo(BaseModel):
     hubspot_owner_id: str = Field(..., description="HubSpot Owner ID of the agent as a string")
     agent_name: str = Field(..., description="Full display name of the agent")
+    name: str | None = Field(None, description="Full display name alias")
+    agent_initials: str | None = Field(None, description="Agent initials e.g. LD")
+    initials: str | None = Field(None, description="Agent initials alias")
+    label: str | None = Field(None, description="Formatted label e.g. LD · Luci Dos Santos")
+    service_id: int | None = Field(None, description="Service ID if applicable")
+    service_name: str | None = Field(None, description="Service name if applicable")
 
 
 class AgentComparisonRow(BaseModel):

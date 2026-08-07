@@ -20,23 +20,13 @@ from app.utils.normalizers import normalize_typology, normalize_direction
 logger = logging.getLogger(__name__)
 
 
+from app.utils.dates import safe_parse_datetime
+
 def parse_date(date_str: str | None) -> datetime | None:
-    """Safely parse timezone-aware datetimes or YYYY-MM-DD strings."""
+    """Safely parse timezone-aware datetimes, ISO strings, or YYYY-MM-DD/DD/MM/YYYY strings."""
     if not date_str:
         return None
-    try:
-        # Try ISO format (e.g. 2026-05-27T09:36:56Z)
-        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except ValueError:
-        # Try as plain YYYY-MM-DD
-        try:
-            dt = datetime.strptime(date_str, "%Y-%m-%d")
-            return dt.replace(tzinfo=timezone.utc)
-        except ValueError:
-            return None
+    return safe_parse_datetime(date_str)
 
 
 def resolve_date_range(
@@ -1052,6 +1042,9 @@ async def get_agents_list(
         if oid not in db_stats or r.total_analyses > db_stats[oid].total_analyses:
             db_stats[oid] = r
 
+    from app.utils.agent_resolvers import build_user_initials_maps, resolve_agent_initials
+    by_owner, by_name, users_list = await build_user_initials_maps(db, company_id=None)
+
     def _fmt(stats: Any, oid: str, name: str) -> dict:
         avg_eval = to_float(round(stats.avg_eval, 1)) if (stats and stats.avg_eval is not None) else 0.0
         last_at = None
@@ -1060,9 +1053,25 @@ async def get_agents_list(
             if raw.tzinfo is None:
                 raw = raw.replace(tzinfo=timezone.utc)
             last_at = raw.isoformat()
+
+        initials = resolve_agent_initials(
+            hubspot_owner_id=oid,
+            agent_name=name,
+            by_owner=by_owner,
+            by_name=by_name,
+            users_list=users_list,
+        )
+        label = f"{initials} · {name}" if initials else name
+
         return {
             "hubspot_owner_id": oid,
+            "name": name,
             "agent_name": name,
+            "agent_initials": initials,
+            "initials": initials,
+            "label": label,
+            "service_id": service_id,
+            "service_name": None,
             "total_analyses": to_float(stats.total_analyses) if stats else 0.0,
             "last_analysis_at": last_at,
             "avg_evaluacion_global": avg_eval,

@@ -136,6 +136,12 @@ class AgentComparisonResponse(BaseModel):
 class AgentInfo(BaseModel):
     hubspot_owner_id: str
     agent_name: str
+    name: str | None = None
+    agent_initials: str | None = None
+    initials: str | None = None
+    label: str | None = None
+    service_id: int | None = None
+    service_name: str | None = None
 
 
 class AgentEvolutionSummary(BaseModel):

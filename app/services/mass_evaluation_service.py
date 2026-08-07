@@ -1777,6 +1777,9 @@ class MassEvaluationService:
         typology_ids: list[int] | None = None,
         duration_min_seconds: int | None = None,
         duration_max_seconds: int | None = None,
+        direction: str | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
         company_ids: list[int] | None = None,
         service_ids: list[int] | None = None,
         allowed_agent_ids: list[str] | None = None,
@@ -1784,7 +1787,10 @@ class MassEvaluationService:
         stmt = select(MassEvaluationResult)
         filters = []
         if run_id is not None:
-            filters.append(MassEvaluationResult.run_id == run_id)
+            filters.append(or_(
+                MassEvaluationResult.run_id == run_id,
+                MassEvaluationResult.source_run_id == run_id
+            ))
         if job_id is not None:
             filters.append(MassEvaluationResult.job_id == job_id)
         if agent_owner_id is not None:
@@ -1795,6 +1801,10 @@ class MassEvaluationService:
             filters.append(MassEvaluationResult.call_timestamp >= date_from)
         if date_to is not None:
             filters.append(MassEvaluationResult.call_timestamp <= date_to)
+        if created_from is not None:
+            filters.append(MassEvaluationResult.created_at >= created_from)
+        if created_to is not None:
+            filters.append(MassEvaluationResult.created_at <= created_to)
         if execution_source is not None:
             if execution_source == "on_demand":
                 filters.append(or_(
@@ -1821,6 +1831,13 @@ class MassEvaluationService:
             filters.append(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
         if duration_max_seconds is not None:
             filters.append(MassEvaluationResult.call_duration_seconds <= duration_max_seconds)
+        if direction is not None:
+            norm_d = normalize_direction(direction)
+            if norm_d:
+                filters.append(or_(
+                    func.lower(MassEvaluationResult.direction) == norm_d,
+                    func.lower(func.coalesce(MassEvaluationResult.result_json["inbound_outbound"].astext, "")) == norm_d
+                ))
             
         # Multitenancy filters
         if allowed_agent_ids is not None:
@@ -1828,7 +1845,10 @@ class MassEvaluationService:
         if service_ids is not None:
             filters.append(MassEvaluationResult.service_id.in_(service_ids))
         elif company_ids:
-            filters.append(MassEvaluationResult.company_id.in_(company_ids))
+            filters.append(or_(
+                MassEvaluationResult.company_id.in_(company_ids),
+                MassEvaluationResult.company_id.is_(None)
+            ))
             
         if filters:
             stmt = stmt.where(and_(*filters))
@@ -1858,6 +1878,9 @@ class MassEvaluationService:
         typology_ids: list[int] | None = None,
         duration_min_seconds: int | None = None,
         duration_max_seconds: int | None = None,
+        direction: str | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
         company_ids: list[int] | None = None,
         service_ids: list[int] | None = None,
         allowed_agent_ids: list[str] | None = None,
@@ -1866,7 +1889,10 @@ class MassEvaluationService:
         stmt = select(func.count(MassEvaluationResult.mass_analysis_id))
         filters = []
         if run_id is not None:
-            filters.append(MassEvaluationResult.run_id == run_id)
+            filters.append(or_(
+                MassEvaluationResult.run_id == run_id,
+                MassEvaluationResult.source_run_id == run_id
+            ))
         if job_id is not None:
             filters.append(MassEvaluationResult.job_id == job_id)
         if agent_owner_id is not None:
@@ -1877,6 +1903,10 @@ class MassEvaluationService:
             filters.append(MassEvaluationResult.call_timestamp >= date_from)
         if date_to is not None:
             filters.append(MassEvaluationResult.call_timestamp <= date_to)
+        if created_from is not None:
+            filters.append(MassEvaluationResult.created_at >= created_from)
+        if created_to is not None:
+            filters.append(MassEvaluationResult.created_at <= created_to)
         if execution_source is not None:
             if execution_source == "on_demand":
                 filters.append(or_(
@@ -1903,6 +1933,13 @@ class MassEvaluationService:
             filters.append(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
         if duration_max_seconds is not None:
             filters.append(MassEvaluationResult.call_duration_seconds <= duration_max_seconds)
+        if direction is not None:
+            norm_d = normalize_direction(direction)
+            if norm_d:
+                filters.append(or_(
+                    func.lower(MassEvaluationResult.direction) == norm_d,
+                    func.lower(func.coalesce(MassEvaluationResult.result_json["inbound_outbound"].astext, "")) == norm_d
+                ))
             
         # Multitenancy filters
         if allowed_agent_ids is not None:
@@ -1910,7 +1947,10 @@ class MassEvaluationService:
         if service_ids is not None:
             filters.append(MassEvaluationResult.service_id.in_(service_ids))
         elif company_ids:
-            filters.append(MassEvaluationResult.company_id.in_(company_ids))
+            filters.append(or_(
+                MassEvaluationResult.company_id.in_(company_ids),
+                MassEvaluationResult.company_id.is_(None)
+            ))
             
         if filters:
             stmt = stmt.where(and_(*filters))

@@ -1,5 +1,6 @@
 """Service logic for Service Evolution dashboard."""
 import logging
+import time
 from datetime import datetime
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,43 +55,25 @@ def clean_sql(query: str, dialect_name: str) -> str:
     return query
 
 
+from app.utils.dates import safe_parse_datetime
+
 def parse_date_bounds(date_from: str | None, date_to: str | None) -> tuple[datetime | None, datetime | None]:
     """
     Parses start and end date/timestamp parameters safely.
-    For date-only strings (like YYYY-MM-DD), date_from represents start of day (00:00:00.000000)
+    For date-only strings (like YYYY-MM-DD or DD/MM/YYYY), date_from represents start of day (00:00:00.000000)
     and date_to represents inclusive end of day (23:59:59.999999).
     """
-    parsed_date_from = None
-    parsed_date_to = None
+    parsed_date_from = safe_parse_datetime(date_from) if date_from else None
+    parsed_date_to = safe_parse_datetime(date_to) if date_to else None
 
-    if date_from:
-        is_date_only = len(date_from.strip()) == 10 and "-" in date_from and ":" not in date_from
-        try:
-            parsed_date_from = datetime.fromisoformat(date_from.replace("Z", "+00:00"))
-        except ValueError:
-            try:
-                parsed_date_from = datetime.strptime(date_from, "%Y-%m-%d")
-                is_date_only = True
-            except ValueError:
-                logger.warning("Invalid date_from format: %s", date_from)
-                
-        if parsed_date_from and is_date_only:
-            # Already represents 00:00:00, which is correct (start of the day)
-            pass
+    if parsed_date_from and date_from:
+        raw_f = date_from.strip()
+        if len(raw_f) <= 10 or ":" not in raw_f:
+            parsed_date_from = parsed_date_from.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    if date_to:
-        is_date_only = len(date_to.strip()) == 10 and "-" in date_to and ":" not in date_to
-        try:
-            parsed_date_to = datetime.fromisoformat(date_to.replace("Z", "+00:00"))
-        except ValueError:
-            try:
-                parsed_date_to = datetime.strptime(date_to, "%Y-%m-%d")
-                is_date_only = True
-            except ValueError:
-                logger.warning("Invalid date_to format: %s", date_to)
-                
-        if parsed_date_to and is_date_only:
-            # If date only, make inclusive of the end of the day: 23:59:59.999999
+    if parsed_date_to and date_to:
+        raw_t = date_to.strip()
+        if len(raw_t) <= 10 or ":" not in raw_t:
             parsed_date_to = parsed_date_to.replace(hour=23, minute=59, second=59, microsecond=999999)
 
     return parsed_date_from, parsed_date_to
@@ -249,6 +232,7 @@ class ServiceEvolutionService:
         GET /bm/service-evolution
         Retrieves complete service evolution details with series, typologies, agents, and criteria ranking.
         """
+        t_start = time.perf_counter()
         _EG_EXPR = """
             COALESCE(
                 NULLIF((r.result_json->>'evaluacion_global')::numeric, 0),
@@ -681,7 +665,13 @@ class ServiceEvolutionService:
             whitelist = [k.strip().lower() for k in criteria.split(",") if k.strip()]
             if whitelist:
                 criteria_ranking = [item for item in criteria_ranking if item.criterion_key.lower() in whitelist]
-                
+
+        total_ms = round((time.perf_counter() - t_start) * 1000.0, 1)
+        logger.info(
+            "[perf.service_evolution] endpoint=/bm/service-evolution total_ms=%.1f service_id=%s date_from=%s date_to=%s total_calls=%d rows_series=%d",
+            total_ms, service_id, date_from, date_to, total_calls, len(series_list)
+        )
+
         return ServiceEvolutionResponse(
             filters=filters,
             summary=summary,
