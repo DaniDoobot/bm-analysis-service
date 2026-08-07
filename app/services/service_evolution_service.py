@@ -172,8 +172,8 @@ class ServiceEvolutionService:
             "date_from": parsed_date_from,
             "date_to": parsed_date_to,
         }
-        if context:
-            where_clause += f" AND r.company_id IN {_format_int_list(context.allowed_company_ids)}"
+        if context and not context.is_super_admin:
+            where_clause += f" AND (r.company_id IN {_format_int_list(context.allowed_company_ids)} OR r.company_id IS NULL)"
             if context.allowed_service_ids is not None:
                 where_clause += f" AND r.service_id IN {_format_int_list(context.allowed_service_ids)}"
             if context.allowed_agent_ids is not None:
@@ -301,9 +301,9 @@ class ServiceEvolutionService:
         extra_sql_left_join = ""
         typo_extra_where = ""
 
-        if context:
-            extra_sql += f" AND r.company_id IN {_format_int_list(context.allowed_company_ids)}"
-            extra_sql_left_join += f" AND r.company_id IN {_format_int_list(context.allowed_company_ids)}"
+        if context and not context.is_super_admin:
+            extra_sql += f" AND (r.company_id IN {_format_int_list(context.allowed_company_ids)} OR r.company_id IS NULL)"
+            extra_sql_left_join += f" AND (r.company_id IN {_format_int_list(context.allowed_company_ids)} OR r.company_id IS NULL)"
             
             if context.allowed_service_ids is not None:
                 extra_sql += f" AND r.service_id IN {_format_int_list(context.allowed_service_ids)}"

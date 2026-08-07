@@ -503,8 +503,13 @@ async def get_dashboard_summary(
     stmt = select(MassEvaluationResult).where(
         MassEvaluationResult.status == "completed"
     )
-    if context:
-        stmt = stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+    if context and not context.is_super_admin:
+        stmt = stmt.where(
+            or_(
+                MassEvaluationResult.company_id.in_(context.allowed_company_ids),
+                MassEvaluationResult.company_id.is_(None)
+            )
+        )
         if context.allowed_service_ids is not None:
             stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
         if context.allowed_agent_ids is not None:
@@ -978,8 +983,13 @@ async def get_agents_list(
         MassEvaluationResult.status == "completed",
         MassEvaluationResult.hubspot_owner_id.is_not(None),
     )
-    if context:
-        agg_stmt = agg_stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+    if context and not context.is_super_admin:
+        agg_stmt = agg_stmt.where(
+            or_(
+                MassEvaluationResult.company_id.in_(context.allowed_company_ids),
+                MassEvaluationResult.company_id.is_(None)
+            )
+        )
         if context.allowed_service_ids is not None:
             agg_stmt = agg_stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
         if context.allowed_agent_ids is not None:
@@ -1144,8 +1154,13 @@ async def get_agent_evolution(
         MassEvaluationResult.hubspot_owner_id == hubspot_owner_id,
         MassEvaluationResult.status == "completed",
     )
-    if context:
-        stmt = stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+    if context and not context.is_super_admin:
+        stmt = stmt.where(
+            or_(
+                MassEvaluationResult.company_id.in_(context.allowed_company_ids),
+                MassEvaluationResult.company_id.is_(None)
+            )
+        )
         if context.allowed_service_ids is not None:
             stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
         if context.allowed_agent_ids is not None and hubspot_owner_id not in context.allowed_agent_ids:
@@ -1470,8 +1485,13 @@ async def get_objections_breakdown(
     stmt = select(MassEvaluationResult).where(
         MassEvaluationResult.status == "completed"
     )
-    if context:
-        stmt = stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+    if context and not context.is_super_admin:
+        stmt = stmt.where(
+            or_(
+                MassEvaluationResult.company_id.in_(context.allowed_company_ids),
+                MassEvaluationResult.company_id.is_(None)
+            )
+        )
         if context.allowed_service_ids is not None:
             stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
         if context.allowed_agent_ids is not None:
@@ -1676,8 +1696,13 @@ async def get_mass_result_detail(
     try:
         id_val = int(identifier)
         stmt = select(MassEvaluationResult).where(MassEvaluationResult.mass_analysis_id == id_val)
-        if context:
-            stmt = stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+        if context and not context.is_super_admin:
+            stmt = stmt.where(
+                or_(
+                    MassEvaluationResult.company_id.in_(context.allowed_company_ids),
+                    MassEvaluationResult.company_id.is_(None)
+                )
+            )
             if context.allowed_service_ids is not None:
                 stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
             if context.allowed_agent_ids is not None:
@@ -1689,8 +1714,13 @@ async def get_mass_result_detail(
         
     if not row:
         stmt = select(MassEvaluationResult).where(MassEvaluationResult.call_id == identifier)
-        if context:
-            stmt = stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+        if context and not context.is_super_admin:
+            stmt = stmt.where(
+                or_(
+                    MassEvaluationResult.company_id.in_(context.allowed_company_ids),
+                    MassEvaluationResult.company_id.is_(None)
+                )
+            )
             if context.allowed_service_ids is not None:
                 stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
             if context.allowed_agent_ids is not None:
@@ -1886,8 +1916,13 @@ async def get_agents_comparison(
     stmt = select(MassEvaluationResult).where(
         MassEvaluationResult.status == "completed"
     )
-    if context:
-        stmt = stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+    if context and not context.is_super_admin:
+        stmt = stmt.where(
+            or_(
+                MassEvaluationResult.company_id.in_(context.allowed_company_ids),
+                MassEvaluationResult.company_id.is_(None)
+            )
+        )
         if context.allowed_service_ids is not None:
             stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
         if context.allowed_agent_ids is not None:

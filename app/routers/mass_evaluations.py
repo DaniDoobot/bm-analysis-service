@@ -15,6 +15,22 @@ from app.models.services import Service
 import time
 from app.utils.hubspot_owners import resolve_owner_id_by_email
 from app.utils.normalizers import normalize_direction
+
+
+def _fix_date_to_end_of_day(dt: "datetime | None") -> "datetime | None":
+    """Adjust date_to / created_to to end-of-day when the caller passed a bare date.
+
+    FastAPI automatically converts 'YYYY-MM-DD' query strings to
+    datetime(YYYY, MM, DD, 0, 0, 0) (midnight).  Passing midnight as an
+    upper-bound means the WHERE clause excludes every record created *during*
+    that day.  We detect the midnight pattern and slide the bound to
+    23:59:59.999999 so that single-day filters are fully inclusive.
+    """
+    if dt is None:
+        return None
+    if dt.hour == 0 and dt.minute == 0 and dt.second == 0 and dt.microsecond == 0:
+        return dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+    return dt
 from app.schemas.mass_evaluations import (
     MassEvaluationJobCreate,
     MassEvaluationJobManualRunRequest,
@@ -611,9 +627,9 @@ async def get_my_analysis_results(
     agent_owner_id: str | None = Query(None, description="For backwards compatibility, ignored for agents"),
     call_id: str | None = Query(None),
     date_from: datetime | None = Query(None),
-    date_to: datetime | None = Query(None),
+    date_to: datetime | None = Query(None, description="Inclusive upper-bound on call_timestamp. 'YYYY-MM-DD' includes the entire day."),
     created_from: datetime | None = Query(None, description="Filter by result creation date from"),
-    created_to: datetime | None = Query(None, description="Filter by result creation date to"),
+    created_to: datetime | None = Query(None, description="Inclusive upper-bound on created_at. 'YYYY-MM-DD' includes the entire day."),
     execution_source: str | None = Query(None, description="on_demand | automation"),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
@@ -636,6 +652,9 @@ async def get_my_analysis_results(
         aut_stmt = select(MassAnalysisAutomation.job_id).where(MassAnalysisAutomation.automation_id == automation_id)
         aut_res = await db.execute(aut_stmt)
         job_id = aut_res.scalar()
+    # Fix inclusive end-of-day: FastAPI parses 'YYYY-MM-DD' as midnight → adjust
+    date_to = _fix_date_to_end_of_day(date_to)
+    created_to = _fix_date_to_end_of_day(created_to)
     raw_direction = direction or call_direction or inbound_outbound
     norm_d = normalize_direction(raw_direction)
 
@@ -766,9 +785,9 @@ async def list_results(
     agent_owner_id: str | None = Query(None),
     call_id: str | None = Query(None),
     date_from: datetime | None = Query(None),
-    date_to: datetime | None = Query(None),
+    date_to: datetime | None = Query(None, description="Inclusive upper-bound on call_timestamp. 'YYYY-MM-DD' includes the entire day."),
     created_from: datetime | None = Query(None, description="Filter by result creation date from"),
-    created_to: datetime | None = Query(None, description="Filter by result creation date to"),
+    created_to: datetime | None = Query(None, description="Inclusive upper-bound on created_at. 'YYYY-MM-DD' includes the entire day."),
     execution_source: str | None = Query(None, description="on_demand | automation"),
     limit: int = Query(100, ge=1, le=1000),
     global_score_min: float | None = Query(None, ge=0.0, le=10.0),
@@ -790,6 +809,9 @@ async def list_results(
         aut_stmt = select(MassAnalysisAutomation.job_id).where(MassAnalysisAutomation.automation_id == automation_id)
         aut_res = await db.execute(aut_stmt)
         job_id = aut_res.scalar()
+    # Fix inclusive end-of-day: FastAPI parses 'YYYY-MM-DD' as midnight → adjust
+    date_to = _fix_date_to_end_of_day(date_to)
+    created_to = _fix_date_to_end_of_day(created_to)
     raw_direction = direction or call_direction or inbound_outbound
     norm_d = normalize_direction(raw_direction)
 

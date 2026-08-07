@@ -119,8 +119,13 @@ async def get_all_metrics(db: AsyncSession, context: TenantContext | None = None
         ).where(
             MassEvaluationCriterionResult.criterion_key != None
         )
-        if context:
-            stmt1 = stmt1.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+        if context and not context.is_super_admin:
+            stmt1 = stmt1.where(
+                or_(
+                    MassEvaluationResult.company_id.in_(context.allowed_company_ids),
+                    MassEvaluationResult.company_id.is_(None)
+                )
+            )
             if context.allowed_service_ids is not None:
                 stmt1 = stmt1.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
         stmt1 = stmt1.group_by(MassEvaluationCriterionResult.criterion_key)
@@ -140,8 +145,13 @@ async def get_all_metrics(db: AsyncSession, context: TenantContext | None = None
         ).where(
             AnalysisCriterionResult.criterion_key != None
         )
-        if context:
-            stmt2 = stmt2.where(Analysis.company_id.in_(context.allowed_company_ids))
+        if context and not context.is_super_admin:
+            stmt2 = stmt2.where(
+                or_(
+                    Analysis.company_id.in_(context.allowed_company_ids),
+                    Analysis.company_id.is_(None)
+                )
+            )
             if context.allowed_service_ids is not None:
                 stmt2 = stmt2.where(Analysis.service_id.in_(context.allowed_service_ids))
         stmt2 = stmt2.group_by(AnalysisCriterionResult.criterion_key)
@@ -399,7 +409,13 @@ async def get_agents_comparison(
         async def _compute():
             # 2. Build Mass Evaluation Results filter query
             stmt = select(MassEvaluationResult).where(MassEvaluationResult.status == "completed")
-            stmt = stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+            if not context.is_super_admin:
+                stmt = stmt.where(
+                    or_(
+                        MassEvaluationResult.company_id.in_(context.allowed_company_ids),
+                        MassEvaluationResult.company_id.is_(None)
+                    )
+                )
             if context.allowed_service_ids is not None:
                 stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
                 
@@ -660,7 +676,13 @@ async def get_items_evolution(
         async def _compute():
             # 2. Build Mass Evaluation Results filter query
             stmt = select(MassEvaluationResult).where(MassEvaluationResult.status == "completed")
-            stmt = stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+            if not context.is_super_admin:
+                stmt = stmt.where(
+                    or_(
+                        MassEvaluationResult.company_id.in_(context.allowed_company_ids),
+                        MassEvaluationResult.company_id.is_(None)
+                    )
+                )
             if context.allowed_service_ids is not None:
                 stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
                 
@@ -839,8 +861,8 @@ async def get_available_agents(
         WHERE status = 'completed' AND hubspot_owner_id IS NOT NULL
     """
     params = {}
-    if context:
-        query += f" AND company_id IN {_format_int_list(context.allowed_company_ids)}"
+    if context and not context.is_super_admin:
+        query += f" AND (company_id IN {_format_int_list(context.allowed_company_ids)} OR company_id IS NULL)"
         if context.allowed_service_ids is not None:
             query += f" AND service_id IN {_format_int_list(context.allowed_service_ids)}"
         if context.allowed_agent_ids is not None:
@@ -996,7 +1018,7 @@ async def get_filter_options(
             })
 
         # 3. Fetch min and max call duration
-        dur_query = f"SELECT MIN(call_duration_seconds), MAX(call_duration_seconds) FROM bm_mass_evaluation_results WHERE status = 'completed' AND company_id IN {_format_int_list(context.allowed_company_ids)}"
+        dur_query = f"SELECT MIN(call_duration_seconds), MAX(call_duration_seconds) FROM bm_mass_evaluation_results WHERE status = 'completed' AND (company_id IN {_format_int_list(context.allowed_company_ids)} OR company_id IS NULL)"
         dur_params = {}
         if context.allowed_service_ids is not None:
             dur_query += f" AND service_id IN {_format_int_list(context.allowed_service_ids)}"
