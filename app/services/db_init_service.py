@@ -19,6 +19,8 @@ from app.models.mass_evaluations import (
 
 logger = logging.getLogger(__name__)
 
+FALLBACK_BOSTON_PROMPT = "Evaluación de llamadas de Boston Medical para audios comerciales."
+
 DEFAULT_STRUCTURES = [
     {
         "structure_key": "boston_medical_audio",
@@ -599,6 +601,18 @@ async def init_db():
 
             logger.info("Dynamic column migrations completed successfully.")
 
+        # Create performance composite indexes safely
+        try:
+            async with engine.begin() as conn:
+                if engine.dialect.name != "sqlite":
+                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_mass_res_svc_stat_ts ON bm_mass_evaluation_results(service_id, status, call_timestamp);"))
+                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_mass_res_comp_stat_ts ON bm_mass_evaluation_results(company_id, status, call_timestamp);"))
+                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_mass_res_svc_dir_ts ON bm_mass_evaluation_results(service_id, direction, call_timestamp);"))
+                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_mass_res_svc_typo_ts ON bm_mass_evaluation_results(service_id, typology_key, call_timestamp);"))
+                    await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_mass_res_owner_ts ON bm_mass_evaluation_results(hubspot_owner_id, call_timestamp);"))
+        except Exception as e_idx:
+            logger.warning("[db_init_service] Performance index creation info/warning: %s", e_idx)
+
         # Drop and recreate PostgreSQL reporting/Looker views (skipped on SQLite)
         if engine.dialect.name != "sqlite":
             try:
@@ -606,7 +620,7 @@ async def init_db():
                     await conn.execute(text("DROP VIEW IF EXISTS vw_bm_analysis_criteria_flat CASCADE;"))
                     await conn.execute(text("DROP VIEW IF EXISTS vw_bm_analysis_results_pivot CASCADE;"))
 
-                await conn.execute(text("""
+                    await conn.execute(text("""
                         CREATE OR REPLACE VIEW vw_bm_analysis_criteria_flat AS
                         SELECT
                             a.analysis_id,

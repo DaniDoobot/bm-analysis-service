@@ -222,8 +222,8 @@ async def start_training_scheduler():
 async def startup_event():
     from app.routers.health import get_version
     commit_ver = get_version()
-    logger.info("bm-analysis-service starting up (commit: %s)", commit_ver)
     import os
+    logger.info("bm-analysis-service starting up (PID: %d, commit: %s)", os.getpid(), commit_ver)
     logger.info("AI provider: %s", settings.ai_provider)
     logger.info("AI_PROVIDER in os.environ: %s", "yes" if "AI_PROVIDER" in os.environ else "no")
     if settings.ai_provider == "gemini":

@@ -26,6 +26,7 @@ from app.schemas.analytics import (
 from app.services.dashboard_service import resolve_date_range, extract_score_from_mass
 from app.utils.hubspot_owners import resolve_owner_name
 from app.utils.normalizers import normalize_typology, normalize_direction
+from app.utils.cache import analytics_cache
 
 def _format_int_list(lst) -> str:
     if not lst:
@@ -378,192 +379,207 @@ async def get_agents_comparison(
         raw_direction = direction or call_direction or inbound_outbound
         norm_d = normalize_direction(raw_direction)
 
-        # 1. Resolve timeframe
+        # 1. Resolve timeframe and validate
         dt_from, dt_to, _ = resolve_date_range(date_from, date_to, period=None, default_period="30d")
-        
-        # 2. Build Mass Evaluation Results filter query
-        stmt = select(MassEvaluationResult).where(MassEvaluationResult.status == "completed")
-        
-        stmt = stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
-        if context.allowed_service_ids is not None:
-            stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
-            
-        if dt_from:
-            stmt = stmt.where(
-                func.coalesce(
-                    MassEvaluationResult.call_timestamp,
-                    MassEvaluationResult.analysis_timestamp,
-                ) >= dt_from
-            )
-        if dt_to:
-            stmt = stmt.where(
-                func.coalesce(
-                    MassEvaluationResult.call_timestamp,
-                    MassEvaluationResult.analysis_timestamp,
-                ) <= dt_to
-            )
-        if service_id is not None:
-            if context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
-                stmt = stmt.where(MassEvaluationResult.service_id == -1)
-            else:
-                stmt = stmt.where(MassEvaluationResult.service_id == service_id)
-        elif service_key is not None:
-            stmt = stmt.where(MassEvaluationResult.service_key == service_key)
-
-        typo_ids = None
-        if typology_ids and typology_ids.strip():
-            typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
-        if typo_ids:
-            stmt = stmt.where(MassEvaluationResult.typology_id.in_(typo_ids))
-        elif norm_t:
-            stmt = stmt.where(
-                or_(
-                    func.lower(MassEvaluationResult.typology_key) == norm_t,
-                    func.lower(func.coalesce(MassEvaluationResult.result_json["tipo_llamada"].astext, "")) == norm_t
-                )
+        if dt_from and dt_to and dt_from > dt_to:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Rango de fechas inválido: date_from ({date_from}) no puede ser posterior a date_to ({date_to})."
             )
 
-        if norm_d:
-            stmt = stmt.where(
-                or_(
-                    func.lower(MassEvaluationResult.direction) == norm_d,
-                    func.lower(func.coalesce(MassEvaluationResult.result_json["inbound_outbound"].astext, "")) == norm_d
-                )
-            )
-        if duration_min_seconds is not None:
-            stmt = stmt.where(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
-        if duration_max_seconds is not None:
-            stmt = stmt.where(MassEvaluationResult.call_duration_seconds <= duration_max_seconds)
-            
-        # Official scale: 0-10 (matches DB storage). Legacy compat: if value > 10 assume 0-100 and divide.
-        score_min_scaled = (avg_score_min / 10.0 if avg_score_min > 10.0 else avg_score_min) if avg_score_min is not None else None
-        score_max_scaled = (avg_score_max / 10.0 if avg_score_max > 10.0 else avg_score_max) if avg_score_max is not None else None
-            
-        if score_min_scaled is not None:
-            stmt = stmt.where(MassEvaluationResult.evaluacion_global >= score_min_scaled)
-        if score_max_scaled is not None:
-            stmt = stmt.where(MassEvaluationResult.evaluacion_global <= score_max_scaled)
-
+        # Build unique cache key
         owner_ids = parse_list_param(agent_owner_ids) + parse_list_param(agent_owner_ids_bracket)
-        if context.allowed_agent_ids is not None:
-            if owner_ids:
-                allowed_requested = [oid for oid in owner_ids if oid in context.allowed_agent_ids]
-                if not allowed_requested:
-                    stmt = stmt.where(MassEvaluationResult.hubspot_owner_id == "-1")
+        item_req_keys = parse_list_param(item_keys) + parse_list_param(item_keys_bracket)
+        cache_key = (
+            f"agents_comp:{context.company_id}:{context.normalized_role}:{service_id}:{service_key}:"
+            f"{date_from}:{date_to}:{sorted(owner_ids)}:{sorted(item_req_keys)}:{norm_t}:{norm_d}:"
+            f"{duration_min_seconds}:{duration_max_seconds}:{avg_score_min}:{avg_score_max}"
+        )
+
+        async def _compute():
+            # 2. Build Mass Evaluation Results filter query
+            stmt = select(MassEvaluationResult).where(MassEvaluationResult.status == "completed")
+            stmt = stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+            if context.allowed_service_ids is not None:
+                stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
+                
+            if dt_from:
+                stmt = stmt.where(
+                    func.coalesce(
+                        MassEvaluationResult.call_timestamp,
+                        MassEvaluationResult.analysis_timestamp,
+                    ) >= dt_from
+                )
+            if dt_to:
+                stmt = stmt.where(
+                    func.coalesce(
+                        MassEvaluationResult.call_timestamp,
+                        MassEvaluationResult.analysis_timestamp,
+                    ) <= dt_to
+                )
+            if service_id is not None:
+                if context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+                    stmt = stmt.where(MassEvaluationResult.service_id == -1)
                 else:
-                    stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(allowed_requested))
+                    stmt = stmt.where(MassEvaluationResult.service_id == service_id)
+            elif service_key is not None:
+                stmt = stmt.where(MassEvaluationResult.service_key == service_key)
+
+            typo_ids = None
+            if typology_ids and typology_ids.strip():
+                typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
+            if typo_ids:
+                stmt = stmt.where(MassEvaluationResult.typology_id.in_(typo_ids))
+            elif norm_t:
+                stmt = stmt.where(
+                    or_(
+                        func.lower(MassEvaluationResult.typology_key) == norm_t,
+                        func.lower(func.coalesce(MassEvaluationResult.result_json["tipo_llamada"].astext, "")) == norm_t
+                    )
+                )
+
+            if norm_d:
+                stmt = stmt.where(
+                    or_(
+                        func.lower(MassEvaluationResult.direction) == norm_d,
+                        func.lower(func.coalesce(MassEvaluationResult.result_json["inbound_outbound"].astext, "")) == norm_d
+                    )
+                )
+            if duration_min_seconds is not None:
+                stmt = stmt.where(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
+            if duration_max_seconds is not None:
+                stmt = stmt.where(MassEvaluationResult.call_duration_seconds <= duration_max_seconds)
+                
+            score_min_scaled = (avg_score_min / 10.0 if avg_score_min > 10.0 else avg_score_min) if avg_score_min is not None else None
+            score_max_scaled = (avg_score_max / 10.0 if avg_score_max > 10.0 else avg_score_max) if avg_score_max is not None else None
+                
+            if score_min_scaled is not None:
+                stmt = stmt.where(MassEvaluationResult.evaluacion_global >= score_min_scaled)
+            if score_max_scaled is not None:
+                stmt = stmt.where(MassEvaluationResult.evaluacion_global <= score_max_scaled)
+
+            if context.allowed_agent_ids is not None:
+                if owner_ids:
+                    allowed_requested = [oid for oid in owner_ids if oid in context.allowed_agent_ids]
+                    if not allowed_requested:
+                        stmt = stmt.where(MassEvaluationResult.hubspot_owner_id == "-1")
+                    else:
+                        stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(allowed_requested))
+                else:
+                    stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(context.allowed_agent_ids))
             else:
-                stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(context.allowed_agent_ids))
-        else:
-            if owner_ids:
-                stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(owner_ids))
+                if owner_ids:
+                    stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(owner_ids))
 
-        # Query Results
-        t_db_start = time.perf_counter()
-        res = await db.execute(stmt)
-        results = res.scalars().all()
-        db_ms = (time.perf_counter() - t_db_start) * 1000.0
+            t_db_start = time.perf_counter()
+            res = await db.execute(stmt)
+            results = res.scalars().all()
+            db_ms = (time.perf_counter() - t_db_start) * 1000.0
 
-        # 3. Query associated criteria results for the matched analyses
-        analysis_ids = [r.mass_analysis_id for r in results]
-        criteria_by_analysis = {}
-        if analysis_ids:
-            stmt_crit = select(MassEvaluationCriterionResult).where(
-                MassEvaluationCriterionResult.mass_analysis_id.in_(analysis_ids),
-                MassEvaluationCriterionResult.is_applicable == True
-            )
-            res_crit = await db.execute(stmt_crit)
-            for c in res_crit.scalars().all():
-                criteria_by_analysis.setdefault(c.mass_analysis_id, []).append(c)
+            analysis_ids = [r.mass_analysis_id for r in results]
+            criteria_by_analysis = {}
+            if analysis_ids:
+                stmt_crit = select(MassEvaluationCriterionResult).where(
+                    MassEvaluationCriterionResult.mass_analysis_id.in_(analysis_ids),
+                    MassEvaluationCriterionResult.is_applicable == True
+                )
+                res_crit = await db.execute(stmt_crit)
+                for c in res_crit.scalars().all():
+                    criteria_by_analysis.setdefault(c.mass_analysis_id, []).append(c)
 
-        # 4. Resolve unique list of available agents for scope
-        available_catalog = await get_available_agents(db, context=context, service_id=service_id)
-        cat_by_oid = {a.hubspot_owner_id: a for a in available_catalog}
+            available_catalog = await get_available_agents(db, context=context, service_id=service_id)
+            cat_by_oid = {a.hubspot_owner_id: a for a in available_catalog}
 
-        agents_found = {}
-        for r in results:
-            oid = r.hubspot_owner_id
-            if oid and oid not in agents_found:
-                name = resolve_owner_name(oid)
-                if not name and r.agent_name and not r.agent_name.isdigit():
-                    name = r.agent_name
-                if not name:
-                    name = oid
-                agents_found[oid] = name
+            agents_found = {}
+            for r in results:
+                oid = r.hubspot_owner_id
+                if oid and oid not in agents_found:
+                    name = resolve_owner_name(oid)
+                    if not name and r.agent_name and not r.agent_name.isdigit():
+                        name = r.agent_name
+                    if not name:
+                        name = oid
+                    agents_found[oid] = name
 
-        if agents_found:
-            agents_list = []
-            for oid, name in sorted(agents_found.items(), key=lambda x: x[1]):
-                if oid in cat_by_oid:
-                    agents_list.append(cat_by_oid[oid])
+            if agents_found:
+                agents_list = []
+                for oid, name in sorted(agents_found.items(), key=lambda x: x[1]):
+                    if oid in cat_by_oid:
+                        agents_list.append(cat_by_oid[oid])
+                    else:
+                        agents_list.append(
+                            AgentInfo(
+                                hubspot_owner_id=oid,
+                                agent_name=name,
+                                name=name,
+                                agent_initials=None,
+                                initials=None,
+                                label=name,
+                                service_id=service_id,
+                                service_name=None,
+                            )
+                        )
+            else:
+                agents_list = available_catalog
+
+            all_metrics = await get_all_metrics(db, context=context)
+            if item_req_keys:
+                effective_keys = item_req_keys[:50] if len(item_req_keys) > 50 else item_req_keys
+                items_to_use = [item for item in all_metrics if item["key"] in effective_keys]
+            else:
+                default_items = [item for item in all_metrics if item.get("default_selected")]
+                if default_items:
+                    items_to_use = default_items[:20]
                 else:
-                    agents_list.append(
-                        AgentInfo(
+                    items_to_use = all_metrics[:20]
+
+            items_list = [AnalyticsItem(**item) for item in items_to_use]
+
+            comparison_rows = []
+            for oid, agent_name in agents_found.items():
+                agent_results = [r for r in results if r.hubspot_owner_id == oid]
+                for item in items_to_use:
+                    key = item["key"]
+                    extracted_vals = []
+                    for r in agent_results:
+                        crit_rows = criteria_by_analysis.get(r.mass_analysis_id, [])
+                        val = extract_metric_value(r, crit_rows, key)
+                        if val is not None:
+                            extracted_vals.append(val)
+                    
+                    count = len(extracted_vals)
+                    value = round(sum(extracted_vals) / count, 1) if count > 0 else None
+                    
+                    comparison_rows.append(
+                        AgentComparisonRow(
                             hubspot_owner_id=oid,
-                            agent_name=name,
-                            name=name,
-                            agent_initials=None,
-                            initials=None,
-                            label=name,
-                            service_id=service_id,
-                            service_name=None,
+                            agent_name=agent_name,
+                            item_key=key,
+                            item_label=item["label"],
+                            metric_type=item["type"],
+                            value=value,
+                            count=count
                         )
                     )
-        else:
-            agents_list = available_catalog
 
-        # 5. Filter items catalogue
-        all_metrics = await get_all_metrics(db, context=context)
-        keys_to_use = parse_list_param(item_keys) + parse_list_param(item_keys_bracket)
-        if keys_to_use:
-            items_to_use = [item for item in all_metrics if item["key"] in keys_to_use]
-        else:
-            items_to_use = all_metrics
+            return AgentComparisonResponse(
+                agents=agents_list,
+                items=items_list,
+                comparison=comparison_rows
+            ), len(results), len(comparison_rows), db_ms
 
-        items_list = [AnalyticsItem(**item) for item in items_to_use]
-
-        # 6. Build comparison rows
-        comparison_rows = []
-        for oid, agent_name in agents_found.items():
-            agent_results = [r for r in results if r.hubspot_owner_id == oid]
-            for item in items_to_use:
-                key = item["key"]
-                extracted_vals = []
-                for r in agent_results:
-                    crit_rows = criteria_by_analysis.get(r.mass_analysis_id, [])
-                    val = extract_metric_value(r, crit_rows, key)
-                    if val is not None:
-                        extracted_vals.append(val)
-                
-                count = len(extracted_vals)
-                value = round(sum(extracted_vals) / count, 1) if count > 0 else None
-                
-                comparison_rows.append(
-                    AgentComparisonRow(
-                        hubspot_owner_id=oid,
-                        agent_name=agent_name,
-                        item_key=key,
-                        item_label=item["label"],
-                        metric_type=item["type"],
-                        value=value,
-                        count=count
-                    )
-                )
-
-        t_end = time.perf_counter()
-        total_processing_ms = round((t_end - t_start) * 1000.0, 1)
+        (resp, rows_scanned, rows_returned, db_ms), is_cache_hit = await analytics_cache.get_or_compute(cache_key, _compute, ttl=30)
+        total_processing_ms = round((time.perf_counter() - t_start) * 1000.0, 1)
         aggregation_ms = round(max(0.0, total_processing_ms - db_ms), 1)
 
         logger.info(
             "[perf.agents_comparison] endpoint=/bm/analytics/agents-comparison company_id=%s service_id=%s date_from=%s date_to=%s agents_count=%d items_count=%d mode=scores direction=%s rows_scanned=%d rows_returned=%d db_ms=%.1f aggregation_ms=%.1f total_ms=%.1f",
-            context.allowed_company_ids if context else None, service_id, date_from, date_to, len(agents_list), len(items_list), norm_d, len(results), len(comparison_rows), db_ms, aggregation_ms, total_processing_ms
+            context.allowed_company_ids if context else None, service_id, date_from, date_to, len(resp.agents), len(resp.items), norm_d, rows_scanned, rows_returned, db_ms, aggregation_ms, total_processing_ms
         )
 
-        return AgentComparisonResponse(
-            agents=agents_list,
-            items=items_list,
-            comparison=comparison_rows
-        )
+        return resp
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Failed to retrieve Analytics agents comparison")
         raise HTTPException(
@@ -624,166 +640,176 @@ async def get_items_evolution(
         raw_direction = direction or call_direction or inbound_outbound
         norm_d = normalize_direction(raw_direction)
 
-        # 1. Resolve timeframe
+        # 1. Resolve timeframe and validate
         dt_from, dt_to, recommended_bucket = resolve_date_range(date_from, date_to, period=None, default_period="30d")
+        if dt_from and dt_to and dt_from > dt_to:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Rango de fechas inválido: date_from ({date_from}) no puede ser posterior a date_to ({date_to})."
+            )
         bucket_interval = bucket if bucket in ["hour", "day", "week"] else recommended_bucket
 
-        # 2. Build Mass Evaluation Results filter query
-        stmt = select(MassEvaluationResult).where(MassEvaluationResult.status == "completed")
-        
-        stmt = stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
-        if context.allowed_service_ids is not None:
-            stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
-            
-        if dt_from:
-            stmt = stmt.where(
-                func.coalesce(
-                    MassEvaluationResult.call_timestamp,
-                    MassEvaluationResult.analysis_timestamp,
-                ) >= dt_from
-            )
-        if dt_to:
-            stmt = stmt.where(
-                func.coalesce(
-                    MassEvaluationResult.call_timestamp,
-                    MassEvaluationResult.analysis_timestamp,
-                ) <= dt_to
-            )
-        if service_id is not None:
-            if context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
-                stmt = stmt.where(MassEvaluationResult.service_id == -1)
-            else:
-                stmt = stmt.where(MassEvaluationResult.service_id == service_id)
-        elif service_key is not None:
-            stmt = stmt.where(MassEvaluationResult.service_key == service_key)
-
-        typo_ids = None
-        if typology_ids and typology_ids.strip():
-            typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
-        if typo_ids:
-            stmt = stmt.where(MassEvaluationResult.typology_id.in_(typo_ids))
-        elif norm_t:
-            stmt = stmt.where(
-                or_(
-                    func.lower(MassEvaluationResult.typology_key) == norm_t,
-                    func.lower(func.coalesce(MassEvaluationResult.result_json["tipo_llamada"].astext, "")) == norm_t
-                )
-            )
-
-        if norm_d:
-            stmt = stmt.where(
-                or_(
-                    func.lower(MassEvaluationResult.direction) == norm_d,
-                    func.lower(func.coalesce(MassEvaluationResult.result_json["inbound_outbound"].astext, "")) == norm_d
-                )
-            )
-        if duration_min_seconds is not None:
-            stmt = stmt.where(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
-        if duration_max_seconds is not None:
-            stmt = stmt.where(MassEvaluationResult.call_duration_seconds <= duration_max_seconds)
-            
-        # Official scale: 0-10 (matches DB storage). Legacy compat: if value > 10 assume 0-100 and divide.
-        score_min_scaled = (avg_score_min / 10.0 if avg_score_min > 10.0 else avg_score_min) if avg_score_min is not None else None
-        score_max_scaled = (avg_score_max / 10.0 if avg_score_max > 10.0 else avg_score_max) if avg_score_max is not None else None
-            
-        if score_min_scaled is not None:
-            stmt = stmt.where(MassEvaluationResult.evaluacion_global >= score_min_scaled)
-        if score_max_scaled is not None:
-            stmt = stmt.where(MassEvaluationResult.evaluacion_global <= score_max_scaled)
-
         owner_ids = parse_list_param(agent_owner_ids) + parse_list_param(agent_owner_ids_bracket)
-        if context.allowed_agent_ids is not None:
-            if owner_ids:
-                allowed_requested = [oid for oid in owner_ids if oid in context.allowed_agent_ids]
-                if not allowed_requested:
-                    stmt = stmt.where(MassEvaluationResult.hubspot_owner_id == "-1")
+        item_req_keys = parse_list_param(item_keys) + parse_list_param(item_keys_bracket)
+        cache_key = (
+            f"items_evo:{context.company_id}:{context.normalized_role}:{service_id}:{service_key}:"
+            f"{date_from}:{date_to}:{sorted(owner_ids)}:{sorted(item_req_keys)}:{bucket_interval}:{norm_t}:{norm_d}:"
+            f"{duration_min_seconds}:{duration_max_seconds}:{avg_score_min}:{avg_score_max}"
+        )
+
+        async def _compute():
+            # 2. Build Mass Evaluation Results filter query
+            stmt = select(MassEvaluationResult).where(MassEvaluationResult.status == "completed")
+            stmt = stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+            if context.allowed_service_ids is not None:
+                stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
+                
+            if dt_from:
+                stmt = stmt.where(
+                    func.coalesce(
+                        MassEvaluationResult.call_timestamp,
+                        MassEvaluationResult.analysis_timestamp,
+                    ) >= dt_from
+                )
+            if dt_to:
+                stmt = stmt.where(
+                    func.coalesce(
+                        MassEvaluationResult.call_timestamp,
+                        MassEvaluationResult.analysis_timestamp,
+                    ) <= dt_to
+                )
+            if service_id is not None:
+                if context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+                    stmt = stmt.where(MassEvaluationResult.service_id == -1)
                 else:
-                    stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(allowed_requested))
-            else:
-                stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(context.allowed_agent_ids))
-        else:
-            if owner_ids:
-                stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(owner_ids))
+                    stmt = stmt.where(MassEvaluationResult.service_id == service_id)
+            elif service_key is not None:
+                stmt = stmt.where(MassEvaluationResult.service_key == service_key)
 
-        # Query Results
-        res = await db.execute(stmt)
-        results = res.scalars().all()
-
-        # 3. Query associated criteria results for the matched analyses
-        analysis_ids = [r.mass_analysis_id for r in results]
-        criteria_by_analysis = {}
-        if analysis_ids:
-            stmt_crit = select(MassEvaluationCriterionResult).where(
-                MassEvaluationCriterionResult.mass_analysis_id.in_(analysis_ids),
-                MassEvaluationCriterionResult.is_applicable == True
-            )
-            res_crit = await db.execute(stmt_crit)
-            for c in res_crit.scalars().all():
-                criteria_by_analysis.setdefault(c.mass_analysis_id, []).append(c)
-
-        # 4. Group results by time interval bucket
-        buckets_map: dict[str, list[MassEvaluationResult]] = {}
-        for r in results:
-            ts = _effective_ts(r)
-            if not ts:
-                continue
-            if bucket_interval == "hour":
-                b_key = ts.strftime("%Y-%m-%d %H:00")
-            elif bucket_interval == "day":
-                b_key = ts.strftime("%Y-%m-%d")
-            else:
-                # Group by Monday start of week
-                b_key = (ts - timedelta(days=ts.weekday())).strftime("%Y-%m-%d")
-            buckets_map.setdefault(b_key, []).append(r)
-
-        # 5. Filter items catalogue
-        all_metrics = await get_all_metrics(db, context=context)
-        keys_to_use = parse_list_param(item_keys) + parse_list_param(item_keys_bracket)
-        if keys_to_use:
-            items_to_use = [item for item in all_metrics if item["key"] in keys_to_use]
-        else:
-            items_to_use = all_metrics
-
-        # 6. Construct timeline points per item series
-        series_list = []
-        for item in items_to_use:
-            key = item["key"]
-            points = []
-            
-            # Sorted bucket keys chronologically
-            for b_key in sorted(buckets_map.keys()):
-                bucket_results = buckets_map[b_key]
-                extracted_vals = []
-                for r in bucket_results:
-                    crit_rows = criteria_by_analysis.get(r.mass_analysis_id, [])
-                    val = extract_metric_value(r, crit_rows, key)
-                    if val is not None:
-                        extracted_vals.append(val)
-                
-                count = len(extracted_vals)
-                value = round(sum(extracted_vals) / count, 1) if count > 0 else None
-                
-                # We return even empty points if evaluations existed in that bucket, or omit if count=0 depending on preference.
-                # Here we follow the exact spec requirement: "Si no hay datos válidos, value=null y count=0"
-                points.append(
-                    EvolutionPoint(
-                        date=b_key,
-                        value=value,
-                        count=count,
-                        analysis_count=count
+            typo_ids = None
+            if typology_ids and typology_ids.strip():
+                typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
+            if typo_ids:
+                stmt = stmt.where(MassEvaluationResult.typology_id.in_(typo_ids))
+            elif norm_t:
+                stmt = stmt.where(
+                    or_(
+                        func.lower(MassEvaluationResult.typology_key) == norm_t,
+                        func.lower(func.coalesce(MassEvaluationResult.result_json["tipo_llamada"].astext, "")) == norm_t
                     )
                 )
-                
-            series_list.append(
-                ItemEvolutionSeries(
-                    item_key=key,
-                    item_label=item["label"],
-                    metric_type=item["type"],
-                    points=points
-                )
-            )
 
-        return series_list
+            if norm_d:
+                stmt = stmt.where(
+                    or_(
+                        func.lower(MassEvaluationResult.direction) == norm_d,
+                        func.lower(func.coalesce(MassEvaluationResult.result_json["inbound_outbound"].astext, "")) == norm_d
+                    )
+                )
+            if duration_min_seconds is not None:
+                stmt = stmt.where(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
+            if duration_max_seconds is not None:
+                stmt = stmt.where(MassEvaluationResult.call_duration_seconds <= duration_max_seconds)
+                
+            score_min_scaled = (avg_score_min / 10.0 if avg_score_min > 10.0 else avg_score_min) if avg_score_min is not None else None
+            score_max_scaled = (avg_score_max / 10.0 if avg_score_max > 10.0 else avg_score_max) if avg_score_max is not None else None
+                
+            if score_min_scaled is not None:
+                stmt = stmt.where(MassEvaluationResult.evaluacion_global >= score_min_scaled)
+            if score_max_scaled is not None:
+                stmt = stmt.where(MassEvaluationResult.evaluacion_global <= score_max_scaled)
+
+            if context.allowed_agent_ids is not None:
+                if owner_ids:
+                    allowed_requested = [oid for oid in owner_ids if oid in context.allowed_agent_ids]
+                    if not allowed_requested:
+                        stmt = stmt.where(MassEvaluationResult.hubspot_owner_id == "-1")
+                    else:
+                        stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(allowed_requested))
+                else:
+                    stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(context.allowed_agent_ids))
+            else:
+                if owner_ids:
+                    stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(owner_ids))
+
+            res = await db.execute(stmt)
+            results = res.scalars().all()
+
+            analysis_ids = [r.mass_analysis_id for r in results]
+            criteria_by_analysis = {}
+            if analysis_ids:
+                stmt_crit = select(MassEvaluationCriterionResult).where(
+                    MassEvaluationCriterionResult.mass_analysis_id.in_(analysis_ids),
+                    MassEvaluationCriterionResult.is_applicable == True
+                )
+                res_crit = await db.execute(stmt_crit)
+                for c in res_crit.scalars().all():
+                    criteria_by_analysis.setdefault(c.mass_analysis_id, []).append(c)
+
+            buckets_map: dict[str, list[MassEvaluationResult]] = {}
+            for r in results:
+                ts = _effective_ts(r)
+                if not ts:
+                    continue
+                if bucket_interval == "hour":
+                    b_key = ts.strftime("%Y-%m-%d %H:00")
+                elif bucket_interval == "day":
+                    b_key = ts.strftime("%Y-%m-%d")
+                else:
+                    b_key = (ts - timedelta(days=ts.weekday())).strftime("%Y-%m-%d")
+                buckets_map.setdefault(b_key, []).append(r)
+
+            all_metrics = await get_all_metrics(db, context=context)
+            if item_req_keys:
+                effective_keys = item_req_keys[:50] if len(item_req_keys) > 50 else item_req_keys
+                items_to_use = [item for item in all_metrics if item["key"] in effective_keys]
+            else:
+                default_items = [item for item in all_metrics if item.get("default_selected")]
+                if default_items:
+                    items_to_use = default_items[:20]
+                else:
+                    items_to_use = all_metrics[:20]
+
+            series_list = []
+            for item in items_to_use:
+                key = item["key"]
+                points = []
+                for b_key in sorted(buckets_map.keys()):
+                    bucket_results = buckets_map[b_key]
+                    extracted_vals = []
+                    for r in bucket_results:
+                        crit_rows = criteria_by_analysis.get(r.mass_analysis_id, [])
+                        val = extract_metric_value(r, crit_rows, key)
+                        if val is not None:
+                            extracted_vals.append(val)
+                    
+                    count = len(extracted_vals)
+                    value = round(sum(extracted_vals) / count, 1) if count > 0 else None
+                    points.append(
+                        EvolutionPoint(
+                            date=b_key,
+                            value=value,
+                            count=count,
+                            analysis_count=count
+                        )
+                    )
+                    
+                series_list.append(
+                    ItemEvolutionSeries(
+                        item_key=key,
+                        item_label=item["label"],
+                        metric_type=item["type"],
+                        bucket_interval=bucket_interval,
+                        points=points
+                    )
+                )
+
+            return series_list
+
+        series_res, _ = await analytics_cache.get_or_compute(cache_key, _compute, ttl=30)
+        return series_res
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Failed to retrieve Analytics items evolution timeline")
         raise HTTPException(

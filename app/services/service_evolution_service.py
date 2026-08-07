@@ -47,6 +47,13 @@ def clean_sql(query: str, dialect_name: str) -> str:
     query = query.replace("::int", "")
     query = query.replace("::text", "")
     query = query.replace("::date", "")
+    query = query.replace("CAST(:date_from AS timestamptz)", ":date_from")
+    query = query.replace("CAST(:date_to AS timestamptz)", ":date_to")
+    query = query.replace("CAST(:service_id AS integer)", ":service_id")
+    query = query.replace("CAST(:service_key AS text)", ":service_key")
+    query = query.replace("CAST(:typology_key AS text)", ":typology_key")
+    query = query.replace("CAST(:agent_owner_id AS text)", ":agent_owner_id")
+    query = query.replace("CAST(:direction AS text)", ":direction")
     query = query.replace("timestamptz", "datetime")
     query = query.replace("date_trunc('week', r.call_timestamp)", "DATE(r.call_timestamp, 'weekday 0', '-6 days')")
     query = query.replace("date_trunc('month', r.call_timestamp)", "DATE(r.call_timestamp, 'start of month')")
@@ -233,25 +240,7 @@ class ServiceEvolutionService:
         Retrieves complete service evolution details with series, typologies, agents, and criteria ranking.
         """
         t_start = time.perf_counter()
-        _EG_EXPR = """
-            COALESCE(
-                NULLIF((r.result_json->>'evaluacion_global')::numeric, 0),
-                (
-                    SELECT AVG(sub.numeric_value)
-                    FROM bm_mass_evaluation_criterion_results sub
-                    WHERE sub.mass_analysis_id = r.mass_analysis_id
-                      AND sub.criterion_type = 'score_1_10'
-                      AND sub.is_applicable = true
-                      AND sub.numeric_value IS NOT NULL
-                      AND sub.criterion_key NOT IN (
-                          'hablando_agente', 'hablando_paciente',
-                          'palabras_minuto_agente', 'palabras_minuto_paciente',
-                          'velocidad_hablando_agente', 'velocidad_hablando_paciente',
-                          'meses_patologia', 'cuanto_tiempo', 'duracion_consulta'
-                      )
-                )
-            )
-        """
+        _EG_EXPR = "COALESCE(r.evaluacion_global, NULLIF((r.result_json->>'evaluacion_global')::numeric, 0))"
         parsed_date_from, parsed_date_to = parse_date_bounds(date_from, date_to)
         logger.info(
             "Service evolution query: service_id=%s, service_key=%s, granularity=%s, typology=%s, agent=%s, "
