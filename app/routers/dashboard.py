@@ -187,6 +187,7 @@ async def list_agents(
     context: Annotated[TenantContext, Depends(get_tenant_context)],
     service_id: Annotated[int | None, Query(description="Filter by service ID")] = None,
     service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
+    service: Annotated[str | None, Query(description="Filter by service ID, key, or slug name")] = None,
     period: Annotated[str | None, Query(description="Filter by period (e.g., 24h, 7d, 30d)")] = None,
     date_from: Annotated[str | None, Query(description="Start date (ISO or YYYY-MM-DD)")] = None,
     date_to: Annotated[str | None, Query(description="End date (ISO or YYYY-MM-DD)")] = None,
@@ -201,6 +202,14 @@ async def list_agents(
     direction: Annotated[str | None, Query(description="all | inbound | outbound")] = None,
     call_direction: Annotated[str | None, Query(description="Filter by call direction")] = None,
     inbound_outbound: Annotated[str | None, Query(description="Filter by inbound/outbound")] = None,
+    duration_min_seconds: Annotated[int | None, Query(alias="duration_min", description="Min duration in seconds")] = None,
+    min_duration: Annotated[int | None, Query(description="Min duration in seconds (alias)")] = None,
+    duration_max_seconds: Annotated[int | None, Query(alias="duration_max", description="Max duration in seconds")] = None,
+    max_duration: Annotated[int | None, Query(description="Max duration in seconds (alias)")] = None,
+    avg_score_min: Annotated[float | None, Query(alias="score_min", description="Min average score")] = None,
+    eval_min: Annotated[float | None, Query(description="Min average score (alias)")] = None,
+    avg_score_max: Annotated[float | None, Query(alias="score_max", description="Max average score")] = None,
+    eval_max: Annotated[float | None, Query(description="Max average score (alias)")] = None,
 ):
     """
     Get all active call center agents with their accumulated real metrics.
@@ -219,11 +228,17 @@ async def list_agents(
     raw_direction = direction or call_direction or inbound_outbound
     norm_direction = normalize_direction(raw_direction)
 
+    dur_min = duration_min_seconds if duration_min_seconds is not None else min_duration
+    dur_max = duration_max_seconds if duration_max_seconds is not None else max_duration
+    sc_min = avg_score_min if avg_score_min is not None else eval_min
+    sc_max = avg_score_max if avg_score_max is not None else eval_max
+
     try:
         data = await get_agents_list(
             db,
             service_id=service_id,
             service_key=service_key,
+            service=service,
             period=period,
             date_from=date_from,
             date_to=date_to,
@@ -231,9 +246,15 @@ async def list_agents(
             typology_ids=typo_ids,
             typology_key=norm_typology_key,
             direction=norm_direction,
+            duration_min_seconds=dur_min,
+            duration_max_seconds=dur_max,
+            avg_score_min=sc_min,
+            avg_score_max=sc_max,
             context=context,
         )
         return data
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Failed to retrieve agents list")
         raise HTTPException(status_code=500, detail=str(e))
@@ -256,6 +277,7 @@ async def agent_evolution(
     prompt_version_id: Annotated[int | None, Query(description="Filter by prompt version")] = None,
     service_id: Annotated[int | None, Query(description="Filter by service ID")] = None,
     service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
+    service: Annotated[str | None, Query(description="Filter by service ID, key, or slug name")] = None,
     date_from: Annotated[str | None, Query(description="Custom start date (ISO or YYYY-MM-DD)")] = None,
     date_to: Annotated[str | None, Query(description="Custom end date (ISO or YYYY-MM-DD)")] = None,
     typology_ids: Annotated[str | None, Query(description="Comma-separated typology IDs")] = None,
@@ -268,10 +290,14 @@ async def agent_evolution(
     direction: Annotated[str | None, Query(description="all | inbound | outbound")] = None,
     call_direction: Annotated[str | None, Query(description="Filter by call direction")] = None,
     inbound_outbound: Annotated[str | None, Query(description="Filter by inbound/outbound")] = None,
-    duration_min_seconds: Annotated[int | None, Query(description="Min duration in seconds")] = None,
-    duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
-    avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
-    avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
+    duration_min_seconds: Annotated[int | None, Query(alias="duration_min", description="Min duration in seconds")] = None,
+    min_duration: Annotated[int | None, Query(description="Min duration in seconds (alias)")] = None,
+    duration_max_seconds: Annotated[int | None, Query(alias="duration_max", description="Max duration in seconds")] = None,
+    max_duration: Annotated[int | None, Query(description="Max duration in seconds (alias)")] = None,
+    avg_score_min: Annotated[float | None, Query(alias="score_min", description="Min average score")] = None,
+    eval_min: Annotated[float | None, Query(description="Min average score (alias)")] = None,
+    avg_score_max: Annotated[float | None, Query(alias="score_max", description="Max average score")] = None,
+    eval_max: Annotated[float | None, Query(description="Max average score (alias)")] = None,
 ):
     """
     Get chronological performance, trends, strengths, weaknesses,
@@ -299,6 +325,11 @@ async def agent_evolution(
         raw_direction = direction or call_direction or inbound_outbound
         norm_direction = normalize_direction(raw_direction)
 
+        dur_min = duration_min_seconds if duration_min_seconds is not None else min_duration
+        dur_max = duration_max_seconds if duration_max_seconds is not None else max_duration
+        sc_min = avg_score_min if avg_score_min is not None else eval_min
+        sc_max = avg_score_max if avg_score_max is not None else eval_max
+
         data = await get_agent_evolution(
             db,
             hubspot_owner_id=hubspot_owner_id,
@@ -308,18 +339,21 @@ async def agent_evolution(
             prompt_version_id=prompt_version_id,
             service_id=service_id,
             service_key=service_key,
+            service=service,
             date_from=date_from,
             date_to=date_to,
             typology_ids=typo_ids,
             typology_key=norm_typology_key,
             direction=norm_direction,
-            duration_min_seconds=duration_min_seconds,
-            duration_max_seconds=duration_max_seconds,
-            avg_score_min=avg_score_min,
-            avg_score_max=avg_score_max,
+            duration_min_seconds=dur_min,
+            duration_max_seconds=dur_max,
+            avg_score_min=sc_min,
+            avg_score_max=sc_max,
             context=context,
         )
         return data
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Failed to retrieve agent performance evolution")
         raise HTTPException(status_code=500, detail=str(e))

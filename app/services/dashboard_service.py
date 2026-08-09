@@ -355,15 +355,25 @@ def extract_score_from_mass(result_json: Any, items_json: Any, key: str, is_fall
     return None
 
 
+def extract_score_from_mass_row(row: Any, key: str, is_fallback_call: bool = False) -> "float | None":
+    """Extract numeric score from MassEvaluationResult row object."""
+    val = extract_score_from_mass(row.result_json, row.items_json, key, is_fallback_call=is_fallback_call)
+    if val is None and key == "evaluacion_global" and hasattr(row, "evaluacion_global"):
+        eg = getattr(row, "evaluacion_global", None)
+        if eg is not None:
+            return to_float(eg)
+    return val
+
+
 def get_avg_score_mass(rows: list, key: str) -> "float | None":
     """Compute average score for a key across MassEvaluationResult rows."""
-    scores = [s for r in rows if (s := extract_score_from_mass(r.result_json, r.items_json, key)) is not None]
+    scores = [s for r in rows if (s := extract_score_from_mass_row(r, key)) is not None]
     return to_float(round(sum(scores) / len(scores), 1)) if scores else None
 
 
 def get_avg_score_and_count_mass(rows: list, key: str) -> tuple[float | None, int]:
     """Compute average score and count of non-null evaluations for a key across MassEvaluationResult rows."""
-    scores = [s for r in rows if (s := extract_score_from_mass(r.result_json, r.items_json, key)) is not None]
+    scores = [s for r in rows if (s := extract_score_from_mass_row(r, key)) is not None]
     avg = to_float(round(sum(scores) / len(scores), 1)) if scores else None
     return avg, len(scores)
 
@@ -944,11 +954,79 @@ async def get_dashboard_summary(
 
 
 
+async def get_service_assigned_users(
+    db: AsyncSession,
+    service_id: int | None = None,
+    context: TenantContext | None = None,
+) -> dict[str, Any]:
+    """
+    Query active users from bm_users with a valid hubspot_owner_id.
+    If service_id is provided, filters for users assigned to service_id via:
+    - User.primary_service_id == service_id
+    - User.primary_team_id -> Team.service_id == service_id
+    - UserServiceAssociation (bm_user_services) -> service_id
+    - UserTeamAssociation (bm_user_teams) -> Team.service_id == service_id
+    - AgentTeamAssociation (bm_agent_teams) -> Team.service_id == service_id
+    Returns dict mapping hubspot_owner_id (str) -> User object.
+    """
+    from app.models.users import User
+    from app.models.teams import Team, UserServiceAssociation, UserTeamAssociation, AgentTeamAssociation
+
+    if service_id is None:
+        stmt = select(User).where(User.is_active == True, User.hubspot_owner_id.is_not(None))
+        if context and not context.is_super_admin:
+            stmt = stmt.where(
+                or_(
+                    User.company_id.in_(context.allowed_company_ids),
+                    User.company_id.is_(None)
+                )
+            )
+            if context.allowed_agent_ids is not None:
+                stmt = stmt.where(User.hubspot_owner_id.in_(context.allowed_agent_ids))
+        res = await db.execute(stmt)
+        return {str(u.hubspot_owner_id).strip(): u for u in res.scalars().all() if u.hubspot_owner_id}
+
+    # Find team IDs belonging to this service_id
+    team_stmt = select(Team.team_id).where(Team.service_id == service_id)
+    team_res = await db.execute(team_stmt)
+    team_ids = [t for t in team_res.scalars().all()]
+
+    user_conds = [
+        User.primary_service_id == service_id,
+        User.user_id.in_(select(UserServiceAssociation.user_id).where(UserServiceAssociation.service_id == service_id))
+    ]
+    if team_ids:
+        user_conds.extend([
+            User.primary_team_id.in_(team_ids),
+            User.user_id.in_(select(UserTeamAssociation.user_id).where(UserTeamAssociation.team_id.in_(team_ids))),
+            User.user_id.in_(select(AgentTeamAssociation.user_id).where(AgentTeamAssociation.team_id.in_(team_ids))),
+        ])
+
+    stmt = select(User).where(
+        User.is_active == True,
+        User.hubspot_owner_id.is_not(None),
+        or_(*user_conds)
+    )
+    if context and not context.is_super_admin:
+        stmt = stmt.where(
+            or_(
+                User.company_id.in_(context.allowed_company_ids),
+                User.company_id.is_(None)
+            )
+        )
+        if context.allowed_agent_ids is not None:
+            stmt = stmt.where(User.hubspot_owner_id.in_(context.allowed_agent_ids))
+
+    res = await db.execute(stmt)
+    return {str(u.hubspot_owner_id).strip(): u for u in res.scalars().all() if u.hubspot_owner_id}
+
+
 # ── A) GET /bm/agents ──────────────────────────────────────────────────────────
 async def get_agents_list(
     db: AsyncSession,
     service_id: int | None = None,
     service_key: str | None = None,
+    service: str | None = None,
     period: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
@@ -956,10 +1034,23 @@ async def get_agents_list(
     typology_ids: list[int] | None = None,
     typology_key: str | None = None,
     direction: str | None = None,
+    duration_min_seconds: int | None = None,
+    duration_max_seconds: int | None = None,
+    avg_score_min: float | None = None,
+    avg_score_max: float | None = None,
     context: TenantContext | None = None,
 ) -> list[dict[str, Any]]:
     """Return agents list with metrics calculated from bm_mass_evaluation_results only."""
     from app.models.mass_evaluations import MassEvaluationResult
+    from app.utils.service_resolvers import resolve_service_id
+
+    eff_service_id, eff_service_key = await resolve_service_id(
+        db,
+        service_id=service_id,
+        service_key=service_key,
+        service_param=service,
+        company_ids=None if (context and context.is_super_admin) else (context.allowed_company_ids if context else None)
+    )
 
     norm_t = normalize_typology(typology_key)
     norm_d = normalize_direction(direction)
@@ -995,13 +1086,13 @@ async def get_agents_list(
         if context.allowed_agent_ids is not None:
             agg_stmt = agg_stmt.where(MassEvaluationResult.hubspot_owner_id.in_(context.allowed_agent_ids))
 
-    if service_id is not None:
-        if context and context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+    if eff_service_id is not None:
+        if context and context.allowed_service_ids is not None and eff_service_id not in context.allowed_service_ids:
             agg_stmt = agg_stmt.where(MassEvaluationResult.service_id == -1)
         else:
-            agg_stmt = agg_stmt.where(MassEvaluationResult.service_id == service_id)
-    elif service_key is not None:
-        agg_stmt = agg_stmt.where(MassEvaluationResult.service_key == service_key)
+            agg_stmt = agg_stmt.where(MassEvaluationResult.service_id == eff_service_id)
+    elif eff_service_key is not None:
+        agg_stmt = agg_stmt.where(MassEvaluationResult.service_key == eff_service_key)
 
     if dt_from:
         agg_stmt = agg_stmt.where(
@@ -1034,6 +1125,18 @@ async def get_agents_list(
                 func.lower(func.coalesce(MassEvaluationResult.result_json["inbound_outbound"].astext, "")) == norm_d
             )
         )
+    if duration_min_seconds is not None:
+        agg_stmt = agg_stmt.where(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
+    if duration_max_seconds is not None:
+        agg_stmt = agg_stmt.where(MassEvaluationResult.call_duration_seconds <= duration_max_seconds)
+        
+    score_min_scaled = (avg_score_min / 10.0 if avg_score_min > 10.0 else avg_score_min) if avg_score_min is not None else None
+    score_max_scaled = (avg_score_max / 10.0 if avg_score_max > 10.0 else avg_score_max) if avg_score_max is not None else None
+        
+    if score_min_scaled is not None:
+        agg_stmt = agg_stmt.where(MassEvaluationResult.evaluacion_global >= score_min_scaled)
+    if score_max_scaled is not None:
+        agg_stmt = agg_stmt.where(MassEvaluationResult.evaluacion_global <= score_max_scaled)
 
     agg_stmt = agg_stmt.group_by(
         MassEvaluationResult.hubspot_owner_id,
@@ -1080,7 +1183,7 @@ async def get_agents_list(
             "agent_initials": initials,
             "initials": initials,
             "label": label,
-            "service_id": service_id,
+            "service_id": eff_service_id,
             "service_name": None,
             "total_analyses": to_float(stats.total_analyses) if stats else 0.0,
             "last_analysis_at": last_at,
@@ -1089,24 +1192,35 @@ async def get_agents_list(
             "total_analyses_period": period or "custom",
         }
 
-    results = []
-    # 3. Known mapping first (always shown even with 0 evaluations)
-    for oid, name in OWNER_TO_NAME.items():
-        if context and context.allowed_agent_ids is not None and oid not in context.allowed_agent_ids:
-            continue
-        results.append(_fmt(db_stats.get(oid), oid, name))
+    # Fetch active users assigned to service
+    assigned_users = await get_service_assigned_users(db, service_id=eff_service_id, context=context)
 
-    # 4. Extra agents found only in mass eval results
-    for oid in db_stats:
+    target_owner_ids: set[str] = set(assigned_users.keys())
+
+    # Add any agent with historical results in this service during the period
+    for oid in db_stats.keys():
         if context and context.allowed_agent_ids is not None and oid not in context.allowed_agent_ids:
             continue
-        if oid not in OWNER_TO_NAME:
+        target_owner_ids.add(oid)
+
+    results = []
+    for oid in sorted(target_owner_ids):
+        if oid in assigned_users:
+            u_obj = assigned_users[oid]
+            disp_name = u_obj.display_name or resolve_owner_name(oid) or oid
+        elif oid in db_stats:
             row = db_stats[oid]
-            disp_name = row.agent_name or oid
-            # Exclude unidentified numeric agents from "Todos los agentes"
-            if disp_name.startswith("Agente no identificado") or disp_name.isdigit():
-                continue
-            results.append(_fmt(row, oid, disp_name))
+            disp_name = resolve_owner_name(oid) or row.agent_name or oid
+        else:
+            disp_name = resolve_owner_name(oid) or oid
+
+        # Exclude unidentified numeric agents unless they have evaluations or are explicitly assigned
+        if (disp_name.startswith("Agente no identificado") or disp_name.isdigit()) and oid not in db_stats:
+            continue
+
+        results.append(_fmt(db_stats.get(oid), oid, disp_name))
+
+    results.sort(key=lambda x: x["name"])
 
     total_ms = (time.perf_counter() - t_start) * 1000.0
     logger.info(
@@ -1115,7 +1229,6 @@ async def get_agents_list(
     )
 
     return results
-
 
 
 # ── B) GET /bm/agents/{hubspot_owner_id}/evolution ─────────────────────────────
@@ -1128,6 +1241,7 @@ async def get_agent_evolution(
     prompt_version_id: int | None = None,
     service_id: int | None = None,
     service_key: str | None = None,
+    service: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
     typology_ids: list[int] | None = None,
@@ -1141,6 +1255,15 @@ async def get_agent_evolution(
 ) -> dict[str, Any]:
     """Evolution metrics from bm_mass_evaluation_results only."""
     from app.models.mass_evaluations import MassEvaluationResult
+    from app.utils.service_resolvers import resolve_service_id
+
+    eff_service_id, eff_service_key = await resolve_service_id(
+        db,
+        service_id=service_id,
+        service_key=service_key,
+        service_param=service,
+        company_ids=None if (context and context.is_super_admin) else (context.allowed_company_ids if context else None)
+    )
 
     now = datetime.now(timezone.utc)
     norm_t = normalize_typology(typology_key)
@@ -1181,13 +1304,13 @@ async def get_agent_evolution(
                 MassEvaluationResult.analysis_timestamp,
             ) <= dt_to
         )
-    if service_id is not None:
-        if context and context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+    if eff_service_id is not None:
+        if context and context.allowed_service_ids is not None and eff_service_id not in context.allowed_service_ids:
             stmt = stmt.where(MassEvaluationResult.service_id == -1)
         else:
-            stmt = stmt.where(MassEvaluationResult.service_id == service_id)
-    elif service_key is not None:
-        stmt = stmt.where(MassEvaluationResult.service_key == service_key)
+            stmt = stmt.where(MassEvaluationResult.service_id == eff_service_id)
+    elif eff_service_key is not None:
+        stmt = stmt.where(MassEvaluationResult.service_key == eff_service_key)
     if prompt_version_id is not None:
         stmt = stmt.where(MassEvaluationResult.prompt_version_id == prompt_version_id)
 

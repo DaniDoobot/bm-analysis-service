@@ -53,12 +53,18 @@ async def resolve_service_id(
 
     # 3. Match against service_key or normalized service_name
     raw_lower = raw_str.lower()
+    raw_clean = raw_lower.replace("-", "").replace("_", "").replace(" ", "")
+
     stmt = select(Service).where(
         or_(
             func.lower(Service.service_key) == raw_lower,
             func.lower(Service.service_name) == raw_lower,
+            func.lower(func.replace(Service.service_key, "_", "-")) == raw_lower,
+            func.lower(func.replace(Service.service_key, "-", "_")) == raw_lower,
             func.lower(func.replace(Service.service_name, " ", "-")) == raw_lower,
             func.lower(func.replace(Service.service_name, " ", "_")) == raw_lower,
+            func.lower(func.replace(func.replace(func.replace(Service.service_key, "-", ""), "_", ""), " ", "")) == raw_clean,
+            func.lower(func.replace(func.replace(func.replace(Service.service_name, "-", ""), "_", ""), " ", "")) == raw_clean,
         )
     )
     if company_ids:
@@ -71,7 +77,10 @@ async def resolve_service_id(
 
     # Fallback partial match if unique
     stmt_like = select(Service).where(
-        func.lower(Service.service_name).like(f"%{raw_lower}%")
+        or_(
+            func.lower(Service.service_name).like(f"%{raw_lower}%"),
+            func.lower(Service.service_key).like(f"%{raw_lower}%")
+        )
     )
     if company_ids:
         stmt_like = stmt_like.where(Service.company_id.in_(company_ids))
