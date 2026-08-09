@@ -34,6 +34,7 @@ from app.utils.json_utils import safe_parse_json
 from app.services.analysis_results_mapper import map_criterion_value
 from app.services.criteria_service import get_active_criteria
 from app.utils.hubspot_owners import resolve_agent_display
+from app.utils.normalizers import normalize_direction
 
 logger = logging.getLogger(__name__)
 
@@ -1783,9 +1784,12 @@ class MassEvaluationService:
         company_ids: list[int] | None = None,
         service_ids: list[int] | None = None,
         allowed_agent_ids: list[str] | None = None,
+        status: str | None = None,
     ) -> list[MassEvaluationResult]:
         stmt = select(MassEvaluationResult)
         filters = []
+        if status is not None and status.strip() and status.strip().lower() != "all":
+            filters.append(MassEvaluationResult.status == status.strip().lower())
         if run_id is not None:
             filters.append(or_(
                 MassEvaluationResult.run_id == run_id,
@@ -1853,7 +1857,7 @@ class MassEvaluationService:
         if filters:
             stmt = stmt.where(and_(*filters))
             
-        stmt = stmt.order_by(desc(MassEvaluationResult.mass_analysis_id)).limit(limit)
+        stmt = stmt.order_by(desc(MassEvaluationResult.call_timestamp), desc(MassEvaluationResult.mass_analysis_id)).limit(limit)
         if offset is not None:
             stmt = stmt.offset(offset)
             
@@ -1884,10 +1888,13 @@ class MassEvaluationService:
         company_ids: list[int] | None = None,
         service_ids: list[int] | None = None,
         allowed_agent_ids: list[str] | None = None,
+        status: str | None = None,
     ) -> int:
         from sqlalchemy import func
         stmt = select(func.count(MassEvaluationResult.mass_analysis_id))
         filters = []
+        if status is not None and status.strip() and status.strip().lower() != "all":
+            filters.append(MassEvaluationResult.status == status.strip().lower())
         if run_id is not None:
             filters.append(or_(
                 MassEvaluationResult.run_id == run_id,

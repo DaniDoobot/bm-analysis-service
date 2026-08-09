@@ -693,5 +693,12 @@ class PagedMassEvaluationResultResponse(BaseModel):
     total: int
     limit: int
     offset: int
+    has_more: bool = False
+
+    @model_validator(mode="after")
+    def populate_has_more(self) -> "PagedMassEvaluationResultResponse":
+        self.has_more = (self.offset + len(self.items)) < self.total
+        return self
+
 
 

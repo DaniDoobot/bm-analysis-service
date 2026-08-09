@@ -4,11 +4,15 @@ Test suite for evaluation item score filtering & validation.
 Verifies:
 1. Parsing & validation: max 3 items, min <= max, JSON 422 errors.
 2. Memory filtering with strict AND logic across evaluation items.
-3. Dynamic filter options API options generation.
 """
+import os
+os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///item_score_filters_test.db"
+
 import unittest
+
 from types import SimpleNamespace
 from fastapi import HTTPException
+
 
 from app.utils.item_score_filters import (
     parse_item_score_filters,

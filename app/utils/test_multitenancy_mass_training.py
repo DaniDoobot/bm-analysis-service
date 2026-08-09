@@ -368,23 +368,27 @@ class TestMultitenancyMassTraining(unittest.IsolatedAsyncioTestCase):
         # Boston Admin sees Boston Result
         res = await self.client.get("/bm/mass-evaluation-results", headers={"Authorization": f"Bearer {self.t_boston_admin}"})
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(len(res.json()), 1)
-        self.assertEqual(res.json()[0]["call_id"], "call_boston_1")
+        items = res.json()["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["call_id"], "call_boston_1")
 
         # Boston Agent sees Boston Result (has same owner_id)
         res = await self.client.get("/bm/mass-evaluation-results", headers={"Authorization": f"Bearer {self.t_boston_agent}"})
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(len(res.json()), 1)
+        items = res.json()["items"]
+        self.assertEqual(len(items), 1)
 
         # GesDent Agent sees GesDent Result
         res = await self.client.get("/bm/mass-evaluation-results", headers={"Authorization": f"Bearer {self.t_gesdent_agent}"})
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(len(res.json()), 1)
-        self.assertEqual(res.json()[0]["call_id"], "call_gesdent_1")
+        items = res.json()["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["call_id"], "call_gesdent_1")
 
         # Boston Agent queries GesDent Result -> 403 / filtered
         res = await self.client.get("/bm/mass-evaluation-results", params={"agent_owner_id": "gesdent_owner"}, headers={"Authorization": f"Bearer {self.t_boston_agent}"})
         self.assertEqual(res.status_code, 403)
+
 
     async def test_get_result_scoping(self):
         # Boston Agent views Boston Result -> 200

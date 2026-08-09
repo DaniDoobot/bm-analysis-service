@@ -278,10 +278,11 @@ class TestTeamCoordinatorPermissions(unittest.IsolatedAsyncioTestCase):
             headers={"Authorization": f"Bearer {self.t_coord}"}
         )
         self.assertEqual(res_results.status_code, 200, res_results.text)
-        results_data = res_results.json()
+        results_data = res_results.json()["items"]
         owners = [r["hubspot_owner_id"] for r in results_data]
         self.assertIn("owner_A", owners)
         self.assertNotIn("owner_B", owners)
+
 
     @patch("app.services.personalized_training_service.PersonalizedTrainingService.approve_training_cycle")
     async def test_team_coordinator_agent_tracking_and_manual_cycles(self, mock_approve):

@@ -14,7 +14,8 @@ from app.models.prompts import Prompt
 from app.models.services import Service
 import time
 from app.utils.hubspot_owners import resolve_owner_id_by_email
-from app.utils.normalizers import normalize_direction
+from app.utils.normalizers import normalize_direction, normalize_typology
+from app.utils.dates import parse_madrid_date_bounds
 
 
 def _fix_date_to_end_of_day(dt: "datetime | None") -> "datetime | None":
@@ -776,44 +777,76 @@ async def get_my_analysis_results(
     )
 
 
-@router.get("/mass-evaluation-results", response_model=list[MassEvaluationResultResponse])
+@router.get("/mass-evaluation-results", response_model=PagedMassEvaluationResultResponse)
 async def list_results(
     context: TenantContext = Depends(get_tenant_context),
     run_id: int | None = Query(None),
     job_id: int | None = Query(None),
     automation_id: int | None = Query(None, description="Filter by automation ID"),
     agent_owner_id: str | None = Query(None),
+    agent_id: str | None = Query(None, description="Alias for agent_owner_id"),
+    owner_id: str | None = Query(None, description="Alias for agent_owner_id"),
+    agent: str | None = Query(None, description="Alias for agent_owner_id"),
     call_id: str | None = Query(None),
-    date_from: datetime | None = Query(None),
-    date_to: datetime | None = Query(None, description="Inclusive upper-bound on call_timestamp. 'YYYY-MM-DD' includes the entire day."),
+    date_from: str | datetime | None = Query(None),
+    date_to: str | datetime | None = Query(None, description="Inclusive upper-bound on call_timestamp."),
+    period: str | None = Query(None, description="24h | 7d | 30d | 90d"),
     created_from: datetime | None = Query(None, description="Filter by result creation date from"),
-    created_to: datetime | None = Query(None, description="Inclusive upper-bound on created_at. 'YYYY-MM-DD' includes the entire day."),
+    created_to: datetime | None = Query(None, description="Inclusive upper-bound on created_at."),
     execution_source: str | None = Query(None, description="on_demand | automation"),
     limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     global_score_min: float | None = Query(None, ge=0.0, le=10.0),
+    eval_min: float | None = Query(None, ge=0.0, le=10.0, description="Alias for global_score_min"),
+    score_min: float | None = Query(None, ge=0.0, le=10.0, description="Alias for global_score_min"),
     global_score_max: float | None = Query(None, ge=0.0, le=10.0),
+    eval_max: float | None = Query(None, ge=0.0, le=10.0, description="Alias for global_score_max"),
+    score_max: float | None = Query(None, ge=0.0, le=10.0, description="Alias for global_score_max"),
     service_id: int | None = Query(None, description="Filter by service ID"),
     service_key: str | None = Query(None, description="Filter by service key"),
     typology_key: str | None = Query(None, description="Filter by typology key"),
+    typology: str | None = Query(None, description="Alias for typology_key"),
+    tipo_llamada: str | None = Query(None, description="Alias for typology_key"),
+    call_type: str | None = Query(None, description="Alias for typology_key"),
+    selected_typology: str | None = Query(None, description="Alias for typology_key"),
+    typologies: str | None = Query(None, description="Alias for typology_key"),
     typology_ids: str | None = Query(None, description="Comma-separated typology IDs to filter"),
     direction: str | None = Query(None, description="all | inbound | outbound"),
     call_direction: str | None = Query(None, description="Filter by call direction"),
     inbound_outbound: str | None = Query(None, description="Filter by inbound/outbound"),
     duration_min_seconds: int | None = Query(None, description="Min duration in seconds"),
+    min_duration: int | None = Query(None, description="Alias for duration_min_seconds"),
+    min_duration_seconds: int | None = Query(None, description="Alias for duration_min_seconds"),
     duration_max_seconds: int | None = Query(None, description="Max duration in seconds"),
+    max_duration: int | None = Query(None, description="Alias for duration_max_seconds"),
+    max_duration_seconds: int | None = Query(None, description="Alias for duration_max_seconds"),
+    result_status: str | None = Query(None, alias="status", description="Filter by result status (e.g. completed)"),
     db: AsyncSession = Depends(get_db)
 ):
-    """List detailed mass analysis call results with advanced filtering options."""
+    """List detailed mass analysis call results with advanced filtering and full pagination metadata."""
+    t_start = time.perf_counter()
     if automation_id is not None and job_id is None:
         from app.models.mass_evaluations import MassAnalysisAutomation
         aut_stmt = select(MassAnalysisAutomation.job_id).where(MassAnalysisAutomation.automation_id == automation_id)
         aut_res = await db.execute(aut_stmt)
         job_id = aut_res.scalar()
-    # Fix inclusive end-of-day: FastAPI parses 'YYYY-MM-DD' as midnight → adjust
-    date_to = _fix_date_to_end_of_day(date_to)
-    created_to = _fix_date_to_end_of_day(created_to)
+
+    # Consolidate alias inputs
+    raw_owner_id = agent_owner_id or agent_id or owner_id or agent
+    raw_typology = typology_key or typology or tipo_llamada or call_type or selected_typology or typologies
+    norm_typology_key = normalize_typology(raw_typology)
     raw_direction = direction or call_direction or inbound_outbound
     norm_d = normalize_direction(raw_direction)
+
+    eff_dur_min = duration_min_seconds if duration_min_seconds is not None else (min_duration if min_duration is not None else min_duration_seconds)
+    eff_dur_max = duration_max_seconds if duration_max_seconds is not None else (max_duration if max_duration is not None else max_duration_seconds)
+
+    eff_score_min = global_score_min if global_score_min is not None else (eval_min if eval_min is not None else score_min)
+    eff_score_max = global_score_max if global_score_max is not None else (eval_max if eval_max is not None else score_max)
+
+    # Timezone & date handling: convert to Europe/Madrid local bounds in UTC
+    dt_from, dt_to = parse_madrid_date_bounds(date_from, date_to, period)
+    created_to = _fix_date_to_end_of_day(created_to)
 
     if context.normalized_role == InternalRole.AGENT:
         effective_owner_id = context.allowed_agent_ids[0] if context.allowed_agent_ids else None
@@ -822,13 +855,13 @@ async def list_results(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="No hay agente asociado a este usuario."
             )
-        if agent_owner_id and agent_owner_id != effective_owner_id:
+        if raw_owner_id and raw_owner_id != effective_owner_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="No tienes permiso para ver resultados de este agente."
             )
     else:
-        effective_owner_id = agent_owner_id
+        effective_owner_id = raw_owner_id
         if effective_owner_id and context.allowed_agent_ids is not None:
             if effective_owner_id not in context.allowed_agent_ids:
                 raise HTTPException(
@@ -836,8 +869,8 @@ async def list_results(
                     detail="No tienes permiso para ver resultados de este agente."
                 )
 
-    if global_score_min is not None and global_score_max is not None:
-        if global_score_min > global_score_max:
+    if eff_score_min is not None and eff_score_max is not None:
+        if eff_score_min > eff_score_max:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="global_score_min cannot be greater than global_score_max",
@@ -856,49 +889,90 @@ async def list_results(
     if typology_ids and typology_ids.strip():
         typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
 
-    t_start = time.perf_counter()
+    t_db_start = time.perf_counter()
+    total = await MassEvaluationService.count_results(
+        db,
+        run_id=run_id,
+        job_id=job_id,
+        agent_owner_id=effective_owner_id,
+        call_id=call_id,
+        date_from=dt_from,
+        date_to=dt_to,
+        created_from=created_from,
+        created_to=created_to,
+        execution_source=execution_source,
+        global_score_min=eff_score_min,
+        global_score_max=eff_score_max,
+        service_id=service_id,
+        service_key=service_key,
+        typology_key=norm_typology_key,
+        typology_ids=typo_ids,
+        duration_min_seconds=eff_dur_min,
+        duration_max_seconds=eff_dur_max,
+        direction=norm_d,
+        company_ids=None if context.is_super_admin else context.allowed_company_ids,
+        service_ids=context.allowed_service_ids,
+        allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None,
+        status=result_status,
+    )
+
     results = await MassEvaluationService.list_results(
         db,
         run_id=run_id,
         job_id=job_id,
         agent_owner_id=effective_owner_id,
         call_id=call_id,
-        date_from=date_from,
-        date_to=date_to,
+        date_from=dt_from,
+        date_to=dt_to,
         created_from=created_from,
         created_to=created_to,
         execution_source=execution_source,
         limit=limit,
-        global_score_min=global_score_min,
-        global_score_max=global_score_max,
+        offset=offset,
+        global_score_min=eff_score_min,
+        global_score_max=eff_score_max,
         service_id=service_id,
         service_key=service_key,
-        typology_key=typology_key,
+        typology_key=norm_typology_key,
         typology_ids=typo_ids,
-        duration_min_seconds=duration_min_seconds,
-        duration_max_seconds=duration_max_seconds,
+        duration_min_seconds=eff_dur_min,
+        duration_max_seconds=eff_dur_max,
         direction=norm_d,
         company_ids=None if context.is_super_admin else context.allowed_company_ids,
         service_ids=context.allowed_service_ids,
-        allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None
+        allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None,
+        status=result_status,
     )
-    
-    out = []
+    db_ms = round((time.perf_counter() - t_db_start) * 1000.0, 1)
+
+    items_out = []
     for r in results:
         d = MassEvaluationResultResponse.model_validate(r)
         d.items_visual = build_items_visual(r.items_json)
         if d.execution_source is None:
             d.execution_source = "on_demand"
-        out.append(d)
+        items_out.append(d)
 
     total_ms = round((time.perf_counter() - t_start) * 1000.0, 1)
     import logging
+    filters_summary = {
+        "run_id": run_id, "job_id": job_id, "agent_owner_id": effective_owner_id,
+        "date_from": dt_from.isoformat() if dt_from else None, "date_to": dt_to.isoformat() if dt_to else None,
+        "service_id": service_id, "typology_key": norm_typology_key, "direction": norm_d,
+        "status": result_status
+    }
     logging.getLogger(__name__).info(
-        "[perf.mass_evaluation_results] endpoint=/bm/mass-evaluation-results total_ms=%.1f rows=%d limit=%d direction=%s",
-        total_ms, len(out), limit, norm_d
+        "[perf.mass_results] total_ms=%.1f db_ms=%.1f total=%d returned=%d limit=%d offset=%d filters=%s",
+        total_ms, db_ms, total, len(items_out), limit, offset, filters_summary
     )
 
-    return out
+    return PagedMassEvaluationResultResponse(
+        items=items_out,
+        total=total,
+        limit=limit,
+        offset=offset
+    )
+
 
 
 @router.get("/mass-evaluation-results/{mass_analysis_id}", response_model=MassEvaluationResultResponse)

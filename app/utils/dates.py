@@ -120,3 +120,64 @@ def format_date_label(dt: datetime | None) -> str | None:
     if not dt:
         return None
     return dt.strftime("%Y-%m-%d")
+
+
+import zoneinfo
+MADRID_TZ = zoneinfo.ZoneInfo("Europe/Madrid")
+
+
+def parse_madrid_date_bounds(
+    date_from: Any = None,
+    date_to: Any = None,
+    period: str | None = None
+) -> tuple[datetime | None, datetime | None]:
+    """
+    Parses start and end date parameters with Europe/Madrid local time bounds.
+    Converts naive dates or dates without explicit offset into Europe/Madrid calendar day bounds
+    (00:00:00.000000 for start, 23:59:59.999999 for end) and returns timezone-aware UTC datetimes.
+
+    Supports period shortcuts ('24h', '7d', '30d', '90d') when date_from is None.
+    """
+    now_utc = datetime.now(timezone.utc)
+    dt_from_utc: datetime | None = None
+    dt_to_utc: datetime | None = None
+
+    if period and not date_from and not date_to:
+        p = period.lower().strip()
+        if p == "24h":
+            dt_from_utc = now_utc - timedelta(hours=24)
+            dt_to_utc = now_utc
+        elif p == "7d":
+            dt_from_utc = now_utc - timedelta(days=7)
+            dt_to_utc = now_utc
+        elif p == "30d":
+            dt_from_utc = now_utc - timedelta(days=30)
+            dt_to_utc = now_utc
+        elif p == "90d":
+            dt_from_utc = now_utc - timedelta(days=90)
+            dt_to_utc = now_utc
+
+    if date_from:
+        parsed_f = safe_parse_datetime(date_from)
+        if parsed_f:
+            raw_str = str(date_from).strip() if isinstance(date_from, str) else ""
+            if raw_str and ("+" in raw_str or "Z" in raw_str or (len(raw_str) > 10 and "T" in raw_str and ":" in raw_str and "00:00:00" not in raw_str)):
+                dt_from_utc = parsed_f.astimezone(timezone.utc)
+            else:
+                # Bare date or midnight -> interpret as 00:00:00 in Europe/Madrid -> convert to UTC
+                dt_madrid = datetime(parsed_f.year, parsed_f.month, parsed_f.day, 0, 0, 0, tzinfo=MADRID_TZ)
+                dt_from_utc = dt_madrid.astimezone(timezone.utc)
+
+    if date_to:
+        parsed_t = safe_parse_datetime(date_to)
+        if parsed_t:
+            raw_str = str(date_to).strip() if isinstance(date_to, str) else ""
+            if raw_str and ("+" in raw_str or "Z" in raw_str or (len(raw_str) > 10 and "T" in raw_str and ":" in raw_str and "00:00:00" not in raw_str)):
+                dt_to_utc = parsed_t.astimezone(timezone.utc)
+            else:
+                # Bare date or midnight -> interpret as 23:59:59.999999 in Europe/Madrid -> convert to UTC
+                dt_madrid = datetime(parsed_t.year, parsed_t.month, parsed_t.day, 23, 59, 59, 999999, tzinfo=MADRID_TZ)
+                dt_to_utc = dt_madrid.astimezone(timezone.utc)
+
+    return dt_from_utc, dt_to_utc
+

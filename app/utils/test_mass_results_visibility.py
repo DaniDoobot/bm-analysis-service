@@ -131,7 +131,9 @@ class TestMassResultsVisibility(unittest.IsolatedAsyncioTestCase):
                 headers={"Authorization": f"Bearer {self.token_super}"}
             )
             self.assertEqual(res.status_code, 200)
-            items = res.json()
+            data = res.json()
+            items = data["items"]
+            self.assertEqual(data["total"], 1)
             self.assertEqual(len(items), 1)
             self.assertEqual(items[0]["call_id"], "call_vis_1")
 
@@ -143,8 +145,11 @@ class TestMassResultsVisibility(unittest.IsolatedAsyncioTestCase):
                 headers={"Authorization": f"Bearer {self.token_super}"}
             )
             self.assertEqual(res.status_code, 200)
-            items = res.json()
+            data = res.json()
+            items = data["items"]
+            self.assertEqual(data["total"], 1)
             self.assertEqual(len(items), 1)
+
 
     async def test_get_my_analysis_results_paged_response(self):
         """Verifies GET /bm/me/analysis-results returns items, total, limit, and offset."""
