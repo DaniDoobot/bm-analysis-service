@@ -38,6 +38,7 @@ from app.schemas.mass_evaluations import (
     MassEvaluationJobResponse,
     MassEvaluationJobUpdate,
     MassEvaluationResultResponse,
+    MassEvaluationResultListItemResponse,
     MassEvaluationRunResponse,
     MassEvaluationRunLaunchResponse,
     MassCriterionTypologyBackfillRequest,
@@ -821,6 +822,7 @@ async def list_results(
     max_duration: int | None = Query(None, description="Alias for duration_max_seconds"),
     max_duration_seconds: int | None = Query(None, description="Alias for duration_max_seconds"),
     result_status: str | None = Query(None, alias="status", description="Filter by result status (e.g. completed)"),
+    include_detail: bool = Query(False, description="Include heavy prompt_snapshot, result_json, items_json if True"),
     db: AsyncSession = Depends(get_db)
 ):
     """List detailed mass analysis call results with advanced filtering and full pagination metadata."""
@@ -946,24 +948,35 @@ async def list_results(
     db_ms = round((time.perf_counter() - t_db_start) * 1000.0, 1)
 
     items_out = []
+    response_mode = "list_full" if include_detail else "list_light"
     for r in results:
-        d = MassEvaluationResultResponse.model_validate(r)
+        if include_detail:
+            d = MassEvaluationResultResponse.model_validate(r)
+        else:
+            d = MassEvaluationResultListItemResponse.model_validate(r)
         d.items_visual = build_items_visual(r.items_json)
         if d.execution_source is None:
             d.execution_source = "on_demand"
         items_out.append(d)
 
     total_ms = round((time.perf_counter() - t_start) * 1000.0, 1)
-    import logging
+    import logging, json
+    # Rough estimate of response byte size
+    try:
+        sample_json = json.dumps([item.model_dump(mode="json") for item in items_out[:5]])
+        estimated_bytes = (len(sample_json) // max(len(items_out[:5]), 1)) * len(items_out)
+    except Exception:
+        estimated_bytes = len(items_out) * (150000 if include_detail else 1000)
+
     filters_summary = {
         "run_id": run_id, "job_id": job_id, "agent_owner_id": effective_owner_id,
         "date_from": dt_from.isoformat() if dt_from else None, "date_to": dt_to.isoformat() if dt_to else None,
         "service_id": service_id, "typology_key": norm_typology_key, "direction": norm_d,
-        "status": result_status
+        "status": result_status, "include_detail": include_detail
     }
     logging.getLogger(__name__).info(
-        "[perf.mass_results] total_ms=%.1f db_ms=%.1f total=%d returned=%d limit=%d offset=%d filters=%s",
-        total_ms, db_ms, total, len(items_out), limit, offset, filters_summary
+        "[perf.mass_results] response_mode=%s response_bytes_estimated=%d total_ms=%.1f db_ms=%.1f total=%d returned=%d limit=%d offset=%d filters=%s",
+        response_mode, estimated_bytes, total_ms, db_ms, total, len(items_out), limit, offset, filters_summary
     )
 
     return PagedMassEvaluationResultResponse(

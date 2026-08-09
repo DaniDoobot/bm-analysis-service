@@ -650,7 +650,7 @@ async def init_db():
                         JOIN bm_analysis_criterion_results c ON a.analysis_id = c.analysis_id;
                     """))
 
-                await conn.execute(text("""
+                    await conn.execute(text("""
                         CREATE OR REPLACE VIEW vw_bm_analysis_results_pivot AS
                         SELECT
                             a.analysis_id,
@@ -777,6 +777,7 @@ async def init_db():
                             pv.version_name,
                             pv.version_label;
                     """))
+
 
                 # Looker-ready views: drop first
                 await conn.execute(text("DROP VIEW IF EXISTS vw_bm_mass_evaluation_criteria_flat CASCADE;"))

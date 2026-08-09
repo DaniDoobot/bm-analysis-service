@@ -688,8 +688,47 @@ class MassAnalysisAutomationRunResponse(BaseModel):
         from_attributes = True
 
 
+class MassEvaluationResultListItemResponse(BaseModel):
+    mass_analysis_id: int
+    run_id: int
+    job_id: int
+    call_id: str
+    hs_object_id: str | None
+    recording_url: str | None
+    hubspot_owner_id: str | None
+    agent_name: str | None
+    call_timestamp: datetime | None
+    analysis_timestamp: datetime
+    call_duration_seconds: int | None
+    direction: str | None
+    prompt_id: int
+    prompt_version_id: int | None
+    prompt_name: str | None
+    prompt_version_name: str | None = None
+    prompt_version_label: str | None = None
+    
+    # Service and typology snapshot
+    company_id: int | None = None
+    service_id: int | None = None
+    service_key: str | None = None
+    service_name: str | None = None
+    typology_id: int | None = None
+    typology_key: str | None = None
+    typology_name: str | None = None
+
+    execution_source: str | None = None
+    status: str
+    items_visual: list[dict[str, Any]] | None = None
+    global_score: float | None = None
+    error_message: str | None = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class PagedMassEvaluationResultResponse(BaseModel):
-    items: list[MassEvaluationResultResponse]
+    items: list[MassEvaluationResultListItemResponse | MassEvaluationResultResponse | dict[str, Any]]
     total: int
     limit: int
     offset: int
@@ -699,6 +738,7 @@ class PagedMassEvaluationResultResponse(BaseModel):
     def populate_has_more(self) -> "PagedMassEvaluationResultResponse":
         self.has_more = (self.offset + len(self.items)) < self.total
         return self
+
 
 
 

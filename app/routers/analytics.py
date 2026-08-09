@@ -27,6 +27,7 @@ from app.services.dashboard_service import resolve_date_range, extract_score_fro
 from app.utils.hubspot_owners import resolve_owner_name
 from app.utils.normalizers import normalize_typology, normalize_direction
 from app.utils.cache import analytics_cache
+from app.utils.service_resolvers import resolve_service_id
 
 def _format_int_list(lst) -> str:
     if not lst:
@@ -326,7 +327,10 @@ def extract_metric_value(r: MassEvaluationResult, criteria: list[MassEvaluationC
 )
 async def get_analytics_items(
     context: Annotated[TenantContext, Depends(get_tenant_context)],
-    db: Annotated[AsyncSession, Depends(get_db)]
+    db: Annotated[AsyncSession, Depends(get_db)],
+    service_id: Annotated[int | None, Query(description="Filter by service ID")] = None,
+    service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
+    service: Annotated[str | None, Query(description="Filter by service key, slug, or ID")] = None,
 ):
     """Retrieve the catalogue of compared metrics available in Analytics v2."""
     if context.normalized_role == InternalRole.AGENT:
@@ -334,7 +338,15 @@ async def get_analytics_items(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: Se requiere rol de nivel superior."
         )
+    eff_service_id, _ = await resolve_service_id(
+        db,
+        service_id=service_id,
+        service_key=service_key,
+        service_param=service,
+        company_ids=None if context.is_super_admin else context.allowed_company_ids
+    )
     return await get_all_metrics(db, context=context)
+
 
 
 @router.get(
@@ -354,6 +366,7 @@ async def get_agents_comparison(
     date_to: Annotated[str | None, Query(description="End date (ISO or YYYY-MM-DD)")] = None,
     service_id: Annotated[int | None, Query(description="Filter by service ID")] = None,
     service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
+    service: Annotated[str | None, Query(description="Filter by service key, slug, or ID (alias for service_key/service_id)")] = None,
     agent_owner_ids: Annotated[list[str] | None, Query(description="Filter agent owner IDs")] = None,
     agent_owner_ids_bracket: Annotated[list[str] | None, Query(alias="agent_owner_ids[]", description="Filter agent owner IDs (array format)")] = None,
     item_keys: Annotated[list[str] | None, Query(description="Filter compared item keys")] = None,
@@ -375,7 +388,7 @@ async def get_agents_comparison(
 ):
     """
     Retrieve agents performance comparison breakdown.
-    Optimized to run exactly two SQL queries to avoid N+1 issues.
+    Optimized to run exactly two SQL queries with targeted scalar column selection to avoid ORM overhead.
     """
     if context.normalized_role == InternalRole.AGENT:
         raise HTTPException(
@@ -384,6 +397,14 @@ async def get_agents_comparison(
         )
     t_start = time.perf_counter()
     try:
+        eff_service_id, eff_service_key = await resolve_service_id(
+            db,
+            service_id=service_id,
+            service_key=service_key,
+            service_param=service,
+            company_ids=None if context.is_super_admin else context.allowed_company_ids
+        )
+
         raw_typology = typology or typology_key or tipo_llamada or call_type or selected_typology or typologies
         norm_t = normalize_typology(raw_typology)
         raw_direction = direction or call_direction or inbound_outbound
@@ -401,14 +422,24 @@ async def get_agents_comparison(
         owner_ids = parse_list_param(agent_owner_ids) + parse_list_param(agent_owner_ids_bracket)
         item_req_keys = parse_list_param(item_keys) + parse_list_param(item_keys_bracket)
         cache_key = (
-            f"agents_comp:{context.company_id}:{context.normalized_role}:{service_id}:{service_key}:"
+            f"agents_comp:{context.company_id}:{context.normalized_role}:{eff_service_id}:{eff_service_key}:"
             f"{date_from}:{date_to}:{sorted(owner_ids)}:{sorted(item_req_keys)}:{norm_t}:{norm_d}:"
             f"{duration_min_seconds}:{duration_max_seconds}:{avg_score_min}:{avg_score_max}"
         )
 
         async def _compute():
-            # 2. Build Mass Evaluation Results filter query
-            stmt = select(MassEvaluationResult).where(MassEvaluationResult.status == "completed")
+            # 2. Build Mass Evaluation Results filter query - select ONLY scalar columns needed
+            stmt = select(
+                MassEvaluationResult.mass_analysis_id,
+                MassEvaluationResult.hubspot_owner_id,
+                MassEvaluationResult.agent_name,
+                MassEvaluationResult.evaluacion_global,
+                MassEvaluationResult.result_json,
+                MassEvaluationResult.items_json,
+                MassEvaluationResult.call_timestamp,
+                MassEvaluationResult.analysis_timestamp,
+            ).where(MassEvaluationResult.status == "completed")
+
             if not context.is_super_admin:
                 stmt = stmt.where(
                     or_(
@@ -433,13 +464,13 @@ async def get_agents_comparison(
                         MassEvaluationResult.analysis_timestamp,
                     ) <= dt_to
                 )
-            if service_id is not None:
-                if context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+            if eff_service_id is not None:
+                if context.allowed_service_ids is not None and eff_service_id not in context.allowed_service_ids:
                     stmt = stmt.where(MassEvaluationResult.service_id == -1)
                 else:
-                    stmt = stmt.where(MassEvaluationResult.service_id == service_id)
-            elif service_key is not None:
-                stmt = stmt.where(MassEvaluationResult.service_key == service_key)
+                    stmt = stmt.where(MassEvaluationResult.service_id == eff_service_id)
+            elif eff_service_key is not None:
+                stmt = stmt.where(MassEvaluationResult.service_key == eff_service_key)
 
             typo_ids = None
             if typology_ids and typology_ids.strip():
@@ -489,21 +520,27 @@ async def get_agents_comparison(
 
             t_db_start = time.perf_counter()
             res = await db.execute(stmt)
-            results = res.scalars().all()
+            results = res.all()
             db_ms = (time.perf_counter() - t_db_start) * 1000.0
 
             analysis_ids = [r.mass_analysis_id for r in results]
             criteria_by_analysis = {}
             if analysis_ids:
-                stmt_crit = select(MassEvaluationCriterionResult).where(
+                stmt_crit = select(
+                    MassEvaluationCriterionResult.mass_analysis_id,
+                    MassEvaluationCriterionResult.criterion_key,
+                    MassEvaluationCriterionResult.numeric_value,
+                    MassEvaluationCriterionResult.boolean_value,
+                    MassEvaluationCriterionResult.percentage_value
+                ).where(
                     MassEvaluationCriterionResult.mass_analysis_id.in_(analysis_ids),
                     MassEvaluationCriterionResult.is_applicable == True
                 )
                 res_crit = await db.execute(stmt_crit)
-                for c in res_crit.scalars().all():
+                for c in res_crit.all():
                     criteria_by_analysis.setdefault(c.mass_analysis_id, []).append(c)
 
-            available_catalog = await get_available_agents(db, context=context, service_id=service_id)
+            available_catalog = await get_available_agents(db, context=context, service_id=eff_service_id)
             cat_by_oid = {a.hubspot_owner_id: a for a in available_catalog}
 
             agents_found = {}
@@ -531,7 +568,7 @@ async def get_agents_comparison(
                                 agent_initials=None,
                                 initials=None,
                                 label=name,
-                                service_id=service_id,
+                                service_id=eff_service_id,
                                 service_name=None,
                             )
                         )
@@ -552,7 +589,7 @@ async def get_agents_comparison(
             items_list = [AnalyticsItem(**item) for item in items_to_use]
 
             comparison_rows = []
-            for oid, agent_name in agents_found.items():
+            for oid, agent_name in sorted(agents_found.items(), key=lambda x: x[1]):
                 agent_results = [r for r in results if r.hubspot_owner_id == oid]
                 for item in items_to_use:
                     key = item["key"]
@@ -589,8 +626,8 @@ async def get_agents_comparison(
         aggregation_ms = round(max(0.0, total_processing_ms - db_ms), 1)
 
         logger.info(
-            "[perf.agents_comparison] endpoint=/bm/analytics/agents-comparison company_id=%s service_id=%s date_from=%s date_to=%s agents_count=%d items_count=%d mode=scores direction=%s rows_scanned=%d rows_returned=%d db_ms=%.1f aggregation_ms=%.1f total_ms=%.1f",
-            context.allowed_company_ids if context else None, service_id, date_from, date_to, len(resp.agents), len(resp.items), norm_d, rows_scanned, rows_returned, db_ms, aggregation_ms, total_processing_ms
+            "[perf.agents_comparison] endpoint=/bm/analytics/agents-comparison company_id=%s service_param=%s service_id=%s service_key=%s date_from=%s date_to=%s agents_count=%d items_count=%d mode=scores direction=%s rows_scanned=%d rows_returned=%d db_ms=%.1f aggregation_ms=%.1f total_ms=%.1f",
+            context.allowed_company_ids if context else None, service, eff_service_id, eff_service_key, date_from, date_to, len(resp.agents), len(resp.items), norm_d, rows_scanned, rows_returned, db_ms, aggregation_ms, total_processing_ms
         )
 
         return resp
@@ -602,6 +639,7 @@ async def get_agents_comparison(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to load agents comparison: {str(e)}"
         )
+
 
 
 @router.get(
@@ -621,6 +659,7 @@ async def get_items_evolution(
     date_to: Annotated[str | None, Query(description="End date (ISO or YYYY-MM-DD)")] = None,
     service_id: Annotated[int | None, Query(description="Filter by service ID")] = None,
     service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
+    service: Annotated[str | None, Query(description="Filter by service key, slug, or ID")] = None,
     agent_owner_ids: Annotated[list[str] | None, Query(description="Filter agent owner IDs")] = None,
     agent_owner_ids_bracket: Annotated[list[str] | None, Query(alias="agent_owner_ids[]", description="Filter agent owner IDs (array format)")] = None,
     item_keys: Annotated[list[str] | None, Query(description="Filter compared item keys")] = None,
@@ -650,32 +689,49 @@ async def get_items_evolution(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: Se requiere rol de nivel superior."
         )
+    t_start = time.perf_counter()
     try:
+        eff_service_id, eff_service_key = await resolve_service_id(
+            db,
+            service_id=service_id,
+            service_key=service_key,
+            service_param=service,
+            company_ids=None if context.is_super_admin else context.allowed_company_ids
+        )
         raw_typology = typology or typology_key or tipo_llamada or call_type or selected_typology or typologies
         norm_t = normalize_typology(raw_typology)
         raw_direction = direction or call_direction or inbound_outbound
         norm_d = normalize_direction(raw_direction)
 
-        # 1. Resolve timeframe and validate
-        dt_from, dt_to, recommended_bucket = resolve_date_range(date_from, date_to, period=None, default_period="30d")
+        dt_from, dt_to, bucket_interval = resolve_date_range(date_from, date_to, period=None, default_period="30d")
+        if bucket and bucket.strip().lower() in ("hour", "day", "week"):
+            bucket_interval = bucket.strip().lower()
         if dt_from and dt_to and dt_from > dt_to:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Rango de fechas inválido: date_from ({date_from}) no puede ser posterior a date_to ({date_to})."
             )
-        bucket_interval = bucket if bucket in ["hour", "day", "week"] else recommended_bucket
 
         owner_ids = parse_list_param(agent_owner_ids) + parse_list_param(agent_owner_ids_bracket)
         item_req_keys = parse_list_param(item_keys) + parse_list_param(item_keys_bracket)
         cache_key = (
-            f"items_evo:{context.company_id}:{context.normalized_role}:{service_id}:{service_key}:"
+            f"items_evo:{context.company_id}:{context.normalized_role}:{eff_service_id}:{eff_service_key}:"
             f"{date_from}:{date_to}:{sorted(owner_ids)}:{sorted(item_req_keys)}:{bucket_interval}:{norm_t}:{norm_d}:"
             f"{duration_min_seconds}:{duration_max_seconds}:{avg_score_min}:{avg_score_max}"
         )
 
         async def _compute():
-            # 2. Build Mass Evaluation Results filter query
-            stmt = select(MassEvaluationResult).where(MassEvaluationResult.status == "completed")
+            stmt = select(
+                MassEvaluationResult.mass_analysis_id,
+                MassEvaluationResult.hubspot_owner_id,
+                MassEvaluationResult.agent_name,
+                MassEvaluationResult.evaluacion_global,
+                MassEvaluationResult.result_json,
+                MassEvaluationResult.items_json,
+                MassEvaluationResult.call_timestamp,
+                MassEvaluationResult.analysis_timestamp,
+            ).where(MassEvaluationResult.status == "completed")
+
             if not context.is_super_admin:
                 stmt = stmt.where(
                     or_(
@@ -700,13 +756,13 @@ async def get_items_evolution(
                         MassEvaluationResult.analysis_timestamp,
                     ) <= dt_to
                 )
-            if service_id is not None:
-                if context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+            if eff_service_id is not None:
+                if context.allowed_service_ids is not None and eff_service_id not in context.allowed_service_ids:
                     stmt = stmt.where(MassEvaluationResult.service_id == -1)
                 else:
-                    stmt = stmt.where(MassEvaluationResult.service_id == service_id)
-            elif service_key is not None:
-                stmt = stmt.where(MassEvaluationResult.service_key == service_key)
+                    stmt = stmt.where(MassEvaluationResult.service_id == eff_service_id)
+            elif eff_service_key is not None:
+                stmt = stmt.where(MassEvaluationResult.service_key == eff_service_key)
 
             typo_ids = None
             if typology_ids and typology_ids.strip():
@@ -755,20 +811,26 @@ async def get_items_evolution(
                     stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(owner_ids))
 
             res = await db.execute(stmt)
-            results = res.scalars().all()
+            results = res.all()
 
             analysis_ids = [r.mass_analysis_id for r in results]
             criteria_by_analysis = {}
             if analysis_ids:
-                stmt_crit = select(MassEvaluationCriterionResult).where(
+                stmt_crit = select(
+                    MassEvaluationCriterionResult.mass_analysis_id,
+                    MassEvaluationCriterionResult.criterion_key,
+                    MassEvaluationCriterionResult.numeric_value,
+                    MassEvaluationCriterionResult.boolean_value,
+                    MassEvaluationCriterionResult.percentage_value
+                ).where(
                     MassEvaluationCriterionResult.mass_analysis_id.in_(analysis_ids),
                     MassEvaluationCriterionResult.is_applicable == True
                 )
                 res_crit = await db.execute(stmt_crit)
-                for c in res_crit.scalars().all():
+                for c in res_crit.all():
                     criteria_by_analysis.setdefault(c.mass_analysis_id, []).append(c)
 
-            buckets_map: dict[str, list[MassEvaluationResult]] = {}
+            buckets_map: dict[str, list[Any]] = {}
             for r in results:
                 ts = _effective_ts(r)
                 if not ts:
@@ -880,30 +942,31 @@ async def get_available_agents(
 
     agents_map: dict[str, dict[str, Any]] = {}
 
-    # Standard known mapping
-    for oid, name in OWNER_TO_NAME.items():
-        if context and context.allowed_agent_ids is not None and oid not in context.allowed_agent_ids:
-            continue
-        initials = resolve_agent_initials(
-            hubspot_owner_id=oid,
-            agent_name=name,
-            by_owner=by_owner,
-            by_name=by_name,
-            users_list=users_list,
-        )
-        label = f"{initials} · {name}" if initials else name
-        agents_map[oid] = {
-            "hubspot_owner_id": oid,
-            "agent_name": name,
-            "name": name,
-            "agent_initials": initials,
-            "initials": initials,
-            "label": label,
-            "service_id": service_id,
-            "service_name": None,
-        }
+    # 1. Standard known mapping (only include globally if service_id is None)
+    if service_id is None:
+        for oid, name in OWNER_TO_NAME.items():
+            if context and context.allowed_agent_ids is not None and oid not in context.allowed_agent_ids:
+                continue
+            initials = resolve_agent_initials(
+                hubspot_owner_id=oid,
+                agent_name=name,
+                by_owner=by_owner,
+                by_name=by_name,
+                users_list=users_list,
+            )
+            label = f"{initials} · {name}" if initials else name
+            agents_map[oid] = {
+                "hubspot_owner_id": oid,
+                "agent_name": name,
+                "name": name,
+                "agent_initials": initials,
+                "initials": initials,
+                "label": label,
+                "service_id": None,
+                "service_name": None,
+            }
 
-    # Add agents from DB results
+    # 2. Add agents from DB results matching service scope
     for row in db_rows:
         oid = str(row[0]).strip()
         r_name = row[1]
@@ -943,12 +1006,14 @@ async def get_available_agents(
             if svc_name and not agents_map[oid]["service_name"]:
                 agents_map[oid]["service_name"] = svc_name
 
-    # Add users from bm_users with hubspot_owner_id
+    # 3. Add users from bm_users with hubspot_owner_id matching service scope
     for u in users_list:
         oid = u.get("hubspot_owner_id")
         if not oid:
             continue
         if context and context.allowed_agent_ids is not None and oid not in context.allowed_agent_ids:
+            continue
+        if service_id is not None and u.get("service_id") and u.get("service_id") != service_id:
             continue
         u_name = u.get("name") or u.get("username") or resolve_owner_name(oid) or oid
         u_inits = u.get("agent_initials") or resolve_agent_initials(
@@ -983,14 +1048,24 @@ async def get_available_agents(
 async def get_filter_options(
     context: Annotated[TenantContext, Depends(get_tenant_context)],
     service_id: Annotated[int | None, Query(description="Filter active typologies by service ID")] = None,
+    service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
+    service: Annotated[str | None, Query(description="Filter by service key, slug, or ID")] = None,
     db: Annotated[AsyncSession, Depends(get_db)] = None,
 ):
     """
     Retrieve filter configuration options: active typologies, agents, duration range, and score bounds.
     """
     try:
+        eff_service_id, _ = await resolve_service_id(
+            db,
+            service_id=service_id,
+            service_key=service_key,
+            service_param=service,
+            company_ids=None if context.is_super_admin else context.allowed_company_ids
+        )
+
         # 1. Fetch available agents list for current scope
-        available_agents = await get_available_agents(db, context=context, service_id=service_id)
+        available_agents = await get_available_agents(db, context=context, service_id=eff_service_id)
 
         # 2. Fetch active typologies per service
         typo_query = f"SELECT t.typology_id, t.typology_key, t.typology_name, t.service_id, s.service_key FROM bm_typologies t JOIN bm_services s ON t.service_id = s.service_id WHERE t.is_active = true AND s.company_id IN {_format_int_list(context.allowed_company_ids)}"
@@ -998,12 +1073,13 @@ async def get_filter_options(
         if context.allowed_service_ids is not None:
             typo_query += f" AND t.service_id IN {_format_int_list(context.allowed_service_ids)}"
             
-        if service_id is not None:
-            if context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+        if eff_service_id is not None:
+            if context.allowed_service_ids is not None and eff_service_id not in context.allowed_service_ids:
                 typo_query += " AND t.service_id = -1"
             else:
                 typo_query += " AND t.service_id = :service_id"
-                params["service_id"] = service_id
+                params["service_id"] = eff_service_id
+
 
         typo_res = await db.execute(text(typo_query), params)
             
