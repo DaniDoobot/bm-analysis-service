@@ -58,20 +58,28 @@ async def scan_automation_gaps(
     if not aut:
         return {"error": f"Automation {automation_id} not found"}
 
-    cutoff_utc = datetime.now(timezone.utc) - timedelta(days=days_back)
-
+    valid_status_list = ["completed", "completed_empty", "completed_with_errors"]
     runs_stmt = (
         select(MassAnalysisAutomationRun)
         .where(
             MassAnalysisAutomationRun.automation_id == automation_id,
+            MassAnalysisAutomationRun.status.in_(valid_status_list),
             MassAnalysisAutomationRun.window_from.isnot(None),
             MassAnalysisAutomationRun.window_to.isnot(None),
-            MassAnalysisAutomationRun.window_from >= cutoff_utc
+            MassAnalysisAutomationRun.window_from >= cutoff_utc,
         )
         .order_by(MassAnalysisAutomationRun.window_from.asc(), MassAnalysisAutomationRun.automation_run_id.asc())
     )
     runs_res = await db.execute(runs_stmt)
-    runs = runs_res.scalars().all()
+    raw_runs = runs_res.scalars().all()
+
+    # Exclude any runs marked with invalid/missing token errors
+    runs = []
+    for r in raw_runs:
+        err = (r.error_message or "").lower()
+        if "missing" in err or "invalid" in err or "token" in err:
+            continue
+        runs.append(r)
 
     gaps = []
     total_gap_seconds = 0.0

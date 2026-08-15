@@ -6,17 +6,23 @@ and executes safe, non-destructive backfill for specific gap windows.
 
 By default, runs in DRY-RUN mode (safe, read-only, no mutations).
 With --execute and --confirm-execute=CONFIRM_BACKFILL_EXECUTE, processes the selected gaps
-with strict deduplication, audit traceability, and safe bounds.
+with strict deduplication, audit traceability, and hard secret validation.
+
+Safety rules:
+  1. In --execute mode, strictly requires HUBSPOT_ACCESS_TOKEN, Twilio, and LLM secrets.
+     If any secret is missing, aborts immediately BEFORE creating any DB runs.
+  2. In --dry-run mode, works without secrets for DB gap auditing, with clear warnings.
+  3. Runs marked failed/invalid with missing tokens NEVER close/mask historical gaps.
 
 Usage:
   # Dry-run preview (SAFE, NO MUTATIONS):
   python app/utils/backfill_automation_gaps.py --automation-id 8 --dry-run
 
-  # Dry-run for specific gaps #9 and #10:
-  python app/utils/backfill_automation_gaps.py --automation-id 8 --gap-indexes 9,10 --dry-run
+  # Dry-run for specific gaps #460 and #540:
+  python app/utils/backfill_automation_gaps.py --automation-id 8 --gap-indexes 460,540 --dry-run
 
-  # Execute pilot gaps #9 and #10:
-  python app/utils/backfill_automation_gaps.py --automation-id 8 --gap-indexes 9,10 --execute --confirm-execute CONFIRM_BACKFILL_EXECUTE
+  # Execute pilot gaps (requires production secrets):
+  python app/utils/backfill_automation_gaps.py --automation-id 8 --gap-indexes 460,540 --execute --confirm-execute CONFIRM_BACKFILL_EXECUTE
 """
 import os
 import sys
@@ -58,6 +64,41 @@ def is_working_hours(dt_madrid: datetime) -> bool:
     return 8 <= dt_madrid.hour < 20
 
 
+def validate_backfill_environment(is_execute: bool = False) -> tuple[bool, list[str]]:
+    """
+    Validates availability of production credentials.
+    In execute mode, missing credentials will block execution.
+    """
+    from app.config import get_settings
+    settings = get_settings()
+
+    missing = []
+    token = settings.hubspot_access_token or os.environ.get("HUBSPOT_ACCESS_TOKEN")
+    if not token:
+        missing.append("HUBSPOT_ACCESS_TOKEN")
+
+    twilio_sid = settings.twilio_account_sid or os.environ.get("TWILIO_ACCOUNT_SID")
+    twilio_tok = settings.twilio_auth_token or os.environ.get("TWILIO_AUTH_TOKEN")
+    if not twilio_sid:
+        missing.append("TWILIO_ACCOUNT_SID")
+    if not twilio_tok:
+        missing.append("TWILIO_AUTH_TOKEN")
+
+    ai_provider = (settings.ai_provider or "gemini").lower()
+    if ai_provider == "gemini":
+        gem_key = settings.gemini_api_key or os.environ.get("GEMINI_API_KEY")
+        if not gem_key:
+            missing.append("GEMINI_API_KEY")
+    elif ai_provider == "azure":
+        az_key = settings.azure_openai_audio_api_key or os.environ.get("AZURE_OPENAI_AUDIO_API_KEY")
+        if not az_key:
+            missing.append("AZURE_OPENAI_AUDIO_API_KEY")
+
+    if missing and is_execute:
+        return False, missing
+    return True, missing
+
+
 async def plan_gap_backfill(
     db: AsyncSession,
     automation_id: int = 8,
@@ -87,11 +128,12 @@ async def plan_gap_backfill(
 
     cutoff_utc = datetime.now(timezone.utc) - timedelta(days=days_back)
 
+    valid_status_list = ["completed", "completed_empty", "completed_with_errors"]
     runs_stmt = (
         select(MassAnalysisAutomationRun)
         .where(
             MassAnalysisAutomationRun.automation_id == automation_id,
-            MassAnalysisAutomationRun.status == "completed",
+            MassAnalysisAutomationRun.status.in_(valid_status_list),
             MassAnalysisAutomationRun.window_from.isnot(None),
             MassAnalysisAutomationRun.window_to.isnot(None),
             MassAnalysisAutomationRun.window_from >= cutoff_utc,
@@ -99,7 +141,15 @@ async def plan_gap_backfill(
         .order_by(MassAnalysisAutomationRun.window_from.asc(), MassAnalysisAutomationRun.automation_run_id.asc())
     )
     runs_res = await db.execute(runs_stmt)
-    runs = runs_res.scalars().all()
+    raw_runs = runs_res.scalars().all()
+
+    # Exclude any runs marked with invalid/missing token errors
+    runs = []
+    for r in raw_runs:
+        err = (r.error_message or "").lower()
+        if "missing" in err or "invalid" in err or "token" in err:
+            continue
+        runs.append(r)
 
     min_gap_seconds = min_gap_minutes * 60.0
     detected_gaps = []
@@ -218,6 +268,13 @@ async def execute_gap_backfill(
     Enforces deduplication, creates audited MassEvaluationRun & MassAnalysisAutomationRun,
     and analyzes calls via HubSpot & AI model.
     """
+    # Hard safety check for execution mode: validate required secrets before any DB actions
+    ok, missing = validate_backfill_environment(is_execute=True)
+    if not ok:
+        err_msg = f"Cannot execute backfill: Required production secret(s) missing in execution environment: {', '.join(missing)}"
+        logger.error("[automation_gap_backfill] %s", err_msg)
+        raise RuntimeError(err_msg)
+
     from app.models.mass_evaluations import (
         MassAnalysisAutomation,
         MassAnalysisAutomationRun,
@@ -569,7 +626,14 @@ async def main():
         if args.execute:
             if args.confirm_execute != "CONFIRM_BACKFILL_EXECUTE":
                 print("[SAFETY ABORT] --execute requires --confirm-execute=CONFIRM_BACKFILL_EXECUTE. Execution blocked.")
-                return
+                sys.exit(1)
+
+            # Validate production credentials before anything
+            ok_env, missing_secrets = validate_backfill_environment(is_execute=True)
+            if not ok_env:
+                print(f"[SECURITY ABORT] Cannot execute backfill: Required production secret(s) missing in execution environment: {', '.join(missing_secrets)}.")
+                print("Execution blocked BEFORE creating any DB runs or calling LLMs.")
+                sys.exit(1)
 
             if not batches:
                 print("[INFO] No gap windows selected to execute.")
@@ -594,6 +658,9 @@ async def main():
 
             print("=" * 125)
         else:
+            ok_env, missing_secrets = validate_backfill_environment(is_execute=False)
+            if "HUBSPOT_ACCESS_TOKEN" in missing_secrets:
+                print("[WARNING] Dry-run running without HUBSPOT_ACCESS_TOKEN: cannot query live HubSpot API to estimate actual source calls count.")
             print("[automation_gap_backfill] Dry-run finalizado con éxito. NO se realizaron modificaciones ni llamadas masivas.")
             print("=" * 125)
 

@@ -137,15 +137,16 @@ class TestAutomationGapBackfillSafety(unittest.IsolatedAsyncioTestCase):
                 "gap_minutes": 6.01,
             }
 
-            with patch("app.services.hubspot_service.HubSpotService.search_calls_for_mass_evaluation", new_callable=AsyncMock) as mock_search:
-                mock_search.return_value = []
-                results = await execute_gap_backfill(db, automation_id=8, planned_gaps=[gap_item])
+            with patch("app.utils.backfill_automation_gaps.validate_backfill_environment", return_value=(True, [])):
+                with patch("app.services.hubspot_service.HubSpotService.search_calls_for_mass_evaluation", new_callable=AsyncMock) as mock_search:
+                    mock_search.return_value = []
+                    results = await execute_gap_backfill(db, automation_id=8, planned_gaps=[gap_item])
 
-                self.assertEqual(len(results), 1)
-                res = results[0]
-                self.assertEqual(res["status"], "completed")
-                self.assertEqual(res["calls_found"], 0)
-                self.assertEqual(res["calls_selected"], 0)
+                    self.assertEqual(len(results), 1)
+                    res = results[0]
+                    self.assertEqual(res["status"], "completed")
+                    self.assertEqual(res["calls_found"], 0)
+                    self.assertEqual(res["calls_selected"], 0)
 
                 # Verify in DB
                 m_stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == res["mass_run_id"])
@@ -201,17 +202,122 @@ class TestAutomationGapBackfillSafety(unittest.IsolatedAsyncioTestCase):
                 "gap_minutes": 9.0,
             }
 
-            with patch("app.services.hubspot_service.HubSpotService.search_calls_for_mass_evaluation", new_callable=AsyncMock) as mock_search:
-                mock_search.return_value = [
-                    {"call_id": "call_already_analyzed", "recording_url": "https://example.com/audio.mp3"}
-                ]
-                results = await execute_gap_backfill(db, automation_id=8, planned_gaps=[gap_item])
+            with patch("app.utils.backfill_automation_gaps.validate_backfill_environment", return_value=(True, [])):
+                with patch("app.services.hubspot_service.HubSpotService.search_calls_for_mass_evaluation", new_callable=AsyncMock) as mock_search:
+                    mock_search.return_value = [
+                        {"call_id": "call_already_analyzed", "recording_url": "https://example.com/audio.mp3"}
+                    ]
+                    results = await execute_gap_backfill(db, automation_id=8, planned_gaps=[gap_item])
 
-                self.assertEqual(len(results), 1)
-                res = results[0]
-                self.assertEqual(res["status"], "completed")
-                self.assertEqual(res["calls_found"], 1)
-                self.assertEqual(res["calls_selected"], 0)  # Deduplicated to 0
+                    self.assertEqual(len(results), 1)
+                    res = results[0]
+                    self.assertEqual(res["status"], "completed")
+                    self.assertEqual(res["calls_found"], 1)
+                    self.assertEqual(res["calls_selected"], 0)  # Deduplicated to 0
+
+    async def test_backfill_execute_requires_hubspot_token(self):
+        """Executing backfill without required secrets raises RuntimeError before creating any runs."""
+        async with self.async_session() as db:
+            gap_item = {
+                "gap_index": 1,
+                "gap_from_utc": datetime(2026, 8, 14, 6, 45, 18, tzinfo=timezone.utc),
+                "gap_to_utc": datetime(2026, 8, 14, 6, 54, 18, tzinfo=timezone.utc),
+                "gap_minutes": 9.0,
+            }
+            # Force missing credentials
+            with patch("app.utils.backfill_automation_gaps.validate_backfill_environment", return_value=(False, ["HUBSPOT_ACCESS_TOKEN"])):
+                with self.assertRaises(RuntimeError) as ctx:
+                    await execute_gap_backfill(db, automation_id=8, planned_gaps=[gap_item])
+                self.assertIn("HUBSPOT_ACCESS_TOKEN", str(ctx.exception))
+
+            # Verify 0 runs created
+            runs_cnt = (await db.execute(select(MassEvaluationRun))).scalars().all()
+            self.assertEqual(len(runs_cnt), 0)
+
+    async def test_invalid_backfill_runs_do_not_close_gaps(self):
+        """Runs marked as failed or with missing token errors do NOT close/mask historical gaps."""
+        async with self.async_session() as db:
+            p = Prompt(prompt_id=58, prompt_name="Prompt Front", prompt_type="mass")
+            pv = PromptVersion(id=241, prompt_id=58, prompt="Evalúa llamada.", version_name="v1", is_current=True)
+            job = MassEvaluationJob(
+                job_id=48,
+                prompt_id=58,
+                prompt_version_id=241,
+                job_name="[Auto] Front Test",
+                selection_mode="filter",
+                timezone="Europe/Madrid",
+            )
+            aut = MassAnalysisAutomation(
+                automation_id=8,
+                name="Front Auto",
+                job_id=48,
+                prompt_id=58,
+                is_active=True,
+                interval_minutes=10,
+                lookback_minutes=10,
+                delay_minutes=5,
+            )
+            now = datetime.now(timezone.utc)
+            # Normal completed run 1
+            r1 = MassAnalysisAutomationRun(
+                automation_id=8,
+                window_from=now - timedelta(minutes=60),
+                window_to=now - timedelta(minutes=50),
+                status="completed",
+            )
+            # Invalid/Failed backfill run in the middle that should NOT close the gap
+            r_failed = MassAnalysisAutomationRun(
+                automation_id=8,
+                window_from=now - timedelta(minutes=50),
+                window_to=now - timedelta(minutes=40),
+                status="failed",
+                error_message="Invalid backfill execution: HUBSPOT_ACCESS_TOKEN missing in execution environment",
+            )
+            # Normal completed run 2
+            r2 = MassAnalysisAutomationRun(
+                automation_id=8,
+                window_from=now - timedelta(minutes=30),
+                window_to=now - timedelta(minutes=20),
+                status="completed",
+            )
+            db.add_all([p, pv, job, aut, r1, r_failed, r2])
+            await db.commit()
+
+            # Plan gaps: the gap between r1 (ending at -50m) and r2 (starting at -30m) must be detected as 20 min gap!
+            plan = await plan_gap_backfill(db, automation_id=8, days_back=1)
+            self.assertEqual(plan["total_gaps_found"], 1)
+            g = plan["planned_batches"][0]
+            self.assertAlmostEqual(g["gap_minutes"], 20.0, places=1)
+
+    async def test_dry_run_without_token_is_allowed(self):
+        """Dry-run mode is permitted without HubSpot token and returns valid gap plan."""
+        async with self.async_session() as db:
+            p = Prompt(prompt_id=58, prompt_name="Prompt Front", prompt_type="mass")
+            pv = PromptVersion(id=241, prompt_id=58, prompt="Evalúa llamada.", version_name="v1", is_current=True)
+            job = MassEvaluationJob(
+                job_id=48,
+                prompt_id=58,
+                prompt_version_id=241,
+                job_name="[Auto] Front Test",
+                selection_mode="filter",
+                timezone="Europe/Madrid",
+            )
+            aut = MassAnalysisAutomation(
+                automation_id=8,
+                name="Front Auto",
+                job_id=48,
+                prompt_id=58,
+                is_active=True,
+                interval_minutes=10,
+                lookback_minutes=10,
+                delay_minutes=5,
+            )
+            db.add_all([p, pv, job, aut])
+            await db.commit()
+
+            plan = await plan_gap_backfill(db, automation_id=8, days_back=1)
+            self.assertIn("total_gaps_found", plan)
+            self.assertEqual(plan["total_gaps_found"], 0)
 
 
 if __name__ == "__main__":
