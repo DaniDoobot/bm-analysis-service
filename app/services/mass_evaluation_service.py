@@ -2631,10 +2631,95 @@ class MassEvaluationService:
         return auto_run
 
     @staticmethod
+    async def get_automation_next_window(
+        db: AsyncSession,
+        automation: MassAnalysisAutomation | int,
+        now: datetime | None = None,
+    ) -> tuple[datetime, datetime, bool, str]:
+        """
+        Calculates continuous search window for an automation to eliminate coverage gaps.
+        Rule 1: Anchor window_from on last_successful_window_to (from latest completed run).
+                If none, fallback to created_at (safe max lookback) or now - lookback - delay.
+        Rule 2: window_to = min(window_from + lookback, now - delay).
+        Rule 3: If window_to <= window_from, is_ready=False (not_due_window_not_ready).
+        Returns:
+            (window_from, window_to, is_ready, source_desc)
+        """
+        if now is None:
+            now = datetime.now(timezone.utc)
+        elif now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+
+        if isinstance(automation, int):
+            target_id = automation
+        else:
+            try:
+                from sqlalchemy import inspect as sa_inspect
+                insp = sa_inspect(automation)
+                if insp and insp.identity:
+                    target_id = insp.identity[0]
+                else:
+                    target_id = automation.__dict__.get("automation_id")
+            except Exception:
+                target_id = getattr(automation, "automation_id", None)
+
+        if target_id is not None:
+            stmt_aut = select(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id == target_id)
+            res_aut = await db.execute(stmt_aut)
+            aut_obj = res_aut.scalars().first()
+            if not aut_obj:
+                raise ValueError(f"La automatización ID {target_id} no existe.")
+        else:
+            aut_obj = automation
+
+        automation_id = aut_obj.automation_id
+        lookback_min = aut_obj.lookback_minutes or 30
+        delay_min = aut_obj.delay_minutes or 5
+
+        # 1. Query latest completed automation run with non-null window_to
+        stmt_last = (
+            select(MassAnalysisAutomationRun.window_to)
+            .where(
+                MassAnalysisAutomationRun.automation_id == automation_id,
+                MassAnalysisAutomationRun.status.in_(["completed", "completed_empty"]),
+                MassAnalysisAutomationRun.window_to.isnot(None),
+            )
+            .order_by(
+                desc(MassAnalysisAutomationRun.window_to),
+                desc(MassAnalysisAutomationRun.automation_run_id),
+            )
+            .limit(1)
+        )
+        res_last = await db.execute(stmt_last)
+        last_window_to = res_last.scalar()
+
+        if last_window_to is not None:
+            if last_window_to.tzinfo is None:
+                last_window_to = last_window_to.replace(tzinfo=timezone.utc)
+            window_from = last_window_to
+            source_desc = "continuous"
+        else:
+            # First run: start from (created_at or now) - lookback - delay
+            base_time = aut_obj.created_at or now
+            if base_time.tzinfo is None:
+                base_time = base_time.replace(tzinfo=timezone.utc)
+            initial_start = base_time - timedelta(minutes=lookback_min + delay_min)
+            min_safe_start = now - timedelta(hours=24)
+            window_from = max(initial_start, min_safe_start)
+            source_desc = "initial_lookback"
+
+        max_window_to = now - timedelta(minutes=delay_min)
+        target_window_to = window_from + timedelta(minutes=lookback_min)
+        window_to = min(target_window_to, max_window_to)
+
+        is_ready = window_to > window_from
+        return window_from, window_to, is_ready, source_desc
+
+    @staticmethod
     async def run_automation_run(
         db: AsyncSession, automation: MassAnalysisAutomation | int, trigger_type: str = "scheduled"
     ) -> MassAnalysisAutomationRun:
-        """Computes call search window, generates an automation execution run, and spawns the job."""
+        """Computes continuous call search window, generates an automation execution run, and spawns the job."""
         if isinstance(automation, int):
             stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id == automation)
             res = await db.execute(stmt)
@@ -2647,9 +2732,32 @@ class MassEvaluationService:
         now = datetime.now(timezone.utc)
         automation_id = automation.automation_id
 
-        # temporal window window_from to window_to based on delay and lookback
-        window_from = now - timedelta(minutes=(automation.lookback_minutes or 30) + (automation.delay_minutes or 5))
-        window_to = now - timedelta(minutes=(automation.delay_minutes or 5))
+        # Calculate continuous window
+        window_from, window_to, is_ready, source_desc = await MassEvaluationService.get_automation_next_window(
+            db, automation, now=now
+        )
+
+        if not is_ready:
+            logger.info(
+                "[automation_window] automation_id=%d not_due_window_not_ready window_from=%s window_to=%s (source=%s)",
+                automation_id, window_from.isoformat(), window_to.isoformat(), source_desc
+            )
+            auto_run = MassAnalysisAutomationRun(
+                automation_id=automation_id,
+                status="skipped",
+                started_at=now,
+                finished_at=now,
+                window_from=window_from,
+                window_to=window_to,
+                calls_found=0,
+                calls_selected=0,
+                calls_skipped=0,
+                error_message="not_due_window_not_ready",
+            )
+            db.add(auto_run)
+            await db.commit()
+            await db.refresh(auto_run)
+            return auto_run
 
         # Check lock: verify if this automation already has a running automation execution
         stmt_lock = select(MassAnalysisAutomationRun).where(
@@ -2680,6 +2788,11 @@ class MassEvaluationService:
                 await db.flush()
             else:
                 raise ValueError(f"La automatización {automation_id} ya tiene una ejecución activa (Run ID {active_auto_run.automation_run_id})")
+
+        logger.info(
+            "[automation_window] automation_id=%d window_from=%s window_to=%s source=%s gap_closed=true",
+            automation_id, window_from.isoformat(), window_to.isoformat(), source_desc
+        )
 
         # Create Run record and COMMIT it immediately so it is persisted even if run_job fails.
         # This avoids the greenlet_spawn error that occurs when the except block tries to commit
@@ -2931,6 +3044,8 @@ class MassEvaluationService:
                 aut.automation_id,
                 aut.name,
                 aut.interval_minutes or 30,
+                aut.lookback_minutes or 30,
+                aut.delay_minutes or 5,
                 last_at
             ))
 
@@ -2941,7 +3056,16 @@ class MassEvaluationService:
 
         threshold_minutes = settings.automation_running_stale_after_minutes or 60
 
-        for automation_id, automation_name, interval_minutes, last_run_at in automations_list:
+        for automation_id, automation_name, interval_minutes, lookback_min, delay_min, last_run_at in automations_list:
+            # Check next continuous window readiness
+            window_from, window_to, is_ready, source_desc = await MassEvaluationService.get_automation_next_window(
+                db, automation_id, now=now
+            )
+
+            if not is_ready:
+                continue
+
+            # Determine whether automation is due (standard cadence vs catch-up backlog)
             is_due = False
             if last_run_at is None:
                 is_due = True
@@ -2949,12 +3073,16 @@ class MassEvaluationService:
                 elapsed = now - last_run_at
                 if elapsed >= timedelta(minutes=interval_minutes):
                     is_due = True
+                elif source_desc == "continuous" and (window_from + timedelta(minutes=lookback_min) <= now - timedelta(minutes=delay_min)):
+                    # Catch-up mode: previous run was completed and backlog is ready
+                    is_due = True
 
             if not is_due:
                 continue
 
             due_count += 1
 
+            # Check lock: verify if this automation already has an active run
             stmt_lock = select(MassAnalysisAutomationRun).where(
                 MassAnalysisAutomationRun.automation_id == automation_id,
                 MassAnalysisAutomationRun.status == "running"
@@ -2987,18 +3115,30 @@ class MassEvaluationService:
 
             try:
                 auto_run = await MassEvaluationService.run_automation_run(db, automation_id, trigger_type="scheduled")
-                if auto_run.status == "failed":
+                if auto_run.status in ("failed", "skipped"):
                     skipped_count += 1
-                    logger.warning(
-                        "[automation_scheduler] failed automation_id=%d ('%s') auto_run_id=%d error='%s'",
-                        automation_id, automation_name, auto_run.automation_run_id, auto_run.error_message
-                    )
-                    executions_detail.append({
-                        "automation_id": automation_id,
-                        "automation_name": automation_name,
-                        "status": "failed",
-                        "error_message": auto_run.error_message,
-                    })
+                    if auto_run.status == "skipped" and auto_run.error_message == "not_due_window_not_ready":
+                        logger.info(
+                            "[automation_scheduler] skipped automation_id=%d ('%s') reason='not_due_window_not_ready'",
+                            automation_id, automation_name
+                        )
+                        executions_detail.append({
+                            "automation_id": automation_id,
+                            "automation_name": automation_name,
+                            "status": "skipped",
+                            "reason_skipped": "not_due_window_not_ready",
+                        })
+                    else:
+                        logger.warning(
+                            "[automation_scheduler] failed automation_id=%d ('%s') auto_run_id=%d error='%s'",
+                            automation_id, automation_name, auto_run.automation_run_id, auto_run.error_message
+                        )
+                        executions_detail.append({
+                            "automation_id": automation_id,
+                            "automation_name": automation_name,
+                            "status": auto_run.status,
+                            "error_message": auto_run.error_message,
+                        })
                 else:
                     launched_count += 1
                     logger.info(
