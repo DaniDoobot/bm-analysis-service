@@ -255,7 +255,8 @@ class TestAutomationConcurrency(unittest.IsolatedAsyncioTestCase):
         from sqlalchemy.engine import Engine
 
         # 1. Synchronous engine (as returned by db.get_bind() on AsyncSession)
-        mock_sync_engine = MagicMock(spec=Engine)
+        mock_sync_engine = MagicMock()
+        mock_sync_engine.dialect = MagicMock()
         mock_sync_engine.dialect.name = "postgresql"
         # If something accidentally calls connect() on sync engine in async context:
         def raise_missing_greenlet(*args, **kwargs):
