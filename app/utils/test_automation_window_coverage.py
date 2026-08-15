@@ -29,7 +29,8 @@ def compile_bigint_sqlite(type_, compiler, **kw):
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db import get_engine, Base
+from app.config import get_settings
+from app.db import get_engine, Base, _get_engine
 from app.models.companies import Company
 from app.models.services import Service
 from app.models.prompts import Prompt, PromptVersion
@@ -45,6 +46,9 @@ from app.services.mass_evaluation_service import MassEvaluationService
 class TestAutomationWindowCoverage(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
+        os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///automation_window_coverage_test.db"
+        get_settings.cache_clear()
+        _get_engine.cache_clear()
         self.engine = get_engine()
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)

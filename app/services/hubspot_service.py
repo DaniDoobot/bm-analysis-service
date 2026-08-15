@@ -37,6 +37,10 @@ class HubSpotService:
         Fetch call engagement from HubSpot CRM API.
         Returns normalized metadata dict.
         """
+        if not self.token:
+            logger.warning("HUBSPOT_ACCESS_TOKEN not set — returning empty call dict")
+            return {}
+
         url = f"{HUBSPOT_API_BASE}/crm/v3/objects/calls/{call_id}"
         params = {
             "properties": ",".join([
@@ -96,14 +100,19 @@ class HubSpotService:
         Supports pagination to retrieve all matched calls up to the job's max_calls limit.
         Apply post-filtering by local call timestamp in job's timezone.
         """
+        if not self.token:
+            logger.warning("HUBSPOT_ACCESS_TOKEN not set — returning empty results list")
+            return []
+
         url = f"{HUBSPOT_API_BASE}/crm/v3/objects/calls/search"
         
         # Build query filters
         hs_filters = []
         
         # 1. Date filters (hs_timestamp)
-        date_from = filters.get("date_from")
-        date_to = filters.get("date_to")
+        from app.utils.dates import safe_parse_datetime
+        date_from = safe_parse_datetime(filters.get("date_from"))
+        date_to = safe_parse_datetime(filters.get("date_to"))
         if date_from and date_to:
             from_ms = int(date_from.timestamp() * 1000)
             to_ms = int(date_to.timestamp() * 1000)
