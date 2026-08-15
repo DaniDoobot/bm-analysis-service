@@ -1,18 +1,32 @@
-"""
-Tests for Zero-Call Automation Windows Diagnostics.
-===================================================
-Tests diagnostic logic for differentiating zero_source vs selection_bug.
-"""
+import os
+os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///automation_zero_windows_test.db"
+
 import unittest
 import asyncio
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from unittest.mock import AsyncMock, patch
 
+from sqlalchemy import BigInteger
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.dialects.postgresql import JSONB
+
+@compiles(JSONB, "sqlite")
+def compile_jsonb_sqlite(type_, compiler, **kw):
+    return "JSON"
+
+@compiles(BigInteger, "sqlite")
+def compile_bigint_sqlite(type_, compiler, **kw):
+    return "INTEGER"
+
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 
-from app.db import Base
+from app.config import get_settings
+from app.db import Base, _get_engine
+get_settings.cache_clear()
+_get_engine.cache_clear()
+
 from app.models.mass_evaluations import (
     MassAnalysisAutomation,
     MassAnalysisAutomationRun,

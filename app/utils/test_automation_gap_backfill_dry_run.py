@@ -1,17 +1,31 @@
-"""
-Tests for Automation Gap Detection and Dry-Run Backfill Planning.
-=================================================================
-Validates gap detection algorithm, time calculations, and safe dry-run output.
-"""
+import os
+os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///automation_gap_dry_run_test.db"
+
 import unittest
 import asyncio
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import BigInteger
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.dialects.postgresql import JSONB
+
+@compiles(JSONB, "sqlite")
+def compile_jsonb_sqlite(type_, compiler, **kw):
+    return "JSON"
+
+@compiles(BigInteger, "sqlite")
+def compile_bigint_sqlite(type_, compiler, **kw):
+    return "INTEGER"
+
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 
-from app.db import Base
+from app.config import get_settings
+from app.db import Base, _get_engine
+get_settings.cache_clear()
+_get_engine.cache_clear()
+
 from app.models.mass_evaluations import (
     MassAnalysisAutomation,
     MassAnalysisAutomationRun,
