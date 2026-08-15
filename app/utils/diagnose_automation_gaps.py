@@ -58,6 +58,7 @@ async def scan_automation_gaps(
     if not aut:
         return {"error": f"Automation {automation_id} not found"}
 
+    cutoff_utc = datetime.now(timezone.utc) - timedelta(days=days_back)
     valid_status_list = ["completed", "completed_empty", "completed_with_errors"]
     runs_stmt = (
         select(MassAnalysisAutomationRun)
