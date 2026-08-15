@@ -298,7 +298,7 @@ class TestAutomationWindowCoverage(unittest.IsolatedAsyncioTestCase):
 
     async def test_window_not_ready_guard(self):
         """When window_to <= window_from, cleanly marks as not ready and returns skipped."""
-        t0 = datetime(2026, 8, 15, 10, 0, 0, tzinfo=timezone.utc)
+        t0 = datetime.now(timezone.utc) + timedelta(hours=1)
 
         async with AsyncSession(self.engine) as db:
             aut = MassAnalysisAutomation(
@@ -316,7 +316,7 @@ class TestAutomationWindowCoverage(unittest.IsolatedAsyncioTestCase):
             db.add(aut)
             await db.flush()
 
-            # Completed run already covered up to 10:00
+            # Completed run already covered up to t0
             r1 = MassAnalysisAutomationRun(
                 automation_run_id=90061,
                 automation_id=9006,
@@ -327,10 +327,8 @@ class TestAutomationWindowCoverage(unittest.IsolatedAsyncioTestCase):
             db.add(r1)
             await db.commit()
 
-            # Now is 10:03. max_window_to = now - 5m = 09:58.
-            # window_from is 10:00. window_to = min(10:10, 09:58) = 09:58 <= window_from.
-            now = t0 + timedelta(minutes=3)
-            w_from, w_to, is_ready, _ = await MassEvaluationService.get_automation_next_window(db, aut, now=now)
+            # Now is before t0 + 5m delay. window_to <= window_from.
+            w_from, w_to, is_ready, _ = await MassEvaluationService.get_automation_next_window(db, aut)
             self.assertFalse(is_ready)
 
             # Test run_automation_run returns skipped with not_due_window_not_ready

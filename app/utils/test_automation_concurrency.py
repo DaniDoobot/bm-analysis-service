@@ -174,9 +174,11 @@ class TestAutomationConcurrency(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import patch, AsyncMock, MagicMock
         from sqlalchemy import text
 
-        mock_conn = AsyncMock()
-        mock_trans = AsyncMock()
-        mock_conn.begin.return_value.__aenter__.return_value = mock_trans
+        mock_conn = MagicMock()
+        mock_trans = MagicMock()
+        mock_trans.__aenter__ = AsyncMock(return_value=mock_trans)
+        mock_trans.__aexit__ = AsyncMock(return_value=None)
+        mock_conn.begin = MagicMock(return_value=mock_trans)
 
         # Mock execute results: lock acquired True, pid 45678
         mock_result_lock = MagicMock()
@@ -192,11 +194,12 @@ class TestAutomationConcurrency(unittest.IsolatedAsyncioTestCase):
                 return mock_result_pid
             return MagicMock()
 
-        mock_conn.execute.side_effect = mock_execute
+        mock_conn.execute = AsyncMock(side_effect=mock_execute)
 
         mock_engine = MagicMock()
         mock_engine.dialect.name = "postgresql"
-        mock_engine.connect.return_value.__aenter__.return_value = mock_conn
+        mock_engine.connect.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_engine.connect.return_value.__aexit__ = AsyncMock(return_value=None)
 
         async with AsyncSession(self.engine) as db:
             with patch.object(db, "get_bind", return_value=mock_engine):
@@ -218,18 +221,21 @@ class TestAutomationConcurrency(unittest.IsolatedAsyncioTestCase):
         """Verifies that under PostgreSQL dialect, if lock is held, worker skips immediately."""
         from unittest.mock import patch, AsyncMock, MagicMock
 
-        mock_conn = AsyncMock()
-        mock_trans = AsyncMock()
-        mock_conn.begin.return_value.__aenter__.return_value = mock_trans
+        mock_conn = MagicMock()
+        mock_trans = MagicMock()
+        mock_trans.__aenter__ = AsyncMock(return_value=mock_trans)
+        mock_trans.__aexit__ = AsyncMock(return_value=None)
+        mock_conn.begin = MagicMock(return_value=mock_trans)
 
         # Lock returns False (held by another worker)
         mock_result_lock = MagicMock()
         mock_result_lock.scalar.return_value = False
-        mock_conn.execute.return_value = mock_result_lock
+        mock_conn.execute = AsyncMock(return_value=mock_result_lock)
 
         mock_engine = MagicMock()
         mock_engine.dialect.name = "postgresql"
-        mock_engine.connect.return_value.__aenter__.return_value = mock_conn
+        mock_engine.connect.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_engine.connect.return_value.__aexit__ = AsyncMock(return_value=None)
 
         async with AsyncSession(self.engine) as db:
             with patch.object(db, "get_bind", return_value=mock_engine):
