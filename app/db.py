@@ -137,7 +137,11 @@ def _get_session_factory():
 
 
 # Public accessors used by dependencies.py
-def get_engine():
+def get_engine() -> AsyncEngine:
+    return _get_engine()
+
+
+def get_async_engine() -> AsyncEngine:
     return _get_engine()
 
 

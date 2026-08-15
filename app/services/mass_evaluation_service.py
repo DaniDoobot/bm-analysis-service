@@ -2937,30 +2937,44 @@ class MassEvaluationService:
         connection-pool lock leakage and indefinite blockage across ticks.
         """
         from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import AsyncEngine
         import threading
 
         # Detect dialect: PostgreSQL vs SQLite / tests
         is_postgresql = False
-        engine = None
         try:
             bind = db.get_bind()
             if bind:
                 dialect_name = getattr(bind.dialect, "name", "")
                 is_postgresql = (dialect_name == "postgresql")
-                engine = bind
         except Exception:
             pass
 
-        if not engine:
-            from app.db import get_engine
-            engine = get_engine()
-            try:
-                is_postgresql = (getattr(engine.dialect, "name", "") == "postgresql")
-            except Exception:
-                is_postgresql = False
+        # Obtain the real AsyncEngine (do NOT use db.get_bind() as connection engine)
+        async_engine: AsyncEngine | None = None
+        try:
+            from app.db import get_async_engine
+            eng = get_async_engine()
+            if isinstance(eng, AsyncEngine):
+                async_engine = eng
+                if not is_postgresql:
+                    is_postgresql = (getattr(eng.dialect, "name", "") == "postgresql")
+        except Exception as e_eng:
+            logger.warning("[automation_scheduler] could not obtain AsyncEngine: %s", e_eng)
 
         if is_postgresql:
-            async with engine.connect() as lock_conn:
+            if not async_engine:
+                logger.error("[automation_scheduler] unable to acquire global lock: valid AsyncEngine not found. Skipping tick.")
+                return {
+                    "due_automations_count": 0,
+                    "launched_automations_count": 0,
+                    "skipped_automations_count": 0,
+                    "stale_runs_closed": 0,
+                    "skip_reason": "no_async_engine",
+                    "executions": [],
+                }
+
+            async with async_engine.connect() as lock_conn:
                 async with lock_conn.begin():
                     try:
                         res = await lock_conn.execute(

@@ -172,7 +172,7 @@ class TestAutomationConcurrency(unittest.IsolatedAsyncioTestCase):
     async def test_postgresql_xact_lock_dialect_flow(self):
         """Verifies that under PostgreSQL dialect, pg_try_advisory_xact_lock is executed within a transaction block."""
         from unittest.mock import patch, AsyncMock, MagicMock
-        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import AsyncEngine
 
         mock_conn = MagicMock()
         mock_trans = MagicMock()
@@ -196,13 +196,13 @@ class TestAutomationConcurrency(unittest.IsolatedAsyncioTestCase):
 
         mock_conn.execute = AsyncMock(side_effect=mock_execute)
 
-        mock_engine = MagicMock()
-        mock_engine.dialect.name = "postgresql"
-        mock_engine.connect.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
-        mock_engine.connect.return_value.__aexit__ = AsyncMock(return_value=None)
+        mock_async_engine = MagicMock(spec=AsyncEngine)
+        mock_async_engine.dialect.name = "postgresql"
+        mock_async_engine.connect.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_async_engine.connect.return_value.__aexit__ = AsyncMock(return_value=None)
 
         async with AsyncSession(self.engine) as db:
-            with patch.object(db, "get_bind", return_value=mock_engine):
+            with patch("app.db.get_async_engine", return_value=mock_async_engine):
                 with patch.object(MassEvaluationService, "_run_due_automations_inner", new_callable=AsyncMock) as mock_inner:
                     mock_inner.return_value = {
                         "due_automations_count": 1,
@@ -220,6 +220,7 @@ class TestAutomationConcurrency(unittest.IsolatedAsyncioTestCase):
     async def test_postgresql_xact_lock_skipped_when_held(self):
         """Verifies that under PostgreSQL dialect, if lock is held, worker skips immediately."""
         from unittest.mock import patch, AsyncMock, MagicMock
+        from sqlalchemy.ext.asyncio import AsyncEngine
 
         mock_conn = MagicMock()
         mock_trans = MagicMock()
@@ -232,19 +233,84 @@ class TestAutomationConcurrency(unittest.IsolatedAsyncioTestCase):
         mock_result_lock.scalar.return_value = False
         mock_conn.execute = AsyncMock(return_value=mock_result_lock)
 
-        mock_engine = MagicMock()
-        mock_engine.dialect.name = "postgresql"
-        mock_engine.connect.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
-        mock_engine.connect.return_value.__aexit__ = AsyncMock(return_value=None)
+        mock_async_engine = MagicMock(spec=AsyncEngine)
+        mock_async_engine.dialect.name = "postgresql"
+        mock_async_engine.connect.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_async_engine.connect.return_value.__aexit__ = AsyncMock(return_value=None)
 
         async with AsyncSession(self.engine) as db:
-            with patch.object(db, "get_bind", return_value=mock_engine):
+            with patch("app.db.get_async_engine", return_value=mock_async_engine):
                 with patch.object(MassEvaluationService, "_run_due_automations_inner", new_callable=AsyncMock) as mock_inner:
                     res = await MassEvaluationService.run_due_automations(db, company_ids=[770])
 
                     self.assertEqual(res.get("skip_reason"), "global_lock_held")
                     self.assertEqual(res.get("launched_automations_count"), 0)
                     mock_inner.assert_not_called()
+
+    async def test_run_due_automations_does_not_use_sync_engine_connect(self):
+        """Simulates db.get_bind() returning a synchronous Engine (raising MissingGreenlet if connect() is awaited)
+        and verifies that run_due_automations uses the real AsyncEngine instead without any MissingGreenlet."""
+        from unittest.mock import patch, AsyncMock, MagicMock
+        from sqlalchemy.ext.asyncio import AsyncEngine
+        from sqlalchemy.engine import Engine
+
+        # 1. Synchronous engine (as returned by db.get_bind() on AsyncSession)
+        mock_sync_engine = MagicMock(spec=Engine)
+        mock_sync_engine.dialect.name = "postgresql"
+        # If something accidentally calls connect() on sync engine in async context:
+        def raise_missing_greenlet(*args, **kwargs):
+            from sqlalchemy.exc import MissingGreenlet
+            raise MissingGreenlet("greenlet_spawn has not been called; can't call await_only() here")
+        mock_sync_engine.connect.side_effect = raise_missing_greenlet
+
+        # 2. Real AsyncEngine mock
+        mock_conn = MagicMock()
+        mock_trans = MagicMock()
+        mock_trans.__aenter__ = AsyncMock(return_value=mock_trans)
+        mock_trans.__aexit__ = AsyncMock(return_value=None)
+        mock_conn.begin = MagicMock(return_value=mock_trans)
+
+        mock_res_lock = MagicMock()
+        mock_res_lock.scalar.return_value = True
+        mock_res_pid = MagicMock()
+        mock_res_pid.scalar.return_value = 998877
+
+        async def mock_execute(stmt, params=None):
+            sql = str(stmt)
+            if "pg_try_advisory_xact_lock" in sql:
+                return mock_res_lock
+            elif "pg_backend_pid" in sql:
+                return mock_res_pid
+            return MagicMock()
+
+        mock_conn.execute = AsyncMock(side_effect=mock_execute)
+
+        mock_async_engine = MagicMock(spec=AsyncEngine)
+        mock_async_engine.dialect.name = "postgresql"
+        mock_async_engine.connect.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_async_engine.connect.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        async with AsyncSession(self.engine) as db:
+            # db.get_bind() returns the sync engine
+            with patch.object(db, "get_bind", return_value=mock_sync_engine):
+                with patch("app.db.get_async_engine", return_value=mock_async_engine):
+                    with patch.object(MassEvaluationService, "_run_due_automations_inner", new_callable=AsyncMock) as mock_inner:
+                        mock_inner.return_value = {
+                            "due_automations_count": 1,
+                            "launched_automations_count": 1,
+                            "skipped_automations_count": 0,
+                            "stale_runs_closed": 0,
+                            "executions": [],
+                        }
+
+                        # Must execute cleanly without raising MissingGreenlet
+                        res = await MassEvaluationService.run_due_automations(db, company_ids=[770])
+
+                        # Assertions
+                        self.assertEqual(res["launched_automations_count"], 1)
+                        mock_sync_engine.connect.assert_not_called()
+                        mock_async_engine.connect.assert_called_once()
+                        mock_conn.begin.assert_called_once()
 
 
 if __name__ == "__main__":
