@@ -260,66 +260,15 @@ class MassEvaluationService:
 
     @staticmethod
     async def _try_acquire_scheduler_lock(db: AsyncSession) -> bool:
-        """Try to acquire a global advisory lock so only one worker runs automation tick.
-        Returns True if lock acquired, False if another worker holds it.
-        Detects SQLite dialect and falls back to threading.Lock (no pg_advisory_lock in SQLite)."""
-        from sqlalchemy import text
-        import threading
-
-        # Detect dialect: skip PG advisory lock for SQLite/non-PG engines
-        is_postgresql = False
-        try:
-            bind = db.get_bind()
-            dialect_name = bind.dialect.name if bind else ""
-            is_postgresql = dialect_name == "postgresql"
-        except Exception:
-            pass
-
-        if is_postgresql:
-            try:
-                result = await db.execute(
-                    text("SELECT pg_try_advisory_lock(:key)"),
-                    {"key": MassEvaluationService._SCHEDULER_LOCK_KEY}
-                )
-                acquired = bool(result.scalar())
-                await db.commit()
-                return acquired
-            except Exception:
-                await db.rollback()
-                pass  # Fall through to threading.Lock fallback
-
-        # Non-PG / SQLite fallback: use in-process threading.Lock
+        """Legacy helper: non-blocking check. Kept for backwards-compatibility."""
         lock = MassEvaluationService._threading_scheduler_lock
         if lock is None:
-            return True  # No lock available — allow execution
+            return True
         return lock.acquire(blocking=False)
 
     @staticmethod
     async def _release_scheduler_lock(db: AsyncSession) -> None:
-        """Release the advisory lock acquired by _try_acquire_scheduler_lock."""
-        from sqlalchemy import text
-
-        is_postgresql = False
-        try:
-            bind = db.get_bind()
-            dialect_name = bind.dialect.name if bind else ""
-            is_postgresql = dialect_name == "postgresql"
-        except Exception:
-            pass
-
-        if is_postgresql:
-            try:
-                await db.execute(
-                    text("SELECT pg_advisory_unlock(:key)"),
-                    {"key": MassEvaluationService._SCHEDULER_LOCK_KEY}
-                )
-                await db.commit()
-                return
-            except Exception:
-                await db.rollback()
-                pass
-
-        # Non-PG / SQLite fallback
+        """Legacy helper: release threading lock. Kept for backwards-compatibility."""
         lock = MassEvaluationService._threading_scheduler_lock
         if lock is not None:
             try:
@@ -2982,13 +2931,88 @@ class MassEvaluationService:
         company_ids: list[int] | None = None,
         service_ids: list[int] | None = None,
     ) -> dict[str, Any]:
-        """Finds all active automations that are due to execute and triggers them with scoping support."""
-        from app.config import get_settings
-        settings = get_settings()
+        """Finds all active automations that are due to execute and triggers them with scoping support.
+        Uses PostgreSQL pg_try_advisory_xact_lock in a dedicated transaction-scoped connection so that
+        the lock is automatically released upon transaction completion (commit or rollback), preventing
+        connection-pool lock leakage and indefinite blockage across ticks.
+        """
+        from sqlalchemy import text
+        import threading
 
-        # 0. Global advisory lock: only one worker (process) should execute a scheduler tick.
-        lock_acquired = await MassEvaluationService._try_acquire_scheduler_lock(db)
-        if not lock_acquired:
+        # Detect dialect: PostgreSQL vs SQLite / tests
+        is_postgresql = False
+        engine = None
+        try:
+            bind = db.get_bind()
+            if bind:
+                dialect_name = getattr(bind.dialect, "name", "")
+                is_postgresql = (dialect_name == "postgresql")
+                engine = bind
+        except Exception:
+            pass
+
+        if not engine:
+            from app.db import get_engine
+            engine = get_engine()
+            try:
+                is_postgresql = (getattr(engine.dialect, "name", "") == "postgresql")
+            except Exception:
+                is_postgresql = False
+
+        if is_postgresql:
+            async with engine.connect() as lock_conn:
+                async with lock_conn.begin():
+                    try:
+                        res = await lock_conn.execute(
+                            text("SELECT pg_try_advisory_xact_lock(:key)"),
+                            {"key": MassEvaluationService._SCHEDULER_LOCK_KEY}
+                        )
+                        acquired = bool(res.scalar())
+                    except Exception as e_lock:
+                        logger.error("[automation_scheduler] error acquiring advisory xact lock: %s", e_lock)
+                        acquired = False
+
+                    if not acquired:
+                        logger.info("[automation_scheduler] skipped global lock held by another worker")
+                        return {
+                            "due_automations_count": 0,
+                            "launched_automations_count": 0,
+                            "skipped_automations_count": 0,
+                            "stale_runs_closed": 0,
+                            "skip_reason": "global_lock_held",
+                            "executions": [],
+                        }
+
+                    worker_pid = "unknown"
+                    try:
+                        pid_res = await lock_conn.execute(text("SELECT pg_backend_pid()"))
+                        worker_pid = str(pid_res.scalar() or "unknown")
+                    except Exception:
+                        pass
+
+                    logger.info("[automation_scheduler] acquired global xact lock worker_pid=%s", worker_pid)
+
+                    result = await MassEvaluationService._run_due_automations_inner(
+                        db, company_ids=company_ids, service_ids=service_ids
+                    )
+
+                    logger.info(
+                        "[automation_scheduler] tick finished due=%d launched=%d skipped=%d",
+                        result.get("due_automations_count", 0),
+                        result.get("launched_automations_count", 0),
+                        result.get("skipped_automations_count", 0),
+                    )
+                    return result
+                # When exiting async with lock_conn.begin():
+                # Transaction ends, and PostgreSQL automatically and unconditionally releases the advisory xact lock!
+
+        # Non-PG / SQLite fallback: use in-process threading.Lock
+        lock = MassEvaluationService._threading_scheduler_lock
+        acquired = True
+        if lock is not None:
+            acquired = lock.acquire(blocking=False)
+
+        if not acquired:
             logger.info("[automation_scheduler] skipped global lock held by another worker")
             return {
                 "due_automations_count": 0,
@@ -3000,11 +3024,23 @@ class MassEvaluationService:
             }
 
         try:
-            return await MassEvaluationService._run_due_automations_inner(
+            logger.info("[automation_scheduler] acquired global xact lock worker_pid=sqlite_thread_%s", threading.get_ident())
+            result = await MassEvaluationService._run_due_automations_inner(
                 db, company_ids=company_ids, service_ids=service_ids
             )
+            logger.info(
+                "[automation_scheduler] tick finished due=%d launched=%d skipped=%d",
+                result.get("due_automations_count", 0),
+                result.get("launched_automations_count", 0),
+                result.get("skipped_automations_count", 0),
+            )
+            return result
         finally:
-            await MassEvaluationService._release_scheduler_lock(db)
+            if lock is not None:
+                try:
+                    lock.release()
+                except RuntimeError:
+                    pass
 
     @staticmethod
     async def _run_due_automations_inner(

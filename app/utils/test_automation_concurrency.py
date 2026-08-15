@@ -146,6 +146,100 @@ class TestAutomationConcurrency(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(running_rows), 1,
                              f"At most 1 running row should exist after concurrent tick, found {len(running_rows)}")
 
+    async def test_subsequent_tick_acquires_lock_successfully(self):
+        """After a tick finishes, the subsequent tick acquires the lock without any retention."""
+        from unittest.mock import patch, AsyncMock, MagicMock
+
+        fake_run = MagicMock()
+        fake_run.run_id = 77002
+
+        with patch.object(MassEvaluationService, "run_job", new_callable=AsyncMock, return_value=fake_run):
+            # Tick 1
+            async with AsyncSession(self.engine) as db1:
+                res1 = await MassEvaluationService.run_due_automations(db1, company_ids=[770])
+                self.assertNotEqual(res1.get("skip_reason"), "global_lock_held", "Tick 1 should acquire lock")
+
+            # Tick 2 immediately after Tick 1
+            async with AsyncSession(self.engine) as db2:
+                res2 = await MassEvaluationService.run_due_automations(db2, company_ids=[770])
+                self.assertNotEqual(res2.get("skip_reason"), "global_lock_held", "Tick 2 must acquire lock without being blocked")
+
+            # Tick 3
+            async with AsyncSession(self.engine) as db3:
+                res3 = await MassEvaluationService.run_due_automations(db3, company_ids=[770])
+                self.assertNotEqual(res3.get("skip_reason"), "global_lock_held", "Tick 3 must acquire lock without being blocked")
+
+    async def test_postgresql_xact_lock_dialect_flow(self):
+        """Verifies that under PostgreSQL dialect, pg_try_advisory_xact_lock is executed within a transaction block."""
+        from unittest.mock import patch, AsyncMock, MagicMock
+        from sqlalchemy import text
+
+        mock_conn = AsyncMock()
+        mock_trans = AsyncMock()
+        mock_conn.begin.return_value.__aenter__.return_value = mock_trans
+
+        # Mock execute results: lock acquired True, pid 45678
+        mock_result_lock = MagicMock()
+        mock_result_lock.scalar.return_value = True
+        mock_result_pid = MagicMock()
+        mock_result_pid.scalar.return_value = 45678
+
+        async def mock_execute(stmt, params=None):
+            sql = str(stmt)
+            if "pg_try_advisory_xact_lock" in sql:
+                return mock_result_lock
+            elif "pg_backend_pid" in sql:
+                return mock_result_pid
+            return MagicMock()
+
+        mock_conn.execute.side_effect = mock_execute
+
+        mock_engine = MagicMock()
+        mock_engine.dialect.name = "postgresql"
+        mock_engine.connect.return_value.__aenter__.return_value = mock_conn
+
+        async with AsyncSession(self.engine) as db:
+            with patch.object(db, "get_bind", return_value=mock_engine):
+                with patch.object(MassEvaluationService, "_run_due_automations_inner", new_callable=AsyncMock) as mock_inner:
+                    mock_inner.return_value = {
+                        "due_automations_count": 1,
+                        "launched_automations_count": 1,
+                        "skipped_automations_count": 0,
+                        "stale_runs_closed": 0,
+                        "executions": [],
+                    }
+                    res = await MassEvaluationService.run_due_automations(db, company_ids=[770])
+
+                    self.assertEqual(res["launched_automations_count"], 1)
+                    mock_conn.begin.assert_called_once()
+                    mock_inner.assert_called_once()
+
+    async def test_postgresql_xact_lock_skipped_when_held(self):
+        """Verifies that under PostgreSQL dialect, if lock is held, worker skips immediately."""
+        from unittest.mock import patch, AsyncMock, MagicMock
+
+        mock_conn = AsyncMock()
+        mock_trans = AsyncMock()
+        mock_conn.begin.return_value.__aenter__.return_value = mock_trans
+
+        # Lock returns False (held by another worker)
+        mock_result_lock = MagicMock()
+        mock_result_lock.scalar.return_value = False
+        mock_conn.execute.return_value = mock_result_lock
+
+        mock_engine = MagicMock()
+        mock_engine.dialect.name = "postgresql"
+        mock_engine.connect.return_value.__aenter__.return_value = mock_conn
+
+        async with AsyncSession(self.engine) as db:
+            with patch.object(db, "get_bind", return_value=mock_engine):
+                with patch.object(MassEvaluationService, "_run_due_automations_inner", new_callable=AsyncMock) as mock_inner:
+                    res = await MassEvaluationService.run_due_automations(db, company_ids=[770])
+
+                    self.assertEqual(res.get("skip_reason"), "global_lock_held")
+                    self.assertEqual(res.get("launched_automations_count"), 0)
+                    mock_inner.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
