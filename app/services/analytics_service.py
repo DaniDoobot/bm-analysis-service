@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Set, Tuple
 from sqlalchemy import select, func, and_
+from sqlalchemy.orm import defer
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 
@@ -213,7 +214,7 @@ async def query_mass_evaluation_results(
     """Query mass evaluation results based on standard analytical filters."""
     service_id = await resolve_service_id(db, service_str)
 
-    stmt = select(MassEvaluationResult).where(
+    stmt = select(MassEvaluationResult).options(defer(MassEvaluationResult.prompt_snapshot)).where(
         MassEvaluationResult.status == "completed"
     )
 

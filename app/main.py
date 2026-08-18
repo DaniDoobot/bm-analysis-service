@@ -128,12 +128,18 @@ async def start_mass_evaluations_scheduler():
     
     from app.db import get_engine
     from app.services.mass_evaluation_service import MassEvaluationService
+    from app.utils.memory_utils import log_process_memory
     from sqlalchemy.ext.asyncio import AsyncSession
     
     engine = get_engine()
+    tick_count = 0
     
     while True:
         try:
+            tick_count += 1
+            if tick_count % 10 == 0:
+                log_process_memory("mass_eval_scheduler_heartbeat")
+
             async with AsyncSession(engine) as db:
                 try:
                     # Cleanup stale/abandoned runs first to release any concurrent locks
@@ -162,12 +168,18 @@ async def start_automation_scheduler():
     
     from app.db import get_engine
     from app.services.mass_evaluation_service import MassEvaluationService
+    from app.utils.memory_utils import log_process_memory
     from sqlalchemy.ext.asyncio import AsyncSession
     
     engine = get_engine()
+    tick_count = 0
     
     while True:
         try:
+            tick_count += 1
+            if tick_count % 10 == 0:
+                log_process_memory("automation_scheduler_heartbeat")
+
             async with AsyncSession(engine) as db:
                 try:
                     await MassEvaluationService.run_due_automations(db)
@@ -194,12 +206,14 @@ async def start_training_scheduler():
     
     from app.db import get_engine
     from app.services.personalized_training_service import PersonalizedTrainingService
+    from app.utils.memory_utils import log_process_memory
     from sqlalchemy.ext.asyncio import AsyncSession
     
     engine = get_engine()
     
     while True:
         try:
+            log_process_memory("training_scheduler_heartbeat")
             async with AsyncSession(engine) as db:
                 try:
                     await PersonalizedTrainingService.run_due_training_jobs(db)
@@ -221,9 +235,11 @@ async def start_training_scheduler():
 @app.on_event("startup")
 async def startup_event():
     from app.routers.health import get_version
+    from app.utils.memory_utils import log_process_memory
     commit_ver = get_version()
     import os
     logger.info("bm-analysis-service starting up (PID: %d, commit: %s)", os.getpid(), commit_ver)
+    log_process_memory("startup", logging.INFO)
     logger.info("AI provider: %s", settings.ai_provider)
     logger.info("AI_PROVIDER in os.environ: %s", "yes" if "AI_PROVIDER" in os.environ else "no")
     if settings.ai_provider == "gemini":

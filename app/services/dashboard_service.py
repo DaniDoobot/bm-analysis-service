@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select, func, or_
+from sqlalchemy.orm import defer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.analyses import Analysis
@@ -509,8 +510,8 @@ async def get_dashboard_summary(
         start_anterior = now - (delta * 2)
         end_anterior = now - delta
 
-    # Query from MassEvaluationResult exclusively
-    stmt = select(MassEvaluationResult).where(
+    # Query from MassEvaluationResult exclusively (defer large prompt_snapshot to minimize memory footprint)
+    stmt = select(MassEvaluationResult).options(defer(MassEvaluationResult.prompt_snapshot)).where(
         MassEvaluationResult.status == "completed"
     )
     if context and not context.is_super_admin:
@@ -1273,7 +1274,7 @@ async def get_agent_evolution(
     dt_from, dt_to, recommended_bucket = resolve_date_range(date_from, date_to, period, default_period="30d")
     bucket_interval = bucket_param if bucket_param in ["hour", "day", "week"] else recommended_bucket
 
-    stmt = select(MassEvaluationResult).where(
+    stmt = select(MassEvaluationResult).options(defer(MassEvaluationResult.prompt_snapshot)).where(
         MassEvaluationResult.hubspot_owner_id == hubspot_owner_id,
         MassEvaluationResult.status == "completed",
     )
@@ -1605,7 +1606,7 @@ async def get_objections_breakdown(
     
     dt_from, dt_to, _ = resolve_date_range(date_from, date_to, period, default_period="7d")
         
-    stmt = select(MassEvaluationResult).where(
+    stmt = select(MassEvaluationResult).options(defer(MassEvaluationResult.prompt_snapshot)).where(
         MassEvaluationResult.status == "completed"
     )
     if context and not context.is_super_admin:
@@ -2035,8 +2036,8 @@ async def get_agents_comparison(
         end_anterior = now - delta
         bucket_interval = bucket or default_bucket
 
-    # 2. Query completed mass evaluation results
-    stmt = select(MassEvaluationResult).where(
+    # 2. Query completed mass evaluation results (defer prompt_snapshot)
+    stmt = select(MassEvaluationResult).options(defer(MassEvaluationResult.prompt_snapshot)).where(
         MassEvaluationResult.status == "completed"
     )
     if context and not context.is_super_admin:

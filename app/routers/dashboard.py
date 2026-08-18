@@ -83,26 +83,29 @@ async def dashboard_summary(
                 detail="Acceso denegado: No tienes permisos para este servicio."
             )
 
+    from app.utils.memory_utils import track_memory_async
+
     try:
-        data = await get_dashboard_summary(
-            db,
-            analysis_type=analysis_type,
-            period=period,
-            service_id=service_id,
-            service_key=service_key,
-            date_from=date_from,
-            date_to=date_to,
-            typology_ids=typo_ids,
-            typology_key=norm_typology_key,
-            direction=norm_direction,
-            duration_min_seconds=duration_min_seconds,
-            duration_max_seconds=duration_max_seconds,
-            avg_score_min=avg_score_min,
-            avg_score_max=avg_score_max,
-            item_filters=effective_item_filters,
-            context=context,
-        )
-        return data
+        async with track_memory_async("dashboard_summary"):
+            data = await get_dashboard_summary(
+                db,
+                analysis_type=analysis_type,
+                period=period,
+                service_id=service_id,
+                service_key=service_key,
+                date_from=date_from,
+                date_to=date_to,
+                typology_ids=typo_ids,
+                typology_key=norm_typology_key,
+                direction=norm_direction,
+                duration_min_seconds=duration_min_seconds,
+                duration_max_seconds=duration_max_seconds,
+                avg_score_min=avg_score_min,
+                avg_score_max=avg_score_max,
+                item_filters=effective_item_filters,
+                context=context,
+            )
+            return data
     except HTTPException:
         raise
     except Exception as e:

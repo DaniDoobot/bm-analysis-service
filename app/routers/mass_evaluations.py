@@ -701,81 +701,84 @@ async def get_my_analysis_results(
                 detail="No tienes acceso al servicio seleccionado."
             )
 
-    t_start = time.perf_counter()
-    total = await MassEvaluationService.count_results(
-        db,
-        run_id=run_id,
-        job_id=job_id,
-        agent_owner_id=effective_owner_id,
-        call_id=call_id,
-        date_from=date_from,
-        date_to=date_to,
-        created_from=created_from,
-        created_to=created_to,
-        execution_source=execution_source,
-        global_score_min=global_score_min,
-        global_score_max=global_score_max,
-        service_id=service_id,
-        service_key=service_key,
-        typology_key=typology_key,
-        typology_ids=typo_ids,
-        duration_min_seconds=duration_min_seconds,
-        duration_max_seconds=duration_max_seconds,
-        direction=norm_d,
-        company_ids=None if context.is_super_admin else context.allowed_company_ids,
-        service_ids=context.allowed_service_ids,
-        allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None
-    )
+    from app.utils.memory_utils import track_memory_async
 
-    from app.utils.visual_formatters import build_items_visual
-    results = await MassEvaluationService.list_results(
-        db,
-        run_id=run_id,
-        job_id=job_id,
-        agent_owner_id=effective_owner_id,
-        call_id=call_id,
-        date_from=date_from,
-        date_to=date_to,
-        created_from=created_from,
-        created_to=created_to,
-        execution_source=execution_source,
-        limit=limit,
-        global_score_min=global_score_min,
-        global_score_max=global_score_max,
-        service_id=service_id,
-        service_key=service_key,
-        typology_key=typology_key,
-        offset=offset,
-        typology_ids=typo_ids,
-        duration_min_seconds=duration_min_seconds,
-        duration_max_seconds=duration_max_seconds,
-        direction=norm_d,
-        company_ids=None if context.is_super_admin else context.allowed_company_ids,
-        service_ids=context.allowed_service_ids,
-        allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None
-    )
-    
-    items_out = []
-    for r in results:
-        d = MassEvaluationResultResponse.model_validate(r)
-        d.items_visual = build_items_visual(r.items_json)
-        if d.execution_source is None:
-            d.execution_source = "on_demand"
-        items_out.append(d)
+    async with track_memory_async("mass_evaluation_results"):
+        t_start = time.perf_counter()
+        total = await MassEvaluationService.count_results(
+            db,
+            run_id=run_id,
+            job_id=job_id,
+            agent_owner_id=effective_owner_id,
+            call_id=call_id,
+            date_from=date_from,
+            date_to=date_to,
+            created_from=created_from,
+            created_to=created_to,
+            execution_source=execution_source,
+            global_score_min=global_score_min,
+            global_score_max=global_score_max,
+            service_id=service_id,
+            service_key=service_key,
+            typology_key=typology_key,
+            typology_ids=typo_ids,
+            duration_min_seconds=duration_min_seconds,
+            duration_max_seconds=duration_max_seconds,
+            direction=norm_d,
+            company_ids=None if context.is_super_admin else context.allowed_company_ids,
+            service_ids=context.allowed_service_ids,
+            allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None
+        )
 
-    total_ms = round((time.perf_counter() - t_start) * 1000.0, 1)
-    import logging
-    logging.getLogger(__name__).info(
-        "[perf.mass_evaluation_results] endpoint=/bm/me/analysis-results total_ms=%.1f rows=%d total=%d limit=%d offset=%d direction=%s",
-        total_ms, len(items_out), total, limit, offset, norm_d
-    )
+        from app.utils.visual_formatters import build_items_visual
+        results = await MassEvaluationService.list_results(
+            db,
+            run_id=run_id,
+            job_id=job_id,
+            agent_owner_id=effective_owner_id,
+            call_id=call_id,
+            date_from=date_from,
+            date_to=date_to,
+            created_from=created_from,
+            created_to=created_to,
+            execution_source=execution_source,
+            limit=limit,
+            global_score_min=global_score_min,
+            global_score_max=global_score_max,
+            service_id=service_id,
+            service_key=service_key,
+            typology_key=typology_key,
+            offset=offset,
+            typology_ids=typo_ids,
+            duration_min_seconds=duration_min_seconds,
+            duration_max_seconds=duration_max_seconds,
+            direction=norm_d,
+            company_ids=None if context.is_super_admin else context.allowed_company_ids,
+            service_ids=context.allowed_service_ids,
+            allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None
+        )
+        
+        items_out = []
+        for r in results:
+            d = MassEvaluationResultResponse.model_validate(r)
+            d.items_visual = build_items_visual(r.items_json)
+            if d.execution_source is None:
+                d.execution_source = "on_demand"
+            items_out.append(d)
 
-    return PagedMassEvaluationResultResponse(
-        items=items_out,
-        total=total,
-        limit=limit,
-        offset=offset
-    )
+        total_ms = round((time.perf_counter() - t_start) * 1000.0, 1)
+        import logging
+        logging.getLogger(__name__).info(
+            "[perf.mass_evaluation_results] endpoint=/bm/me/analysis-results total_ms=%.1f rows=%d total=%d limit=%d offset=%d direction=%s",
+            total_ms, len(items_out), total, limit, offset, norm_d
+        )
+
+        return PagedMassEvaluationResultResponse(
+            items=items_out,
+            total=total,
+            limit=limit,
+            offset=offset
+        )
 
 
 @router.get("/mass-evaluation-results", response_model=PagedMassEvaluationResultResponse)

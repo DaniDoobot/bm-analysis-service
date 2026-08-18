@@ -13,10 +13,11 @@ T = TypeVar("T")
 
 class AnalyticsCache:
     """
-    Worker-level TTL Cache with In-Flight single-flight protection.
+    Worker-level TTL Cache with In-Flight single-flight protection and bounded size.
     """
-    def __init__(self, default_ttl: int = 30):
+    def __init__(self, default_ttl: int = 30, max_entries: int = 100):
         self.default_ttl = default_ttl
+        self.max_entries = max_entries
         self._store: dict[str, tuple[float, Any]] = {}
         self._inflight: dict[str, asyncio.Task] = {}
         self._lock = asyncio.Lock()
@@ -26,6 +27,14 @@ class AnalyticsCache:
         expired = [k for k, (exp, _) in self._store.items() if now > exp]
         for k in expired:
             del self._store[k]
+
+        # Enforce maximum cache entries (evict oldest if above max_entries)
+        if len(self._store) > self.max_entries:
+            # Sort by expiration time and remove the earliest expiring entries
+            sorted_keys = sorted(self._store.keys(), key=lambda k: self._store[k][0])
+            to_remove = sorted_keys[: len(self._store) - self.max_entries]
+            for k in to_remove:
+                del self._store[k]
 
     async def get_or_compute(
         self,
@@ -56,7 +65,6 @@ class AnalyticsCache:
             # 2. Check if identical request is already in-flight
             if key in self._inflight:
                 task = self._inflight[key]
-                # Release lock while waiting for in-flight task
                 pass
 
         if key in self._inflight:
@@ -81,6 +89,7 @@ class AnalyticsCache:
         try:
             val = await task
             async with self._lock:
+                self._clean_expired()
                 self._store[key] = (time.monotonic() + effective_ttl, val)
             return val, False
         finally:
@@ -93,5 +102,5 @@ class AnalyticsCache:
         self._inflight.clear()
 
 
-# Global cache instance for worker
-analytics_cache = AnalyticsCache(default_ttl=30)
+# Global cache instance for worker (bounded to 100 entries, 30s TTL)
+analytics_cache = AnalyticsCache(default_ttl=30, max_entries=100)

@@ -9,7 +9,7 @@ from typing import Any
 
 from sqlalchemy import select, update, delete, desc, func, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import selectinload, defer
 
 from app.models.mass_evaluations import (
     MassEvaluationJob,
@@ -35,6 +35,8 @@ from app.services.analysis_results_mapper import map_criterion_value
 from app.services.criteria_service import get_active_criteria
 from app.utils.hubspot_owners import resolve_agent_display
 from app.utils.normalizers import normalize_direction
+from app.utils.memory_utils import log_process_memory, track_memory_async, get_process_rss_mb, check_and_log_memory_thresholds
+import gc
 
 logger = logging.getLogger(__name__)
 
@@ -1513,6 +1515,16 @@ class MassEvaluationService:
                             }
                         )
                         calls_failed += 1
+                    finally:
+                        # Explicitly release large audio and LLM response buffers
+                        if "audio_bytes" in locals():
+                            del audio_bytes
+                        if "raw_response" in locals():
+                            del raw_response
+                        if "clean_result" in locals():
+                            del clean_result
+                        if "items" in locals():
+                            del items
                         
                     # Incrementally update metrics in DB for polling
                     try:
@@ -1536,6 +1548,13 @@ class MassEvaluationService:
 
                     # Commit per-call results to prevent loss of progress
                     await db.commit()
+
+                    # Periodic memory check every 10 calls
+                    if (calls_analyzed + calls_skipped + calls_failed) % 10 == 0:
+                        rss_now = get_process_rss_mb()
+                        if rss_now > 500.0:
+                            gc.collect()
+                            log_process_memory(f"mass_eval_run_{run_id}_progress")
                     
                 # 4. Fetch fresh copies of run and job for final updates.
                 # Since the loop commits frequently, run and job are expired.
@@ -1590,6 +1609,9 @@ class MassEvaluationService:
                         )
 
                 await db.commit()
+                # Run garbage collection at run completion to immediately free peak memory
+                gc.collect()
+                log_process_memory(f"mass_eval_run_{run_id}_completed")
                 logger.info("Mass evaluation job %d, run %d finished with status: %s", job_id, run_id, final_status)
 
                 # Synchronization hook for MassAnalysisAutomationRun
@@ -1735,7 +1757,7 @@ class MassEvaluationService:
         allowed_agent_ids: list[str] | None = None,
         status: str | None = None,
     ) -> list[MassEvaluationResult]:
-        stmt = select(MassEvaluationResult)
+        stmt = select(MassEvaluationResult).options(defer(MassEvaluationResult.prompt_snapshot))
         filters = []
         if status is not None and status.strip() and status.strip().lower() != "all":
             filters.append(MassEvaluationResult.status == status.strip().lower())
@@ -3010,10 +3032,14 @@ class MassEvaluationService:
                         db, company_ids=company_ids, service_ids=service_ids
                     )
 
+                    launched_cnt = result.get("launched_automations_count", 0)
+                    if launched_cnt > 0:
+                        log_process_memory(f"automations_launched_{launched_cnt}")
+
                     logger.info(
                         "[automation_scheduler] tick finished due=%d launched=%d skipped=%d",
                         result.get("due_automations_count", 0),
-                        result.get("launched_automations_count", 0),
+                        launched_cnt,
                         result.get("skipped_automations_count", 0),
                     )
                     return result
