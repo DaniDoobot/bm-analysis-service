@@ -79,11 +79,19 @@ def get_process_rss_mb() -> float:
 
             counters = PROCESS_MEMORY_COUNTERS()
             counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
-            handle = ctypes.windll.kernel32.GetCurrentProcess()
-            if ctypes.windll.psapi.GetProcessMemoryInfo(
-                handle, ctypes.byref(counters), ctypes.sizeof(counters)
-            ):
-                return counters.WorkingSetSize / (1024.0 * 1024.0)
+            get_handle = ctypes.windll.kernel32.GetCurrentProcess
+            get_handle.restype = wintypes.HANDLE
+            handle = get_handle()
+
+            get_mem = getattr(ctypes.windll.kernel32, "K32GetProcessMemoryInfo", None)
+            if get_mem is None:
+                get_mem = getattr(ctypes.windll.psapi, "GetProcessMemoryInfo", None)
+
+            if get_mem is not None:
+                get_mem.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESS_MEMORY_COUNTERS), wintypes.DWORD]
+                get_mem.restype = wintypes.BOOL
+                if get_mem(handle, ctypes.byref(counters), ctypes.sizeof(counters)):
+                    return float(counters.WorkingSetSize) / (1024.0 * 1024.0)
         except Exception:
             pass
 

@@ -89,8 +89,8 @@ class AnalyticsCache:
         try:
             val = await task
             async with self._lock:
-                self._clean_expired()
                 self._store[key] = (time.monotonic() + effective_ttl, val)
+                self._clean_expired()
             return val, False
         finally:
             async with self._lock:
