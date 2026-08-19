@@ -460,7 +460,7 @@ async def execute_gap_backfill(
                 await MassEvaluationService._execute_background_run(job_id, cur_mass_run_id, effective_filters)
 
                 # Fetch updated metrics from DB
-                m_stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == cur_mass_run_id)
+                m_stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == cur_mass_run_id).execution_options(populate_existing=True)
                 m_res = await db.execute(m_stmt)
                 m_fresh = m_res.scalar()
 
@@ -472,8 +472,6 @@ async def execute_gap_backfill(
                 await db.execute(
                     update(MassAnalysisAutomationRun).where(MassAnalysisAutomationRun.automation_run_id == cur_auto_run_id).values(
                         status=final_status,
-                        calls_analyzed=calls_analyzed,
-                        calls_failed=calls_failed,
                         calls_skipped=calls_skipped,
                         finished_at=now_finished,
                     )
@@ -500,20 +498,38 @@ async def execute_gap_backfill(
             logger.error("[automation_gap_backfill] Error executing Gap #%d: %s", gap_idx, e_gap, exc_info=True)
             now_err = datetime.now(timezone.utc)
             err_msg = str(e_gap)
+            recovered_status = "failed"
             try:
-                await db.execute(
-                    update(MassEvaluationRun).where(MassEvaluationRun.run_id == cur_mass_run_id).values(
-                        status="failed", error_message=err_msg, finished_at=now_err
-                    )
-                )
-                await db.execute(
-                    update(MassAnalysisAutomationRun).where(MassAnalysisAutomationRun.automation_run_id == cur_auto_run_id).values(
-                        status="failed", error_message=err_msg, finished_at=now_err
-                    )
-                )
+                # Check if MassEvaluationRun actually completed before marking as failed
+                m_chk_stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == cur_mass_run_id).execution_options(populate_existing=True)
+                m_chk_res = await db.execute(m_chk_stmt)
+                m_chk = m_chk_res.scalar()
+
+                if m_chk and m_chk.status in ["completed", "completed_with_errors"]:
+                    logger.warning("[automation_gap_backfill] MassEvaluationRun %d was completed, preserving status despite bookkeeping error.", cur_mass_run_id)
+                    recovered_status = m_chk.status
+                    if cur_auto_run_id:
+                        await db.execute(
+                            update(MassAnalysisAutomationRun).where(MassAnalysisAutomationRun.automation_run_id == cur_auto_run_id).values(
+                                status=m_chk.status, finished_at=m_chk.finished_at or now_err, error_message=None
+                            )
+                        )
+                else:
+                    if cur_mass_run_id:
+                        await db.execute(
+                            update(MassEvaluationRun).where(MassEvaluationRun.run_id == cur_mass_run_id).values(
+                                status="failed", error_message=err_msg, finished_at=now_err
+                            )
+                        )
+                    if cur_auto_run_id:
+                        await db.execute(
+                            update(MassAnalysisAutomationRun).where(MassAnalysisAutomationRun.automation_run_id == cur_auto_run_id).values(
+                                status="failed", error_message=err_msg, finished_at=now_err
+                            )
+                        )
                 await db.commit()
             except Exception as e_commit:
-                logger.error("[automation_gap_backfill] Error marking runs failed: %s", e_commit)
+                logger.error("[automation_gap_backfill] Error marking runs failed/recovered: %s", e_commit)
 
             execution_results.append({
                 "gap_index": gap_idx,
@@ -522,13 +538,13 @@ async def execute_gap_backfill(
                 "gap_from_madrid": format_dt(w_from, MADRID_TZ),
                 "gap_to_madrid": format_dt(w_to, MADRID_TZ),
                 "duration_minutes": dur_min,
-                "status": "failed",
-                "calls_found": 0,
-                "calls_selected": 0,
-                "calls_analyzed": 0,
-                "calls_failed": 0,
-                "calls_skipped": 0,
-                "error_message": err_msg,
+                "status": recovered_status,
+                "calls_found": calls_found_cnt if "calls_found_cnt" in locals() else 0,
+                "calls_selected": calls_sel_cnt if "calls_sel_cnt" in locals() else 0,
+                "calls_analyzed": calls_analyzed if "calls_analyzed" in locals() else 0,
+                "calls_failed": calls_failed if "calls_failed" in locals() else 0,
+                "calls_skipped": calls_skipped if "calls_skipped" in locals() else 0,
+                "error_message": None if recovered_status in ["completed", "completed_with_errors"] else err_msg,
             })
 
     return execution_results

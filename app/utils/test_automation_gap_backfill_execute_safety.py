@@ -215,6 +215,80 @@ class TestAutomationGapBackfillSafety(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(res["calls_found"], 1)
                     self.assertEqual(res["calls_selected"], 0)  # Deduplicated to 0
 
+    async def test_backfill_execute_with_calls_updates_automation_run_safely(self):
+        """Executing backfill with real calls updates MassAnalysisAutomationRun without unconsumed column errors."""
+        async with self.async_session() as db:
+            p = Prompt(prompt_id=58, prompt_name="Prompt Front", prompt_type="mass")
+            pv = PromptVersion(id=241, prompt_id=58, prompt="Evalúa llamada.", version_name="v1", is_current=True)
+            job = MassEvaluationJob(
+                job_id=48,
+                prompt_id=58,
+                prompt_version_id=241,
+                job_name="[Auto] Front Test",
+                selection_mode="filter",
+                timezone="Europe/Madrid",
+            )
+            aut = MassAnalysisAutomation(
+                automation_id=8,
+                name="Front Auto",
+                job_id=48,
+                prompt_id=58,
+                is_active=True,
+                interval_minutes=10,
+                lookback_minutes=10,
+                delay_minutes=5,
+            )
+            db.add_all([p, pv, job, aut])
+            await db.commit()
+
+            gap_item = {
+                "gap_index": 113,
+                "gap_from_utc": datetime(2026, 8, 13, 13, 56, 8, tzinfo=timezone.utc),
+                "gap_to_utc": datetime(2026, 8, 13, 14, 2, 9, tzinfo=timezone.utc),
+                "gap_minutes": 6.0,
+            }
+
+            async def mock_execute_bg(job_id, run_id, effective_filters):
+                # Simulate successful background execution
+                async with self.async_session() as inner_db:
+                    m_run = (await inner_db.execute(select(MassEvaluationRun).where(MassEvaluationRun.run_id == run_id))).scalar()
+                    if m_run:
+                        m_run.status = "completed"
+                        m_run.calls_analyzed = 2
+                        m_run.calls_failed = 0
+                        m_run.calls_skipped = 0
+                        m_run.finished_at = datetime.now(timezone.utc)
+                        await inner_db.commit()
+
+            with patch("app.utils.backfill_automation_gaps.validate_backfill_environment", return_value=(True, [])):
+                with patch("app.services.hubspot_service.HubSpotService.search_calls_for_mass_evaluation", new_callable=AsyncMock) as mock_search:
+                    with patch("app.services.mass_evaluation_service.MassEvaluationService._execute_background_run", side_effect=mock_execute_bg):
+                        mock_search.return_value = [
+                            {"call_id": "call_new_1", "recording_url": "https://example.com/audio1.mp3"},
+                            {"call_id": "call_new_2", "recording_url": "https://example.com/audio2.mp3"},
+                        ]
+                        results = await execute_gap_backfill(db, automation_id=8, planned_gaps=[gap_item])
+
+                        self.assertEqual(len(results), 1)
+                        res = results[0]
+                        self.assertEqual(res["status"], "completed")
+                        self.assertEqual(res["calls_found"], 2)
+                        self.assertEqual(res["calls_selected"], 2)
+                        self.assertEqual(res["calls_analyzed"], 2)
+                        self.assertEqual(res["calls_failed"], 0)
+                        self.assertIsNone(res["error_message"])
+
+                        # Check DB objects
+                        m_run_db = (await db.execute(select(MassEvaluationRun).where(MassEvaluationRun.run_id == res["mass_run_id"]))).scalar()
+                        self.assertEqual(m_run_db.status, "completed")
+                        self.assertIsNone(m_run_db.error_message)
+
+                        a_run_db = (await db.execute(select(MassAnalysisAutomationRun).where(MassAnalysisAutomationRun.automation_run_id == res["automation_run_id"]))).scalar()
+                        self.assertEqual(a_run_db.status, "completed")
+                        self.assertIsNone(a_run_db.error_message)
+                        self.assertEqual(a_run_db.calls_found, 2)
+                        self.assertEqual(a_run_db.calls_selected, 2)
+
     async def test_backfill_execute_requires_hubspot_token(self):
         """Executing backfill without required secrets raises RuntimeError before creating any runs."""
         async with self.async_session() as db:
