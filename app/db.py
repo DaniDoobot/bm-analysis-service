@@ -18,6 +18,15 @@ from app.config import get_settings
 logger = logging.getLogger(__name__)
 
 
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.compiler import compiles
+
+
+@compiles(JSONB, "sqlite")
+def compile_jsonb_sqlite(type_, compiler, **kw):
+    return "JSON"
+
+
 class Base(DeclarativeBase):
     """Base class for all SQLAlchemy ORM models."""
     pass

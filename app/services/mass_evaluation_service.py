@@ -1756,6 +1756,7 @@ class MassEvaluationService:
         service_ids: list[int] | None = None,
         allowed_agent_ids: list[str] | None = None,
         status: str | None = None,
+        item_filters: str | list | dict | None = None,
     ) -> list[MassEvaluationResult]:
         stmt = select(MassEvaluationResult).options(defer(MassEvaluationResult.prompt_snapshot))
         filters = []
@@ -1813,7 +1814,14 @@ class MassEvaluationService:
                     func.lower(MassEvaluationResult.direction) == norm_d,
                     func.lower(func.coalesce(MassEvaluationResult.result_json["inbound_outbound"].astext, "")) == norm_d
                 ))
-            
+
+        if item_filters is not None:
+            from app.utils.item_score_filters import parse_item_score_filters, build_item_filters_sql
+            parsed_item_filters = parse_item_score_filters(item_filters)
+            if parsed_item_filters:
+                item_sql_conds = build_item_filters_sql(parsed_item_filters)
+                filters.extend(item_sql_conds)
+
         # Multitenancy filters
         if allowed_agent_ids is not None:
             filters.append(MassEvaluationResult.hubspot_owner_id.in_(allowed_agent_ids))
@@ -1824,14 +1832,14 @@ class MassEvaluationService:
                 MassEvaluationResult.company_id.in_(company_ids),
                 MassEvaluationResult.company_id.is_(None)
             ))
-            
+
         if filters:
             stmt = stmt.where(and_(*filters))
-            
+
         stmt = stmt.order_by(desc(MassEvaluationResult.call_timestamp), desc(MassEvaluationResult.mass_analysis_id)).limit(limit)
         if offset is not None:
             stmt = stmt.offset(offset)
-            
+
         res = await db.execute(stmt)
         return list(res.scalars().all())
 
@@ -1860,6 +1868,7 @@ class MassEvaluationService:
         service_ids: list[int] | None = None,
         allowed_agent_ids: list[str] | None = None,
         status: str | None = None,
+        item_filters: str | list | dict | None = None,
     ) -> int:
         from sqlalchemy import func
         stmt = select(func.count(MassEvaluationResult.mass_analysis_id))
@@ -1918,7 +1927,14 @@ class MassEvaluationService:
                     func.lower(MassEvaluationResult.direction) == norm_d,
                     func.lower(func.coalesce(MassEvaluationResult.result_json["inbound_outbound"].astext, "")) == norm_d
                 ))
-            
+
+        if item_filters is not None:
+            from app.utils.item_score_filters import parse_item_score_filters, build_item_filters_sql
+            parsed_item_filters = parse_item_score_filters(item_filters)
+            if parsed_item_filters:
+                item_sql_conds = build_item_filters_sql(parsed_item_filters)
+                filters.extend(item_sql_conds)
+
         # Multitenancy filters
         if allowed_agent_ids is not None:
             filters.append(MassEvaluationResult.hubspot_owner_id.in_(allowed_agent_ids))
@@ -1929,10 +1945,10 @@ class MassEvaluationService:
                 MassEvaluationResult.company_id.in_(company_ids),
                 MassEvaluationResult.company_id.is_(None)
             ))
-            
+
         if filters:
             stmt = stmt.where(and_(*filters))
-            
+
         res = await db.execute(stmt)
         return res.scalar() or 0
 

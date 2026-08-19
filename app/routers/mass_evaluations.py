@@ -621,6 +621,7 @@ def resolve_agent_owner_id(user: User) -> str | None:
 
 
 @router.get("/me/analysis-results", response_model=PagedMassEvaluationResultResponse)
+@router.get("/mass-evaluations/results/my-results", response_model=PagedMassEvaluationResultResponse)
 async def get_my_analysis_results(
     context: TenantContext = Depends(get_tenant_context),
     run_id: int | None = Query(None),
@@ -646,9 +647,14 @@ async def get_my_analysis_results(
     inbound_outbound: str | None = Query(None, description="Filter by inbound/outbound"),
     duration_min_seconds: int | None = Query(None, description="Min duration in seconds"),
     duration_max_seconds: int | None = Query(None, description="Max duration in seconds"),
+    item_filters: str | None = Query(None, description="JSON url-encoded item score/boolean filters"),
+    criterion_filters: str | None = Query(None, description="Alias for item_filters"),
+    score_filters: str | None = Query(None, description="Alias for item_filters"),
+    item_score_filters: str | None = Query(None, description="Alias for item_filters"),
     db: AsyncSession = Depends(get_db)
 ):
     """List detailed mass analysis call results for the logged-in agent with filters."""
+    effective_item_filters = item_filters or criterion_filters or score_filters or item_score_filters
     if automation_id is not None and job_id is None:
         from app.models.mass_evaluations import MassAnalysisAutomation
         aut_stmt = select(MassAnalysisAutomation.job_id).where(MassAnalysisAutomation.automation_id == automation_id)
@@ -727,7 +733,8 @@ async def get_my_analysis_results(
             direction=norm_d,
             company_ids=None if context.is_super_admin else context.allowed_company_ids,
             service_ids=context.allowed_service_ids,
-            allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None
+            allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None,
+            item_filters=effective_item_filters,
         )
 
         from app.utils.visual_formatters import build_items_visual
@@ -755,7 +762,8 @@ async def get_my_analysis_results(
             direction=norm_d,
             company_ids=None if context.is_super_admin else context.allowed_company_ids,
             service_ids=context.allowed_service_ids,
-            allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None
+            allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None,
+            item_filters=effective_item_filters,
         )
         
         items_out = []
@@ -782,6 +790,7 @@ async def get_my_analysis_results(
 
 
 @router.get("/mass-evaluation-results", response_model=PagedMassEvaluationResultResponse)
+@router.get("/mass-evaluations/results", response_model=PagedMassEvaluationResultResponse)
 async def list_results(
     context: TenantContext = Depends(get_tenant_context),
     run_id: int | None = Query(None),
@@ -825,10 +834,15 @@ async def list_results(
     max_duration: int | None = Query(None, description="Alias for duration_max_seconds"),
     max_duration_seconds: int | None = Query(None, description="Alias for duration_max_seconds"),
     result_status: str | None = Query(None, alias="status", description="Filter by result status (e.g. completed)"),
+    item_filters: str | None = Query(None, description="JSON url-encoded item score/boolean filters"),
+    criterion_filters: str | None = Query(None, description="Alias for item_filters"),
+    score_filters: str | None = Query(None, description="Alias for item_filters"),
+    item_score_filters: str | None = Query(None, description="Alias for item_filters"),
     include_detail: bool = Query(False, description="Include heavy prompt_snapshot, result_json, items_json if True"),
     db: AsyncSession = Depends(get_db)
 ):
     """List detailed mass analysis call results with advanced filtering and full pagination metadata."""
+    effective_item_filters = item_filters or criterion_filters or score_filters or item_score_filters
     t_start = time.perf_counter()
     if automation_id is not None and job_id is None:
         from app.models.mass_evaluations import MassAnalysisAutomation
@@ -919,6 +933,7 @@ async def list_results(
         service_ids=context.allowed_service_ids,
         allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None,
         status=result_status,
+        item_filters=effective_item_filters,
     )
 
     results = await MassEvaluationService.list_results(
@@ -947,6 +962,7 @@ async def list_results(
         service_ids=context.allowed_service_ids,
         allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None,
         status=result_status,
+        item_filters=effective_item_filters,
     )
     db_ms = round((time.perf_counter() - t_db_start) * 1000.0, 1)
 
@@ -992,6 +1008,7 @@ async def list_results(
 
 
 @router.get("/mass-evaluation-results/{mass_analysis_id}", response_model=MassEvaluationResultResponse)
+@router.get("/mass-evaluations/results/{mass_analysis_id}", response_model=MassEvaluationResultResponse)
 async def get_result(
     mass_analysis_id: int,
     context: TenantContext = Depends(get_tenant_context),

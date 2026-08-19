@@ -268,16 +268,7 @@ def _effective_ts(row: Any) -> "datetime | None":
 
 def extract_score_from_mass(result_json: Any, items_json: Any, key: str, is_fallback_call: bool = False) -> "float | None":
     """Extract numeric score from mass result_json, falling back to items_json."""
-    EVALUATIVE_SCORES = {
-        "evaluacion_global", "sentiment", "sentimiento", "evaluacion_sentimiento",
-        "empatia", "simpatia", "claridad", "procedimiento", "adherencia_procedimiento",
-        "saludo_inicio", "n3_preguntas", "despedida_con_refuerzo", 
-        "gestion_objeciones", "uso_nombre_paciente", "uso_preguntas", 
-        "explicaciones_medicas", "claridad_explicacion_economica",
-        "trato_usted", "propension", "siguiente_paso"
-    }
-
-    if key not in EVALUATIVE_SCORES:
+    if not key:
         return None
 
     # 1. Check result_json
@@ -1039,6 +1030,7 @@ async def get_agents_list(
     duration_max_seconds: int | None = None,
     avg_score_min: float | None = None,
     avg_score_max: float | None = None,
+    item_filters: str | list | dict | None = None,
     context: TenantContext | None = None,
 ) -> list[dict[str, Any]]:
     """Return agents list with metrics calculated from bm_mass_evaluation_results only."""
@@ -1138,6 +1130,14 @@ async def get_agents_list(
         agg_stmt = agg_stmt.where(MassEvaluationResult.evaluacion_global >= score_min_scaled)
     if score_max_scaled is not None:
         agg_stmt = agg_stmt.where(MassEvaluationResult.evaluacion_global <= score_max_scaled)
+
+    if item_filters is not None:
+        from app.utils.item_score_filters import parse_item_score_filters, build_item_filters_sql
+        parsed_item_filters = parse_item_score_filters(item_filters)
+        if parsed_item_filters:
+            item_sql_conds = build_item_filters_sql(parsed_item_filters)
+            for cond in item_sql_conds:
+                agg_stmt = agg_stmt.where(cond)
 
     agg_stmt = agg_stmt.group_by(
         MassEvaluationResult.hubspot_owner_id,
@@ -1252,6 +1252,7 @@ async def get_agent_evolution(
     duration_max_seconds: int | None = None,
     avg_score_min: float | None = None,
     avg_score_max: float | None = None,
+    item_filters: str | list | dict | None = None,
     context: TenantContext | None = None,
 ) -> dict[str, Any]:
     """Evolution metrics from bm_mass_evaluation_results only."""
@@ -1354,6 +1355,12 @@ async def get_agent_evolution(
 
     result = await db.execute(stmt)
     rows = list(result.scalars().all())
+
+    if item_filters is not None:
+        from app.utils.item_score_filters import parse_item_score_filters, apply_item_score_filters_sql_or_python
+        parsed_item_filters = parse_item_score_filters(item_filters)
+        if parsed_item_filters:
+            rows = apply_item_score_filters_sql_or_python(rows, parsed_item_filters)
 
     agent_name = resolve_owner_name(hubspot_owner_id)
     if not agent_name and rows:
@@ -1598,6 +1605,7 @@ async def get_objections_breakdown(
     duration_max_seconds: int | None = None,
     avg_score_min: float | None = None,
     avg_score_max: float | None = None,
+    item_filters: str | list | dict | None = None,
     context: TenantContext | None = None,
 ) -> dict[str, Any]:
     norm_t = normalize_typology(typology_key or tipo_llamada)
@@ -1684,6 +1692,12 @@ async def get_objections_breakdown(
         
     result = await db.execute(stmt)
     analyses = list(result.scalars().all())
+
+    if item_filters is not None:
+        from app.utils.item_score_filters import parse_item_score_filters, apply_item_score_filters_sql_or_python
+        parsed_item_filters = parse_item_score_filters(item_filters)
+        if parsed_item_filters:
+            analyses = apply_item_score_filters_sql_or_python(analyses, parsed_item_filters)
 
     if tipo_llamada:
         analyses = [
@@ -1968,6 +1982,7 @@ async def get_agents_comparison(
     duration_max_seconds: int | None = None,
     avg_score_min: float | None = None,
     avg_score_max: float | None = None,
+    item_filters: str | list | dict | None = None,
     context: TenantContext | None = None,
 ) -> dict[str, Any]:
     """Retrieve multi-agent comparison analytics using MassEvaluationResult."""
@@ -2129,6 +2144,13 @@ async def get_agents_comparison(
             actual_rows.append(r)
         elif start_anterior <= ts < start_actual:
             anterior_rows.append(r)
+
+    if item_filters is not None:
+        from app.utils.item_score_filters import parse_item_score_filters, apply_item_score_filters_sql_or_python
+        parsed_item_filters = parse_item_score_filters(item_filters)
+        if parsed_item_filters:
+            actual_rows = apply_item_score_filters_sql_or_python(actual_rows, parsed_item_filters)
+            anterior_rows = apply_item_score_filters_sql_or_python(anterior_rows, parsed_item_filters)
 
     # 4. Fetch available metrics catalog
     stmt_metrics = select(

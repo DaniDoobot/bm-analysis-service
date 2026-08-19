@@ -140,10 +140,15 @@ async def agents_comparison(
     duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
     avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
     avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
+    item_filters: Annotated[str | None, Query(description="JSON url-encoded item score/boolean filters")] = None,
+    criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
 ):
     """
     Get multi-agent comparison analytics for dashboard reporting.
     """
+    effective_item_filters = item_filters or criterion_filters or score_filters or item_score_filters
     owner_ids = None
     if hubspot_owner_ids and hubspot_owner_ids.strip():
         owner_ids = [oid.strip() for oid in hubspot_owner_ids.split(",") if oid.strip()]
@@ -176,6 +181,7 @@ async def agents_comparison(
             duration_max_seconds=duration_max_seconds,
             avg_score_min=avg_score_min,
             avg_score_max=avg_score_max,
+            item_filters=effective_item_filters,
             context=context,
         )
         return data
@@ -213,10 +219,15 @@ async def list_agents(
     eval_min: Annotated[float | None, Query(description="Min average score (alias)")] = None,
     avg_score_max: Annotated[float | None, Query(alias="score_max", description="Max average score")] = None,
     eval_max: Annotated[float | None, Query(description="Max average score (alias)")] = None,
+    item_filters: Annotated[str | None, Query(description="JSON url-encoded item score/boolean filters")] = None,
+    criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
 ):
     """
     Get all active call center agents with their accumulated real metrics.
     """
+    effective_item_filters = item_filters or criterion_filters or score_filters or item_score_filters
     typo_ids = None
     if typology_ids and typology_ids.strip():
         typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
@@ -253,6 +264,7 @@ async def list_agents(
             duration_max_seconds=dur_max,
             avg_score_min=sc_min,
             avg_score_max=sc_max,
+            item_filters=effective_item_filters,
             context=context,
         )
         return data
@@ -301,11 +313,16 @@ async def agent_evolution(
     eval_min: Annotated[float | None, Query(description="Min average score (alias)")] = None,
     avg_score_max: Annotated[float | None, Query(alias="score_max", description="Max average score")] = None,
     eval_max: Annotated[float | None, Query(description="Max average score (alias)")] = None,
+    item_filters: Annotated[str | None, Query(description="JSON url-encoded item score/boolean filters")] = None,
+    criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
 ):
     """
     Get chronological performance, trends, strengths, weaknesses,
     and evolution timelines for a specific agent.
     """
+    effective_item_filters = item_filters or criterion_filters or score_filters or item_score_filters
     if context.allowed_agent_ids is not None and hubspot_owner_id not in context.allowed_agent_ids:
         raise HTTPException(
             status_code=403,
@@ -352,6 +369,7 @@ async def agent_evolution(
             duration_max_seconds=dur_max,
             avg_score_min=sc_min,
             avg_score_max=sc_max,
+            item_filters=effective_item_filters,
             context=context,
         )
         return data
@@ -387,11 +405,16 @@ async def objections_breakdown(
     duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
     avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
     avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
+    item_filters: Annotated[str | None, Query(description="JSON url-encoded item score/boolean filters")] = None,
+    criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
 ):
     """
     Get categorized objection lists, agent-specific counts,
     and a chronological list of calls that raised objections.
     """
+    effective_item_filters = item_filters or criterion_filters or score_filters or item_score_filters
     typo_ids = None
     if typology_ids and typology_ids.strip():
         typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
@@ -425,6 +448,7 @@ async def objections_breakdown(
             duration_max_seconds=duration_max_seconds,
             avg_score_min=avg_score_min,
             avg_score_max=avg_score_max,
+            item_filters=effective_item_filters,
             context=context,
         )
         return data
@@ -460,10 +484,15 @@ async def get_my_evolution(
     duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
     avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
     avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
+    item_filters: Annotated[str | None, Query(description="JSON url-encoded item score/boolean filters")] = None,
+    criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
 ):
     """
     Get chronological performance evolution metrics specifically for the logged-in agent.
     """
+    effective_item_filters = item_filters or criterion_filters or score_filters or item_score_filters
     # Use context's normalized role and fields instead of legacy strings
     is_manager_or_admin = (
         context.is_super_admin or
@@ -531,6 +560,7 @@ async def get_my_evolution(
             duration_max_seconds=duration_max_seconds,
             avg_score_min=avg_score_min,
             avg_score_max=avg_score_max,
+            item_filters=effective_item_filters,
             context=context,
         )
         return data
@@ -608,18 +638,34 @@ async def get_latest_analysis_detail(
 
 
 @router.get("/evaluation-items/filter-options")
+@router.get("/criteria/filter-options")
 async def get_evaluation_items_filter_options(
     db: Annotated[AsyncSession, Depends(get_db)],
     context: Annotated[TenantContext, Depends(get_tenant_context)],
+    service_id: Annotated[int | None, Query(description="Filter criteria by service ID")] = None,
+    service_key: Annotated[str | None, Query(description="Filter criteria by service key")] = None,
+    service: Annotated[str | None, Query(description="Filter criteria by service key, slug, or ID")] = None,
 ):
     """
     Retrieve available evaluation criteria item filter options dynamically for frontend UI.
     """
     from app.utils.item_score_filters import get_evaluation_item_filter_options
+    from app.utils.service_resolvers import resolve_service_id
+
+    eff_service_id, _ = await resolve_service_id(
+        db,
+        service_id=service_id,
+        service_key=service_key,
+        service_param=service,
+        company_ids=None if context.is_super_admin else context.allowed_company_ids
+    )
+
+    eff_service_ids = [eff_service_id] if eff_service_id is not None else context.allowed_service_ids
+
     options = await get_evaluation_item_filter_options(
         db,
         company_ids=context.allowed_company_ids,
-        service_ids=context.allowed_service_ids
+        service_ids=eff_service_ids
     )
     return {"items": options}
 

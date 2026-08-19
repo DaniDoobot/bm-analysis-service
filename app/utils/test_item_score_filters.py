@@ -6,7 +6,9 @@ Verifies:
 2. Memory filtering with strict AND logic across evaluation items.
 """
 import os
+import sys
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///item_score_filters_test.db"
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 import unittest
 
