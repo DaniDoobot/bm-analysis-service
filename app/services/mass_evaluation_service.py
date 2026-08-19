@@ -2129,9 +2129,9 @@ class MassEvaluationService:
             if not run.finished_at:
                 run.finished_at = datetime.now(timezone.utc)
             if total_res > 0:
-                run.calls_analyzed = max(run.calls_analyzed or 0, completed_res + failed_res)
-                run.calls_failed = max(run.calls_failed or 0, failed_res)
-                run.calls_skipped = max(run.calls_skipped or 0, skipped_res)
+                run.calls_analyzed = completed_res + failed_res
+                run.calls_failed = failed_res
+                run.calls_skipped = skipped_res
 
             # If it is an automation run, sync the associated automation run
             try:

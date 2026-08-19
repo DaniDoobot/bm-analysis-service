@@ -80,6 +80,14 @@ async def plan_reconciliation(db: AsyncSession, run_ids: list[int]) -> list[dict
         res_auto = await db.execute(stmt_auto)
         auto_run = res_auto.scalar()
 
+        proposed_analyzed = completed_res + failed_res
+        proposed_failed = failed_res
+        needs_update = (
+            run.status != proposed_status
+            or (run.calls_analyzed or 0) != proposed_analyzed
+            or (run.calls_failed or 0) != proposed_failed
+        )
+
         plans.append({
             "run_id": rid,
             "job_id": run.job_id,
@@ -93,11 +101,11 @@ async def plan_reconciliation(db: AsyncSession, run_ids: list[int]) -> list[dict
             "skipped_results_db": skipped_res,
             "proposed_status": proposed_status,
             "proposed_error": proposed_error,
-            "proposed_analyzed": max(run.calls_analyzed or 0, completed_res + failed_res),
-            "proposed_failed": failed_res,
+            "proposed_analyzed": proposed_analyzed,
+            "proposed_failed": proposed_failed,
             "has_auto_run": auto_run is not None,
             "auto_run_id": auto_run.automation_run_id if auto_run else None,
-            "needs_update": run.status != proposed_status,
+            "needs_update": needs_update,
         })
     return plans
 
@@ -170,20 +178,22 @@ async def main():
         is_execute = args.execute and args.confirm_execute == "CONFIRM_RECONCILE_ABANDONED"
         mode_str = "EXECUTION (MUTACIONES REALES)" if is_execute else "DRY-RUN (SOLO LECTURA)"
 
-        print("=" * 135)
+        print("=" * 145)
         print(f"RECONCILIACIÓN HISTÓRICA DE RUNS FALSOS FAILED (ERR-02) - MODO: {mode_str}")
-        print("=" * 135)
-        print(f"{'Run#':<6} | {'Job#':<6} | {'Status Actual':<15} | {'Total DB':<9} | {'Comp DB':<8} | {'Fail DB':<8} | {'Status Propuesto':<23} | {'Acción'}")
-        print("-" * 135)
+        print("=" * 145)
+        print(f"{'Run#':<6} | {'Job#':<6} | {'Status Actual':<22} | {'Comp/Fail DB':<14} | {'Analyzed (Act->Prop)':<22} | {'Status Propuesto':<23} | {'Acción'}")
+        print("-" * 145)
 
         for p in plans:
             action = "ACTUALIZAR" if p["needs_update"] else "SIN CAMBIO"
+            comp_fail = f"{p['completed_results_db']}/{p['failed_results_db']}"
+            analyzed_change = f"{p['current_analyzed']} -> {p['proposed_analyzed']}"
             print(
-                f"{p['run_id']:<6} | {p['job_id']:<6} | {p['current_status']:<15} | {p['total_results_db']:<9} | "
-                f"{p['completed_results_db']:<8} | {p['failed_results_db']:<8} | {p['proposed_status']:<23} | {action}"
+                f"{p['run_id']:<6} | {p['job_id']:<6} | {p['current_status']:<22} | {comp_fail:<14} | "
+                f"{analyzed_change:<22} | {p['proposed_status']:<23} | {action}"
             )
 
-        print("=" * 135)
+        print("=" * 145)
 
         if args.execute:
             if args.confirm_execute != "CONFIRM_RECONCILE_ABANDONED":
