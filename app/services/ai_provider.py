@@ -1,10 +1,13 @@
 import abc
+import asyncio
 import base64
 import logging
+import random
 import time
 from typing import Any
 
 from app.config import get_settings
+from app.utils.error_categorization import is_transient_llm_error
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -153,16 +156,66 @@ class GeminiProvider(AIProvider):
 
         logger.info("Calling Gemini analyze_audio_bytes (google-genai): model=%s, format=%s, size=%.2f MB", model_name, audio_format, len(audio_bytes)/(1024*1024))
         t_start = time.perf_counter()
-        
-        response = await self._client.aio.models.generate_content(
-            model=model_name,
-            contents=contents,
-            config=self._types.GenerateContentConfig(**config_args)
-        )
-        
-        duration = time.perf_counter() - t_start
-        logger.info("Gemini analyze_audio_bytes completed in %.2f s", duration)
-        return response.text or ""
+
+        max_attempts = 3
+        last_exception = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = await self._client.aio.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=self._types.GenerateContentConfig(**config_args)
+                )
+                duration = time.perf_counter() - t_start
+                logger.info(
+                    "Gemini analyze_audio_bytes completed in %.2f s (attempt %d/%d)",
+                    duration, attempt, max_attempts,
+                    extra={
+                        "provider": "gemini",
+                        "model": model_name,
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                        "transient": False,
+                        "elapsed": duration,
+                    }
+                )
+                return response.text or ""
+            except Exception as e:
+                last_exception = e
+                elapsed = time.perf_counter() - t_start
+                is_transient = is_transient_llm_error(e)
+
+                if is_transient and attempt < max_attempts:
+                    # Exponential backoff with small jitter (e.g. ~1.1s, ~2.2s)
+                    delay = (1.0 * (2 ** (attempt - 1))) + random.uniform(0.1, 0.35)
+                    logger.warning(
+                        "Gemini analyze_audio_bytes transient error [attempt %d/%d]: %s. Retrying in %.2fs...",
+                        attempt, max_attempts, e, delay,
+                        extra={
+                            "provider": "gemini",
+                            "model": model_name,
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "transient": True,
+                            "elapsed": elapsed,
+                        }
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(
+                        "Gemini analyze_audio_bytes failed [attempt %d/%d, transient=%s, elapsed=%.2fs]: %s",
+                        attempt, max_attempts, is_transient, elapsed, e,
+                        extra={
+                            "provider": "gemini",
+                            "model": model_name,
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "transient": is_transient,
+                            "elapsed": elapsed,
+                        }
+                    )
+                    raise last_exception
 
     async def transcribe_audio(
         self,

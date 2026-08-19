@@ -7,7 +7,7 @@ from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select, update, delete, desc, func, and_, or_
+from sqlalchemy import select, update, delete, desc, func, and_, or_, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload, defer
 
@@ -2095,38 +2095,74 @@ class MassEvaluationService:
         
         cleaned_count = 0
         for run in stale_runs:
+            # Query existing results for this run to avoid false failure on runs that finished processing
+            stmt_res = select(
+                func.count(MassEvaluationResult.mass_analysis_id).label("total"),
+                func.count(case((MassEvaluationResult.status == "completed", 1))).label("completed"),
+                func.count(case((MassEvaluationResult.status == "failed", 1))).label("failed"),
+                func.count(case((MassEvaluationResult.status == "skipped", 1))).label("skipped"),
+            ).where(MassEvaluationResult.run_id == run.run_id)
+            res_counts = (await db.execute(stmt_res)).first()
+
+            total_res = res_counts.total if res_counts else 0
+            completed_res = res_counts.completed if res_counts else 0
+            failed_res = res_counts.failed if res_counts else 0
+            skipped_res = res_counts.skipped if res_counts else 0
+
+            # Resolve status defensibly based on actual persisted call results
+            if completed_res > 0 and failed_res == 0:
+                resolved_status = "completed"
+                resolved_err = None
+            elif completed_res > 0 and failed_res > 0:
+                resolved_status = "completed_with_errors"
+                resolved_err = f"Completed with {failed_res} error(s) before heartbeat timeout."
+            else:
+                resolved_status = "failed"
+                resolved_err = f"Execution abandoned (no heartbeat updated for more than {threshold_minutes} minutes)."
+
             logger.warning(
-                "Mass evaluation run %d (job %d) is stale (no heartbeat or started long ago). Marking as failed.",
-                run.run_id, run.job_id
+                "Mass evaluation run %d (job %d) is stale (results: total=%d, completed=%d, failed=%d). Resolving status to '%s'.",
+                run.run_id, run.job_id, total_res, completed_res, failed_res, resolved_status
             )
-            run.status = "failed"
-            run.error_message = f"Execution abandoned (no heartbeat updated for more than {threshold_minutes} minutes)."
-            run.finished_at = datetime.now(timezone.utc)
-            
-            # If it is an automation run, also mark the automation run as failed
+            run.status = resolved_status
+            run.error_message = resolved_err
+            if not run.finished_at:
+                run.finished_at = datetime.now(timezone.utc)
+            if total_res > 0:
+                run.calls_analyzed = max(run.calls_analyzed or 0, completed_res + failed_res)
+                run.calls_failed = max(run.calls_failed or 0, failed_res)
+                run.calls_skipped = max(run.calls_skipped or 0, skipped_res)
+
+            # If it is an automation run, sync the associated automation run
             try:
                 auto_stmt = select(MassAnalysisAutomationRun).where(MassAnalysisAutomationRun.run_id == run.run_id)
                 auto_res = await db.execute(auto_stmt)
                 auto_run = auto_res.scalars().first()
                 if auto_run:
-                    auto_run.status = "failed"
-                    auto_run.finished_at = datetime.now(timezone.utc)
-                    auto_run.error_message = f"Execution abandoned (no heartbeat updated for more than {threshold_minutes} minutes)."
-                    
+                    auto_run.status = resolved_status
+                    if not auto_run.finished_at:
+                        auto_run.finished_at = run.finished_at
+                    auto_run.error_message = resolved_err
+                    if total_res > 0:
+                        auto_run.calls_skipped = run.calls_skipped
+
                     aut_stmt = select(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id == auto_run.automation_id)
                     aut_res = await db.execute(aut_stmt)
                     aut_obj = aut_res.scalars().first()
                     if aut_obj:
-                        aut_obj.last_error_at = datetime.now(timezone.utc)
-                        aut_obj.last_error_message = auto_run.error_message
+                        if resolved_status in ["completed", "completed_with_errors"]:
+                            aut_obj.last_success_at = datetime.now(timezone.utc)
+                        else:
+                            aut_obj.last_error_at = datetime.now(timezone.utc)
+                            aut_obj.last_error_message = resolved_err
             except Exception as e_auto:
                 logger.error("Failed to cleanup associated automation run for run %d: %s", run.run_id, e_auto)
-                
+
             cleaned_count += 1
-            
+
         if cleaned_count > 0:
             await db.commit()
-            
+
         return cleaned_count
 
     @staticmethod
