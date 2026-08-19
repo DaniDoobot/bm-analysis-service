@@ -33,7 +33,7 @@ from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from typing import Any
 
-from sqlalchemy import select, text, update
+from sqlalchemy import select, text, update, func
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 
 MADRID_TZ = ZoneInfo("Europe/Madrid")
@@ -392,6 +392,14 @@ async def execute_gap_backfill(
         await db.refresh(auto_run)
         cur_auto_run_id = auto_run.automation_run_id
 
+        # Query existing completed results count in DB before this run
+        q_persisted = select(func.count(MassEvaluationResult.mass_analysis_id)).where(
+            MassEvaluationResult.call_timestamp >= w_from,
+            MassEvaluationResult.call_timestamp <= w_to,
+            MassEvaluationResult.status == "completed",
+        )
+        persisted_before_cnt = (await db.execute(q_persisted)).scalar() or 0
+
         # 3. Search HubSpot calls
         try:
             calls = await hs_service.search_calls_for_mass_evaluation(effective_filters)
@@ -441,7 +449,7 @@ async def execute_gap_backfill(
             now_finished = datetime.now(timezone.utc)
 
             if len(selected_calls) == 0:
-                logger.info("[automation_gap_backfill] 0 un-evaluated calls found for Gap #%d.", gap_idx)
+                logger.info("[automation_gap_backfill] 0 un-evaluated calls found for Gap #%d (already persisted: %d).", gap_idx, persisted_before_cnt)
                 final_status = "completed"
                 await db.execute(
                     update(MassEvaluationRun).where(MassEvaluationRun.run_id == cur_mass_run_id).values(
@@ -455,9 +463,28 @@ async def execute_gap_backfill(
                 )
                 await db.commit()
             else:
-                logger.info("[automation_gap_backfill] Processing %d calls for Gap #%d...", len(selected_calls), gap_idx)
+                logger.info(
+                    "[automation_gap_backfill] Processing %d new calls for Gap #%d (total found in HubSpot: %d, already persisted: %d)...",
+                    len(selected_calls), gap_idx, calls_found_cnt, persisted_before_cnt
+                )
+                # Pass explicit un-evaluated call_ids to avoid re-evaluating already completed calls
+                run_filters = {
+                    "job_mode": "call_ids",
+                    "selection_mode": "manual_call_ids",
+                    "call_ids": [str(c["call_id"]) for c in selected_calls],
+                    "date_from": w_from.isoformat(),
+                    "date_to": w_to.isoformat(),
+                    "agent_owner_ids": owner_ids,
+                    "duration_min_seconds": 120,
+                    "duration_max_seconds": None,
+                    "direction": "all",
+                    "only_with_recording": True,
+                    "max_calls": len(selected_calls),
+                    "timezone": "Europe/Madrid",
+                    "execution_source": "backfill",
+                }
                 # Delegate to MassEvaluationService background runner
-                await MassEvaluationService._execute_background_run(job_id, cur_mass_run_id, effective_filters)
+                await MassEvaluationService._execute_background_run(job_id, cur_mass_run_id, run_filters)
 
                 # Fetch updated metrics from DB
                 m_stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == cur_mass_run_id).execution_options(populate_existing=True)
@@ -489,8 +516,13 @@ async def execute_gap_backfill(
                 "calls_found": calls_found_cnt,
                 "calls_selected": calls_sel_cnt,
                 "calls_analyzed": calls_analyzed,
+                "calls_persisted_before": persisted_before_cnt,
+                "calls_found_hubspot": calls_found_cnt,
+                "calls_newly_selected": calls_sel_cnt,
+                "calls_newly_analyzed": calls_analyzed,
                 "calls_failed": calls_failed,
                 "calls_skipped": calls_skipped,
+                "total_covered_in_window": persisted_before_cnt + calls_analyzed,
                 "error_message": None,
             })
 
@@ -663,16 +695,21 @@ async def main():
                 max_calls_per_gap=args.max_calls_per_gap,
             )
 
-            print("\n" + "=" * 125)
+            print("\n" + "=" * 135)
             print("RESULTADOS DE LA EJECUCIÓN DE BACKFILL:")
-            print("=" * 125)
-            print(f"{'Gap#':<5} | {'MassRun':<8} | {'AutoRun':<8} | {'Ventana Madrid':<42} | {'Status':<10} | {'Found':<5} | {'Sel':<4} | {'Analyzed':<8}")
-            print("-" * 125)
+            print("=" * 135)
+            print(f"{'Gap#':<5} | {'MassRun':<8} | {'AutoRun':<8} | {'Ventana Madrid':<42} | {'Status':<10} | {'Prev':<5} | {'Found':<5} | {'NewSel':<6} | {'NewDone':<7} | {'TotalCov':<8}")
+            print("-" * 135)
             for er in exec_results:
                 win_str = f"{er['gap_from_madrid']} -> {er['gap_to_madrid']}"
-                print(f"{er['gap_index']:<5} | {er['mass_run_id']:<8} | {er['automation_run_id']:<8} | {win_str:<42} | {er['status']:<10} | {er['calls_found']:<5} | {er['calls_selected']:<4} | {er['calls_analyzed']:<8}")
+                prev_c = er.get("calls_persisted_before", 0)
+                fnd_c = er.get("calls_found_hubspot", er.get("calls_found", 0))
+                sel_c = er.get("calls_newly_selected", er.get("calls_selected", 0))
+                done_c = er.get("calls_newly_analyzed", er.get("calls_analyzed", 0))
+                cov_c = er.get("total_covered_in_window", prev_c + done_c)
+                print(f"{er['gap_index']:<5} | {er['mass_run_id']:<8} | {er['automation_run_id']:<8} | {win_str:<42} | {er['status']:<10} | {prev_c:<5} | {fnd_c:<5} | {sel_c:<6} | {done_c:<7} | {cov_c:<8}")
 
-            print("=" * 125)
+            print("=" * 135)
         else:
             ok_env, missing_secrets = validate_backfill_environment(is_execute=False)
             if "HUBSPOT_ACCESS_TOKEN" in missing_secrets:

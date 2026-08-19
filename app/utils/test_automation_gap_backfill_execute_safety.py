@@ -272,10 +272,11 @@ class TestAutomationGapBackfillSafety(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(len(results), 1)
                         res = results[0]
                         self.assertEqual(res["status"], "completed")
-                        self.assertEqual(res["calls_found"], 2)
-                        self.assertEqual(res["calls_selected"], 2)
-                        self.assertEqual(res["calls_analyzed"], 2)
+                        self.assertEqual(res["calls_found_hubspot"], 2)
+                        self.assertEqual(res["calls_newly_selected"], 2)
+                        self.assertEqual(res["calls_newly_analyzed"], 2)
                         self.assertEqual(res["calls_failed"], 0)
+                        self.assertEqual(res["total_covered_in_window"], 2)
                         self.assertIsNone(res["error_message"])
 
                         # Check DB objects
