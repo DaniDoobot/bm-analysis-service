@@ -115,3 +115,56 @@ def normalize_status(status_raw: str | None) -> str | None:
         detail=f"Valor de estado no válido '{status_raw}'. Valores aceptados: completed, failed, all."
     )
 
+
+VALID_SORT_FIELDS = {
+    "date": "date",
+    "call_timestamp": "date",
+    "agent": "agent",
+    "agent_name": "agent",
+    "call_id": "call_id",
+    "duration": "duration",
+    "call_duration_seconds": "duration",
+    "score": "score",
+    "evaluacion_global": "score",
+    "global_score": "score",
+    "typology": "typology",
+    "typology_name": "typology",
+    "direction": "direction",
+    "status": "status",
+    "service": "service",
+    "service_name": "service",
+    "execution_source": "execution_source",
+    "source": "execution_source",
+}
+
+
+def normalize_sort(sort_by_raw: str | None, sort_order_raw: str | None = None) -> tuple[str | None, str]:
+    """
+    Validate and normalize sort_by and sort_order parameters.
+    Returns (canonical_sort_by, canonical_sort_order).
+    Raises HTTPException(422) if invalid field or order is provided.
+    """
+    canonical_field = None
+    if sort_by_raw is not None:
+        s_by = str(sort_by_raw).strip().lower()
+        if s_by:
+            if s_by not in VALID_SORT_FIELDS:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Campo de ordenación no válido '{sort_by_raw}'. Valores aceptados: date, agent, call_id, duration, score, typology, direction, status, service, execution_source."
+                )
+            canonical_field = VALID_SORT_FIELDS[s_by]
+
+    canonical_order = "desc"
+    if sort_order_raw is not None:
+        s_ord = str(sort_order_raw).strip().lower()
+        if s_ord:
+            if s_ord not in ("asc", "desc"):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Dirección de ordenación no válida '{sort_order_raw}'. Valores aceptados: asc, desc."
+                )
+            canonical_order = s_ord
+
+    return canonical_field, canonical_order
+

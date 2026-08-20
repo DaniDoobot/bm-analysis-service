@@ -7,7 +7,7 @@ from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select, update, delete, desc, func, and_, or_, case
+from sqlalchemy import select, update, delete, desc, asc, func, and_, or_, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload, defer
 
@@ -1757,6 +1757,8 @@ class MassEvaluationService:
         allowed_agent_ids: list[str] | None = None,
         status: str | None = None,
         item_filters: str | list | dict | None = None,
+        sort_by: str | None = None,
+        sort_order: str | None = "desc",
     ) -> list[MassEvaluationResult]:
         stmt = select(MassEvaluationResult).options(defer(MassEvaluationResult.prompt_snapshot))
         filters = []
@@ -1836,7 +1838,35 @@ class MassEvaluationService:
         if filters:
             stmt = stmt.where(and_(*filters))
 
-        stmt = stmt.order_by(desc(MassEvaluationResult.call_timestamp), desc(MassEvaluationResult.mass_analysis_id)).limit(limit)
+        order_clauses = []
+        if sort_by:
+            SORT_MAP = {
+                "date": MassEvaluationResult.call_timestamp,
+                "agent": func.lower(MassEvaluationResult.agent_name),
+                "call_id": func.lower(MassEvaluationResult.call_id),
+                "duration": MassEvaluationResult.call_duration_seconds,
+                "score": MassEvaluationResult.evaluacion_global,
+                "typology": func.lower(MassEvaluationResult.typology_name),
+                "direction": func.lower(MassEvaluationResult.direction),
+                "status": func.lower(MassEvaluationResult.status),
+                "service": func.lower(MassEvaluationResult.service_name),
+                "execution_source": func.lower(MassEvaluationResult.execution_source),
+            }
+            col_expr = SORT_MAP.get(sort_by)
+            if col_expr is not None:
+                if sort_order == "asc":
+                    order_clauses.append(asc(col_expr).nulls_last())
+                else:
+                    order_clauses.append(desc(col_expr).nulls_last())
+
+            if sort_by != "date":
+                order_clauses.append(desc(MassEvaluationResult.call_timestamp).nulls_last())
+            order_clauses.append(desc(MassEvaluationResult.mass_analysis_id))
+        else:
+            order_clauses.append(desc(MassEvaluationResult.call_timestamp).nulls_last())
+            order_clauses.append(desc(MassEvaluationResult.mass_analysis_id))
+
+        stmt = stmt.order_by(*order_clauses).limit(limit)
         if offset is not None:
             stmt = stmt.offset(offset)
 

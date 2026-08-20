@@ -14,7 +14,7 @@ from app.models.prompts import Prompt
 from app.models.services import Service
 import time
 from app.utils.hubspot_owners import resolve_owner_id_by_email
-from app.utils.normalizers import normalize_direction, normalize_typology, normalize_status
+from app.utils.normalizers import normalize_direction, normalize_typology, normalize_status, normalize_sort
 from app.utils.dates import parse_madrid_date_bounds
 
 
@@ -649,11 +649,15 @@ async def get_my_analysis_results(
     duration_min_seconds: int | None = Query(None, description="Min duration in seconds"),
     duration_max_seconds: int | None = Query(None, description="Max duration in seconds"),
     status: str | None = Query(None, description="Filter by result status: completed | failed | all"),
-    result_status: str | None = Query(None, description="Alias for status"),
     item_filters: str | None = Query(None, description="JSON url-encoded item score/boolean filters"),
     criterion_filters: str | None = Query(None, description="Alias for item_filters"),
     score_filters: str | None = Query(None, description="Alias for item_filters"),
     item_score_filters: str | None = Query(None, description="Alias for item_filters"),
+    sort_by: str | None = Query(None, description="Field to sort by: date, agent, call_id, duration, score, typology, direction, status, service, execution_source"),
+    sort_order: str | None = Query(None, description="Sort direction: asc or desc (default: desc)"),
+    order_by: str | None = Query(None, description="Alias for sort_by"),
+    order: str | None = Query(None, description="Alias for sort_order"),
+    sort_direction: str | None = Query(None, description="Alias for sort_order"),
     db: AsyncSession = Depends(get_db)
 ):
     """List detailed mass analysis call results for the logged-in agent with filters."""
@@ -661,6 +665,9 @@ async def get_my_analysis_results(
     raw_status = status or result_status
     norm_status = normalize_status(raw_status)
     eff_status = norm_status if norm_status != "all" else None
+    raw_sort_by = sort_by or order_by
+    raw_sort_order = sort_order or order or sort_direction
+    norm_sort_by, norm_sort_order = normalize_sort(raw_sort_by, raw_sort_order)
     if automation_id is not None and job_id is None:
         from app.models.mass_evaluations import MassAnalysisAutomation
         aut_stmt = select(MassAnalysisAutomation.job_id).where(MassAnalysisAutomation.automation_id == automation_id)
@@ -778,6 +785,8 @@ async def get_my_analysis_results(
             allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None,
             status=eff_status,
             item_filters=effective_item_filters,
+            sort_by=norm_sort_by,
+            sort_order=norm_sort_order,
         )
         
         items_out = []
@@ -853,11 +862,19 @@ async def list_results(
     criterion_filters: str | None = Query(None, description="Alias for item_filters"),
     score_filters: str | None = Query(None, description="Alias for item_filters"),
     item_score_filters: str | None = Query(None, description="Alias for item_filters"),
+    sort_by: str | None = Query(None, description="Field to sort by: date, agent, call_id, duration, score, typology, direction, status, service, execution_source"),
+    sort_order: str | None = Query(None, description="Sort direction: asc or desc (default: desc)"),
+    order_by: str | None = Query(None, description="Alias for sort_by"),
+    order: str | None = Query(None, description="Alias for sort_order"),
+    sort_direction: str | None = Query(None, description="Alias for sort_order"),
     include_detail: bool = Query(False, description="Include heavy prompt_snapshot, result_json, items_json if True"),
     db: AsyncSession = Depends(get_db)
 ):
     """List detailed mass analysis call results with advanced filtering and full pagination metadata."""
     effective_item_filters = item_filters or criterion_filters or score_filters or item_score_filters
+    raw_sort_by = sort_by or order_by
+    raw_sort_order = sort_order or order or sort_direction
+    norm_sort_by, norm_sort_order = normalize_sort(raw_sort_by, raw_sort_order)
     t_start = time.perf_counter()
     if automation_id is not None and job_id is None:
         from app.models.mass_evaluations import MassAnalysisAutomation
@@ -987,6 +1004,8 @@ async def list_results(
         allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None,
         status=eff_status,
         item_filters=effective_item_filters,
+        sort_by=norm_sort_by,
+        sort_order=norm_sort_order,
     )
     db_ms = round((time.perf_counter() - t_db_start) * 1000.0, 1)
 
