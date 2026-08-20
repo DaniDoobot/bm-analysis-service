@@ -34,6 +34,12 @@ async def dashboard_summary(
     period: Annotated[str, Query(description="24h | 7d | 30d")] = "24h",
     service_id: Annotated[int | None, Query(description="Filter by service ID")] = None,
     service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
+    service: Annotated[str | None, Query(description="Filter by service ID, key, or slug name")] = None,
+    hubspot_owner_ids: Annotated[str | None, Query(description="Comma-separated HubSpot owner IDs")] = None,
+    hubspot_owner_id: Annotated[str | None, Query(description="Filter by HubSpot owner ID")] = None,
+    agent_id: Annotated[str | None, Query(description="Alias for hubspot_owner_id")] = None,
+    agent_owner_id: Annotated[str | None, Query(description="Alias for hubspot_owner_id")] = None,
+    agent: Annotated[str | None, Query(description="Alias for hubspot_owner_id")] = None,
     date_from: Annotated[str | None, Query(description="Custom start date (ISO or YYYY-MM-DD)")] = None,
     date_to: Annotated[str | None, Query(description="Custom end date (ISO or YYYY-MM-DD)")] = None,
     typology_ids: Annotated[str | None, Query(description="Comma-separated typology IDs")] = None,
@@ -47,9 +53,17 @@ async def dashboard_summary(
     call_direction: Annotated[str | None, Query(description="Filter by call direction")] = None,
     inbound_outbound: Annotated[str | None, Query(description="Filter by inbound/outbound")] = None,
     duration_min_seconds: Annotated[int | None, Query(description="Min duration in seconds")] = None,
+    duration_min: Annotated[int | None, Query(description="Alias for duration_min_seconds")] = None,
+    min_duration: Annotated[int | None, Query(description="Alias for duration_min_seconds")] = None,
     duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
+    duration_max: Annotated[int | None, Query(description="Alias for duration_max_seconds")] = None,
+    max_duration: Annotated[int | None, Query(description="Alias for duration_max_seconds")] = None,
     avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
+    score_min: Annotated[float | None, Query(description="Alias for avg_score_min")] = None,
+    eval_min: Annotated[float | None, Query(description="Alias for avg_score_min")] = None,
     avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
+    score_max: Annotated[float | None, Query(description="Alias for avg_score_max")] = None,
+    eval_max: Annotated[float | None, Query(description="Alias for avg_score_max")] = None,
     item_filters: Annotated[str | None, Query(description="JSON url-encoded item score filters")] = None,
     criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
@@ -60,6 +74,24 @@ async def dashboard_summary(
     agent rankings, and latest analyses.
     """
     effective_item_filters = item_filters or criterion_filters or score_filters or item_score_filters
+
+    if service and not service_id and not service_key:
+        from app.utils.service_resolvers import resolve_service_id
+        resolved_id, resolved_key = await resolve_service_id(db, service_param=service)
+        service_id = resolved_id or service_id
+        service_key = resolved_key or service_key
+
+    raw_owner_id = hubspot_owner_id or agent_id or agent_owner_id or agent
+    owner_ids = None
+    if hubspot_owner_ids and hubspot_owner_ids.strip():
+        owner_ids = [oid.strip() for oid in hubspot_owner_ids.split(",") if oid.strip()]
+    elif raw_owner_id:
+        owner_ids = [raw_owner_id.strip()]
+
+    eff_score_min = avg_score_min if avg_score_min is not None else (score_min if score_min is not None else eval_min)
+    eff_score_max = avg_score_max if avg_score_max is not None else (score_max if score_max is not None else eval_max)
+    eff_dur_min = duration_min_seconds if duration_min_seconds is not None else (duration_min if duration_min is not None else min_duration)
+    eff_dur_max = duration_max_seconds if duration_max_seconds is not None else (duration_max if duration_max is not None else max_duration)
 
     typo_ids = None
     if typology_ids and typology_ids.strip():
@@ -98,10 +130,12 @@ async def dashboard_summary(
                 typology_ids=typo_ids,
                 typology_key=norm_typology_key,
                 direction=norm_direction,
-                duration_min_seconds=duration_min_seconds,
-                duration_max_seconds=duration_max_seconds,
-                avg_score_min=avg_score_min,
-                avg_score_max=avg_score_max,
+                duration_min_seconds=eff_dur_min,
+                duration_max_seconds=eff_dur_max,
+                avg_score_min=eff_score_min,
+                avg_score_max=eff_score_max,
+                hubspot_owner_id=raw_owner_id,
+                hubspot_owner_ids=owner_ids,
                 item_filters=effective_item_filters,
                 context=context,
             )

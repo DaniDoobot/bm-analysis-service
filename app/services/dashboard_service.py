@@ -445,6 +445,8 @@ async def get_dashboard_summary(
     duration_max_seconds: int | None = None,
     avg_score_min: float | None = None,
     avg_score_max: float | None = None,
+    hubspot_owner_id: str | None = None,
+    hubspot_owner_ids: list[str] | None = None,
     item_filters: str | list | dict | None = None,
     context: TenantContext | None = None,
 ) -> dict[str, Any]:
@@ -540,6 +542,18 @@ async def get_dashboard_summary(
             stmt = stmt.where(MassEvaluationResult.service_id == service_id)
     elif service_key is not None:
         stmt = stmt.where(MassEvaluationResult.service_key == service_key)
+
+    if hubspot_owner_ids:
+        if context and context.allowed_agent_ids is not None:
+            filtered_agents = [oid for oid in hubspot_owner_ids if oid in context.allowed_agent_ids]
+            stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(filtered_agents if filtered_agents else ["__NONE__"]))
+        else:
+            stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(hubspot_owner_ids))
+    elif hubspot_owner_id:
+        if context and context.allowed_agent_ids is not None and hubspot_owner_id not in context.allowed_agent_ids:
+            stmt = stmt.where(MassEvaluationResult.hubspot_owner_id == "__NONE__")
+        else:
+            stmt = stmt.where(MassEvaluationResult.hubspot_owner_id == hubspot_owner_id)
 
     if typology_ids:
         stmt = stmt.where(MassEvaluationResult.typology_id.in_(typology_ids))
@@ -916,6 +930,8 @@ async def get_dashboard_summary(
             "direction": norm_d,
             "direction_raw": direction,
             "service_id": service_id,
+            "hubspot_owner_id": hubspot_owner_id,
+            "hubspot_owner_ids": hubspot_owner_ids,
             "item_filters_raw_count": item_filter_info["raw_count"],
             "item_filters_normalized": parsed_item_filters,
             "item_filters_discarded_neutral_count": item_filter_info["discarded_neutral_count"],

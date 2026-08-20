@@ -640,6 +640,7 @@ async def get_my_analysis_results(
     global_score_max: float | None = Query(None, ge=0.0, le=10.0),
     service_id: int | None = Query(None, description="Filter by service ID"),
     service_key: str | None = Query(None, description="Filter by service key"),
+    service: str | None = Query(None, description="Filter by service ID, key or slug"),
     typology_key: str | None = Query(None, description="Filter by typology key"),
     typology_ids: str | None = Query(None, description="Comma-separated typology IDs to filter"),
     direction: str | None = Query(None, description="all | inbound | outbound"),
@@ -660,6 +661,12 @@ async def get_my_analysis_results(
         aut_stmt = select(MassAnalysisAutomation.job_id).where(MassAnalysisAutomation.automation_id == automation_id)
         aut_res = await db.execute(aut_stmt)
         job_id = aut_res.scalar()
+
+    if service and not service_id and not service_key:
+        from app.utils.service_resolvers import resolve_service_id
+        resolved_id, resolved_key = await resolve_service_id(db, service_param=service)
+        service_id = resolved_id or service_id
+        service_key = resolved_key or service_key
     # Fix inclusive end-of-day: FastAPI parses 'YYYY-MM-DD' as midnight → adjust
     date_to = _fix_date_to_end_of_day(date_to)
     created_to = _fix_date_to_end_of_day(created_to)
@@ -817,6 +824,7 @@ async def list_results(
     score_max: float | None = Query(None, ge=0.0, le=10.0, description="Alias for global_score_max"),
     service_id: int | None = Query(None, description="Filter by service ID"),
     service_key: str | None = Query(None, description="Filter by service key"),
+    service: str | None = Query(None, description="Filter by service ID, key or slug"),
     typology_key: str | None = Query(None, description="Filter by typology key"),
     typology: str | None = Query(None, description="Alias for typology_key"),
     tipo_llamada: str | None = Query(None, description="Alias for typology_key"),
@@ -849,6 +857,12 @@ async def list_results(
         aut_stmt = select(MassAnalysisAutomation.job_id).where(MassAnalysisAutomation.automation_id == automation_id)
         aut_res = await db.execute(aut_stmt)
         job_id = aut_res.scalar()
+
+    if service and not service_id and not service_key:
+        from app.utils.service_resolvers import resolve_service_id
+        resolved_id, resolved_key = await resolve_service_id(db, service_param=service)
+        service_id = resolved_id or service_id
+        service_key = resolved_key or service_key
 
     # Consolidate alias inputs
     raw_owner_id = agent_owner_id or agent_id or owner_id or agent
