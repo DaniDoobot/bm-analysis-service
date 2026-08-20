@@ -385,45 +385,140 @@ def apply_item_score_filters_sql_or_python(
 async def get_evaluation_item_filter_options(
     db: AsyncSession,
     company_ids: list[int] | None = None,
-    service_ids: list[int] | None = None
+    service_ids: list[int] | None = None,
+    prompt_type: str = "audio",
 ) -> list[dict[str, Any]]:
     """
     Returns available evaluative criteria item filter options dynamically with types,
     min/max boundaries, and boolean option values for Lovable frontend.
+    The primary ordering is derived from the active Specific Structure (bm_prompts + bm_prompt_criteria)
+    using PromptCriterion.order_index ASC. Historical evaluation criteria not present in the active
+    structure are appended afterwards as a fallback, ensuring full backward compatibility without duplicates.
     """
+    from app.models.prompts import Prompt
+    from app.models.criteria import PromptCriterion
     from app.models.mass_evaluations import MassEvaluationCriterionResult
+    from sqlalchemy import or_
 
-    stmt = select(
-        MassEvaluationCriterionResult.criterion_key,
-        MassEvaluationCriterionResult.criterion_name,
-        MassEvaluationCriterionResult.criterion_type,
-        MassEvaluationCriterionResult.service_id
-    ).where(
-        MassEvaluationCriterionResult.criterion_type.in_(["score_1_10", "score", "number", "boolean", "percentage"])
-    )
+    options: list[dict[str, Any]] = []
+    seen: set[str] = set()
 
-    if service_ids is not None:
-        stmt = stmt.where(MassEvaluationCriterionResult.service_id.in_(service_ids))
-
-    stmt = stmt.group_by(
-        MassEvaluationCriterionResult.criterion_key,
-        MassEvaluationCriterionResult.criterion_name,
-        MassEvaluationCriterionResult.criterion_type,
-        MassEvaluationCriterionResult.service_id
-    )
-
-    options = []
-    seen = set()
+    # 1. Primary Phase: Fetch active prompt(s) for the requested service_ids / company_ids
     try:
-        res = await db.execute(stmt)
-        rows = res.all()
-        for idx, r in enumerate(rows):
+        prompt_stmt = select(Prompt).where(
+            Prompt.prompt_type == prompt_type,
+            Prompt.is_active == True,    # noqa: E712
+            Prompt.is_archived == False, # noqa: E712
+            Prompt.deleted_at.is_(None)
+        )
+        if service_ids is not None:
+            prompt_stmt = prompt_stmt.where(Prompt.service_id.in_(service_ids))
+        if company_ids:
+            prompt_stmt = prompt_stmt.where(
+                or_(Prompt.company_id.in_(company_ids), Prompt.company_id.is_(None))
+            )
+        # Order by service_id, company_id (tenant-specific first if non-null), prompt_id desc
+        prompt_stmt = prompt_stmt.order_by(
+            Prompt.service_id.asc().nullslast(),
+            Prompt.company_id.asc().nullslast(),
+            Prompt.prompt_id.desc()
+        )
+        prompts_res = await db.execute(prompt_stmt)
+        active_prompts = prompts_res.scalars().all()
+
+        # Group active prompts per service (pick the first / most specific active prompt per service)
+        service_prompt_map: dict[int | None, Prompt] = {}
+        for p in active_prompts:
+            sid = p.service_id
+            if sid not in service_prompt_map:
+                service_prompt_map[sid] = p
+
+        active_prompt_ids = [p.prompt_id for p in service_prompt_map.values()]
+
+        if active_prompt_ids:
+            # 2. Fetch criteria for these active prompts ordered strictly by order_index
+            crit_stmt = select(
+                PromptCriterion,
+                Prompt.service_id
+            ).join(
+                Prompt, PromptCriterion.prompt_id == Prompt.prompt_id
+            ).where(
+                PromptCriterion.prompt_id.in_(active_prompt_ids),
+                PromptCriterion.is_active == True,  # noqa: E712
+                PromptCriterion.deleted_at.is_(None),
+                PromptCriterion.criterion_type.in_(["score_1_10", "score", "number", "boolean", "percentage"])
+            ).order_by(
+                Prompt.service_id.asc().nullslast(),
+                PromptCriterion.order_index.asc().nullslast(),
+                PromptCriterion.criterion_id.asc()
+            )
+            crit_res = await db.execute(crit_stmt)
+            for criterion, sid in crit_res.all():
+                ckey = criterion.criterion_key or criterion.output_key
+                if not ckey or ckey in seen:
+                    continue
+                seen.add(ckey)
+
+                cname = criterion.criterion_name or ckey.replace("_", " ").capitalize()
+                ctype = criterion.criterion_type or "score_1_10"
+
+                norm_type = "score"
+                if ctype == "boolean":
+                    norm_type = "boolean"
+                elif ctype == "percentage":
+                    norm_type = "percentage"
+                elif ctype == "number":
+                    norm_type = "number"
+
+                item_dict: dict[str, Any] = {
+                    "key": ckey,
+                    "label": cname,
+                    "type": norm_type,
+                    "service_id": sid,
+                    "active": True,
+                    "sort_order": len(options) + 1
+                }
+                if norm_type == "boolean":
+                    item_dict["options"] = [
+                        {"label": "Sí", "value": True},
+                        {"label": "No", "value": False}
+                    ]
+                elif norm_type == "percentage":
+                    item_dict["min_score"] = 0.0
+                    item_dict["max_score"] = 100.0
+                else:
+                    item_dict["min_score"] = 0.0
+                    item_dict["max_score"] = 10.0
+
+                options.append(item_dict)
+    except Exception as e:
+        logger.warning("Error fetching criteria from active prompt structures: %s", e)
+
+    # 3. Secondary Phase: Fallback for historical criteria from MassEvaluationCriterionResult
+    try:
+        hist_stmt = select(
+            MassEvaluationCriterionResult.criterion_key,
+            MassEvaluationCriterionResult.criterion_name,
+            MassEvaluationCriterionResult.criterion_type,
+            MassEvaluationCriterionResult.service_id
+        ).where(
+            MassEvaluationCriterionResult.criterion_type.in_(["score_1_10", "score", "number", "boolean", "percentage"])
+        )
+        if service_ids is not None:
+            hist_stmt = hist_stmt.where(MassEvaluationCriterionResult.service_id.in_(service_ids))
+        hist_stmt = hist_stmt.group_by(
+            MassEvaluationCriterionResult.criterion_key,
+            MassEvaluationCriterionResult.criterion_name,
+            MassEvaluationCriterionResult.criterion_type,
+            MassEvaluationCriterionResult.service_id
+        )
+        hist_res = await db.execute(hist_stmt)
+        for r in hist_res.all():
             ckey, cname, ctype, sid = r
             if not ckey or ckey in seen:
                 continue
             seen.add(ckey)
             label = cname or ckey.replace("_", " ").capitalize()
-
             norm_type = "score"
             if ctype == "boolean":
                 norm_type = "boolean"
@@ -432,15 +527,14 @@ async def get_evaluation_item_filter_options(
             elif ctype == "number":
                 norm_type = "number"
 
-            item_dict: dict[str, Any] = {
+            item_dict = {
                 "key": ckey,
                 "label": label,
                 "type": norm_type,
                 "service_id": sid,
                 "active": True,
-                "sort_order": idx + 1
+                "sort_order": len(options) + 1
             }
-
             if norm_type == "boolean":
                 item_dict["options"] = [
                     {"label": "Sí", "value": True},
@@ -455,14 +549,18 @@ async def get_evaluation_item_filter_options(
 
             options.append(item_dict)
     except Exception as e:
-        logger.warning("Error fetching dynamic criterion filter options: %s", e)
+        logger.warning("Error fetching dynamic criterion filter options from history: %s", e)
 
-    # Combine with fallbacks if missing
+    # 4. Tertiary Phase: Combine with hardcoded fallbacks if any standard item is still missing
     for fb in EVALUATION_ITEMS_FALLBACK:
         if fb["key"] not in seen:
             seen.add(fb["key"])
             fb_copy = dict(fb)
             fb_copy["sort_order"] = len(options) + 1
             options.append(fb_copy)
+
+    # Ensure contiguous sort_order
+    for idx, opt in enumerate(options):
+        opt["sort_order"] = idx + 1
 
     return options

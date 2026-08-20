@@ -32,6 +32,8 @@ from app.models.mass_evaluations import (
     MassEvaluationResult,
     MassEvaluationCriterionResult,
 )
+from app.models.prompts import Prompt
+from app.models.criteria import PromptCriterion
 from app.services.mass_evaluation_service import MassEvaluationService
 from app.utils.item_score_filters import (
     parse_item_score_filters,
@@ -310,35 +312,71 @@ class TestItemFiltersComprehensive(unittest.IsolatedAsyncioTestCase):
             cnt_neutral = await MassEvaluationService.count_results(db, service_id=1, item_filters=f_neutral)
             self.assertEqual(cnt_neutral, 3)
 
-    async def test_get_evaluation_item_filter_options_metadata(self):
+    async def test_get_evaluation_item_filter_options_canonical_order_single_service(self):
+        """Test ERR-07: criteria ordering follows PromptCriterion.order_index ASC for single service."""
         async with self.async_session() as db:
-            crit_bool = MassEvaluationCriterionResult(
-                id=10, mass_analysis_id=201, job_id=1, run_id=1, call_id="call_201",
-                criterion_key="cierre_cita", criterion_name="Cierre de Cita", criterion_type="boolean",
-                service_id=1
+            p1 = Prompt(
+                prompt_id=101,
+                prompt_name="EE Front Test",
+                prompt_type="audio",
+                service_id=1,
+                company_id=1,
+                is_active=True,
+                is_archived=False
             )
-            crit_num = MassEvaluationCriterionResult(
-                id=11, mass_analysis_id=201, job_id=1, run_id=1, call_id="call_201",
-                criterion_key="empatia", criterion_name="Empatía", criterion_type="score_1_10",
-                service_id=1
-            )
-            db.add_all([crit_bool, crit_num])
+            db.add(p1)
+            await db.flush()
+
+            # Insert out-of-order criteria
+            c1 = PromptCriterion(criterion_id=1, prompt_id=101, criterion_key="tono_simpatia", criterion_name="Tono Simpatía", criterion_type="score_1_10", order_index=50, is_active=True)
+            c2 = PromptCriterion(criterion_id=2, prompt_id=101, criterion_key="conexion_emocional", criterion_name="CONEXION EMOCIONAL", criterion_type="score_1_10", order_index=10, is_active=True)
+            c3 = PromptCriterion(criterion_id=3, prompt_id=101, criterion_key="empatia", criterion_name="Empatía", criterion_type="score_1_10", order_index=20, is_active=True)
+            c4 = PromptCriterion(criterion_id=4, prompt_id=101, criterion_key="engagement", criterion_name="Engagement", criterion_type="score_1_10", order_index=30, is_active=True)
+            c5 = PromptCriterion(criterion_id=5, prompt_id=101, criterion_key="no_linealidad", criterion_name="No Linealidad", criterion_type="score_1_10", order_index=40, is_active=True)
+            c6 = PromptCriterion(criterion_id=6, prompt_id=101, criterion_key="cierre_cita", criterion_name="Cierre de Cita", criterion_type="boolean", order_index=320, is_active=True)
+
+            db.add_all([c1, c2, c3, c4, c5, c6])
             await db.commit()
 
             options = await get_evaluation_item_filter_options(db, service_ids=[1])
-            self.assertTrue(len(options) >= 2)
+            keys = [o["key"] for o in options]
 
-            cie_opt = next((o for o in options if o["key"] == "cierre_cita"), None)
-            self.assertIsNotNone(cie_opt)
-            self.assertEqual(cie_opt["type"], "boolean")
-            self.assertIn("options", cie_opt)
-            self.assertEqual(len(cie_opt["options"]), 2)
+            # Top items must match the exact order_index sequence
+            expected_top = ["conexion_emocional", "empatia", "engagement", "no_linealidad", "tono_simpatia"]
+            self.assertEqual(keys[:5], expected_top)
 
-            emp_opt = next((o for o in options if o["key"] == "empatia"), None)
-            self.assertIsNotNone(emp_opt)
-            self.assertEqual(emp_opt["type"], "score")
-            self.assertEqual(emp_opt["min_score"], 0.0)
-            self.assertEqual(emp_opt["max_score"], 10.0)
+            # Sort order must be contiguous 1, 2, 3, ...
+            for idx, opt in enumerate(options):
+                self.assertEqual(opt["sort_order"], idx + 1)
+
+    async def test_get_evaluation_item_filter_options_global_multi_service_deduplicated(self):
+        """Test ERR-07: multi-service global query is deterministic, ordered by service and order_index, deduplicated."""
+        async with self.async_session() as db:
+            p_front = Prompt(prompt_id=201, prompt_name="Front", prompt_type="audio", service_id=1, is_active=True, is_archived=False)
+            p_expac = Prompt(prompt_id=202, prompt_name="ExPac", prompt_type="audio", service_id=2, is_active=True, is_archived=False)
+            db.add_all([p_front, p_expac])
+            await db.flush()
+
+            # Front criteria
+            c_f1 = PromptCriterion(criterion_id=21, prompt_id=201, criterion_key="conexion_emocional", criterion_name="Conexion", criterion_type="score_1_10", order_index=10, is_active=True)
+            c_f2 = PromptCriterion(criterion_id=22, prompt_id=201, criterion_key="empatia", criterion_name="Empatía Front", criterion_type="score_1_10", order_index=20, is_active=True)
+            
+            # ExPac criteria (shares 'empatia', adds 'asertividad')
+            c_e1 = PromptCriterion(criterion_id=23, prompt_id=202, criterion_key="empatia", criterion_name="Empatía ExPac", criterion_type="score_1_10", order_index=10, is_active=True)
+            c_e2 = PromptCriterion(criterion_id=24, prompt_id=202, criterion_key="asertividad", criterion_name="Asertividad", criterion_type="score_1_10", order_index=20, is_active=True)
+
+            db.add_all([c_f1, c_f2, c_e1, c_e2])
+            await db.commit()
+
+            options = await get_evaluation_item_filter_options(db, service_ids=None)
+            keys = [o["key"] for o in options]
+
+            # 'empatia' must not be duplicated
+            self.assertEqual(keys.count("empatia"), 1)
+            # Front criteria first, then ExPac's unique criteria
+            self.assertEqual(keys[0], "conexion_emocional")
+            self.assertEqual(keys[1], "empatia")
+            self.assertIn("asertividad", keys)
 
 
 if __name__ == "__main__":
