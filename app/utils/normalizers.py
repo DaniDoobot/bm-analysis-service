@@ -91,3 +91,27 @@ def normalize_direction(direction_raw: str | None) -> str | None:
         detail=f"Valor de dirección no válido '{direction_raw}'. Valores aceptados: all, inbound, outbound, entrante, saliente."
     )
 
+
+def normalize_status(status_raw: str | None) -> str | None:
+    """
+    Normalize status raw parameter ('completed', 'failed', 'all').
+    Raises HTTPException(422) if invalid value is provided.
+    Returns 'completed', 'failed', 'all', or None if omitted/empty.
+    """
+    if status_raw is None:
+        return None
+    s = str(status_raw).strip().lower()
+    if not s:
+        return None
+    if s in ("all", "todas", "todos", "none", "null", "*"):
+        return "all"
+    if s in ("completed", "completado", "ok", "success"):
+        return "completed"
+    if s in ("failed", "fallido", "error"):
+        return "failed"
+
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail=f"Valor de estado no válido '{status_raw}'. Valores aceptados: completed, failed, all."
+    )
+

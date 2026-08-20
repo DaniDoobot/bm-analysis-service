@@ -14,7 +14,7 @@ from app.models.prompts import Prompt
 from app.models.services import Service
 import time
 from app.utils.hubspot_owners import resolve_owner_id_by_email
-from app.utils.normalizers import normalize_direction, normalize_typology
+from app.utils.normalizers import normalize_direction, normalize_typology, normalize_status
 from app.utils.dates import parse_madrid_date_bounds
 
 
@@ -648,6 +648,8 @@ async def get_my_analysis_results(
     inbound_outbound: str | None = Query(None, description="Filter by inbound/outbound"),
     duration_min_seconds: int | None = Query(None, description="Min duration in seconds"),
     duration_max_seconds: int | None = Query(None, description="Max duration in seconds"),
+    status: str | None = Query(None, description="Filter by result status: completed | failed | all"),
+    result_status: str | None = Query(None, description="Alias for status"),
     item_filters: str | None = Query(None, description="JSON url-encoded item score/boolean filters"),
     criterion_filters: str | None = Query(None, description="Alias for item_filters"),
     score_filters: str | None = Query(None, description="Alias for item_filters"),
@@ -656,6 +658,9 @@ async def get_my_analysis_results(
 ):
     """List detailed mass analysis call results for the logged-in agent with filters."""
     effective_item_filters = item_filters or criterion_filters or score_filters or item_score_filters
+    raw_status = status or result_status
+    norm_status = normalize_status(raw_status)
+    eff_status = norm_status if norm_status != "all" else None
     if automation_id is not None and job_id is None:
         from app.models.mass_evaluations import MassAnalysisAutomation
         aut_stmt = select(MassAnalysisAutomation.job_id).where(MassAnalysisAutomation.automation_id == automation_id)
@@ -741,6 +746,7 @@ async def get_my_analysis_results(
             company_ids=None if context.is_super_admin else context.allowed_company_ids,
             service_ids=context.allowed_service_ids,
             allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None,
+            status=eff_status,
             item_filters=effective_item_filters,
         )
 
@@ -770,6 +776,7 @@ async def get_my_analysis_results(
             company_ids=None if context.is_super_admin else context.allowed_company_ids,
             service_ids=context.allowed_service_ids,
             allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None,
+            status=eff_status,
             item_filters=effective_item_filters,
         )
         
@@ -877,6 +884,9 @@ async def list_results(
     eff_score_min = global_score_min if global_score_min is not None else (eval_min if eval_min is not None else score_min)
     eff_score_max = global_score_max if global_score_max is not None else (eval_max if eval_max is not None else score_max)
 
+    norm_status = normalize_status(result_status)
+    eff_status = norm_status if norm_status != "all" else None
+
     # Timezone & date handling: convert to Europe/Madrid local bounds in UTC
     dt_from, dt_to = parse_madrid_date_bounds(date_from, date_to, period)
     created_to = _fix_date_to_end_of_day(created_to)
@@ -946,7 +956,7 @@ async def list_results(
         company_ids=None if context.is_super_admin else context.allowed_company_ids,
         service_ids=context.allowed_service_ids,
         allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None,
-        status=result_status,
+        status=eff_status,
         item_filters=effective_item_filters,
     )
 
@@ -975,7 +985,7 @@ async def list_results(
         company_ids=None if context.is_super_admin else context.allowed_company_ids,
         service_ids=context.allowed_service_ids,
         allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None,
-        status=result_status,
+        status=eff_status,
         item_filters=effective_item_filters,
     )
     db_ms = round((time.perf_counter() - t_db_start) * 1000.0, 1)

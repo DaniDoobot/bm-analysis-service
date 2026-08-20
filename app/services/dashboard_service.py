@@ -206,9 +206,13 @@ def _round_dt(dt: datetime, interval: str) -> datetime:
         return dt.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-def _calc_delta(actual: Any, anterior: Any) -> float:
+def _calc_delta(actual: Any, anterior: Any) -> float | None:
+    if actual is None or anterior is None:
+        return None
     act = to_float(actual)
     ant = to_float(anterior)
+    if act is None or ant is None:
+        return None
     if ant == 0.0:
         return 0.0
     return to_float(round(((act - ant) / ant) * 100, 1))
@@ -448,6 +452,7 @@ async def get_dashboard_summary(
     hubspot_owner_id: str | None = None,
     hubspot_owner_ids: list[str] | None = None,
     item_filters: str | list | dict | None = None,
+    status: str | None = None,
     context: TenantContext | None = None,
 ) -> dict[str, Any]:
     from app.utils.item_score_filters import parse_item_score_filters_detailed, apply_item_score_filters_sql_or_python
@@ -461,8 +466,8 @@ async def get_dashboard_summary(
 
     logger.info(
         "[dashboard_summary] typology_filter_raw=%r typology_filter_normalized=%r "
-        "direction_filter_raw=%r direction_filter_normalized=%r period=%r date_from=%r date_to=%r item_filters_info=%s",
-        typology_key, norm_t, direction, norm_d, period, date_from, date_to, item_filter_info
+        "direction_filter_raw=%r direction_filter_normalized=%r period=%r date_from=%r date_to=%r item_filters_info=%s status=%r",
+        typology_key, norm_t, direction, norm_d, period, date_from, date_to, item_filter_info, status
     )
 
     # Resolve custom range or period
@@ -504,9 +509,13 @@ async def get_dashboard_summary(
         end_anterior = now - delta
 
     # Query from MassEvaluationResult exclusively (defer large prompt_snapshot to minimize memory footprint)
-    stmt = select(MassEvaluationResult).options(defer(MassEvaluationResult.prompt_snapshot)).where(
-        MassEvaluationResult.status == "completed"
-    )
+    stmt = select(MassEvaluationResult).options(defer(MassEvaluationResult.prompt_snapshot))
+    if status == "failed":
+        stmt = stmt.where(MassEvaluationResult.status == "failed")
+    elif status == "all":
+        pass
+    else:
+        stmt = stmt.where(MassEvaluationResult.status == "completed")
     if context and not context.is_super_admin:
         stmt = stmt.where(
             or_(
@@ -630,11 +639,11 @@ async def get_dashboard_summary(
         v = extract_score_from_mass(r.result_json, r.items_json, "evaluacion_global")
         if v is not None:
             evals.append(to_float(v))
-    avg_eval = to_float(round(sum(evals) / len(evals), 1)) if evals else 0.0
+    avg_eval = to_float(round(sum(evals) / len(evals), 1)) if evals else None
     
     citas = sum(1 for r in actual_rows if r.result_json and isinstance(r.result_json, dict) and r.result_json.get("tipo_llamada") == "cita")
     total_tipo = sum(1 for r in actual_rows if r.result_json and isinstance(r.result_json, dict) and r.result_json.get("tipo_llamada") is not None)
-    cita_rate = to_float(round((citas / total_tipo) * 100)) if total_tipo > 0 else 0.0
+    cita_rate = to_float(round((citas / total_tipo) * 100)) if total_tipo > 0 else None
 
     durs = [_get_duration_sec_mass(r) for r in actual_rows]
     durs = [d for d in durs if d is not None]
@@ -651,11 +660,11 @@ async def get_dashboard_summary(
         v = extract_score_from_mass(r.result_json, r.items_json, "evaluacion_global")
         if v is not None:
             evals_ant.append(to_float(v))
-    avg_eval_ant = to_float(sum(evals_ant) / len(evals_ant)) if evals_ant else 0.0
+    avg_eval_ant = to_float(sum(evals_ant) / len(evals_ant)) if evals_ant else None
     
     citas_ant = sum(1 for r in anterior_rows if r.result_json and isinstance(r.result_json, dict) and r.result_json.get("tipo_llamada") == "cita")
     total_tipo_ant = sum(1 for r in anterior_rows if r.result_json and isinstance(r.result_json, dict) and r.result_json.get("tipo_llamada") is not None)
-    cita_rate_ant = to_float((citas_ant / total_tipo_ant) * 100) if total_tipo_ant > 0 else 0.0
+    cita_rate_ant = to_float((citas_ant / total_tipo_ant) * 100) if total_tipo_ant > 0 else None
 
     durs_ant = [_get_duration_sec_mass(r) for r in anterior_rows]
     durs_ant = [d for d in durs_ant if d is not None]
@@ -815,7 +824,7 @@ async def get_dashboard_summary(
     sentiment_evolution = []
     for b in buckets:
         vals = sentiment_grouped.get(b, [])
-        avg_sent = to_float(round(sum(vals) / len(vals), 1)) if vals else 0.0
+        avg_sent = to_float(round(sum(vals) / len(vals), 1)) if vals else None
         sentiment_evolution.append({
             "bucket": b.isoformat(),
             "avg_sentiment": avg_sent
@@ -859,8 +868,8 @@ async def get_dashboard_summary(
     for bucket_key, data in agent_data.items():
         name = data["name"]
         owner_id = data["hubspot_owner_id"]
-        avg_eval_score = to_float(round(sum(data["evals"]) / len(data["evals"]), 1)) if data["evals"] else 0.0
-        cita_rate_score = to_float(round((data["citas"] / data["total_tipo"]) * 100)) if data["total_tipo"] > 0 else 0.0
+        avg_eval_score = to_float(round(sum(data["evals"]) / len(data["evals"]), 1)) if data["evals"] else None
+        cita_rate_score = to_float(round((data["citas"] / data["total_tipo"]) * 100)) if data["total_tipo"] > 0 else None
         initials = resolve_agent_initials(
             hubspot_owner_id=owner_id,
             agent_name=name,
@@ -878,7 +887,7 @@ async def get_dashboard_summary(
             "cita_rate": cita_rate_score,
         })
 
-    ranking.sort(key=lambda x: (x["total_analyses"], x["avg_evaluacion_global"]), reverse=True)
+    ranking.sort(key=lambda x: (x["total_analyses"], x["avg_evaluacion_global"] if x["avg_evaluacion_global"] is not None else -1.0), reverse=True)
     agent_ranking = ranking[:5]
 
     sorted_actual = sorted(actual_rows, key=lambda x: _effective_ts(x) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
@@ -1047,6 +1056,7 @@ async def get_agents_list(
     avg_score_min: float | None = None,
     avg_score_max: float | None = None,
     item_filters: str | list | dict | None = None,
+    status: str | None = None,
     context: TenantContext | None = None,
 ) -> list[dict[str, Any]]:
     """Return agents list with metrics calculated from bm_mass_evaluation_results only."""
@@ -1080,9 +1090,14 @@ async def get_agents_list(
         func.max(MassEvaluationResult.analysis_timestamp).label("last_analysis_at"),
         func.avg(MassEvaluationResult.evaluacion_global).label("avg_eval"),
     ).where(
-        MassEvaluationResult.status == "completed",
         MassEvaluationResult.hubspot_owner_id.is_not(None),
     )
+    if status == "failed":
+        agg_stmt = agg_stmt.where(MassEvaluationResult.status == "failed")
+    elif status == "all":
+        pass
+    else:
+        agg_stmt = agg_stmt.where(MassEvaluationResult.status == "completed")
     if context and not context.is_super_admin:
         agg_stmt = agg_stmt.where(
             or_(
@@ -1176,7 +1191,7 @@ async def get_agents_list(
     by_owner, by_name, users_list = await build_user_initials_maps(db, company_id=None)
 
     def _fmt(stats: Any, oid: str, name: str) -> dict:
-        avg_eval = to_float(round(stats.avg_eval, 1)) if (stats and stats.avg_eval is not None) else 0.0
+        avg_eval = to_float(round(stats.avg_eval, 1)) if (stats and stats.avg_eval is not None) else None
         last_at = None
         if stats and stats.last_analysis_at:
             raw = stats.last_analysis_at
@@ -1269,6 +1284,7 @@ async def get_agent_evolution(
     avg_score_min: float | None = None,
     avg_score_max: float | None = None,
     item_filters: str | list | dict | None = None,
+    status: str | None = None,
     context: TenantContext | None = None,
 ) -> dict[str, Any]:
     """Evolution metrics from bm_mass_evaluation_results only."""
@@ -1293,8 +1309,13 @@ async def get_agent_evolution(
 
     stmt = select(MassEvaluationResult).options(defer(MassEvaluationResult.prompt_snapshot)).where(
         MassEvaluationResult.hubspot_owner_id == hubspot_owner_id,
-        MassEvaluationResult.status == "completed",
     )
+    if status == "failed":
+        stmt = stmt.where(MassEvaluationResult.status == "failed")
+    elif status == "all":
+        pass
+    else:
+        stmt = stmt.where(MassEvaluationResult.status == "completed")
     if context and not context.is_super_admin:
         stmt = stmt.where(
             or_(
@@ -1622,6 +1643,7 @@ async def get_objections_breakdown(
     avg_score_min: float | None = None,
     avg_score_max: float | None = None,
     item_filters: str | list | dict | None = None,
+    status: str | None = None,
     context: TenantContext | None = None,
 ) -> dict[str, Any]:
     norm_t = normalize_typology(typology_key or tipo_llamada)
@@ -1630,9 +1652,13 @@ async def get_objections_breakdown(
     
     dt_from, dt_to, _ = resolve_date_range(date_from, date_to, period, default_period="7d")
         
-    stmt = select(MassEvaluationResult).options(defer(MassEvaluationResult.prompt_snapshot)).where(
-        MassEvaluationResult.status == "completed"
-    )
+    stmt = select(MassEvaluationResult).options(defer(MassEvaluationResult.prompt_snapshot))
+    if status == "failed":
+        stmt = stmt.where(MassEvaluationResult.status == "failed")
+    elif status == "all":
+        pass
+    else:
+        stmt = stmt.where(MassEvaluationResult.status == "completed")
     if context and not context.is_super_admin:
         stmt = stmt.where(
             or_(
@@ -1999,6 +2025,7 @@ async def get_agents_comparison(
     avg_score_min: float | None = None,
     avg_score_max: float | None = None,
     item_filters: str | list | dict | None = None,
+    status: str | None = None,
     context: TenantContext | None = None,
 ) -> dict[str, Any]:
     """Retrieve multi-agent comparison analytics using MassEvaluationResult."""
@@ -2068,9 +2095,13 @@ async def get_agents_comparison(
         bucket_interval = bucket or default_bucket
 
     # 2. Query completed mass evaluation results (defer prompt_snapshot)
-    stmt = select(MassEvaluationResult).options(defer(MassEvaluationResult.prompt_snapshot)).where(
-        MassEvaluationResult.status == "completed"
-    )
+    stmt = select(MassEvaluationResult).options(defer(MassEvaluationResult.prompt_snapshot))
+    if status == "failed":
+        stmt = stmt.where(MassEvaluationResult.status == "failed")
+    elif status == "all":
+        pass
+    else:
+        stmt = stmt.where(MassEvaluationResult.status == "completed")
     if context and not context.is_super_admin:
         stmt = stmt.where(
             or_(
@@ -2495,12 +2526,13 @@ async def get_agents_comparison(
         total_calls_ant = len(agent_anterior_rows)
         avg_eval_ant = get_avg_score_mass(agent_anterior_rows, "evaluacion_global")
         citas_count_ant = sum(1 for r in agent_anterior_rows if r.result_json and isinstance(r.result_json, dict) and r.result_json.get("tipo_llamada") == "cita")
-        cierre_cita_rate_ant = round(citas_count_ant / total_calls_ant, 2) if total_calls_ant > 0 else 0.0
+        tipo_count_ant = sum(1 for r in agent_anterior_rows if r.result_json and isinstance(r.result_json, dict) and r.result_json.get("tipo_llamada") is not None)
+        cierre_cita_rate_ant = round(citas_count_ant / tipo_count_ant, 2) if tipo_count_ant > 0 else None
         
         # Delta calculations
-        delta_eval = round(avg_eval - avg_eval_ant, 2) if (avg_eval is not None and avg_eval_ant is not None) else (round(avg_eval, 2) if avg_eval is not None else 0.0)
+        delta_eval = round(avg_eval - avg_eval_ant, 2) if (avg_eval is not None and avg_eval_ant is not None) else (round(avg_eval, 2) if avg_eval is not None else None)
         delta_calls = total_calls - total_calls_ant
-        delta_cierre = round(cierre_cita_rate - cierre_cita_rate_ant, 2)
+        delta_cierre = round(cierre_cita_rate - cierre_cita_rate_ant, 2) if (cierre_cita_rate is not None and cierre_cita_rate_ant is not None) else (round(cierre_cita_rate, 2) if cierre_cita_rate is not None else None)
         
         delta_vs_previous_period = {
             "avg_evaluacion_global": delta_eval,
@@ -2525,7 +2557,7 @@ async def get_agents_comparison(
             else:
                 selected_metric_avg = None
                 selected_metric_count = 0
-                selected_metric_delta = 0.0
+                selected_metric_delta = None
         else:
             agent_actual_crits = []
             agent_anterior_crits = []
@@ -2553,7 +2585,7 @@ async def get_agents_comparison(
             elif selected_metric_avg is not None:
                 selected_metric_delta = round(selected_metric_avg, 2)
             else:
-                selected_metric_delta = 0.0
+                selected_metric_delta = None
 
         # Append Agent Metrics
         agents_list.append({
@@ -2609,18 +2641,19 @@ async def get_agents_comparison(
             if b_rows:
                 b_total = len(b_rows)
                 b_citas = sum(1 for r in b_rows if r.result_json and isinstance(r.result_json, dict) and r.result_json.get("tipo_llamada") == "cita")
+                b_tipo = sum(1 for r in b_rows if r.result_json and isinstance(r.result_json, dict) and r.result_json.get("tipo_llamada") is not None)
                 b_avg_eval = get_avg_score_mass(b_rows, "evaluacion_global")
                 b_avg_emp = get_avg_score_mass(b_rows, "empatia")
                 b_avg_cla = get_avg_score_mass(b_rows, "claridad")
                 b_avg_pro = get_avg_score_mass(b_rows, "procedimiento")
-                b_rate = round(b_citas / b_total, 2)
+                b_rate = round(b_citas / b_tipo, 2) if b_tipo > 0 else None
             else:
                 b_total = 0
                 b_avg_eval = None
                 b_avg_emp = None
                 b_avg_cla = None
                 b_avg_pro = None
-                b_rate = 0.0
+                b_rate = None
                 
             # Compute bucket dynamic/fixed metric value
             if is_fixed:

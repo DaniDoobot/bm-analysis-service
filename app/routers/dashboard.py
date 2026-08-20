@@ -20,7 +20,7 @@ from app.services.dashboard_service import (
 )
 from app.schemas.dashboard import AgentComparisonResponse, AgentEvolutionResponse
 from app.utils.hubspot_owners import resolve_owner_id_by_email, resolve_owner_name
-from app.utils.normalizers import normalize_typology, normalize_direction
+from app.utils.normalizers import normalize_typology, normalize_direction, normalize_status
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/bm", tags=["Dashboard & Analytics"])
@@ -64,6 +64,8 @@ async def dashboard_summary(
     avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
     score_max: Annotated[float | None, Query(description="Alias for avg_score_max")] = None,
     eval_max: Annotated[float | None, Query(description="Alias for avg_score_max")] = None,
+    status: Annotated[str | None, Query(description="Filter by evaluation status: completed | failed | all")] = None,
+    result_status: Annotated[str | None, Query(description="Alias for status")] = None,
     item_filters: Annotated[str | None, Query(description="JSON url-encoded item score filters")] = None,
     criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
@@ -74,6 +76,8 @@ async def dashboard_summary(
     agent rankings, and latest analyses.
     """
     effective_item_filters = item_filters or criterion_filters or score_filters or item_score_filters
+    raw_status = status or result_status
+    norm_status = normalize_status(raw_status)
 
     if service and not service_id and not service_key:
         from app.utils.service_resolvers import resolve_service_id
@@ -137,6 +141,7 @@ async def dashboard_summary(
                 hubspot_owner_id=raw_owner_id,
                 hubspot_owner_ids=owner_ids,
                 item_filters=effective_item_filters,
+                status=norm_status,
                 context=context,
             )
             return data
@@ -174,6 +179,8 @@ async def agents_comparison(
     duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
     avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
     avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
+    status: Annotated[str | None, Query(description="Filter by evaluation status: completed | failed | all")] = None,
+    result_status: Annotated[str | None, Query(description="Alias for status")] = None,
     item_filters: Annotated[str | None, Query(description="JSON url-encoded item score/boolean filters")] = None,
     criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
@@ -183,6 +190,8 @@ async def agents_comparison(
     Get multi-agent comparison analytics for dashboard reporting.
     """
     effective_item_filters = item_filters or criterion_filters or score_filters or item_score_filters
+    raw_status = status or result_status
+    norm_status = normalize_status(raw_status)
     owner_ids = None
     if hubspot_owner_ids and hubspot_owner_ids.strip():
         owner_ids = [oid.strip() for oid in hubspot_owner_ids.split(",") if oid.strip()]
@@ -216,6 +225,7 @@ async def agents_comparison(
             avg_score_min=avg_score_min,
             avg_score_max=avg_score_max,
             item_filters=effective_item_filters,
+            status=norm_status,
             context=context,
         )
         return data
@@ -253,6 +263,8 @@ async def list_agents(
     eval_min: Annotated[float | None, Query(description="Min average score (alias)")] = None,
     avg_score_max: Annotated[float | None, Query(alias="score_max", description="Max average score")] = None,
     eval_max: Annotated[float | None, Query(description="Max average score (alias)")] = None,
+    status: Annotated[str | None, Query(description="Filter by evaluation status: completed | failed | all")] = None,
+    result_status: Annotated[str | None, Query(description="Alias for status")] = None,
     item_filters: Annotated[str | None, Query(description="JSON url-encoded item score/boolean filters")] = None,
     criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
@@ -262,6 +274,8 @@ async def list_agents(
     Get all active call center agents with their accumulated real metrics.
     """
     effective_item_filters = item_filters or criterion_filters or score_filters or item_score_filters
+    raw_status = status or result_status
+    norm_status = normalize_status(raw_status)
     typo_ids = None
     if typology_ids and typology_ids.strip():
         typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
@@ -299,6 +313,7 @@ async def list_agents(
             avg_score_min=sc_min,
             avg_score_max=sc_max,
             item_filters=effective_item_filters,
+            status=norm_status,
             context=context,
         )
         return data
@@ -347,6 +362,8 @@ async def agent_evolution(
     eval_min: Annotated[float | None, Query(description="Min average score (alias)")] = None,
     avg_score_max: Annotated[float | None, Query(alias="score_max", description="Max average score")] = None,
     eval_max: Annotated[float | None, Query(description="Max average score (alias)")] = None,
+    status: Annotated[str | None, Query(description="Filter by evaluation status: completed | failed | all")] = None,
+    result_status: Annotated[str | None, Query(description="Alias for status")] = None,
     item_filters: Annotated[str | None, Query(description="JSON url-encoded item score/boolean filters")] = None,
     criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
@@ -357,6 +374,8 @@ async def agent_evolution(
     and evolution timelines for a specific agent.
     """
     effective_item_filters = item_filters or criterion_filters or score_filters or item_score_filters
+    raw_status = status or result_status
+    norm_status = normalize_status(raw_status)
     if context.allowed_agent_ids is not None and hubspot_owner_id not in context.allowed_agent_ids:
         raise HTTPException(
             status_code=403,
@@ -404,6 +423,7 @@ async def agent_evolution(
             avg_score_min=sc_min,
             avg_score_max=sc_max,
             item_filters=effective_item_filters,
+            status=norm_status,
             context=context,
         )
         return data
@@ -439,6 +459,8 @@ async def objections_breakdown(
     duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
     avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
     avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
+    status: Annotated[str | None, Query(description="Filter by evaluation status: completed | failed | all")] = None,
+    result_status: Annotated[str | None, Query(description="Alias for status")] = None,
     item_filters: Annotated[str | None, Query(description="JSON url-encoded item score/boolean filters")] = None,
     criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
@@ -449,6 +471,8 @@ async def objections_breakdown(
     and a chronological list of calls that raised objections.
     """
     effective_item_filters = item_filters or criterion_filters or score_filters or item_score_filters
+    raw_status = status or result_status
+    norm_status = normalize_status(raw_status)
     typo_ids = None
     if typology_ids and typology_ids.strip():
         typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
@@ -483,6 +507,7 @@ async def objections_breakdown(
             avg_score_min=avg_score_min,
             avg_score_max=avg_score_max,
             item_filters=effective_item_filters,
+            status=norm_status,
             context=context,
         )
         return data
@@ -518,6 +543,8 @@ async def get_my_evolution(
     duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
     avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
     avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
+    status: Annotated[str | None, Query(description="Filter by evaluation status: completed | failed | all")] = None,
+    result_status: Annotated[str | None, Query(description="Alias for status")] = None,
     item_filters: Annotated[str | None, Query(description="JSON url-encoded item score/boolean filters")] = None,
     criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
@@ -527,6 +554,8 @@ async def get_my_evolution(
     Get chronological performance evolution metrics specifically for the logged-in agent.
     """
     effective_item_filters = item_filters or criterion_filters or score_filters or item_score_filters
+    raw_status = status or result_status
+    norm_status = normalize_status(raw_status)
     # Use context's normalized role and fields instead of legacy strings
     is_manager_or_admin = (
         context.is_super_admin or
@@ -595,6 +624,7 @@ async def get_my_evolution(
             avg_score_min=avg_score_min,
             avg_score_max=avg_score_max,
             item_filters=effective_item_filters,
+            status=norm_status,
             context=context,
         )
         return data

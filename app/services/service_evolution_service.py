@@ -92,6 +92,7 @@ class ServiceEvolutionService:
         db: AsyncSession,
         date_from: str | None = None,
         date_to: str | None = None,
+        status: str | None = None,
         context: TenantContext | None = None,
     ) -> list[ServiceListItem]:
         """
@@ -100,9 +101,15 @@ class ServiceEvolutionService:
         """
         parsed_date_from, parsed_date_to = parse_date_bounds(date_from, date_to)
         logger.info(
-            "Fetching services list: date_from=%s (parsed: %s), date_to=%s (parsed: %s)",
-            date_from, parsed_date_from, date_to, parsed_date_to
+            "Fetching services list: date_from=%s (parsed: %s), date_to=%s (parsed: %s), status=%s",
+            date_from, parsed_date_from, date_to, parsed_date_to, status
         )
+
+        r_status_cond = "AND r.status = 'completed'"
+        if status == "failed":
+            r_status_cond = "AND r.status = 'failed'"
+        elif status == "all":
+            r_status_cond = ""
 
         where_clause = "WHERE s.is_active = true"
         params = {
@@ -124,7 +131,7 @@ class ServiceEvolutionService:
                 MAX(r.created_at::date)::text AS last_analysis_date
             FROM bm_services s
             LEFT JOIN bm_mass_evaluation_results r ON s.service_id = r.service_id 
-              AND r.status = 'completed'
+              {r_status_cond}
               AND (CAST(:date_from AS timestamptz) IS NULL OR r.created_at >= CAST(:date_from AS timestamptz))
               AND (CAST(:date_to AS timestamptz) IS NULL OR r.created_at <= CAST(:date_to AS timestamptz))
             {where_clause}
@@ -154,6 +161,7 @@ class ServiceEvolutionService:
         service_id: int | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
+        status: str | None = None,
         context: TenantContext | None = None,
     ) -> list[CriterionListItem]:
         """
@@ -162,11 +170,17 @@ class ServiceEvolutionService:
         """
         parsed_date_from, parsed_date_to = parse_date_bounds(date_from, date_to)
         logger.info(
-            "Fetching criteria list: service_id=%s, date_from=%s (parsed: %s), date_to=%s (parsed: %s)",
-            service_id, date_from, parsed_date_from, date_to, parsed_date_to
+            "Fetching criteria list: service_id=%s, date_from=%s (parsed: %s), date_to=%s (parsed: %s), status=%s",
+            service_id, date_from, parsed_date_from, date_to, parsed_date_to, status
         )
 
-        where_clause = "WHERE r.status = 'completed'"
+        if status == "failed":
+            where_clause = "WHERE r.status = 'failed'"
+        elif status == "all":
+            where_clause = "WHERE 1=1"
+        else:
+            where_clause = "WHERE r.status = 'completed'"
+
         params = {
             "service_id": service_id,
             "date_from": parsed_date_from,
@@ -233,6 +247,7 @@ class ServiceEvolutionService:
         duration_max_seconds: int | None = None,
         avg_score_min: float | None = None,
         avg_score_max: float | None = None,
+        status: str | None = None,
         context: TenantContext | None = None,
     ) -> ServiceEvolutionResponse:
         """
@@ -244,10 +259,20 @@ class ServiceEvolutionService:
         parsed_date_from, parsed_date_to = parse_date_bounds(date_from, date_to)
         logger.info(
             "Service evolution query: service_id=%s, service_key=%s, granularity=%s, typology=%s, agent=%s, "
-            "date_from_raw=%s (parsed: %s), date_to_raw=%s (parsed: %s)",
+            "date_from_raw=%s (parsed: %s), date_to_raw=%s (parsed: %s), status=%s",
             service_id, service_key, granularity, typology_key, agent_owner_id,
-            date_from, parsed_date_from, date_to, parsed_date_to
+            date_from, parsed_date_from, date_to, parsed_date_to, status
         )
+
+        if status == "failed":
+            r_status_filter = "r.status = 'failed'"
+            r_status_join = "AND r.status = 'failed'"
+        elif status == "all":
+            r_status_filter = "1=1"
+            r_status_join = ""
+        else:
+            r_status_filter = "r.status = 'completed'"
+            r_status_join = "AND r.status = 'completed'"
 
         dialect_name = db.get_bind().dialect.name
 
@@ -363,7 +388,7 @@ class ServiceEvolutionService:
                 AVG(CASE WHEN c.criterion_key = 'cierre_cita' AND c.is_applicable = true AND c.boolean_value IS NOT NULL THEN c.boolean_value::int END) AS cierre_cita_rate
             FROM bm_mass_evaluation_results r
             LEFT JOIN bm_mass_evaluation_criterion_results c ON r.mass_analysis_id = c.mass_analysis_id
-            WHERE r.status = 'completed'
+            WHERE {r_status_filter}
               AND (CAST(:service_id AS integer) IS NULL OR r.service_id = CAST(:service_id AS integer))
               AND (CAST(:service_key AS text) IS NULL OR r.service_key = CAST(:service_key AS text))
               AND (CAST(:date_from AS timestamptz) IS NULL OR r.call_timestamp >= CAST(:date_from AS timestamptz))
@@ -401,7 +426,7 @@ class ServiceEvolutionService:
                 SELECT 
                     r.typology_name
                 FROM bm_mass_evaluation_results r
-                WHERE r.status = 'completed' AND r.typology_name IS NOT NULL
+                WHERE {r_status_filter} AND r.typology_name IS NOT NULL
                   AND (CAST(:service_id AS integer) IS NULL OR r.service_id = CAST(:service_id AS integer))
                   AND (CAST(:service_key AS text) IS NULL OR r.service_key = CAST(:service_key AS text))
                   AND (CAST(:date_from AS timestamptz) IS NULL OR r.call_timestamp >= CAST(:date_from AS timestamptz))
@@ -462,7 +487,7 @@ class ServiceEvolutionService:
                 AVG(CASE WHEN c.criterion_key = 'cierre_cita' AND c.is_applicable = true AND c.boolean_value IS NOT NULL THEN c.boolean_value::int END) AS cierre_cita_rate
             FROM bm_mass_evaluation_results r
             LEFT JOIN bm_mass_evaluation_criterion_results c ON r.mass_analysis_id = c.mass_analysis_id
-            WHERE r.status = 'completed'
+            WHERE {r_status_filter}
               AND (CAST(:service_id AS integer) IS NULL OR r.service_id = CAST(:service_id AS integer))
               AND (CAST(:service_key AS text) IS NULL OR r.service_key = CAST(:service_key AS text))
               AND (CAST(:date_from AS timestamptz) IS NULL OR r.call_timestamp >= CAST(:date_from AS timestamptz))
@@ -512,7 +537,7 @@ class ServiceEvolutionService:
             LEFT JOIN bm_mass_evaluation_results r 
                 ON t.typology_key = r.typology_key 
                 AND t.service_id = r.service_id
-                AND r.status = 'completed'
+                {r_status_join}
                 AND (CAST(:date_from AS timestamptz) IS NULL OR r.call_timestamp >= CAST(:date_from AS timestamptz))
                 AND (CAST(:date_to AS timestamptz) IS NULL OR r.call_timestamp <= CAST(:date_to AS timestamptz))
                 AND (CAST(:agent_owner_id AS text) IS NULL OR r.hubspot_owner_id = CAST(:agent_owner_id AS text))
@@ -550,7 +575,7 @@ class ServiceEvolutionService:
                     AVG(CASE WHEN c.criterion_key = 'cierre_cita' AND c.is_applicable = true AND c.boolean_value IS NOT NULL THEN c.boolean_value::int END) AS cierre_cita_rate
                 FROM bm_mass_evaluation_results r
                 LEFT JOIN bm_mass_evaluation_criterion_results c ON r.mass_analysis_id = c.mass_analysis_id
-                WHERE r.status = 'completed'
+                WHERE {r_status_filter}
                   AND (CAST(:service_id AS integer) IS NULL OR r.service_id = CAST(:service_id AS integer))
                   AND (CAST(:service_key AS text) IS NULL OR r.service_key = CAST(:service_key AS text))
                   AND (CAST(:date_from AS timestamptz) IS NULL OR r.call_timestamp >= CAST(:date_from AS timestamptz))
@@ -592,7 +617,7 @@ class ServiceEvolutionService:
                 AVG(CASE WHEN c.criterion_key = 'cierre_cita' AND c.is_applicable = true AND c.boolean_value IS NOT NULL THEN c.boolean_value::int END) AS cierre_cita_rate
             FROM bm_mass_evaluation_results r
             LEFT JOIN bm_mass_evaluation_criterion_results c ON r.mass_analysis_id = c.mass_analysis_id
-            WHERE r.status = 'completed'
+            WHERE {r_status_filter}
               AND (CAST(:service_id AS integer) IS NULL OR r.service_id = CAST(:service_id AS integer))
               AND (CAST(:service_key AS text) IS NULL OR r.service_key = CAST(:service_key AS text))
               AND (CAST(:date_from AS timestamptz) IS NULL OR r.call_timestamp >= CAST(:date_from AS timestamptz))
@@ -625,7 +650,7 @@ class ServiceEvolutionService:
                 COUNT(CASE WHEN c.is_applicable = true THEN 1 END) AS total_applicable
             FROM bm_mass_evaluation_criterion_results c
             JOIN bm_mass_evaluation_results r ON c.mass_analysis_id = r.mass_analysis_id
-            WHERE r.status = 'completed'
+            WHERE {r_status_filter}
               AND c.is_applicable = true
               AND c.numeric_value IS NOT NULL
               AND (CAST(:service_id AS integer) IS NULL OR r.service_id = CAST(:service_id AS integer))

@@ -12,7 +12,7 @@ from app.schemas.service_evolution import (
     CriterionListItem,
 )
 from app.services.service_evolution_service import ServiceEvolutionService
-from app.utils.normalizers import normalize_typology, normalize_direction
+from app.utils.normalizers import normalize_typology, normalize_direction, normalize_status
 
 logger = logging.getLogger(__name__)
 
@@ -24,18 +24,21 @@ async def get_services(
     context: Annotated[TenantContext, Depends(get_tenant_context)],
     date_from: str | None = Query(None, description="Fecha de inicio (ISO 8601 o YYYY-MM-DD) para filtrar recuento de llamadas"),
     date_to: str | None = Query(None, description="Fecha de fin (ISO 8601 o YYYY-MM-DD) para filtrar recuento de llamadas"),
+    status: str | None = Query(None, description="Filter by evaluation status: completed | failed | all"),
+    result_status: str | None = Query(None, description="Alias for status"),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Retrieve all active services with unique evaluated calls counts and date bounds.
     Useful for populating service selectors.
     """
+    norm_status = normalize_status(status or result_status)
     try:
-        return await ServiceEvolutionService.get_services(db, date_from=date_from, date_to=date_to, context=context)
+        return await ServiceEvolutionService.get_services(db, date_from=date_from, date_to=date_to, status=norm_status, context=context)
     except Exception as e:
         logger.error("Error fetching services for evolution dashboard: %s", e, exc_info=True)
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR if hasattr(status, "HTTP_500_INTERNAL_SERVER_ERROR") else 500,
             detail="Error interno del servidor al recuperar servicios."
         )
 
@@ -46,18 +49,21 @@ async def get_criteria(
     service_id: int | None = Query(None, description="Filtrar criterios aplicados a un servicio específico"),
     date_from: str | None = Query(None, description="Fecha de inicio (ISO 8601 o YYYY-MM-DD) para filtrar recuento de criterios"),
     date_to: str | None = Query(None, description="Fecha de fin (ISO 8601 o YYYY-MM-DD) para filtrar recuento de criterios"),
+    status: str | None = Query(None, description="Filter by evaluation status: completed | failed | all"),
+    result_status: str | None = Query(None, description="Alias for status"),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Retrieve available criteria keys with counts of applicable entries.
     Useful for selecting criteria to graph/analyze.
     """
+    norm_status = normalize_status(status or result_status)
     try:
-        return await ServiceEvolutionService.get_criteria(db, service_id=service_id, date_from=date_from, date_to=date_to, context=context)
+        return await ServiceEvolutionService.get_criteria(db, service_id=service_id, date_from=date_from, date_to=date_to, status=norm_status, context=context)
     except Exception as e:
         logger.error("Error fetching criteria for evolution dashboard: %s", e, exc_info=True)
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=500,
             detail="Error interno del servidor al recuperar criterios."
         )
 
@@ -86,6 +92,8 @@ async def get_evolution(
     duration_max_seconds: int | None = Query(None, description="Max duration in seconds"),
     avg_score_min: float | None = Query(None, description="Min average score"),
     avg_score_max: float | None = Query(None, description="Max average score"),
+    status: str | None = Query(None, description="Filter by evaluation status: completed | failed | all"),
+    result_status: str | None = Query(None, description="Alias for status"),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -124,6 +132,8 @@ async def get_evolution(
                     detail="No tienes permiso para consultar la evolución de este agente."
                 )
 
+    norm_status = normalize_status(status or result_status)
+
     try:
         return await ServiceEvolutionService.get_evolution(
             db,
@@ -141,6 +151,7 @@ async def get_evolution(
             duration_max_seconds=duration_max_seconds,
             avg_score_min=avg_score_min,
             avg_score_max=avg_score_max,
+            status=norm_status,
             context=context,
         )
     except Exception as e:

@@ -348,7 +348,6 @@ async def get_analytics_items(
     return await get_all_metrics(db, context=context)
 
 
-
 @router.get(
     "/analytics/agents-comparison",
     response_model=AgentComparisonResponse,
@@ -385,6 +384,8 @@ async def get_agents_comparison(
     duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
     avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
     avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
+    status: Annotated[str | None, Query(description="Filter by evaluation status: completed | failed | all")] = None,
+    result_status: Annotated[str | None, Query(description="Alias for status")] = None,
 ):
     """
     Retrieve agents performance comparison breakdown.
@@ -409,6 +410,8 @@ async def get_agents_comparison(
         norm_t = normalize_typology(raw_typology)
         raw_direction = direction or call_direction or inbound_outbound
         norm_d = normalize_direction(raw_direction)
+        raw_status = status or result_status
+        norm_status = normalize_status(raw_status)
 
         # 1. Resolve timeframe and validate
         dt_from, dt_to, _ = resolve_date_range(date_from, date_to, period=None, default_period="30d")
@@ -424,7 +427,7 @@ async def get_agents_comparison(
         cache_key = (
             f"agents_comp:{context.company_id}:{context.normalized_role}:{eff_service_id}:{eff_service_key}:"
             f"{date_from}:{date_to}:{sorted(owner_ids)}:{sorted(item_req_keys)}:{norm_t}:{norm_d}:"
-            f"{duration_min_seconds}:{duration_max_seconds}:{avg_score_min}:{avg_score_max}"
+            f"{duration_min_seconds}:{duration_max_seconds}:{avg_score_min}:{avg_score_max}:{norm_status}"
         )
 
         async def _compute():
@@ -438,7 +441,13 @@ async def get_agents_comparison(
                 MassEvaluationResult.items_json,
                 MassEvaluationResult.call_timestamp,
                 MassEvaluationResult.analysis_timestamp,
-            ).where(MassEvaluationResult.status == "completed")
+            )
+            if norm_status == "failed":
+                stmt = stmt.where(MassEvaluationResult.status == "failed")
+            elif norm_status == "all":
+                pass
+            else:
+                stmt = stmt.where(MassEvaluationResult.status == "completed")
 
             if not context.is_super_admin:
                 stmt = stmt.where(
@@ -679,6 +688,8 @@ async def get_items_evolution(
     duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
     avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
     avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
+    status: Annotated[str | None, Query(description="Filter by evaluation status: completed | failed | all")] = None,
+    result_status: Annotated[str | None, Query(description="Alias for status")] = None,
 ):
     """
     Retrieve chronological evolution timeline for chosen analytics metrics.
@@ -702,6 +713,8 @@ async def get_items_evolution(
         norm_t = normalize_typology(raw_typology)
         raw_direction = direction or call_direction or inbound_outbound
         norm_d = normalize_direction(raw_direction)
+        raw_status = status or result_status
+        norm_status = normalize_status(raw_status)
 
         dt_from, dt_to, bucket_interval = resolve_date_range(date_from, date_to, period=None, default_period="30d")
         if bucket and bucket.strip().lower() in ("hour", "day", "week"):
@@ -717,7 +730,7 @@ async def get_items_evolution(
         cache_key = (
             f"items_evo:{context.company_id}:{context.normalized_role}:{eff_service_id}:{eff_service_key}:"
             f"{date_from}:{date_to}:{sorted(owner_ids)}:{sorted(item_req_keys)}:{bucket_interval}:{norm_t}:{norm_d}:"
-            f"{duration_min_seconds}:{duration_max_seconds}:{avg_score_min}:{avg_score_max}"
+            f"{duration_min_seconds}:{duration_max_seconds}:{avg_score_min}:{avg_score_max}:{norm_status}"
         )
 
         async def _compute():
@@ -730,7 +743,13 @@ async def get_items_evolution(
                 MassEvaluationResult.items_json,
                 MassEvaluationResult.call_timestamp,
                 MassEvaluationResult.analysis_timestamp,
-            ).where(MassEvaluationResult.status == "completed")
+            )
+            if norm_status == "failed":
+                stmt = stmt.where(MassEvaluationResult.status == "failed")
+            elif norm_status == "all":
+                pass
+            else:
+                stmt = stmt.where(MassEvaluationResult.status == "completed")
 
             if not context.is_super_admin:
                 stmt = stmt.where(
