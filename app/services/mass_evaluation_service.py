@@ -1142,9 +1142,19 @@ class MassEvaluationService:
                     
                     date_from = safe_parse_datetime(date_from_str) if date_from_str else None
                     date_to = safe_parse_datetime(date_to_str) if date_to_str else None
+
+                    # Automation lookback search margin:
+                    # Expands the effective search start back by automation_call_lookback_minutes (default 120m)
+                    # to capture long calls or delayed recording availability while preserving the logical watermark.
+                    effective_search_from = date_from
+                    if execution_source == "automation" and date_from is not None:
+                        from app.config import get_settings
+                        lookback_margin = get_settings().automation_call_lookback_minutes
+                        if lookback_margin and lookback_margin > 0:
+                            effective_search_from = date_from - timedelta(minutes=lookback_margin)
                     
                     search_filters = {
-                        "date_from": date_from,
+                        "date_from": effective_search_from,
                         "date_to": date_to,
                         "agent_owner_ids": filters_payload.get("agent_owner_ids"),
                         "duration_min_seconds": eff_duration_min_seconds,
@@ -1160,7 +1170,7 @@ class MassEvaluationService:
                     calls = await hs_service.search_calls_for_mass_evaluation(search_filters)
                     run.calls_found = len(calls)
                     
-                    # 3. Filter duplicates within the same execution and apply max_calls slicing
+                    # 3. Filter duplicates within the same execution and against DB completed calls
                     max_calls_val = filters_payload.get("max_calls")
                     if max_calls_val is None or max_calls_val <= 0:
                         max_calls_val = 10
@@ -1174,13 +1184,36 @@ class MassEvaluationService:
                         if c_id not in seen_call_ids:
                             seen_call_ids.add(c_id)
                             unique_calls.append(c)
-                            
-                    selected_calls = unique_calls[:max_calls_val]
+
+                    # Deduplication against database:
+                    # In automations (with lookback search), identify calls that already have status='completed'
+                    # for the exact canonical identity (call_id + prompt_id) to skip reprocessing them.
+                    already_completed_call_ids = set()
+                    candidate_call_ids = [c["call_id"] for c in unique_calls if c.get("call_id")]
+                    if candidate_call_ids and execution_source == "automation":
+                        stmt_completed = (
+                            select(MassEvaluationResult.call_id)
+                            .where(
+                                MassEvaluationResult.call_id.in_(candidate_call_ids),
+                                MassEvaluationResult.prompt_id == prompt_id,
+                                MassEvaluationResult.status == "completed"
+                            )
+                        )
+                        res_completed = await db.execute(stmt_completed)
+                        already_completed_call_ids = set(res_completed.scalars().all())
+
+                    new_candidate_calls = [
+                        c for c in unique_calls if c["call_id"] not in already_completed_call_ids
+                    ]
+                    skipped_completed_count = len(unique_calls) - len(new_candidate_calls)
+
+                    selected_calls = new_candidate_calls[:max_calls_val]
                     run.calls_selected = len(selected_calls)
+                    run.calls_skipped = skipped_completed_count
                     await db.commit()
                 
                 calls_analyzed = 0
-                calls_skipped = 0
+                calls_skipped = skipped_completed_count if "skipped_completed_count" in locals() else 0
                 calls_failed = 0
                 cancelled_by_user = False
                 
@@ -3028,6 +3061,7 @@ class MassEvaluationService:
                     auto_run.finished_at = mass_run.finished_at or now
                     auto_run.calls_found = mass_run.calls_found or 0
                     auto_run.calls_selected = mass_run.calls_selected or 0
+                    auto_run.calls_skipped = mass_run.calls_skipped or 0
                     changed += 1
                     logger.info(
                         "[automation_sync] synced auto_run_id=%d automation_id=%d mass_run_id=%d "

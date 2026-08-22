@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     automation_running_stale_after_minutes: int = 60
     automation_max_catchup_windows_per_tick: int = 1
     automation_min_duration_seconds: int = 20
+    automation_call_lookback_minutes: int = 120
 
     # ── Personalized Training Scheduler ───────────────────────────────────────
     enable_training_scheduler: bool = True
