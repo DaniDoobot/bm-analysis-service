@@ -353,6 +353,8 @@ def extract_score_from_mass(result_json: Any, items_json: Any, key: str, is_fall
 
 def extract_score_from_mass_row(row: Any, key: str, is_fallback_call: bool = False) -> "float | None":
     """Extract numeric score from MassEvaluationResult row object."""
+    if getattr(row, "is_evaluable", None) is False:
+        return None
     val = extract_score_from_mass(row.result_json, row.items_json, key, is_fallback_call=is_fallback_call)
     if val is None and key == "evaluacion_global" and hasattr(row, "evaluacion_global"):
         eg = getattr(row, "evaluacion_global", None)

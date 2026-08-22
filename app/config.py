@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     enable_automation_scheduler: bool = False
     automation_running_stale_after_minutes: int = 60
     automation_max_catchup_windows_per_tick: int = 1
+    automation_min_duration_seconds: int = 20
 
     # ── Personalized Training Scheduler ───────────────────────────────────────
     enable_training_scheduler: bool = True

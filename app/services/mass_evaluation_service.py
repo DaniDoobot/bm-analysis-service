@@ -872,6 +872,7 @@ class MassEvaluationService:
             )
 
         # Create Run record
+        exec_src = "automation" if trigger_type == "automation" else ("on_demand" if trigger_type == "manual" else (job.execution_source or "on_demand"))
         run = MassEvaluationRun(
             job_id=job_id,
             company_id=job.company_id,
@@ -880,7 +881,7 @@ class MassEvaluationService:
             status="running",
             started_at=datetime.now(timezone.utc),
             effective_filters=effective_filters,
-            execution_source=job.execution_source or "on_demand"
+            execution_source=exec_src
         )
         db.add(run)
         await db.commit()
@@ -934,9 +935,18 @@ class MassEvaluationService:
                 prompt_version_name = job.prompt_version_name
                 prompt_version_label = job.prompt_version_label
                 company_id = job.company_id  # FIX: snapshot here to avoid MissingGreenlet after commits
-                execution_source = job.execution_source or "on_demand"
+                execution_source = run.execution_source or job.execution_source or "on_demand"
                 duration_min_seconds = job.duration_min_seconds
                 duration_max_seconds = job.duration_max_seconds
+                
+                # Automation-only minimum duration pre-filter threshold
+                eff_duration_min_seconds = duration_min_seconds
+                if execution_source == "automation":
+                    from app.config import get_settings
+                    auto_min = get_settings().automation_min_duration_seconds
+                    if eff_duration_min_seconds is None or eff_duration_min_seconds < auto_min:
+                        eff_duration_min_seconds = auto_min
+
                 direction = job.direction
                 only_with_recording = job.only_with_recording
                 max_calls = job.max_calls
@@ -1091,7 +1101,7 @@ class MassEvaluationService:
                         "date_from": date_from,
                         "date_to": date_to,
                         "agent_owner_ids": filters_payload.get("agent_owner_ids"),
-                        "duration_min_seconds": duration_min_seconds,
+                        "duration_min_seconds": eff_duration_min_seconds,
                         "duration_max_seconds": duration_max_seconds,
                         "direction": filters_payload.get("direction"),
                         "only_with_recording": filters_payload.get("only_with_recording"),
@@ -1137,7 +1147,7 @@ class MassEvaluationService:
                         "date_from": date_from,
                         "date_to": date_to,
                         "agent_owner_ids": filters_payload.get("agent_owner_ids"),
-                        "duration_min_seconds": duration_min_seconds,
+                        "duration_min_seconds": eff_duration_min_seconds,
                         "duration_max_seconds": duration_max_seconds,
                         "direction": filters_payload.get("direction"),
                         "only_with_recording": filters_payload.get("only_with_recording"),
@@ -1217,6 +1227,8 @@ class MassEvaluationService:
                                 "prompt_version_label": prompt_version_label,
                                 "prompt_snapshot": prompt_snapshot,
                                 "status": "skipped",
+                                "is_evaluable": None,
+                                "non_evaluable_reason": None,
                                 "error_message": "No recording URL present.",
                                 "company_id": company_id,  # FIX: use local snapshot, not job ORM (expired after commit)
                                 "service_id": service_id,
@@ -1397,9 +1409,22 @@ class MassEvaluationService:
                         owner_id = call["hubspot_owner_id"]
                         resolved_agent = resolve_agent_display(None, owner_id)
                         
-                        from app.utils.scores import calculate_score_from_items
-                        eval_val = calculate_score_from_items(items)
-                        eval_decimal = Decimal(str(eval_val)) if eval_val is not None else None
+                        # Determine evaluability dynamically across all services
+                        from app.utils.evaluability import determine_evaluability
+                        is_eval, non_eval_reason = determine_evaluability(
+                            typology_key=typology_key,
+                            result_json=clean_result,
+                            items=items,
+                            call_duration_seconds=call.get("call_duration_seconds"),
+                            status="completed"
+                        )
+                        
+                        if is_eval is True:
+                            from app.utils.scores import calculate_score_from_items
+                            eval_val = calculate_score_from_items(items)
+                            eval_decimal = Decimal(str(eval_val)) if eval_val is not None else None
+                        else:
+                            eval_decimal = None
 
                         # Persist Result via Upsert Helper
                         res_row = await MassEvaluationService._upsert_mass_evaluation_result(
@@ -1423,6 +1448,8 @@ class MassEvaluationService:
                                 "prompt_version_label": prompt_version_label,
                                 "prompt_snapshot": prompt_snapshot,
                                 "status": "completed",
+                                "is_evaluable": is_eval,
+                                "non_evaluable_reason": non_eval_reason if is_eval is False else None,
                                 "result_json": clean_result,
                                 "items_json": items,
                                 "evaluacion_global": eval_decimal,
@@ -1501,6 +1528,8 @@ class MassEvaluationService:
                                 "prompt_version_label": prompt_version_label,
                                 "prompt_snapshot": prompt_snapshot,
                                 "status": "failed",
+                                "is_evaluable": None,
+                                "non_evaluable_reason": None,
                                 "error_message": str(e_call),
                                 "company_id": company_id,  # FIX: use local snapshot, not job ORM (expired after commit)
                                 "service_id": service_id,

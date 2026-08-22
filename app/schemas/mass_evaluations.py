@@ -527,6 +527,8 @@ class MassEvaluationResultResponse(BaseModel):
 
     execution_source: str | None = None
     status: str
+    is_evaluable: bool | None = None
+    non_evaluable_reason: str | None = None
     result_json: dict[str, Any] | None
     items_json: Any
     items_visual: list[dict[str, Any]] | None = None
@@ -718,6 +720,8 @@ class MassEvaluationResultListItemResponse(BaseModel):
 
     execution_source: str | None = None
     status: str
+    is_evaluable: bool | None = None
+    non_evaluable_reason: str | None = None
     items_visual: list[dict[str, Any]] | None = None
     global_score: float | None = None
     error_message: str | None = None

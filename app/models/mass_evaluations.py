@@ -187,6 +187,8 @@ class MassEvaluationResult(Base):
 
     # Result payload
     status: Mapped[str] = mapped_column(Text, default="completed", server_default="'completed'")  # completed, failed, skipped
+    is_evaluable: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
+    non_evaluable_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     result_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     items_json: Mapped[list[Any] | dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     evaluacion_global: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
@@ -217,6 +219,7 @@ class MassEvaluationResult(Base):
         Index("idx_mass_eval_results_hubspot_owner_id", "hubspot_owner_id"),
         Index("idx_mass_eval_results_call_timestamp", "call_timestamp"),
         Index("idx_mass_eval_results_execution_source", "execution_source"),
+        Index("idx_mass_eval_results_is_evaluable", "is_evaluable"),
     )
 
 

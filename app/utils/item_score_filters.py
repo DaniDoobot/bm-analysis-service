@@ -234,13 +234,14 @@ def build_item_filters_sql(item_filters: list[dict[str, Any]]) -> list[Any]:
     """
     Builds SQLAlchemy SQL WHERE expressions for MassEvaluationResult queries
     using EXISTS subqueries on MassEvaluationCriterionResult.
+    Ensures non-evaluable calls (is_evaluable = False) never match evaluative item filters.
     """
     if not item_filters:
         return []
 
     from app.models.mass_evaluations import MassEvaluationResult, MassEvaluationCriterionResult
 
-    sql_conditions = []
+    sql_conditions = [MassEvaluationResult.is_evaluable.is_not(False)]
     for filt in item_filters:
         key = filt["key"]
         filt_type = filt.get("type", "numeric")
@@ -302,7 +303,7 @@ def extract_boolean_from_mass(result_json: Any, items_json: Any, key: str) -> bo
             if item_key == key:
                 if item.get("boolean_value") is not None:
                     return bool(item["boolean_value"])
-                v = item.get("value") if "value" in item else (item.get("text_value") or item.get("raw_value"))
+                v = item.get("value") if ("value" in item and item.get("value") is not None) else (item.get("text_value") or item.get("raw_value"))
                 parsed = _parse_bool_value(v)
                 if parsed is not None:
                     return parsed
@@ -311,7 +312,7 @@ def extract_boolean_from_mass(result_json: Any, items_json: Any, key: str) -> bo
     if result_json and isinstance(result_json, dict):
         v = result_json.get(key)
         if isinstance(v, dict):
-            for sub_k in ["value", "valor", "boolean_value", "score"]:
+            for sub_k in ["value", "boolean_value", "raw_value", "text_value", "val"]:
                 if sub_k in v:
                     parsed = _parse_bool_value(v[sub_k])
                     if parsed is not None:
@@ -327,6 +328,7 @@ def filter_mass_results_by_items(results: list[Any], item_filters: list[dict[str
     """
     Filters a list of MassEvaluationResult rows in memory using strict AND logic.
     Handles numeric score ranges and boolean criteria.
+    Ensures non-evaluable calls (is_evaluable = False) never match evaluative item filters.
     """
     if not item_filters:
         return results
@@ -335,6 +337,10 @@ def filter_mass_results_by_items(results: list[Any], item_filters: list[dict[str
 
     filtered = []
     for r in results:
+        # Non-evaluable calls never pass evaluative item filters
+        if getattr(r, "is_evaluable", None) is False:
+            continue
+
         rj = getattr(r, "result_json", None)
         ij = getattr(r, "items_json", None)
 

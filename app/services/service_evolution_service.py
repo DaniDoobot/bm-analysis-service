@@ -255,7 +255,7 @@ class ServiceEvolutionService:
         Retrieves complete service evolution details with series, typologies, agents, and criteria ranking.
         """
         t_start = time.perf_counter()
-        _EG_EXPR = "COALESCE(r.evaluacion_global, NULLIF((r.result_json->>'evaluacion_global')::numeric, 0))"
+        _EG_EXPR = "CASE WHEN (r.is_evaluable IS NOT FALSE) THEN COALESCE(r.evaluacion_global, NULLIF((r.result_json->>'evaluacion_global')::numeric, 0)) ELSE NULL END"
         parsed_date_from, parsed_date_to = parse_date_bounds(date_from, date_to)
         logger.info(
             "Service evolution query: service_id=%s, service_key=%s, granularity=%s, typology=%s, agent=%s, "
