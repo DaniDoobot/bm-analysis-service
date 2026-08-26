@@ -5,7 +5,7 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
 from sqlalchemy import select, func, text, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,7 +25,7 @@ from app.schemas.analytics import (
 )
 from app.services.dashboard_service import resolve_date_range, extract_score_from_mass
 from app.utils.hubspot_owners import resolve_owner_name
-from app.utils.normalizers import normalize_typology, normalize_direction
+from app.utils.normalizers import normalize_typology, normalize_direction, normalize_status
 from app.utils.cache import analytics_cache
 from app.utils.service_resolvers import resolve_service_id
 
@@ -335,7 +335,7 @@ async def get_analytics_items(
     """Retrieve the catalogue of compared metrics available in Analytics v2."""
     if context.normalized_role == InternalRole.AGENT:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=http_status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: Se requiere rol de nivel superior."
         )
     eff_service_id, _ = await resolve_service_id(
@@ -393,7 +393,7 @@ async def get_agents_comparison(
     """
     if context.normalized_role == InternalRole.AGENT:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=http_status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: Se requiere rol de nivel superior."
         )
     t_start = time.perf_counter()
@@ -417,7 +417,7 @@ async def get_agents_comparison(
         dt_from, dt_to, _ = resolve_date_range(date_from, date_to, period=None, default_period="30d")
         if dt_from and dt_to and dt_from > dt_to:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Rango de fechas inválido: date_from ({date_from}) no puede ser posterior a date_to ({date_to})."
             )
 
@@ -645,7 +645,7 @@ async def get_agents_comparison(
     except Exception as e:
         logger.exception("Failed to retrieve Analytics agents comparison")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to load agents comparison: {str(e)}"
         )
 
@@ -697,7 +697,7 @@ async def get_items_evolution(
     """
     if context.normalized_role == InternalRole.AGENT:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=http_status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: Se requiere rol de nivel superior."
         )
     t_start = time.perf_counter()
@@ -721,7 +721,7 @@ async def get_items_evolution(
             bucket_interval = bucket.strip().lower()
         if dt_from and dt_to and dt_from > dt_to:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Rango de fechas inválido: date_from ({date_from}) no puede ser posterior a date_to ({date_to})."
             )
 
@@ -916,7 +916,7 @@ async def get_items_evolution(
     except Exception as e:
         logger.exception("Failed to retrieve Analytics items evolution timeline")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to load items evolution: {str(e)}"
         )
 
@@ -1147,6 +1147,6 @@ async def get_filter_options(
     except Exception as e:
         logger.exception("Failed to retrieve filter options")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to load filter options: {str(e)}"
         )
