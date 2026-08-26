@@ -908,11 +908,7 @@ class MassEvaluationService:
                 if not run:
                     logger.error("Run ID %d not found in background task", run_id)
                     return
-                    
-                effective_filters_snapshot = dict(run.effective_filters or {})
-                run.heartbeat_at = datetime.now(timezone.utc)
-                await db.commit()
-                    
+
                 job_stmt = select(MassEvaluationJob).where(MassEvaluationJob.job_id == job_id)
                 job_res = await db.execute(job_stmt)
                 job = job_res.scalars().first()
@@ -924,20 +920,38 @@ class MassEvaluationService:
                     await db.commit()
                     return
 
-                # 1. Resolve and extract ALL parameters to local variables BEFORE any commits.
-                # This completely prevents any lazy-loading/expiration/greenlet errors.
-                # Snapshot ALL scalar job fields BEFORE any commit/await that would expire the ORM object.
-                # Accessing job.xxx after a db.commit() triggers a lazy-load outside an async greenlet
-                # → MissingGreenlet error. Keep all reads here, never read job.xxx after this block.
+                # 1. Resolve and snapshot ALL scalar parameters from run and job to local variables
+                # IMMEDIATELY BEFORE ANY COMMITS.
+                # This completely prevents any lazy-loading/expiration/MissingGreenlet errors,
+                # because any subsequent commit() expires ORM instances.
+                effective_filters_snapshot = dict(run.effective_filters or {})
+                run_execution_source = run.execution_source
+
                 prompt_id = job.prompt_id
                 prompt_name = job.prompt_name
                 prompt_version_id = job.prompt_version_id
                 prompt_version_name = job.prompt_version_name
                 prompt_version_label = job.prompt_version_label
-                company_id = job.company_id  # FIX: snapshot here to avoid MissingGreenlet after commits
-                execution_source = run.execution_source or job.execution_source or "on_demand"
+                company_id = job.company_id
+                job_execution_source = job.execution_source
                 duration_min_seconds = job.duration_min_seconds
                 duration_max_seconds = job.duration_max_seconds
+                direction = job.direction
+                only_with_recording = job.only_with_recording
+                max_calls = job.max_calls
+                timezone_name = job.timezone
+                schedule_enabled = job.schedule_enabled
+                schedule_type = job.schedule_type
+                schedule_time = job.schedule_time
+                schedule_day_of_week = job.schedule_day_of_week
+                schedule_day_of_month = job.schedule_day_of_month
+                schedule_cron = job.schedule_cron
+
+                execution_source = run_execution_source or job_execution_source or "on_demand"
+
+                # Update initial heartbeat and commit
+                run.heartbeat_at = datetime.now(timezone.utc)
+                await db.commit()
                 
                 # Automation-only minimum duration pre-filter threshold
                 eff_duration_min_seconds = duration_min_seconds
@@ -946,17 +960,6 @@ class MassEvaluationService:
                     auto_min = get_settings().automation_min_duration_seconds
                     if eff_duration_min_seconds is None or eff_duration_min_seconds < auto_min:
                         eff_duration_min_seconds = auto_min
-
-                direction = job.direction
-                only_with_recording = job.only_with_recording
-                max_calls = job.max_calls
-                timezone_name = job.timezone
-                schedule_enabled = job.schedule_enabled
-                schedule_type = job.schedule_type
-                schedule_time = job.schedule_time          # FIX: snapshot – used in calculate_next_run
-                schedule_day_of_week = job.schedule_day_of_week    # FIX: snapshot
-                schedule_day_of_month = job.schedule_day_of_month  # FIX: snapshot
-                schedule_cron = job.schedule_cron
 
                 # Resolve prompt snapshot content
                 if prompt_version_id:
@@ -1168,8 +1171,7 @@ class MassEvaluationService:
                     }
                     
                     calls = await hs_service.search_calls_for_mass_evaluation(search_filters)
-                    run.calls_found = len(calls)
-                    
+
                     # 3. Filter duplicates within the same execution and against DB completed calls
                     max_calls_val = filters_payload.get("max_calls")
                     if max_calls_val is None or max_calls_val <= 0:
@@ -1208,8 +1210,15 @@ class MassEvaluationService:
                     skipped_completed_count = len(unique_calls) - len(new_candidate_calls)
 
                     selected_calls = new_candidate_calls[:max_calls_val]
-                    run.calls_selected = len(selected_calls)
-                    run.calls_skipped = skipped_completed_count
+
+                    # Refetch run freshly to avoid ORM expiration & MissingGreenlet
+                    fresh_run_stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == run_id)
+                    fresh_run_res = await db.execute(fresh_run_stmt)
+                    fresh_run_obj = fresh_run_res.scalars().first()
+                    if fresh_run_obj:
+                        fresh_run_obj.calls_found = len(calls)
+                        fresh_run_obj.calls_selected = len(selected_calls)
+                        fresh_run_obj.calls_skipped = skipped_completed_count
                     await db.commit()
                 
                 calls_analyzed = 0
