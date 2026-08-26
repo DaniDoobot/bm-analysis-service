@@ -25,11 +25,13 @@ from app.models.mass_evaluations import MassEvaluationResult
 from app.models.services import Service
 from app.routers.analytics import get_agents_comparison, get_items_evolution
 from fastapi import HTTPException, status as http_status
+from app.utils.cache import analytics_cache
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class TestAnalyticsStatusRegression(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        analytics_cache.clear()
         self.engine = get_engine()
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)

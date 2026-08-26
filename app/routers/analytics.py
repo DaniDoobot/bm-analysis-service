@@ -23,11 +23,13 @@ from app.schemas.analytics import (
     EvolutionPoint,
     ItemEvolutionSeries,
 )
+import json
 from app.services.dashboard_service import resolve_date_range, extract_score_from_mass
 from app.utils.hubspot_owners import resolve_owner_name
 from app.utils.normalizers import normalize_typology, normalize_direction, normalize_status
 from app.utils.cache import analytics_cache
 from app.utils.service_resolvers import resolve_service_id
+from app.utils.item_score_filters import parse_item_score_filters_detailed, build_item_filters_sql
 
 def _format_int_list(lst) -> str:
     if not lst:
@@ -386,6 +388,10 @@ async def get_agents_comparison(
     avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
     status: Annotated[str | None, Query(description="Filter by evaluation status: completed | failed | all")] = None,
     result_status: Annotated[str | None, Query(description="Alias for status")] = None,
+    item_filters: Annotated[str | None, Query(description="JSON url-encoded item score/boolean filters")] = None,
+    criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
 ):
     """
     Retrieve agents performance comparison breakdown.
@@ -413,6 +419,11 @@ async def get_agents_comparison(
         raw_status = status or result_status
         norm_status = normalize_status(raw_status)
 
+        effective_item_filters = item_filters or criterion_filters or score_filters or item_score_filters
+        parsed_item_filters = parse_item_score_filters_detailed(effective_item_filters)
+        active_filters = parsed_item_filters.get("active_filters", [])
+        stable_item_filters_key = json.dumps(active_filters, sort_keys=True)
+
         # 1. Resolve timeframe and validate
         dt_from, dt_to, _ = resolve_date_range(date_from, date_to, period=None, default_period="30d")
         if dt_from and dt_to and dt_from > dt_to:
@@ -426,7 +437,7 @@ async def get_agents_comparison(
         item_req_keys = parse_list_param(item_keys) + parse_list_param(item_keys_bracket)
         cache_key = (
             f"agents_comp:{context.company_id}:{context.normalized_role}:{eff_service_id}:{eff_service_key}:"
-            f"{date_from}:{date_to}:{sorted(owner_ids)}:{sorted(item_req_keys)}:{norm_t}:{norm_d}:"
+            f"{date_from}:{date_to}:{sorted(owner_ids)}:{sorted(item_req_keys)}:{stable_item_filters_key}:{norm_t}:{norm_d}:"
             f"{duration_min_seconds}:{duration_max_seconds}:{avg_score_min}:{avg_score_max}:{norm_status}"
         )
 
@@ -527,6 +538,11 @@ async def get_agents_comparison(
                 if owner_ids:
                     stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(owner_ids))
 
+            if active_filters:
+                sql_filter_conds = build_item_filters_sql(active_filters)
+                for cond in sql_filter_conds:
+                    stmt = stmt.where(cond)
+
             t_db_start = time.perf_counter()
             res = await db.execute(stmt)
             results = res.all()
@@ -535,19 +551,22 @@ async def get_agents_comparison(
             analysis_ids = [r.mass_analysis_id for r in results]
             criteria_by_analysis = {}
             if analysis_ids:
-                stmt_crit = select(
-                    MassEvaluationCriterionResult.mass_analysis_id,
-                    MassEvaluationCriterionResult.criterion_key,
-                    MassEvaluationCriterionResult.numeric_value,
-                    MassEvaluationCriterionResult.boolean_value,
-                    MassEvaluationCriterionResult.percentage_value
-                ).where(
-                    MassEvaluationCriterionResult.mass_analysis_id.in_(analysis_ids),
-                    MassEvaluationCriterionResult.is_applicable == True
-                )
-                res_crit = await db.execute(stmt_crit)
-                for c in res_crit.all():
-                    criteria_by_analysis.setdefault(c.mass_analysis_id, []).append(c)
+                chunk_size = 1000
+                for i in range(0, len(analysis_ids), chunk_size):
+                    chunk = analysis_ids[i:i + chunk_size]
+                    stmt_crit = select(
+                        MassEvaluationCriterionResult.mass_analysis_id,
+                        MassEvaluationCriterionResult.criterion_key,
+                        MassEvaluationCriterionResult.numeric_value,
+                        MassEvaluationCriterionResult.boolean_value,
+                        MassEvaluationCriterionResult.percentage_value
+                    ).where(
+                        MassEvaluationCriterionResult.mass_analysis_id.in_(chunk),
+                        MassEvaluationCriterionResult.is_applicable == True
+                    )
+                    res_crit = await db.execute(stmt_crit)
+                    for c in res_crit.all():
+                        criteria_by_analysis.setdefault(c.mass_analysis_id, []).append(c)
 
             available_catalog = await get_available_agents(db, context=context, service_id=eff_service_id)
             cat_by_oid = {a.hubspot_owner_id: a for a in available_catalog}
@@ -690,6 +709,10 @@ async def get_items_evolution(
     avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
     status: Annotated[str | None, Query(description="Filter by evaluation status: completed | failed | all")] = None,
     result_status: Annotated[str | None, Query(description="Alias for status")] = None,
+    item_filters: Annotated[str | None, Query(description="JSON url-encoded item score/boolean filters")] = None,
+    criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
 ):
     """
     Retrieve chronological evolution timeline for chosen analytics metrics.
@@ -716,6 +739,11 @@ async def get_items_evolution(
         raw_status = status or result_status
         norm_status = normalize_status(raw_status)
 
+        effective_item_filters = item_filters or criterion_filters or score_filters or item_score_filters
+        parsed_item_filters = parse_item_score_filters_detailed(effective_item_filters)
+        active_filters = parsed_item_filters.get("active_filters", [])
+        stable_item_filters_key = json.dumps(active_filters, sort_keys=True)
+
         dt_from, dt_to, bucket_interval = resolve_date_range(date_from, date_to, period=None, default_period="30d")
         if bucket and bucket.strip().lower() in ("hour", "day", "week"):
             bucket_interval = bucket.strip().lower()
@@ -729,7 +757,7 @@ async def get_items_evolution(
         item_req_keys = parse_list_param(item_keys) + parse_list_param(item_keys_bracket)
         cache_key = (
             f"items_evo:{context.company_id}:{context.normalized_role}:{eff_service_id}:{eff_service_key}:"
-            f"{date_from}:{date_to}:{sorted(owner_ids)}:{sorted(item_req_keys)}:{bucket_interval}:{norm_t}:{norm_d}:"
+            f"{date_from}:{date_to}:{sorted(owner_ids)}:{sorted(item_req_keys)}:{bucket_interval}:{stable_item_filters_key}:{norm_t}:{norm_d}:"
             f"{duration_min_seconds}:{duration_max_seconds}:{avg_score_min}:{avg_score_max}:{norm_status}"
         )
 
@@ -829,25 +857,33 @@ async def get_items_evolution(
                 if owner_ids:
                     stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(owner_ids))
 
+            if active_filters:
+                sql_filter_conds = build_item_filters_sql(active_filters)
+                for cond in sql_filter_conds:
+                    stmt = stmt.where(cond)
+
             res = await db.execute(stmt)
             results = res.all()
 
             analysis_ids = [r.mass_analysis_id for r in results]
             criteria_by_analysis = {}
             if analysis_ids:
-                stmt_crit = select(
-                    MassEvaluationCriterionResult.mass_analysis_id,
-                    MassEvaluationCriterionResult.criterion_key,
-                    MassEvaluationCriterionResult.numeric_value,
-                    MassEvaluationCriterionResult.boolean_value,
-                    MassEvaluationCriterionResult.percentage_value
-                ).where(
-                    MassEvaluationCriterionResult.mass_analysis_id.in_(analysis_ids),
-                    MassEvaluationCriterionResult.is_applicable == True
-                )
-                res_crit = await db.execute(stmt_crit)
-                for c in res_crit.all():
-                    criteria_by_analysis.setdefault(c.mass_analysis_id, []).append(c)
+                chunk_size = 1000
+                for i in range(0, len(analysis_ids), chunk_size):
+                    chunk = analysis_ids[i:i + chunk_size]
+                    stmt_crit = select(
+                        MassEvaluationCriterionResult.mass_analysis_id,
+                        MassEvaluationCriterionResult.criterion_key,
+                        MassEvaluationCriterionResult.numeric_value,
+                        MassEvaluationCriterionResult.boolean_value,
+                        MassEvaluationCriterionResult.percentage_value
+                    ).where(
+                        MassEvaluationCriterionResult.mass_analysis_id.in_(chunk),
+                        MassEvaluationCriterionResult.is_applicable == True
+                    )
+                    res_crit = await db.execute(stmt_crit)
+                    for c in res_crit.all():
+                        criteria_by_analysis.setdefault(c.mass_analysis_id, []).append(c)
 
             buckets_map: dict[str, list[Any]] = {}
             for r in results:
