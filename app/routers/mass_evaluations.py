@@ -778,7 +778,7 @@ async def get_my_analysis_results(
             duration_max_seconds=eff_dur_max,
             direction=norm_d,
             company_ids=None if context.is_super_admin else context.allowed_company_ids,
-            service_ids=context.allowed_service_ids,
+            service_ids=None if context.normalized_role == InternalRole.AGENT else context.allowed_service_ids,
             allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None,
             status=eff_status,
             item_filters=effective_item_filters,
@@ -808,7 +808,7 @@ async def get_my_analysis_results(
             duration_max_seconds=eff_dur_max,
             direction=norm_d,
             company_ids=None if context.is_super_admin else context.allowed_company_ids,
-            service_ids=context.allowed_service_ids,
+            service_ids=None if context.normalized_role == InternalRole.AGENT else context.allowed_service_ids,
             allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None,
             status=eff_status,
             item_filters=effective_item_filters,
@@ -1100,19 +1100,27 @@ async def get_result(
     if not context.is_super_admin:
         if result.company_id not in context.allowed_company_ids:
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
+                status_code=http_status.HTTP_403_FORBIDDEN,
                 detail="Acceso denegado: este resultado pertenece a otra empresa."
             )
-        if context.allowed_service_ids is not None and result.service_id not in context.allowed_service_ids:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Acceso denegado: este resultado pertenece a un servicio no asignado."
-            )
-        if context.allowed_agent_ids is not None and result.hubspot_owner_id not in context.allowed_agent_ids:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Acceso denegado: no tienes permisos sobre el agente de este resultado."
-            )
+        if context.normalized_role == InternalRole.AGENT:
+            agent_owner = context.allowed_agent_ids[0] if context.allowed_agent_ids else None
+            if not agent_owner or result.hubspot_owner_id != agent_owner:
+                raise HTTPException(
+                    status_code=http_status.HTTP_403_FORBIDDEN,
+                    detail="No tienes permiso para consultar este análisis."
+                )
+        else:
+            if context.allowed_service_ids is not None and result.service_id not in context.allowed_service_ids:
+                raise HTTPException(
+                    status_code=http_status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: este resultado pertenece a un servicio no asignado."
+                )
+            if context.allowed_agent_ids is not None and result.hubspot_owner_id not in context.allowed_agent_ids:
+                raise HTTPException(
+                    status_code=http_status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: no tienes permisos sobre el agente de este resultado."
+                )
 
     d = MassEvaluationResultResponse.model_validate(result)
     d.items_visual = build_items_visual(result.items_json)

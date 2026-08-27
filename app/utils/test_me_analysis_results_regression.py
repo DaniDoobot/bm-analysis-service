@@ -25,7 +25,7 @@ SQLiteTypeCompiler.visit_JSONB = lambda self, type_, **kw: "JSON"
 from app.db import Base, get_engine
 from app.models.mass_evaluations import MassEvaluationResult, MassEvaluationCriterionResult
 from app.models.services import Service
-from app.routers.mass_evaluations import get_my_analysis_results
+from app.routers.mass_evaluations import get_my_analysis_results, get_result
 from app.core.tenant_context import TenantContext
 from app.core.roles import InternalRole
 from app.utils.cache import analytics_cache
@@ -38,11 +38,15 @@ class TestMeAnalysisResultsRegression(unittest.IsolatedAsyncioTestCase):
         analytics_cache.clear()
         self.engine = get_engine()
         async with self.engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
             await conn.run_sync(Base.metadata.create_all)
 
         # Seed data
         async with AsyncSession(self.engine) as db:
+            await db.execute(MassEvaluationCriterionResult.__table__.delete())
+            await db.execute(MassEvaluationResult.__table__.delete())
+            await db.execute(Service.__table__.delete())
+            await db.commit()
+
             service = Service(
                 service_id=1,
                 service_key="front",
@@ -94,7 +98,27 @@ class TestMeAnalysisResultsRegression(unittest.IsolatedAsyncioTestCase):
                 hubspot_owner_id="owner_2", agent_name="Agent Two",
                 call_timestamp=now, evaluacion_global=8.0, status="completed", is_evaluable=True
             ))
+
+            # Company 2 - 1 call (owner_1 in another company)
+            db.add(MassEvaluationResult(
+                mass_analysis_id=5, run_id=1, job_id=1, prompt_id=1, prompt_snapshot="Snapshot",
+                call_id="c5", company_id=2, service_id=2, service_key="other",
+                hubspot_owner_id="owner_1", agent_name="Agent One",
+                call_timestamp=now, evaluacion_global=8.0, status="completed", is_evaluable=True
+            ))
             await db.commit()
+
+        self.admin_context = TenantContext(
+            user_id=1,
+            company_id=1,
+            role="admin",
+            raw_role="admin",
+            normalized_role=InternalRole.SUPER_ADMIN,
+            is_super_admin=True,
+            allowed_company_ids=[1, 2],
+            allowed_service_ids=None,
+            allowed_agent_ids=None,
+        )
 
         self.agent1_context = TenantContext(
             user_id=101,
@@ -104,7 +128,7 @@ class TestMeAnalysisResultsRegression(unittest.IsolatedAsyncioTestCase):
             normalized_role=InternalRole.AGENT,
             is_super_admin=False,
             allowed_company_ids=[1],
-            allowed_service_ids=None,
+            allowed_service_ids=[],  # Typical for agent without explicit team/service assignments
             allowed_agent_ids=["owner_1"],
         )
 
@@ -119,11 +143,6 @@ class TestMeAnalysisResultsRegression(unittest.IsolatedAsyncioTestCase):
             allowed_service_ids=None,
             allowed_agent_ids=["owner_empty"],
         )
-
-    async def asyncTearDown(self):
-        async with self.engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
-        await self.engine.dispose()
 
     async def test_01_no_status_does_not_throw_name_error(self):
         """Regression test for NameError: result_status is not defined when no status is provided."""
@@ -247,6 +266,46 @@ class TestMeAnalysisResultsRegression(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(res.total, 1)
             self.assertEqual(res.items[0].call_id, "c1")
+
+    async def test_11_admin_opens_any_evaluation_returns_200(self):
+        """Admin can open any evaluation detail in their allowed companies."""
+        async with AsyncSession(self.engine) as db:
+            detail = await get_result(mass_analysis_id=1, context=self.admin_context, db=db)
+            self.assertEqual(detail.mass_analysis_id, 1)
+            self.assertEqual(detail.call_id, "c1")
+            self.assertEqual(detail.prompt_snapshot, "Snapshot")
+
+    async def test_12_agent_opens_own_evaluation_returns_200(self):
+        """Agent can open their own evaluation detail (even with allowed_service_ids=[])."""
+        async with AsyncSession(self.engine) as db:
+            detail = await get_result(mass_analysis_id=1, context=self.agent1_context, db=db)
+            self.assertEqual(detail.mass_analysis_id, 1)
+            self.assertEqual(detail.call_id, "c1")
+            self.assertEqual(detail.hubspot_owner_id, "owner_1")
+            self.assertEqual(detail.prompt_snapshot, "Snapshot")
+
+    async def test_13_agent_opens_other_agent_evaluation_returns_403(self):
+        """Agent receives 403 when trying to open another agent's evaluation."""
+        async with AsyncSession(self.engine) as db:
+            with self.assertRaises(HTTPException) as ctx:
+                await get_result(mass_analysis_id=4, context=self.agent1_context, db=db)
+            self.assertEqual(ctx.exception.status_code, http_status.HTTP_403_FORBIDDEN)
+            self.assertIn("No tienes permiso para consultar este análisis", ctx.exception.detail)
+
+    async def test_14_agent_opens_other_company_evaluation_returns_403(self):
+        """Agent receives 403 when trying to open evaluation belonging to another company."""
+        async with AsyncSession(self.engine) as db:
+            with self.assertRaises(HTTPException) as ctx:
+                await get_result(mass_analysis_id=5, context=self.agent1_context, db=db)
+            self.assertEqual(ctx.exception.status_code, http_status.HTTP_403_FORBIDDEN)
+            self.assertIn("otra empresa", ctx.exception.detail)
+
+    async def test_15_nonexistent_evaluation_returns_404(self):
+        """Requesting non-existent mass_analysis_id returns 404."""
+        async with AsyncSession(self.engine) as db:
+            with self.assertRaises(HTTPException) as ctx:
+                await get_result(mass_analysis_id=99999, context=self.agent1_context, db=db)
+            self.assertEqual(ctx.exception.status_code, http_status.HTTP_404_NOT_FOUND)
 
 
 if __name__ == "__main__":
