@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Any, Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status, status as http_status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -624,40 +624,56 @@ def resolve_agent_owner_id(user: User) -> str | None:
 @router.get("/mass-evaluations/results/my-results", response_model=PagedMassEvaluationResultResponse)
 async def get_my_analysis_results(
     context: TenantContext = Depends(get_tenant_context),
-    run_id: int | None = Query(None),
-    job_id: int | None = Query(None),
-    automation_id: int | None = Query(None, description="Filter by automation ID"),
-    agent_owner_id: str | None = Query(None, description="For backwards compatibility, ignored for agents"),
-    call_id: str | None = Query(None),
-    date_from: datetime | None = Query(None),
-    date_to: datetime | None = Query(None, description="Inclusive upper-bound on call_timestamp. 'YYYY-MM-DD' includes the entire day."),
-    created_from: datetime | None = Query(None, description="Filter by result creation date from"),
-    created_to: datetime | None = Query(None, description="Inclusive upper-bound on created_at. 'YYYY-MM-DD' includes the entire day."),
-    execution_source: str | None = Query(None, description="on_demand | automation"),
-    limit: int = Query(100, ge=1, le=1000),
-    offset: int = Query(0, ge=0),
-    global_score_min: float | None = Query(None, ge=0.0, le=10.0),
-    global_score_max: float | None = Query(None, ge=0.0, le=10.0),
-    service_id: int | None = Query(None, description="Filter by service ID"),
-    service_key: str | None = Query(None, description="Filter by service key"),
-    service: str | None = Query(None, description="Filter by service ID, key or slug"),
-    typology_key: str | None = Query(None, description="Filter by typology key"),
-    typology_ids: str | None = Query(None, description="Comma-separated typology IDs to filter"),
-    direction: str | None = Query(None, description="all | inbound | outbound"),
-    call_direction: str | None = Query(None, description="Filter by call direction"),
-    inbound_outbound: str | None = Query(None, description="Filter by inbound/outbound"),
-    duration_min_seconds: int | None = Query(None, description="Min duration in seconds"),
-    duration_max_seconds: int | None = Query(None, description="Max duration in seconds"),
-    status: str | None = Query(None, description="Filter by result status: completed | failed | all"),
-    item_filters: str | None = Query(None, description="JSON url-encoded item score/boolean filters"),
-    criterion_filters: str | None = Query(None, description="Alias for item_filters"),
-    score_filters: str | None = Query(None, description="Alias for item_filters"),
-    item_score_filters: str | None = Query(None, description="Alias for item_filters"),
-    sort_by: str | None = Query(None, description="Field to sort by: date, agent, call_id, duration, score, typology, direction, status, service, execution_source"),
-    sort_order: str | None = Query(None, description="Sort direction: asc or desc (default: desc)"),
-    order_by: str | None = Query(None, description="Alias for sort_by"),
-    order: str | None = Query(None, description="Alias for sort_order"),
-    sort_direction: str | None = Query(None, description="Alias for sort_order"),
+    run_id: Annotated[int | None, Query()] = None,
+    job_id: Annotated[int | None, Query()] = None,
+    automation_id: Annotated[int | None, Query(description="Filter by automation ID")] = None,
+    agent_owner_id: Annotated[str | None, Query(description="For backwards compatibility, ignored for agents")] = None,
+    call_id: Annotated[str | None, Query()] = None,
+    date_from: Annotated[str | datetime | None, Query()] = None,
+    date_to: Annotated[str | datetime | None, Query(description="Inclusive upper-bound on call_timestamp.")] = None,
+    period: Annotated[str | None, Query(description="24h | 7d | 30d | 90d")] = None,
+    created_from: Annotated[datetime | None, Query(description="Filter by result creation date from")] = None,
+    created_to: Annotated[datetime | None, Query(description="Inclusive upper-bound on created_at.")] = None,
+    execution_source: Annotated[str | None, Query(description="on_demand | automation")] = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    global_score_min: Annotated[float | None, Query(ge=0.0, le=10.0)] = None,
+    eval_min: Annotated[float | None, Query(ge=0.0, le=10.0, description="Alias for global_score_min")] = None,
+    score_min: Annotated[float | None, Query(ge=0.0, le=10.0, description="Alias for global_score_min")] = None,
+    global_score_max: Annotated[float | None, Query(ge=0.0, le=10.0)] = None,
+    eval_max: Annotated[float | None, Query(ge=0.0, le=10.0, description="Alias for global_score_max")] = None,
+    score_max: Annotated[float | None, Query(ge=0.0, le=10.0, description="Alias for global_score_max")] = None,
+    service_id: Annotated[int | None, Query(description="Filter by service ID")] = None,
+    service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
+    service: Annotated[str | None, Query(description="Filter by service ID, key or slug")] = None,
+    typology_key: Annotated[str | None, Query(description="Filter by typology key")] = None,
+    typology: Annotated[str | None, Query(description="Alias for typology_key")] = None,
+    tipo_llamada: Annotated[str | None, Query(description="Alias for typology_key")] = None,
+    call_type: Annotated[str | None, Query(description="Alias for typology_key")] = None,
+    selected_typology: Annotated[str | None, Query(description="Alias for typology_key")] = None,
+    typologies: Annotated[str | None, Query(description="Alias for typology_key")] = None,
+    typology_ids: Annotated[str | None, Query(description="Comma-separated typology IDs to filter")] = None,
+    direction: Annotated[str | None, Query(description="all | inbound | outbound")] = None,
+    call_direction: Annotated[str | None, Query(description="Filter by call direction")] = None,
+    inbound_outbound: Annotated[str | None, Query(description="Filter by inbound/outbound")] = None,
+    duration_min_seconds: Annotated[int | None, Query(description="Min duration in seconds")] = None,
+    min_duration: Annotated[int | None, Query(description="Alias for duration_min_seconds")] = None,
+    min_duration_seconds: Annotated[int | None, Query(description="Alias for duration_min_seconds")] = None,
+    duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
+    max_duration: Annotated[int | None, Query(description="Alias for duration_max_seconds")] = None,
+    max_duration_seconds: Annotated[int | None, Query(description="Alias for duration_max_seconds")] = None,
+    status: Annotated[str | None, Query(description="Filter by result status: completed | failed | all")] = None,
+    result_status: Annotated[str | None, Query(description="Alias for status")] = None,
+    item_filters: Annotated[str | None, Query(description="JSON url-encoded item score/boolean filters")] = None,
+    criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    sort_by: Annotated[str | None, Query(description="Field to sort by: date, agent, call_id, duration, score, typology, direction, status, service, execution_source")] = None,
+    sort_order: Annotated[str | None, Query(description="Sort direction: asc or desc (default: desc)")] = None,
+    order_by: Annotated[str | None, Query(description="Alias for sort_by")] = None,
+    order: Annotated[str | None, Query(description="Alias for sort_order")] = None,
+    sort_direction: Annotated[str | None, Query(description="Alias for sort_order")] = None,
+    include_detail: Annotated[bool, Query(description="Include heavy prompt_snapshot, result_json, items_json if True")] = False,
     db: AsyncSession = Depends(get_db)
 ):
     """List detailed mass analysis call results for the logged-in agent with filters."""
@@ -679,23 +695,34 @@ async def get_my_analysis_results(
         resolved_id, resolved_key = await resolve_service_id(db, service_param=service)
         service_id = resolved_id or service_id
         service_key = resolved_key or service_key
-    # Fix inclusive end-of-day: FastAPI parses 'YYYY-MM-DD' as midnight → adjust
-    date_to = _fix_date_to_end_of_day(date_to)
-    created_to = _fix_date_to_end_of_day(created_to)
+
+    # Consolidate alias inputs
+    raw_typology = typology_key or typology or tipo_llamada or call_type or selected_typology or typologies
+    norm_typology_key = normalize_typology(raw_typology)
     raw_direction = direction or call_direction or inbound_outbound
     norm_d = normalize_direction(raw_direction)
+
+    eff_dur_min = duration_min_seconds if duration_min_seconds is not None else (min_duration if min_duration is not None else min_duration_seconds)
+    eff_dur_max = duration_max_seconds if duration_max_seconds is not None else (max_duration if max_duration is not None else max_duration_seconds)
+
+    eff_score_min = global_score_min if global_score_min is not None else (eval_min if eval_min is not None else score_min)
+    eff_score_max = global_score_max if global_score_max is not None else (eval_max if eval_max is not None else score_max)
+
+    # Timezone & date handling: convert to Europe/Madrid local bounds in UTC
+    dt_from, dt_to = parse_madrid_date_bounds(date_from, date_to, period)
+    created_to = _fix_date_to_end_of_day(created_to)
 
     # Enforce agent scope
     if context.normalized_role == InternalRole.AGENT:
         effective_owner_id = context.allowed_agent_ids[0] if context.allowed_agent_ids else None
         if not effective_owner_id:
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
+                status_code=http_status.HTTP_403_FORBIDDEN,
                 detail="No hay agente asociado a este usuario."
             )
         if agent_owner_id and agent_owner_id != effective_owner_id:
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
+                status_code=http_status.HTTP_403_FORBIDDEN,
                 detail="No tienes permiso para ver resultados de este agente."
             )
     else:
@@ -703,14 +730,14 @@ async def get_my_analysis_results(
         if effective_owner_id and context.allowed_agent_ids is not None:
             if effective_owner_id not in context.allowed_agent_ids:
                 raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
+                    status_code=http_status.HTTP_403_FORBIDDEN,
                     detail="No tienes permiso para ver resultados de este agente."
                 )
 
-    if global_score_min is not None and global_score_max is not None:
-        if global_score_min > global_score_max:
+    if eff_score_min is not None and eff_score_max is not None:
+        if eff_score_min > eff_score_max:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="global_score_min cannot be greater than global_score_max",
             )
 
@@ -722,7 +749,7 @@ async def get_my_analysis_results(
     if service_id is not None and context.allowed_service_ids is not None:
         if service_id not in context.allowed_service_ids:
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
+                status_code=http_status.HTTP_403_FORBIDDEN,
                 detail="No tienes acceso al servicio seleccionado."
             )
 
@@ -736,19 +763,19 @@ async def get_my_analysis_results(
             job_id=job_id,
             agent_owner_id=effective_owner_id,
             call_id=call_id,
-            date_from=date_from,
-            date_to=date_to,
+            date_from=dt_from,
+            date_to=dt_to,
             created_from=created_from,
             created_to=created_to,
             execution_source=execution_source,
-            global_score_min=global_score_min,
-            global_score_max=global_score_max,
+            global_score_min=eff_score_min,
+            global_score_max=eff_score_max,
             service_id=service_id,
             service_key=service_key,
-            typology_key=typology_key,
+            typology_key=norm_typology_key,
             typology_ids=typo_ids,
-            duration_min_seconds=duration_min_seconds,
-            duration_max_seconds=duration_max_seconds,
+            duration_min_seconds=eff_dur_min,
+            duration_max_seconds=eff_dur_max,
             direction=norm_d,
             company_ids=None if context.is_super_admin else context.allowed_company_ids,
             service_ids=context.allowed_service_ids,
@@ -764,21 +791,21 @@ async def get_my_analysis_results(
             job_id=job_id,
             agent_owner_id=effective_owner_id,
             call_id=call_id,
-            date_from=date_from,
-            date_to=date_to,
+            date_from=dt_from,
+            date_to=dt_to,
             created_from=created_from,
             created_to=created_to,
             execution_source=execution_source,
             limit=limit,
-            global_score_min=global_score_min,
-            global_score_max=global_score_max,
+            global_score_min=eff_score_min,
+            global_score_max=eff_score_max,
             service_id=service_id,
             service_key=service_key,
-            typology_key=typology_key,
+            typology_key=norm_typology_key,
             offset=offset,
             typology_ids=typo_ids,
-            duration_min_seconds=duration_min_seconds,
-            duration_max_seconds=duration_max_seconds,
+            duration_min_seconds=eff_dur_min,
+            duration_max_seconds=eff_dur_max,
             direction=norm_d,
             company_ids=None if context.is_super_admin else context.allowed_company_ids,
             service_ids=context.allowed_service_ids,
@@ -791,7 +818,10 @@ async def get_my_analysis_results(
         
         items_out = []
         for r in results:
-            d = MassEvaluationResultResponse.model_validate(r)
+            if include_detail:
+                d = MassEvaluationResultResponse.model_validate(r)
+            else:
+                d = MassEvaluationResultListItemResponse.model_validate(r)
             d.items_visual = build_items_visual(r.items_json)
             if d.execution_source is None:
                 d.execution_source = "on_demand"
