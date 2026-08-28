@@ -1099,12 +1099,8 @@ async def get_result(
 
     # Scoping validation
     if not context.is_super_admin:
-        if result.company_id not in context.allowed_company_ids:
-            raise HTTPException(
-                status_code=http_status.HTTP_403_FORBIDDEN,
-                detail="Acceso denegado: este resultado pertenece a otra empresa."
-            )
         if context.normalized_role == InternalRole.AGENT:
+            # 1. Owner check (mandatory & strict for AGENT)
             agent_owners = [str(a).strip() for a in context.allowed_agent_ids] if context.allowed_agent_ids else []
             res_owner = str(result.hubspot_owner_id).strip() if result.hubspot_owner_id is not None else None
             if not agent_owners or not res_owner or res_owner not in agent_owners:
@@ -1112,7 +1108,43 @@ async def get_result(
                     status_code=http_status.HTTP_403_FORBIDDEN,
                     detail="No tienes permiso para consultar este análisis."
                 )
+
+            # 2. Explicit company check (if present on result)
+            if result.company_id is not None and result.company_id not in context.allowed_company_ids:
+                raise HTTPException(
+                    status_code=http_status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: este resultado pertenece a otra empresa."
+                )
+
+            # 3. Implicit company check via service (when company_id is NULL)
+            if result.company_id is None and result.service_id is not None:
+                svc_stmt = select(Service.company_id).where(Service.service_id == result.service_id)
+                svc_res = await db.execute(svc_stmt)
+                svc_comp_id = svc_res.scalar()
+                if svc_comp_id is not None and svc_comp_id not in context.allowed_company_ids:
+                    raise HTTPException(
+                        status_code=http_status.HTTP_403_FORBIDDEN,
+                        detail="Acceso denegado: este resultado pertenece a un servicio de otra empresa."
+                    )
         else:
+            # Non-AGENT roles (Company Admin / Managers / Coordinators)
+            if result.company_id is not None:
+                if result.company_id not in context.allowed_company_ids:
+                    raise HTTPException(
+                        status_code=http_status.HTTP_403_FORBIDDEN,
+                        detail="Acceso denegado: este resultado pertenece a otra empresa."
+                    )
+            else:
+                if result.service_id is not None:
+                    svc_stmt = select(Service.company_id).where(Service.service_id == result.service_id)
+                    svc_res = await db.execute(svc_stmt)
+                    svc_comp_id = svc_res.scalar()
+                    if svc_comp_id is not None and svc_comp_id not in context.allowed_company_ids:
+                        raise HTTPException(
+                            status_code=http_status.HTTP_403_FORBIDDEN,
+                            detail="Acceso denegado: este resultado pertenece a un servicio de otra empresa."
+                        )
+
             if context.allowed_service_ids is not None and result.service_id not in context.allowed_service_ids:
                 raise HTTPException(
                     status_code=http_status.HTTP_403_FORBIDDEN,
