@@ -307,6 +307,32 @@ class TestMeAnalysisResultsRegression(unittest.IsolatedAsyncioTestCase):
                 await get_result(mass_analysis_id=99999, context=self.agent1_context, db=db)
             self.assertEqual(ctx.exception.status_code, http_status.HTTP_404_NOT_FOUND)
 
+    async def test_16_payload_integrity_and_data_protection(self):
+        """Detail payload contains all UI-required fields and url tampering is prevented."""
+        async with AsyncSession(self.engine) as db:
+            detail = await get_result(mass_analysis_id=1, context=self.agent1_context, db=db)
+            # Verify complete UI-required payload fields
+            self.assertEqual(detail.mass_analysis_id, 1)
+            self.assertEqual(detail.call_id, "c1")
+            self.assertEqual(detail.agent_name, "Agent One")
+            self.assertEqual(detail.hubspot_owner_id, "owner_1")
+            self.assertEqual(detail.company_id, 1)
+            self.assertEqual(detail.service_key, "front")
+            self.assertEqual(detail.status, "completed")
+            self.assertEqual(detail.global_score, 9.0)
+            self.assertIsNotNone(detail.items_visual)
+            self.assertEqual(detail.prompt_snapshot, "Snapshot")
+
+            # URL tampering attempt: agent modifying ID in request URL to access ID 4 (other agent)
+            with self.assertRaises(HTTPException) as ctx_other_agent:
+                await get_result(mass_analysis_id=4, context=self.agent1_context, db=db)
+            self.assertEqual(ctx_other_agent.exception.status_code, http_status.HTTP_403_FORBIDDEN)
+
+            # URL tampering attempt: agent modifying ID in request URL to access ID 5 (other company)
+            with self.assertRaises(HTTPException) as ctx_other_company:
+                await get_result(mass_analysis_id=5, context=self.agent1_context, db=db)
+            self.assertEqual(ctx_other_company.exception.status_code, http_status.HTTP_403_FORBIDDEN)
+
 
 if __name__ == "__main__":
     unittest.main()

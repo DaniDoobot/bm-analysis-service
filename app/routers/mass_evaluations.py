@@ -1082,6 +1082,7 @@ async def list_results(
 
 @router.get("/mass-evaluation-results/{mass_analysis_id}", response_model=MassEvaluationResultResponse)
 @router.get("/mass-evaluations/results/{mass_analysis_id}", response_model=MassEvaluationResultResponse)
+@router.get("/me/analysis-results/{mass_analysis_id}", response_model=MassEvaluationResultResponse)
 async def get_result(
     mass_analysis_id: int,
     context: TenantContext = Depends(get_tenant_context),
@@ -1104,8 +1105,9 @@ async def get_result(
                 detail="Acceso denegado: este resultado pertenece a otra empresa."
             )
         if context.normalized_role == InternalRole.AGENT:
-            agent_owner = context.allowed_agent_ids[0] if context.allowed_agent_ids else None
-            if not agent_owner or result.hubspot_owner_id != agent_owner:
+            agent_owners = [str(a).strip() for a in context.allowed_agent_ids] if context.allowed_agent_ids else []
+            res_owner = str(result.hubspot_owner_id).strip() if result.hubspot_owner_id is not None else None
+            if not agent_owners or not res_owner or res_owner not in agent_owners:
                 raise HTTPException(
                     status_code=http_status.HTTP_403_FORBIDDEN,
                     detail="No tienes permiso para consultar este análisis."
@@ -1116,11 +1118,14 @@ async def get_result(
                     status_code=http_status.HTTP_403_FORBIDDEN,
                     detail="Acceso denegado: este resultado pertenece a un servicio no asignado."
                 )
-            if context.allowed_agent_ids is not None and result.hubspot_owner_id not in context.allowed_agent_ids:
-                raise HTTPException(
-                    status_code=http_status.HTTP_403_FORBIDDEN,
-                    detail="Acceso denegado: no tienes permisos sobre el agente de este resultado."
-                )
+            if context.allowed_agent_ids is not None:
+                allowed_str_ids = [str(a).strip() for a in context.allowed_agent_ids]
+                res_owner = str(result.hubspot_owner_id).strip() if result.hubspot_owner_id is not None else None
+                if not res_owner or res_owner not in allowed_str_ids:
+                    raise HTTPException(
+                        status_code=http_status.HTTP_403_FORBIDDEN,
+                        detail="Acceso denegado: no tienes permisos sobre el agente de este resultado."
+                    )
 
     d = MassEvaluationResultResponse.model_validate(result)
     d.items_visual = build_items_visual(result.items_json)
