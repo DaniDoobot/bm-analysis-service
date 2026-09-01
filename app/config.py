@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     # ── HubSpot ───────────────────────────────────────────────────────────────
     hubspot_access_token: str = ""
     hubspot_portal_id: str = "140451581"
+    hubspot_ticket_pipeline: str = ""
+    hubspot_ticket_stage: str = ""
+    hubspot_tipo_de_rem: str = ""
+    hubspot_alarm_tickets_enabled: bool = False
+    hubspot_alarm_company_id: int = 1
 
     # ── Twilio ────────────────────────────────────────────────────────────────
     twilio_account_sid: str = ""

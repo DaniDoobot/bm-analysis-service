@@ -196,6 +196,13 @@ class MassEvaluationResult(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), server_default=func.now())
 
+    # HubSpot Alarm Ticket tracking & contact association
+    hubspot_contact_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hubspot_ticket_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hubspot_ticket_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hubspot_ticket_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    hubspot_ticket_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # Audit / Overwrite details
     last_evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -220,6 +227,9 @@ class MassEvaluationResult(Base):
         Index("idx_mass_eval_results_call_timestamp", "call_timestamp"),
         Index("idx_mass_eval_results_execution_source", "execution_source"),
         Index("idx_mass_eval_results_is_evaluable", "is_evaluable"),
+        Index("idx_mass_eval_results_contact_id", "hubspot_contact_id"),
+        Index("idx_mass_eval_results_ticket_status", "hubspot_ticket_status"),
+        Index("idx_mass_eval_results_ticket_id", "hubspot_ticket_id"),
     )
 
 

@@ -533,8 +533,13 @@ class MassEvaluationResultResponse(BaseModel):
     items_json: Any
     items_visual: list[dict[str, Any]] | None = None
     global_score: float | None = None
-    hubspot_metadata: dict[str, Any] | None
-    error_message: str | None
+    hubspot_metadata: dict[str, Any] | None = None
+    error_message: str | None = None
+    hubspot_contact_id: str | None = None
+    hubspot_ticket_id: str | None = None
+    hubspot_ticket_status: str | None = None
+    hubspot_ticket_created_at: datetime | None = None
+    hubspot_ticket_error: str | None = None
     created_at: datetime
 
     class Config:
@@ -724,6 +729,9 @@ class MassEvaluationResultListItemResponse(BaseModel):
     non_evaluable_reason: str | None = None
     items_visual: list[dict[str, Any]] | None = None
     global_score: float | None = None
+    hubspot_contact_id: str | None = None
+    hubspot_ticket_id: str | None = None
+    hubspot_ticket_status: str | None = None
     error_message: str | None = None
     created_at: datetime
 

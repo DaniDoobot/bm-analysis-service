@@ -1,6 +1,7 @@
 """Mass Evaluation Service for managing jobs, runs, and background analyses."""
 import asyncio
 import logging
+import re
 import sys
 import zoneinfo
 from datetime import datetime, time, timedelta, timezone
@@ -1260,6 +1261,7 @@ class MassEvaluationService:
                             defaults={
                                 "hs_object_id": call["hs_object_id"],
                                 "hubspot_owner_id": call["hubspot_owner_id"],
+                                "hubspot_contact_id": call.get("contact_id"),
                                 "call_timestamp": safe_parse_datetime(call["call_timestamp"]),
                                 "call_duration_seconds": call["call_duration_seconds"],
                                 "direction": call["direction"],
@@ -1310,6 +1312,10 @@ class MassEvaluationService:
                         continue
                         
                     # Process call analysis
+                    res_row = None
+                    call_success = False
+                    has_alarm = False
+                    alarma_feed = None
                     try:
                         twilio_service = TwilioService()
                         audio_bytes = await twilio_service.download_audio(recording_url)
@@ -1480,6 +1486,7 @@ class MassEvaluationService:
                                 "hs_object_id": call["hs_object_id"],
                                 "recording_url": recording_url,
                                 "hubspot_owner_id": owner_id,
+                                "hubspot_contact_id": call.get("contact_id"),
                                 "agent_name": resolved_agent,
                                 "call_timestamp": safe_parse_datetime(call["call_timestamp"]),
                                 "call_duration_seconds": call["call_duration_seconds"],
@@ -1542,9 +1549,16 @@ class MassEvaluationService:
                             )
                             db.add(crit_res)
                         
+                        # Check if Alarm was detected
+                        has_alarm, alarma_feed = MassEvaluationService._is_alarm_detected(items)
+                        
+                        call_success = True
                         calls_analyzed += 1
                         
                     except Exception as e_call:
+                        call_success = False
+                        has_alarm = False
+                        alarma_feed = None
                         import traceback
                         logger.warning(
                             "Call %s failed in mass evaluation job %d: %s\nStacktrace:\n%s", 
@@ -1561,6 +1575,7 @@ class MassEvaluationService:
                                 "hs_object_id": call["hs_object_id"],
                                 "recording_url": recording_url,
                                 "hubspot_owner_id": call["hubspot_owner_id"],
+                                "hubspot_contact_id": call.get("contact_id"),
                                 "call_timestamp": safe_parse_datetime(call["call_timestamp"]),
                                 "call_duration_seconds": call["call_duration_seconds"],
                                 "direction": call["direction"],
@@ -1619,6 +1634,28 @@ class MassEvaluationService:
 
                     # Commit per-call results to prevent loss of progress
                     await db.commit()
+
+                    # Trigger HubSpot Alarm Ticket creation if alarm was detected and call succeeded
+                    if call_success and is_eval is not False and has_alarm and res_row:
+                        try:
+                            await MassEvaluationService._process_alarm_hubspot_ticket(
+                                db=db,
+                                mass_analysis_id=res_row.mass_analysis_id,
+                                execution_source=execution_source,
+                                company_id=company_id,
+                                service_name=service_name,
+                                agent_name=resolved_agent,
+                                call_id=call_id,
+                                call_timestamp=safe_parse_datetime(call.get("call_timestamp")),
+                                typology_name=typology_name,
+                                direction=call.get("direction"),
+                                call_duration_seconds=call.get("call_duration_seconds"),
+                                evaluacion_global=eval_decimal,
+                                alarma_feed=alarma_feed,
+                                contact_id=call.get("contact_id"),
+                            )
+                        except Exception as e_alarm_outer:
+                            logger.error("[alarm_ticket] Unexpected error executing alarm ticket process: %s", e_alarm_outer)
 
                     # Periodic memory check every 10 calls
                     if (calls_analyzed + calls_skipped + calls_failed) % 10 == 0:
@@ -2059,6 +2096,260 @@ class MassEvaluationService:
         stmt = select(MassEvaluationResult).where(MassEvaluationResult.mass_analysis_id == mass_analysis_id)
         res = await db.execute(stmt)
         return res.scalars().first()
+
+    @staticmethod
+    def _is_alarm_detected(items: list[dict[str, Any]] | None) -> tuple[bool, str | None]:
+        """
+        Check if any criterion item represents an active alarm.
+        Checks criterion_key/output_key == 'alarma'.
+        Normalized boolean_value True or value True indicates an alarm.
+        Returns (has_alarm, alarma_feed).
+        """
+        if not items or not isinstance(items, list):
+            return False, None
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            crit_key = str(item.get("criterion_key") or item.get("output_key") or "").strip().lower()
+            if crit_key == "alarma":
+                bool_val = item.get("boolean_value")
+                val = item.get("value")
+                raw = item.get("raw_value")
+                is_true = bool_val is True or val is True or (isinstance(raw, str) and raw.strip().lower() in ("si", "sí", "true", "1"))
+                if is_true:
+                    feed = item.get("feed") or item.get("feedback")
+                    return True, str(feed).strip() if feed else None
+        return False, None
+
+    @staticmethod
+    async def _process_alarm_hubspot_ticket(
+        db: AsyncSession,
+        mass_analysis_id: int,
+        execution_source: str,
+        company_id: int | None,
+        service_name: str | None,
+        agent_name: str | None,
+        call_id: str,
+        call_timestamp: datetime | None,
+        typology_name: str | None,
+        direction: str | None,
+        call_duration_seconds: int | None,
+        evaluacion_global: Decimal | float | None,
+        alarma_feed: str | None,
+        contact_id: str | None = None,
+    ) -> None:
+        """
+        Idempotent, non-blocking creation of HubSpot REM Ticket upon Alarm detection.
+        Errors are logged and saved to the database without affecting the evaluation status.
+        """
+        from app.config import get_settings
+        settings = get_settings()
+
+        # 1. Feature flag check
+        if not getattr(settings, "hubspot_alarm_tickets_enabled", False):
+            return
+
+        # 2. Operational execution source check (strictly exclude Test Analysis)
+        if execution_source not in ("automation", "on_demand", "scheduled"):
+            logger.info("[alarm_ticket] Skipped: execution_source '%s' is not operational.", execution_source)
+            return
+
+        # 3. Company check
+        configured_company = getattr(settings, "hubspot_alarm_company_id", 1)
+        if company_id is not None and company_id != configured_company:
+            logger.info(
+                "[alarm_ticket] Skipped: company_id=%s does not match configured hubspot_alarm_company_id=%s",
+                company_id, configured_company
+            )
+            return
+
+        # 4. Check configuration completeness
+        pipeline = getattr(settings, "hubspot_ticket_pipeline", "") or ""
+        stage = getattr(settings, "hubspot_ticket_stage", "") or ""
+        tipo_de_rem = getattr(settings, "hubspot_tipo_de_rem", "") or ""
+        token = getattr(settings, "hubspot_access_token", "") or ""
+
+        if not (pipeline.strip() and stage.strip() and tipo_de_rem.strip() and token.strip()):
+            logger.warning(
+                "[alarm_ticket] Configuration incomplete (pipeline=%s, stage=%s, tipo_de_rem=%s, token_set=%s). Ticket creation skipped.",
+                bool(pipeline.strip()), bool(stage.strip()), bool(tipo_de_rem.strip()), bool(token.strip())
+            )
+            try:
+                stmt_upd = (
+                    update(MassEvaluationResult)
+                    .where(MassEvaluationResult.mass_analysis_id == mass_analysis_id)
+                    .values(
+                        hubspot_ticket_status="failed",
+                        hubspot_ticket_error="HubSpot Alarm Ticket configuration incomplete (missing pipeline, stage, tipo_de_rem or token)"
+                    )
+                )
+                await db.execute(stmt_upd)
+                await db.commit()
+            except Exception as e_cfg:
+                logger.warning("[alarm_ticket] Failed to record incomplete config in DB: %s", e_cfg)
+            return
+
+        # 5. Idempotency reservation (atomic transition to 'pending')
+        try:
+            stmt_sel = select(MassEvaluationResult).where(MassEvaluationResult.mass_analysis_id == mass_analysis_id)
+            res_sel = await db.execute(stmt_sel)
+            record = res_sel.scalars().first()
+            if not record:
+                return
+
+            if record.hubspot_ticket_id or record.hubspot_ticket_status == "created":
+                logger.info(
+                    "[alarm_ticket] Ticket already created (ID=%s) for mass_analysis_id=%d. Skipping duplicate.",
+                    record.hubspot_ticket_id, mass_analysis_id
+                )
+                return
+
+            if record.hubspot_ticket_status == "pending":
+                logger.info(
+                    "[alarm_ticket] Ticket creation already pending for mass_analysis_id=%d. Skipping concurrent attempt.",
+                    mass_analysis_id
+                )
+                return
+
+            record.hubspot_ticket_status = "pending"
+            record.hubspot_ticket_error = None
+            await db.commit()
+        except Exception as e_lock:
+            logger.warning("[alarm_ticket] Failed to reserve pending status: %s", e_lock)
+
+        # 6. Contact Resolution & Ticket Build
+        try:
+            hs_service = HubSpotService()
+
+            # Resolve effective contact_id:
+            # 1) Provided argument `contact_id`
+            # 2) Stored `record.hubspot_contact_id` in database
+            # 3) Live HubSpot call lookup fallback
+            effective_contact_id = contact_id or (record.hubspot_contact_id if record else None)
+            is_ambiguous_contact = False
+
+            if not effective_contact_id:
+                try:
+                    call_meta = await hs_service.get_call(call_id)
+                    resolved_cid = call_meta.get("contact_id")
+                    is_ambiguous_contact = bool(call_meta.get("is_contact_ambiguous"))
+                    if resolved_cid:
+                        effective_contact_id = str(resolved_cid)
+                        if record:
+                            record.hubspot_contact_id = effective_contact_id
+                            await db.commit()
+                except Exception as e_cid_lookup:
+                    logger.warning("[alarm_ticket] Fallback contact lookup failed for call %s: %s", call_id, e_cid_lookup)
+
+            # Strict guard: DO NOT create orphan tickets without associated contact or if contact is ambiguous
+            if not effective_contact_id:
+                if is_ambiguous_contact:
+                    err_msg = "Múltiples contactos asociados a la llamada en HubSpot sin paciente identificable de forma determinista"
+                    logger.warning(
+                        "[alarm_ticket] Ambiguous contacts for call %s in mass_analysis_id=%d. Ticket creation skipped.",
+                        call_id, mass_analysis_id
+                    )
+                else:
+                    err_msg = "No se encontró contacto asociado a la llamada en HubSpot para crear el Ticket"
+                    logger.warning(
+                        "[alarm_ticket] No associated Contact ID found for call %s in mass_analysis_id=%d. Ticket creation skipped without creating orphan ticket.",
+                        call_id, mass_analysis_id
+                    )
+
+                if record:
+                    record.hubspot_ticket_status = "failed"
+                    record.hubspot_ticket_error = err_msg
+                    await db.commit()
+                return
+
+            svc_label = service_name or "Front"
+            agt_label = agent_name or "Agente"
+            subject = "REM doobot speechFront"
+
+            dur_str = f"{call_duration_seconds}s"
+            if call_duration_seconds:
+                mins = call_duration_seconds // 60
+                secs = call_duration_seconds % 60
+                dur_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
+
+            dt_str = "Sin datos"
+            if call_timestamp:
+                try:
+                    madrid_tz = zoneinfo.ZoneInfo("Europe/Madrid")
+                    local_dt = call_timestamp.astimezone(madrid_tz) if call_timestamp.tzinfo else call_timestamp.replace(tzinfo=timezone.utc).astimezone(madrid_tz)
+                    dt_str = local_dt.strftime("%d/%m/%Y %H:%M:%S")
+                except Exception:
+                    dt_str = call_timestamp.strftime("%d/%m/%Y %H:%M:%S")
+
+            score_str = f"{float(evaluacion_global):.1f} / 10" if evaluacion_global is not None else "Sin datos"
+            review_url = hs_service.build_hubspot_url(call_id)
+            url_line = f"URL de la llamada: {review_url}" if review_url else f"Call ID: {call_id}"
+            feed_text = alarma_feed.strip() if alarma_feed and alarma_feed.strip() else "Alarma detectada sin detalle adicional."
+
+            content = (
+                f"ALARMA DETECTADA EN SPEECH ANALYTICS\n\n"
+                f"Servicio: {svc_label}\n"
+                f"Agente: {agt_label}\n"
+                f"Fecha: {dt_str}\n"
+                f"Tipología: {typology_name or 'Sin datos'}\n"
+                f"Dirección: {direction or 'Sin datos'}\n"
+                f"Duración: {dur_str}\n"
+                f"Evaluación global: {score_str}\n"
+                f"Call ID: {call_id}\n"
+                f"{url_line}\n\n"
+                f"MOTIVO DE LA ALARMA:\n"
+                f"{feed_text}"
+            )
+
+            properties = {
+                "subject": subject,
+                "content": content,
+                "tipo_de_rem": tipo_de_rem,
+                "hs_pipeline": pipeline,
+                "hs_pipeline_stage": stage,
+            }
+
+            # 7. Create ticket in HubSpot API
+            ticket_data = await hs_service.create_ticket(properties=properties, contact_id=effective_contact_id)
+            ticket_id = str(ticket_data.get("id", ""))
+
+            # 8. Persist success
+            stmt_ok = (
+                update(MassEvaluationResult)
+                .where(MassEvaluationResult.mass_analysis_id == mass_analysis_id)
+                .values(
+                    hubspot_contact_id=effective_contact_id,
+                    hubspot_ticket_id=ticket_id,
+                    hubspot_ticket_status="created",
+                    hubspot_ticket_created_at=datetime.now(timezone.utc),
+                    hubspot_ticket_error=None,
+                )
+            )
+            await db.execute(stmt_ok)
+            await db.commit()
+            logger.info(
+                "[alarm_ticket] Successfully created HubSpot Ticket ID=%s for mass_analysis_id=%d (Call ID=%s, Contact ID=%s)",
+                ticket_id, mass_analysis_id, call_id, effective_contact_id
+            )
+
+        except Exception as e_ticket:
+            raw_err = str(e_ticket)
+            clean_err = re.sub(r'Bearer\s+[A-Za-z0-9\-\._~+/]+=*', 'Bearer [REDACTED]', raw_err)
+            clean_err = re.sub(r'(token|secret|password|api_key)\s*[:=]\s*["\'][^"\']+["\']', r'\1 = [REDACTED]', clean_err, flags=re.IGNORECASE)[:500]
+            logger.error("[alarm_ticket] Failed to create HubSpot ticket for mass_analysis_id=%d: %s", mass_analysis_id, clean_err)
+            try:
+                stmt_err = (
+                    update(MassEvaluationResult)
+                    .where(MassEvaluationResult.mass_analysis_id == mass_analysis_id)
+                    .values(
+                        hubspot_ticket_status="failed",
+                        hubspot_ticket_error=clean_err,
+                    )
+                )
+                await db.execute(stmt_err)
+                await db.commit()
+            except Exception as e_db_err:
+                logger.warning("[alarm_ticket] Failed to record ticket error in DB: %s", e_db_err)
 
     @staticmethod
     async def _upsert_mass_evaluation_result(

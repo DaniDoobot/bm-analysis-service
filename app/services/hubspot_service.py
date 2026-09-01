@@ -32,6 +32,67 @@ class HubSpotService:
             return f"https://app.hubspot.com/calls/{self.portal_id}/review/{call_id}"
         return f"https://app.hubspot.com/calls/review/{call_id}"
 
+    @staticmethod
+    def extract_patient_contact_id(data: dict[str, Any]) -> tuple[str | None, bool]:
+        """
+        Deterministically extracts the single patient/contact ID associated with a call.
+        Returns: (contact_id, is_ambiguous)
+
+        Rules:
+        1. hs_call_callee_object_type == "CONTACT" and hs_call_callee_object_id present:
+           - If associations.contacts is present:
+             * If callee_id in contacts -> return (callee_id, False).
+             * If callee_id not in contacts -> inconsistent/ambiguous, return (None, True).
+           - If associations.contacts is empty:
+             * return (callee_id, False).
+        2. If callee is NOT a valid CONTACT (e.g. COMPANY, missing, or != CONTACT):
+           - If associations.contacts contains exactly 1 contact -> return (contact_id, False).
+           - If associations.contacts contains > 1 contacts -> return (None, True) [ambiguous, no arbitrary selection].
+           - If associations.contacts is empty -> return (None, False).
+        3. Never treats agent hubspot_owner_id as a contact ID.
+        """
+        props = data.get("properties", {})
+        callee_type = str(props.get("hs_call_callee_object_type") or "").strip().upper()
+        callee_id = str(props.get("hs_call_callee_object_id") or "").strip()
+        owner_id = str(props.get("hubspot_owner_id") or "").strip()
+
+        associations = data.get("associations", {})
+        contact_assoc = associations.get("contacts", {}).get("results", [])
+
+        # 1. Extract unique associated contact IDs
+        contact_ids = []
+        for r in contact_assoc:
+            cid = str(r.get("id") or "").strip()
+            if cid and cid not in contact_ids:
+                contact_ids.append(cid)
+
+        # 2. CASO A: callee inequívocamente CONTACT
+        if callee_type == "CONTACT" and callee_id:
+            # Check against associations if present
+            if contact_ids:
+                if callee_id in contact_ids:
+                    return (callee_id, False)
+                else:
+                    # Inconsistency: callee says CONTACT X, but associations list does not contain X
+                    logger.warning(
+                        "[hubspot_patient_extraction] Inconsistency detected: callee CONTACT '%s' not in associations %s",
+                        callee_id, contact_ids
+                    )
+                    return (None, True)
+            else:
+                # No associations list present, but callee is explicitly marked as CONTACT
+                return (callee_id, False)
+
+        # 3. CASO B: No existe un callee CONTACT fiable (e.g. COMPANY, None, etc.)
+        # If callee_type is COMPANY or other, callee_id MUST NOT be used as contact.
+        if len(contact_ids) == 1:
+            return (contact_ids[0], False)
+        elif len(contact_ids) > 1:
+            # Multiple contacts without a reliable callee CONTACT -> Ambiguous
+            return (None, True)
+
+        return (None, False)
+
     async def get_call(self, call_id: str) -> dict[str, Any]:
         """
         Fetch call engagement from HubSpot CRM API.
@@ -52,7 +113,10 @@ class HubSpotService:
                 "hubspot_owner_id",
                 "hs_call_status",
                 "hs_call_title",
-            ])
+                "hs_call_callee_object_id",
+                "hs_call_callee_object_type",
+            ]),
+            "associations": "contacts"
         }
 
         async with httpx.AsyncClient(timeout=30) as client:
@@ -62,6 +126,7 @@ class HubSpotService:
 
         props = data.get("properties", {})
         owner_id = props.get("hubspot_owner_id")
+        contact_id, is_ambiguous = self.extract_patient_contact_id(data)
 
         return {
             "call_id": call_id,
@@ -75,7 +140,46 @@ class HubSpotService:
             "hubspot_owner_id": owner_id,
             "agente_telefonico": owner_id,  # Will be enriched if owner lookup is added
             "status": props.get("hs_call_status"),
+            "callee_object_id": props.get("hs_call_callee_object_id"),
+            "callee_object_type": props.get("hs_call_callee_object_type"),
+            "contact_id": contact_id,
+            "is_contact_ambiguous": is_ambiguous,
         }
+
+    async def create_ticket(
+        self, properties: dict[str, Any], contact_id: str | None = None
+    ) -> dict[str, Any]:
+        """
+        Create a Ticket object in HubSpot CRM API v3.
+        Optionally associates with a Contact if contact_id is provided (associationTypeId=16).
+        """
+        if not self.token:
+            raise ValueError("HUBSPOT_ACCESS_TOKEN not set — cannot create ticket")
+
+        url = f"{HUBSPOT_API_BASE}/crm/v3/objects/tickets"
+        payload: dict[str, Any] = {
+            "properties": properties
+        }
+
+        if contact_id:
+            payload["associations"] = [
+                {
+                    "to": {
+                        "id": str(contact_id)
+                    },
+                    "types": [
+                        {
+                            "associationCategory": "HUBSPOT_DEFINED",
+                            "associationTypeId": 16
+                        }
+                    ]
+                }
+            ]
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(url, headers=self._headers(), json=payload)
+            response.raise_for_status()
+            return response.json()
 
     async def get_owner_name(self, owner_id: str) -> str | None:
         """Optionally resolve owner_id to a display name."""
@@ -240,7 +344,9 @@ class HubSpotService:
             "hubspot_owner_id",
             "hs_call_duration",
             "hs_call_direction",
-            "hs_call_status"
+            "hs_call_status",
+            "hs_call_callee_object_id",
+            "hs_call_callee_object_type",
         ]
         
         results = []
@@ -310,6 +416,10 @@ class HubSpotService:
                     dur_ms = props.get("hs_call_duration")
                     dur_sec = int(float(dur_ms) / 1000.0) if dur_ms else None
                     
+                    callee_type = str(props.get("hs_call_callee_object_type") or "").strip().upper()
+                    callee_id = str(props.get("hs_call_callee_object_id") or "").strip()
+                    candidate_contact_id = callee_id if callee_type == "CONTACT" and callee_id else None
+
                     results.append({
                         "call_id": h.get("id"),
                         "hs_object_id": props.get("hs_object_id") or h.get("id"),
@@ -318,7 +428,10 @@ class HubSpotService:
                         "call_timestamp": props.get("hs_timestamp") or props.get("hs_createdate"),
                         "call_duration_seconds": dur_sec,
                         "direction": props.get("hs_call_direction"),
-                        "status": props.get("hs_call_status")
+                        "status": props.get("hs_call_status"),
+                        "callee_object_id": callee_id or None,
+                        "callee_object_type": props.get("hs_call_callee_object_type"),
+                        "contact_id": candidate_contact_id,
                     })
                     
                 paging = data.get("paging", {})
