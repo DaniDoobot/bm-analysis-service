@@ -1139,17 +1139,23 @@ async def get_agents_list(
         agg_stmt = agg_stmt.where(MassEvaluationResult.typology_id.in_(typology_ids))
     elif norm_t:
         agg_stmt = agg_stmt.where(
-            or_(
-                func.lower(MassEvaluationResult.typology_key) == norm_t,
-                func.lower(func.coalesce(MassEvaluationResult.result_json["tipo_llamada"].astext, "")) == norm_t
-            )
+            func.lower(
+                func.coalesce(
+                    func.nullif(func.trim(MassEvaluationResult.typology_key), ""),
+                    MassEvaluationResult.result_json["tipo_llamada"].astext,
+                    ""
+                )
+            ) == norm_t
         )
     if norm_d:
         agg_stmt = agg_stmt.where(
-            or_(
-                func.lower(MassEvaluationResult.direction) == norm_d,
-                func.lower(func.coalesce(MassEvaluationResult.result_json["inbound_outbound"].astext, "")) == norm_d
-            )
+            func.lower(
+                func.coalesce(
+                    func.nullif(func.trim(MassEvaluationResult.direction), ""),
+                    MassEvaluationResult.result_json["inbound_outbound"].astext,
+                    ""
+                )
+            ) == norm_d
         )
     if duration_min_seconds is not None:
         agg_stmt = agg_stmt.where(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
@@ -1359,17 +1365,23 @@ async def get_agent_evolution(
         stmt = stmt.where(MassEvaluationResult.typology_id.in_(typology_ids))
     elif norm_t:
         stmt = stmt.where(
-            or_(
-                func.lower(MassEvaluationResult.typology_key) == norm_t,
-                func.lower(func.coalesce(MassEvaluationResult.result_json["tipo_llamada"].astext, "")) == norm_t
-            )
+            func.lower(
+                func.coalesce(
+                    func.nullif(func.trim(MassEvaluationResult.typology_key), ""),
+                    MassEvaluationResult.result_json["tipo_llamada"].astext,
+                    ""
+                )
+            ) == norm_t
         )
     if norm_d:
         stmt = stmt.where(
-            or_(
-                func.lower(MassEvaluationResult.direction) == norm_d,
-                func.lower(func.coalesce(MassEvaluationResult.result_json["inbound_outbound"].astext, "")) == norm_d
-            )
+            func.lower(
+                func.coalesce(
+                    func.nullif(func.trim(MassEvaluationResult.direction), ""),
+                    MassEvaluationResult.result_json["inbound_outbound"].astext,
+                    ""
+                )
+            ) == norm_d
         )
     if duration_min_seconds is not None:
         stmt = stmt.where(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
@@ -1560,14 +1572,28 @@ async def get_agent_evolution(
     latest_analyses = []
     for r in sorted_desc[:10]:
         rj = r.result_json or {}
-        eg = rj.get("evaluacion_global")
-        try:
-            eg = to_float(eg) if eg is not None else None
-        except (ValueError, TypeError):
-            eg = None
+        if r.evaluacion_global is not None:
+            try:
+                eg = to_float(r.evaluacion_global)
+            except (ValueError, TypeError):
+                eg = None
+        else:
+            raw_eg = extract_score_from_mass(r.result_json, r.items_json, "evaluacion_global")
+            try:
+                eg = to_float(raw_eg) if raw_eg is not None else None
+            except (ValueError, TypeError):
+                eg = None
+
         obj = rj.get("objeciones") or rj.get("objecion_1")
         if isinstance(obj, list) and obj:
             obj = str(obj[0])
+
+        tipo_llamada = (
+            r.typology_name
+            or r.typology_key
+            or (rj.get("tipo_llamada") if isinstance(rj, dict) else None)
+        )
+
         latest_analyses.append({
             "mass_analysis_id": r.mass_analysis_id,
             "run_id": r.run_id,
@@ -1581,7 +1607,7 @@ async def get_agent_evolution(
             "prompt_name": r.prompt_name,
             "prompt_version_name": r.prompt_version_name,
             "status": r.status,
-            "tipo_llamada": rj.get("tipo_llamada"),
+            "tipo_llamada": tipo_llamada,
             "evaluacion_global": eg,
             "objeciones": obj,
             "execution_source": r.execution_source
