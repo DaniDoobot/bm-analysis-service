@@ -1551,6 +1551,7 @@ class MassEvaluationService:
                         
                         # Check if Alarm was detected
                         has_alarm, alarma_feed = MassEvaluationService._is_alarm_detected(items)
+                        resumen_llamada = MassEvaluationService._extract_call_summary(items)
                         
                         call_success = True
                         calls_analyzed += 1
@@ -1559,6 +1560,7 @@ class MassEvaluationService:
                         call_success = False
                         has_alarm = False
                         alarma_feed = None
+                        resumen_llamada = None
                         import traceback
                         logger.warning(
                             "Call %s failed in mass evaluation job %d: %s\nStacktrace:\n%s", 
@@ -1653,6 +1655,7 @@ class MassEvaluationService:
                                 evaluacion_global=eval_decimal,
                                 alarma_feed=alarma_feed,
                                 contact_id=call.get("contact_id"),
+                                resumen_llamada=resumen_llamada,
                             )
                         except Exception as e_alarm_outer:
                             logger.error("[alarm_ticket] Unexpected error executing alarm ticket process: %s", e_alarm_outer)
@@ -2122,6 +2125,27 @@ class MassEvaluationService:
         return False, None
 
     @staticmethod
+    def _extract_call_summary(items: list[dict[str, Any]] | None) -> str | None:
+        """
+        Extract the 'Resumen llamada' text from evaluated items.
+        Checks criterion_key/output_key in ('resumen_llamada', 'resumen').
+        Returns stripped string if non-empty, otherwise None.
+        """
+        if not items or not isinstance(items, list):
+            return None
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            crit_key = str(item.get("criterion_key") or item.get("output_key") or "").strip().lower()
+            if crit_key in ("resumen_llamada", "resumen"):
+                val = item.get("value") or item.get("text_value") or item.get("raw_value")
+                if val is not None and str(val).strip():
+                    s = str(val).strip()
+                    if s.lower() not in ("none", "null", "undefined", "n/a"):
+                        return s
+        return None
+
+    @staticmethod
     async def _process_alarm_hubspot_ticket(
         db: AsyncSession,
         mass_analysis_id: int,
@@ -2137,6 +2161,7 @@ class MassEvaluationService:
         evaluacion_global: Decimal | float | None,
         alarma_feed: str | None,
         contact_id: str | None = None,
+        resumen_llamada: str | None = None,
     ) -> None:
         """
         Idempotent, non-blocking creation of HubSpot REM Ticket upon Alarm detection.
@@ -2286,6 +2311,35 @@ class MassEvaluationService:
             url_line = f"URL de la llamada: {review_url}" if review_url else f"Call ID: {call_id}"
             feed_text = alarma_feed.strip() if alarma_feed and alarma_feed.strip() else "Alarma detectada sin detalle adicional."
 
+            # Resolve effective call summary:
+            # 1) Provided argument `resumen_llamada`
+            # 2) `record.items_json`
+            # 3) `record.result_json["items"]`
+            # 4) Fallback query `bm_mass_evaluation_criterion_results`
+            raw_res = (resumen_llamada or "").strip()
+            effective_resumen = raw_res if raw_res and raw_res.lower() not in ("none", "null", "undefined", "n/a") else None
+            if not effective_resumen and record:
+                if record.items_json:
+                    effective_resumen = MassEvaluationService._extract_call_summary(record.items_json)
+                if not effective_resumen and isinstance(record.result_json, dict):
+                    effective_resumen = MassEvaluationService._extract_call_summary(record.result_json.get("items"))
+                if not effective_resumen:
+                    try:
+                        stmt_sum = select(MassEvaluationCriterionResult.text_value).where(
+                            MassEvaluationCriterionResult.mass_analysis_id == mass_analysis_id,
+                            MassEvaluationCriterionResult.criterion_key.in_(["resumen_llamada", "resumen"])
+                        ).limit(1)
+                        res_sum = await db.execute(stmt_sum)
+                        raw_sum = res_sum.scalar_one_or_none()
+                        if raw_sum and str(raw_sum).strip() and str(raw_sum).strip().lower() not in ("none", "null", "undefined", "n/a"):
+                            effective_resumen = str(raw_sum).strip()
+                    except Exception as e_sum:
+                        logger.debug("[alarm_ticket] Fallback criterion summary query failed: %s", e_sum)
+
+            summary_block = ""
+            if effective_resumen:
+                summary_block = f"RESUMEN DE LA LLAMADA:\n{effective_resumen}\n\n"
+
             content = (
                 f"ALARMA DETECTADA EN SPEECH ANALYTICS\n\n"
                 f"Servicio: {svc_label}\n"
@@ -2297,6 +2351,7 @@ class MassEvaluationService:
                 f"Evaluación global: {score_str}\n"
                 f"Call ID: {call_id}\n"
                 f"{url_line}\n\n"
+                f"{summary_block}"
                 f"MOTIVO DE LA ALARMA:\n"
                 f"{feed_text}"
             )

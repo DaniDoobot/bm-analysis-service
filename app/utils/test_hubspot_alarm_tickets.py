@@ -809,6 +809,208 @@ class TestHubSpotAlarmTickets(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(assoc["types"][0]["associationTypeId"], 16)
                 self.assertEqual(assoc["types"][0]["associationCategory"], "HUBSPOT_DEFINED")
 
+    # 29. Resumen llamada included in ticket content immediately before MOTIVO DE LA ALARMA
+    async def test_29_resumen_llamada_included_in_ticket_content(self):
+        async with self.async_session() as session:
+            res = await self._create_test_result(session, hubspot_contact_id="hs_contact_101")
+
+            with patch("app.services.hubspot_service.httpx.AsyncClient.post") as mock_post:
+                mock_post.return_value = MagicMock(
+                    status_code=201,
+                    json=lambda: {"id": "ticket_with_summary_123"},
+                    raise_for_status=lambda: None
+                )
+
+                sample_summary = "El paciente llama para solicitar cita urgente tras sufrir molestias de dos semanas."
+                sample_feed = "El paciente expresa descontento por demora en la atención."
+
+                self.settings.hubspot_ticket_pipeline = "1458057418"
+                self.settings.hubspot_ticket_stage = "1991865549"
+                self.settings.hubspot_tipo_de_rem = "General Call Center"
+
+                await MassEvaluationService._process_alarm_hubspot_ticket(
+                    db=session,
+                    mass_analysis_id=res.mass_analysis_id,
+                    execution_source="automation",
+                    company_id=1,
+                    service_name="Front",
+                    agent_name="Agente Resumen",
+                    call_id=res.call_id,
+                    call_timestamp=res.call_timestamp,
+                    typology_name="Queja",
+                    direction="INBOUND",
+                    call_duration_seconds=150,
+                    evaluacion_global=res.evaluacion_global,
+                    alarma_feed=sample_feed,
+                    contact_id="hs_contact_101",
+                    resumen_llamada=sample_summary,
+                )
+
+                self.assertEqual(mock_post.call_count, 1)
+                payload = mock_post.call_args[1]["json"]
+                props = payload["properties"]
+                content = props["content"]
+
+                # Content checks
+                self.assertIn("RESUMEN DE LA LLAMADA:\n" + sample_summary, content)
+                self.assertIn("MOTIVO DE LA ALARMA:\n" + sample_feed, content)
+
+                # Position check: RESUMEN DE LA LLAMADA must appear strictly before MOTIVO DE LA ALARMA
+                idx_summary = content.index("RESUMEN DE LA LLAMADA:")
+                idx_motivo = content.index("MOTIVO DE LA ALARMA:")
+                self.assertLess(idx_summary, idx_motivo)
+
+                # Confirm required properties unchanged
+                self.assertEqual(props["subject"], "REM doobot speechFront")
+                self.assertEqual(props["hs_pipeline"], "1458057418")
+                self.assertEqual(props["hs_pipeline_stage"], "1991865549")
+                self.assertEqual(props["tipo_de_rem"], "General Call Center")
+
+                # Association check
+                self.assertEqual(len(payload["associations"]), 1)
+                self.assertEqual(payload["associations"][0]["to"]["id"], "hs_contact_101")
+                self.assertEqual(payload["associations"][0]["types"][0]["associationTypeId"], 16)
+                self.assertEqual(payload["associations"][0]["types"][0]["associationCategory"], "HUBSPOT_DEFINED")
+
+    # 30. Resumen llamada absent: clean fallback without empty block or N/A
+    async def test_30_resumen_llamada_absent_clean_fallback(self):
+        async with self.async_session() as session:
+            res = await self._create_test_result(session, hubspot_contact_id="hs_contact_102")
+
+            with patch("app.services.hubspot_service.httpx.AsyncClient.post") as mock_post:
+                mock_post.return_value = MagicMock(
+                    status_code=201,
+                    json=lambda: {"id": "ticket_no_summary_456"},
+                    raise_for_status=lambda: None
+                )
+
+                await MassEvaluationService._process_alarm_hubspot_ticket(
+                    db=session,
+                    mass_analysis_id=res.mass_analysis_id,
+                    execution_source="automation",
+                    company_id=1,
+                    service_name="Front",
+                    agent_name="Agente Sin Resumen",
+                    call_id=res.call_id,
+                    call_timestamp=res.call_timestamp,
+                    typology_name="General",
+                    direction="OUTBOUND",
+                    call_duration_seconds=90,
+                    evaluacion_global=res.evaluacion_global,
+                    alarma_feed="Feed sin resumen",
+                    contact_id="hs_contact_102",
+                    resumen_llamada=None,
+                )
+
+                self.assertEqual(mock_post.call_count, 1)
+                payload = mock_post.call_args[1]["json"]
+                props = payload["properties"]
+                content = props["content"]
+
+                # Must NOT contain RESUMEN DE LA LLAMADA block or None/null/undefined/N/A
+                self.assertNotIn("RESUMEN DE LA LLAMADA", content)
+                self.assertNotIn("None", content)
+                self.assertNotIn("undefined", content)
+                self.assertIn("MOTIVO DE LA ALARMA:\nFeed sin resumen", content)
+                self.assertEqual(props["subject"], "REM doobot speechFront")
+
+    # 31. Resumen llamada extracted automatically from persisted items_json
+    async def test_31_resumen_llamada_extracted_from_persisted_items_json(self):
+        async with self.async_session() as session:
+            res = await self._create_test_result(session, hubspot_contact_id="hs_contact_103")
+            res.items_json = [
+                {
+                    "criterion_id": 682,
+                    "criterion_key": "resumen_llamada",
+                    "output_key": "resumen_llamada",
+                    "name": "Resumen llamada",
+                    "type": "text",
+                    "value": "El paciente consulta tarifas y agenda cita para el jueves."
+                },
+                {
+                    "criterion_key": "alarma",
+                    "output_key": "alarma",
+                    "boolean_value": True,
+                    "feed": "Alarma por tono agresivo."
+                }
+            ]
+            await session.commit()
+
+            with patch("app.services.hubspot_service.httpx.AsyncClient.post") as mock_post:
+                mock_post.return_value = MagicMock(
+                    status_code=201,
+                    json=lambda: {"id": "ticket_persisted_789"},
+                    raise_for_status=lambda: None
+                )
+
+                # Call without passing resumen_llamada argument: should extract from record.items_json
+                await MassEvaluationService._process_alarm_hubspot_ticket(
+                    db=session,
+                    mass_analysis_id=res.mass_analysis_id,
+                    execution_source="automation",
+                    company_id=1,
+                    service_name="Front",
+                    agent_name="Agente Items",
+                    call_id=res.call_id,
+                    call_timestamp=res.call_timestamp,
+                    typology_name="Cita",
+                    direction="INBOUND",
+                    call_duration_seconds=120,
+                    evaluacion_global=res.evaluacion_global,
+                    alarma_feed="Alarma por tono agresivo.",
+                    contact_id="hs_contact_103",
+                    resumen_llamada=None,
+                )
+
+                self.assertEqual(mock_post.call_count, 1)
+                props = mock_post.call_args[1]["json"]["properties"]
+                content = props["content"]
+
+                self.assertIn("RESUMEN DE LA LLAMADA:\nEl paciente consulta tarifas y agenda cita para el jueves.", content)
+                self.assertIn("MOTIVO DE LA ALARMA:\nAlarma por tono agresivo.", content)
+                self.assertLess(content.index("RESUMEN DE LA LLAMADA:"), content.index("MOTIVO DE LA ALARMA:"))
+
+    # 32. Resumen llamada with trivial or dummy values (N/A, None) is ignored
+    async def test_32_resumen_llamada_trivial_value_ignored(self):
+        async with self.async_session() as session:
+            res = await self._create_test_result(session, hubspot_contact_id="hs_contact_104")
+
+            with patch("app.services.hubspot_service.httpx.AsyncClient.post") as mock_post:
+                mock_post.return_value = MagicMock(
+                    status_code=201,
+                    json=lambda: {"id": "ticket_trivial_000"},
+                    raise_for_status=lambda: None
+                )
+
+                for trivial in ["  N/A  ", "None", "null", "undefined", ""]:
+                    mock_post.reset_mock()
+                    res.hubspot_ticket_status = None
+                    res.hubspot_ticket_id = None
+                    await session.commit()
+
+                    await MassEvaluationService._process_alarm_hubspot_ticket(
+                        db=session,
+                        mass_analysis_id=res.mass_analysis_id,
+                        execution_source="automation",
+                        company_id=1,
+                        service_name="Front",
+                        agent_name="Agente NA",
+                        call_id=res.call_id,
+                        call_timestamp=res.call_timestamp,
+                        typology_name="Info",
+                        direction="INBOUND",
+                        call_duration_seconds=60,
+                        evaluacion_global=res.evaluacion_global,
+                        alarma_feed="Motivo de prueba",
+                        contact_id="hs_contact_104",
+                        resumen_llamada=trivial,
+                    )
+
+                    self.assertEqual(mock_post.call_count, 1)
+                    content = mock_post.call_args[1]["json"]["properties"]["content"]
+                    self.assertNotIn("RESUMEN DE LA LLAMADA", content)
+                    self.assertIn("MOTIVO DE LA ALARMA:\nMotivo de prueba", content)
+
 
 if __name__ == "__main__":
     unittest.main()
