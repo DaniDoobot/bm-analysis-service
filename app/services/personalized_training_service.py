@@ -3535,13 +3535,17 @@ class PersonalizedTrainingService:
                     triggered_by="scheduler"
                 )
                 
+                # Extract primitive scalars before commit to prevent MissingGreenlet from expired attributes
+                run_id = run.training_run_id
+                run_status = run.status
+
                 # Fetch settings again to refresh session state safely
                 db_settings = await PersonalizedTrainingService.get_or_create_scheduler_settings(db)
                 db_settings.last_run_at = now
                 db_settings.next_run_at = now + timedelta(days=db_settings.interval_days)
-                db_settings.last_status = run.status
+                db_settings.last_status = run_status
                 await db.commit()
-                return {"triggered": True, "run_id": run.training_run_id, "reason": reason}
+                return {"triggered": True, "run_id": run_id, "reason": reason}
             except Exception as e_run:
                 logger.exception("Training scheduler: Run failed.")
                 # Fetch settings again to refresh session state safely
