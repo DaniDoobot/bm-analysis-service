@@ -259,10 +259,12 @@ async def list_agents(
     min_duration: Annotated[int | None, Query(description="Min duration in seconds (alias)")] = None,
     duration_max_seconds: Annotated[int | None, Query(alias="duration_max", description="Max duration in seconds")] = None,
     max_duration: Annotated[int | None, Query(description="Max duration in seconds (alias)")] = None,
-    avg_score_min: Annotated[float | None, Query(alias="score_min", description="Min average score")] = None,
-    eval_min: Annotated[float | None, Query(description="Min average score (alias)")] = None,
-    avg_score_max: Annotated[float | None, Query(alias="score_max", description="Max average score")] = None,
-    eval_max: Annotated[float | None, Query(description="Max average score (alias)")] = None,
+    avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
+    score_min: Annotated[float | None, Query(description="Alias for avg_score_min")] = None,
+    eval_min: Annotated[float | None, Query(description="Alias for avg_score_min")] = None,
+    avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
+    score_max: Annotated[float | None, Query(description="Alias for avg_score_max")] = None,
+    eval_max: Annotated[float | None, Query(description="Alias for avg_score_max")] = None,
     status: Annotated[str | None, Query(description="Filter by evaluation status: completed | failed | all")] = None,
     result_status: Annotated[str | None, Query(description="Alias for status")] = None,
     item_filters: Annotated[str | None, Query(description="JSON url-encoded item score/boolean filters")] = None,
@@ -292,8 +294,8 @@ async def list_agents(
 
     dur_min = duration_min_seconds if duration_min_seconds is not None else min_duration
     dur_max = duration_max_seconds if duration_max_seconds is not None else max_duration
-    sc_min = avg_score_min if avg_score_min is not None else eval_min
-    sc_max = avg_score_max if avg_score_max is not None else eval_max
+    sc_min = avg_score_min if avg_score_min is not None else (score_min if score_min is not None else eval_min)
+    sc_max = avg_score_max if avg_score_max is not None else (score_max if score_max is not None else eval_max)
 
     try:
         data = await get_agents_list(
@@ -358,10 +360,12 @@ async def agent_evolution(
     min_duration: Annotated[int | None, Query(description="Min duration in seconds (alias)")] = None,
     duration_max_seconds: Annotated[int | None, Query(alias="duration_max", description="Max duration in seconds")] = None,
     max_duration: Annotated[int | None, Query(description="Max duration in seconds (alias)")] = None,
-    avg_score_min: Annotated[float | None, Query(alias="score_min", description="Min average score")] = None,
-    eval_min: Annotated[float | None, Query(description="Min average score (alias)")] = None,
-    avg_score_max: Annotated[float | None, Query(alias="score_max", description="Max average score")] = None,
-    eval_max: Annotated[float | None, Query(description="Max average score (alias)")] = None,
+    avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
+    score_min: Annotated[float | None, Query(description="Alias for avg_score_min")] = None,
+    eval_min: Annotated[float | None, Query(description="Alias for avg_score_min")] = None,
+    avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
+    score_max: Annotated[float | None, Query(description="Alias for avg_score_max")] = None,
+    eval_max: Annotated[float | None, Query(description="Alias for avg_score_max")] = None,
     status: Annotated[str | None, Query(description="Filter by evaluation status: completed | failed | all")] = None,
     result_status: Annotated[str | None, Query(description="Alias for status")] = None,
     item_filters: Annotated[str | None, Query(description="JSON url-encoded item score/boolean filters")] = None,
@@ -400,8 +404,8 @@ async def agent_evolution(
 
         dur_min = duration_min_seconds if duration_min_seconds is not None else min_duration
         dur_max = duration_max_seconds if duration_max_seconds is not None else max_duration
-        sc_min = avg_score_min if avg_score_min is not None else eval_min
-        sc_max = avg_score_max if avg_score_max is not None else eval_max
+        sc_min = avg_score_min if avg_score_min is not None else (score_min if score_min is not None else eval_min)
+        sc_max = avg_score_max if avg_score_max is not None else (score_max if score_max is not None else eval_max)
 
         data = await get_agent_evolution(
             db,
@@ -542,7 +546,11 @@ async def get_my_evolution(
     duration_min_seconds: Annotated[int | None, Query(description="Min duration in seconds")] = None,
     duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
     avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
+    score_min: Annotated[float | None, Query(description="Alias for avg_score_min")] = None,
+    eval_min: Annotated[float | None, Query(description="Alias for avg_score_min")] = None,
     avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
+    score_max: Annotated[float | None, Query(description="Alias for avg_score_max")] = None,
+    eval_max: Annotated[float | None, Query(description="Alias for avg_score_max")] = None,
     status: Annotated[str | None, Query(description="Filter by evaluation status: completed | failed | all")] = None,
     result_status: Annotated[str | None, Query(description="Alias for status")] = None,
     item_filters: Annotated[str | None, Query(description="JSON url-encoded item score/boolean filters")] = None,
@@ -605,6 +613,9 @@ async def get_my_evolution(
         raw_direction = direction or call_direction or inbound_outbound
         norm_direction = normalize_direction(raw_direction)
 
+        sc_min = avg_score_min if avg_score_min is not None else (score_min if score_min is not None else eval_min)
+        sc_max = avg_score_max if avg_score_max is not None else (score_max if score_max is not None else eval_max)
+
         data = await get_agent_evolution(
             db,
             hubspot_owner_id=owner_id,
@@ -621,8 +632,8 @@ async def get_my_evolution(
             direction=norm_direction,
             duration_min_seconds=duration_min_seconds,
             duration_max_seconds=duration_max_seconds,
-            avg_score_min=avg_score_min,
-            avg_score_max=avg_score_max,
+            avg_score_min=sc_min,
+            avg_score_max=sc_max,
             item_filters=effective_item_filters,
             status=norm_status,
             context=context,
