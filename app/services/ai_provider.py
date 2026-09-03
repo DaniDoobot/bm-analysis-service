@@ -157,7 +157,7 @@ class GeminiProvider(AIProvider):
         logger.info("Calling Gemini analyze_audio_bytes (google-genai): model=%s, format=%s, size=%.2f MB", model_name, audio_format, len(audio_bytes)/(1024*1024))
         t_start = time.perf_counter()
 
-        max_attempts = 3
+        max_attempts = 5
         last_exception = None
 
         for attempt in range(1, max_attempts + 1):
@@ -187,11 +187,11 @@ class GeminiProvider(AIProvider):
                 is_transient = is_transient_llm_error(e)
 
                 if is_transient and attempt < max_attempts:
-                    # Exponential backoff with small jitter (e.g. ~1.1s, ~2.2s)
+                    # Exponential backoff with small jitter (e.g. ~1.1s, ~2.2s, ~4.2s, ~8.2s)
                     delay = (1.0 * (2 ** (attempt - 1))) + random.uniform(0.1, 0.35)
                     logger.warning(
-                        "Gemini analyze_audio_bytes transient error [attempt %d/%d]: %s. Retrying in %.2fs...",
-                        attempt, max_attempts, e, delay,
+                        "[gemini_retry] attempt=%d/%d delay_seconds=%.2f error_type=transient: %s. Retrying in %.2fs...",
+                        attempt, max_attempts, delay, e, delay,
                         extra={
                             "provider": "gemini",
                             "model": model_name,

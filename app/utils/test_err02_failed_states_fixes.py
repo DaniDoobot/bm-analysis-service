@@ -81,7 +81,7 @@ class TestERR02FailedStatesFixes(unittest.IsolatedAsyncioTestCase):
         mock_sleep.assert_awaited_once()
 
     async def test_gemini_audio_transient_retry_exhausted(self):
-        """When all attempts fail with 500 INTERNAL, the exception is raised."""
+        """When all 5 attempts fail with 500 INTERNAL, the exception is raised."""
         provider = GeminiProvider()
         mock_client = MagicMock()
         mock_client.aio.models.generate_content = AsyncMock(
@@ -94,8 +94,8 @@ class TestERR02FailedStatesFixes(unittest.IsolatedAsyncioTestCase):
                 await provider.analyze_audio_bytes(b"dummy_audio", "prompt text", "mp3")
 
         self.assertIn("500 INTERNAL", str(ctx.exception))
-        self.assertEqual(mock_client.aio.models.generate_content.call_count, 3)
-        self.assertEqual(mock_sleep.await_count, 2)
+        self.assertEqual(mock_client.aio.models.generate_content.call_count, 5)
+        self.assertEqual(mock_sleep.await_count, 4)
 
     async def test_gemini_audio_non_transient_no_retry(self):
         """Non-transient errors (e.g. 400 Bad Request / Invalid Argument) fail immediately on attempt 1."""
@@ -113,6 +113,145 @@ class TestERR02FailedStatesFixes(unittest.IsolatedAsyncioTestCase):
         self.assertIn("INVALID_ARGUMENT", str(ctx.exception))
         self.assertEqual(mock_client.aio.models.generate_content.call_count, 1)
         mock_sleep.assert_not_called()
+
+    async def test_gemini_audio_4_transient_errors_then_success_on_attempt_5(self):
+        """A) 4 transient errors + success on attempt 5 -> success, exactly 5 calls, delays growing exponentially."""
+        provider = GeminiProvider()
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = '{"status": "ok", "evaluacion_global": 8.0}'
+
+        mock_client.aio.models.generate_content = AsyncMock(
+            side_effect=[
+                Exception("503 UNAVAILABLE. High demand spike."),
+                Exception("500 INTERNAL. Internal server error."),
+                Exception("429 RESOURCE_EXHAUSTED. Quota exceeded."),
+                Exception("Server disconnected without sending a response."),
+                mock_response,
+            ]
+        )
+        provider._client = mock_client
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            result = await provider.analyze_audio_bytes(b"dummy_audio", "prompt text", "mp3")
+
+        self.assertEqual(result, '{"status": "ok", "evaluacion_global": 8.0}')
+        self.assertEqual(mock_client.aio.models.generate_content.call_count, 5)
+        self.assertEqual(mock_sleep.await_count, 4)
+
+        # Verify delays follow exponential backoff: ~1s, ~2s, ~4s, ~8s
+        delays = [call.args[0] for call in mock_sleep.await_args_list]
+        self.assertTrue(1.0 <= delays[0] <= 1.5, f"Delay 1 was {delays[0]}")
+        self.assertTrue(2.0 <= delays[1] <= 2.5, f"Delay 2 was {delays[1]}")
+        self.assertTrue(4.0 <= delays[2] <= 4.5, f"Delay 3 was {delays[2]}")
+        self.assertTrue(8.0 <= delays[3] <= 8.5, f"Delay 4 was {delays[3]}")
+        self.assertTrue(delays[0] < delays[1] < delays[2] < delays[3], "Delays must strictly increase exponentially")
+
+    async def test_gemini_audio_5_transient_errors_exhausted_relanza_final(self):
+        """B) 5 transient errors -> re-raises final error, exactly 5 calls."""
+        provider = GeminiProvider()
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = AsyncMock(
+            side_effect=Exception("503 UNAVAILABLE. Overloaded.")
+        )
+        provider._client = mock_client
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            with self.assertRaises(Exception) as ctx:
+                await provider.analyze_audio_bytes(b"dummy_audio", "prompt text", "mp3")
+
+        self.assertIn("503 UNAVAILABLE", str(ctx.exception))
+        self.assertEqual(mock_client.aio.models.generate_content.call_count, 5)
+        self.assertEqual(mock_sleep.await_count, 4)
+
+    async def test_gemini_audio_permanent_400_fails_immediately(self):
+        """C) 1 permanent 400 Bad Request -> fails immediately, exactly 1 call."""
+        provider = GeminiProvider()
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = AsyncMock(
+            side_effect=ValueError("400 Bad Request: prompt contains disallowed tokens")
+        )
+        provider._client = mock_client
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            with self.assertRaises(ValueError) as ctx:
+                await provider.analyze_audio_bytes(b"dummy_audio", "prompt text", "mp3")
+
+        self.assertIn("400 Bad Request", str(ctx.exception))
+        self.assertEqual(mock_client.aio.models.generate_content.call_count, 1)
+        mock_sleep.assert_not_called()
+
+    async def test_gemini_audio_transient_retry_503(self):
+        """D) 503 UNAVAILABLE is retryable."""
+        provider = GeminiProvider()
+        mock_client = MagicMock()
+        mock_response = MagicMock(text='{"ok": true}')
+        mock_client.aio.models.generate_content = AsyncMock(
+            side_effect=[Exception("503 UNAVAILABLE: high demand"), mock_response]
+        )
+        provider._client = mock_client
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            res = await provider.analyze_audio_bytes(b"dummy", "prompt", "mp3")
+
+        self.assertEqual(res, '{"ok": true}')
+        self.assertEqual(mock_client.aio.models.generate_content.call_count, 2)
+        mock_sleep.assert_awaited_once()
+
+    async def test_gemini_audio_transient_retry_500(self):
+        """E) 500 INTERNAL is retryable."""
+        provider = GeminiProvider()
+        mock_client = MagicMock()
+        mock_response = MagicMock(text='{"ok": true}')
+        mock_client.aio.models.generate_content = AsyncMock(
+            side_effect=[Exception("500 INTERNAL: internal server error"), mock_response]
+        )
+        provider._client = mock_client
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            res = await provider.analyze_audio_bytes(b"dummy", "prompt", "mp3")
+
+        self.assertEqual(res, '{"ok": true}')
+        self.assertEqual(mock_client.aio.models.generate_content.call_count, 2)
+        mock_sleep.assert_awaited_once()
+
+    async def test_gemini_audio_transient_retry_429(self):
+        """F) 429 RESOURCE_EXHAUSTED / rate limit is retryable."""
+        provider = GeminiProvider()
+        mock_client = MagicMock()
+        mock_response = MagicMock(text='{"ok": true}')
+        mock_client.aio.models.generate_content = AsyncMock(
+            side_effect=[Exception("429 RESOURCE_EXHAUSTED: rate limit exceeded"), mock_response]
+        )
+        provider._client = mock_client
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            res = await provider.analyze_audio_bytes(b"dummy", "prompt", "mp3")
+
+        self.assertEqual(res, '{"ok": true}')
+        self.assertEqual(mock_client.aio.models.generate_content.call_count, 2)
+        mock_sleep.assert_awaited_once()
+
+    async def test_gemini_audio_transient_retry_timeout_and_connection_reset(self):
+        """G) timeout and connection reset / server disconnected are retryable."""
+        provider = GeminiProvider()
+        mock_client = MagicMock()
+        mock_response = MagicMock(text='{"ok": true}')
+        mock_client.aio.models.generate_content = AsyncMock(
+            side_effect=[
+                Exception("ReadTimeoutError: timed out"),
+                Exception("Connection reset by peer: server disconnected"),
+                mock_response,
+            ]
+        )
+        provider._client = mock_client
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            res = await provider.analyze_audio_bytes(b"dummy", "prompt", "mp3")
+
+        self.assertEqual(res, '{"ok": true}')
+        self.assertEqual(mock_client.aio.models.generate_content.call_count, 3)
+        self.assertEqual(mock_sleep.await_count, 2)
 
     # -------------------------------------------------------------------------
     # 2. Defensive Stale Runs Cleanup Tests
