@@ -254,6 +254,16 @@ async def startup_event():
     if not settings.database_url:
         logger.warning("DATABASE_URL is not set!")
 
+    logger.info(
+        "HubSpot Alarm Tickets config: enabled=%s, company_id=%s, pipeline_configured=%s, stage_configured=%s, tipo_de_rem_configured=%s, access_token_present=%s",
+        bool(settings.hubspot_alarm_tickets_enabled),
+        settings.hubspot_alarm_company_id,
+        bool(settings.hubspot_ticket_pipeline and str(settings.hubspot_ticket_pipeline).strip()),
+        bool(settings.hubspot_ticket_stage and str(settings.hubspot_ticket_stage).strip()),
+        bool(settings.hubspot_tipo_de_rem and str(settings.hubspot_tipo_de_rem).strip()),
+        bool(settings.hubspot_access_token and str(settings.hubspot_access_token).strip()),
+    )
+
     import asyncio
     from app.services.db_init_service import init_db
     
