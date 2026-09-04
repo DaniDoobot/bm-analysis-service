@@ -213,6 +213,33 @@ class MassEvaluationResult(Base):
     def global_score(self) -> float | None:
         return float(self.evaluacion_global) if self.evaluacion_global is not None else None
 
+    @property
+    def alarma(self) -> bool:
+        if hasattr(self, "_alarma_override") and self._alarma_override is not None:
+            return bool(self._alarma_override)
+        if not self.items_json:
+            return False
+        items = self.items_json
+        if isinstance(items, dict):
+            items = items.get("items") or []
+        if not isinstance(items, list):
+            return False
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            crit_key = str(item.get("criterion_key") or item.get("output_key") or "").strip().lower()
+            if crit_key == "alarma":
+                bool_val = item.get("boolean_value")
+                val = item.get("value")
+                raw = item.get("raw_value")
+                if bool_val is True or val is True or (isinstance(raw, str) and raw.strip().lower() in ("si", "sí", "true", "1")):
+                    return True
+        return False
+
+    @alarma.setter
+    def alarma(self, value: bool) -> None:
+        self._alarma_override = value
+
     # Relationships
     job = relationship("MassEvaluationJob", back_populates="results")
     run = relationship("MassEvaluationRun", back_populates="results")

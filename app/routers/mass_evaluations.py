@@ -46,6 +46,7 @@ from app.schemas.mass_evaluations import (
     MassAnalysisAutomationUpdate,
     MassAnalysisAutomationResponse,
     MassAnalysisAutomationRunResponse,
+    MassAnalysisAutomationHealthResponse,
     PagedMassEvaluationResultResponse,
 )
 from app.services.mass_evaluation_service import MassEvaluationService
@@ -1382,6 +1383,48 @@ async def get_automation(
                 )
 
     return automation
+
+
+@router.get("/mass-analysis/automations/{automation_id}/health-summary", response_model=MassAnalysisAutomationHealthResponse)
+async def get_automation_health_summary(
+    automation_id: int,
+    context: TenantContext = Depends(get_tenant_context),
+    db: AsyncSession = Depends(get_db)
+):
+    """Retrieve aggregated health status and summary metrics for an automation configuration."""
+    if context.normalized_role == InternalRole.AGENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para consultar la salud de automatizaciones."
+        )
+    automation = await MassEvaluationService.get_automation(db, automation_id=automation_id)
+    if not automation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Automation configuration ID {automation_id} not found."
+        )
+
+    # Scoping validation
+    if not context.is_super_admin:
+        if context.allowed_service_ids is not None:
+            if automation.service_id not in context.allowed_service_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: esta automatización pertenece a un servicio no asignado."
+                )
+        else:
+            stmt_svc = select(Service.company_id).where(Service.service_id == automation.service_id)
+            res_svc = await db.execute(stmt_svc)
+            svc_comp_id = res_svc.scalar()
+            if svc_comp_id not in context.allowed_company_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: esta automatización pertenece a otra empresa."
+                )
+
+    return await MassEvaluationService.get_automation_health_summary(
+        db, automation=automation, context=context
+    )
 
 
 @router.post("/mass-analysis/automations", response_model=MassAnalysisAutomationResponse, status_code=status.HTTP_201_CREATED)

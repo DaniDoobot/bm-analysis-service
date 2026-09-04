@@ -3819,3 +3819,311 @@ class MassEvaluationService:
         ).order_by(desc(MassAnalysisAutomationRun.automation_run_id)).limit(limit)
         res = await db.execute(stmt)
         return list(res.scalars().all())
+
+    @staticmethod
+    async def get_automation_health_summary(
+        db: AsyncSession,
+        automation: MassAnalysisAutomation | int,
+        context: Any = None
+    ):
+        """Aggregated health summary for an automation configuration.
+        Computes deterministic health status (healthy, warning, critical), today's metrics,
+        active running task, recent execution runs, and recent evaluation results.
+        """
+        from app.config import get_settings
+        from app.models.services import Service
+        from app.schemas.mass_evaluations import (
+            MassAnalysisAutomationHealthActiveRun,
+            MassAnalysisAutomationHealthTodaySummary,
+            MassAnalysisAutomationHealthRecentRun,
+            MassAnalysisAutomationHealthRecentEvaluation,
+            MassAnalysisAutomationHealthResponse,
+        )
+        settings = get_settings()
+
+        if isinstance(automation, int):
+            stmt_aut = select(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id == automation)
+            res_aut = await db.execute(stmt_aut)
+            automation_obj = res_aut.scalars().first()
+            if not automation_obj:
+                raise ValueError(f"Automation configuration ID {automation} not found.")
+        else:
+            automation_obj = automation
+
+        automation_id = automation_obj.automation_id
+        service_id = automation_obj.service_id
+        interval_min = automation_obj.interval_minutes or 30
+
+        # 1. Fetch Service Name & Company ID
+        service_name = None
+        company_id = None
+        if service_id:
+            s_res = await db.execute(select(Service).where(Service.service_id == service_id))
+            s_obj = s_res.scalars().first()
+            if s_obj:
+                service_name = s_obj.service_name
+                company_id = s_obj.company_id
+
+        now = datetime.now(timezone.utc)
+        today_start_utc = datetime(now.year, now.month, now.day, 0, 0, 0, tzinfo=timezone.utc)
+        today_date_str = now.strftime("%Y-%m-%d")
+
+        # 2. Today's metrics (exclusively for this automation_id)
+        stmt_today = (
+            select(
+                func.count(MassAnalysisAutomationRun.automation_run_id).label("total_runs"),
+                func.coalesce(func.sum(MassAnalysisAutomationRun.calls_found), 0).label("calls_found"),
+                func.coalesce(func.sum(MassAnalysisAutomationRun.calls_selected), 0).label("calls_selected"),
+                func.coalesce(func.sum(MassEvaluationRun.calls_analyzed), 0).label("calls_analyzed"),
+                func.coalesce(func.sum(MassEvaluationRun.calls_failed), 0).label("calls_failed"),
+                func.coalesce(func.sum(MassAnalysisAutomationRun.calls_skipped), 0).label("calls_skipped"),
+                func.count(MassAnalysisAutomationRun.automation_run_id).filter(
+                    or_(
+                        MassAnalysisAutomationRun.status == "failed",
+                        MassEvaluationRun.status == "failed",
+                        MassEvaluationRun.calls_failed > 0
+                    )
+                ).label("errors_count")
+            )
+            .select_from(MassAnalysisAutomationRun)
+            .outerjoin(MassEvaluationRun, MassEvaluationRun.run_id == MassAnalysisAutomationRun.run_id)
+            .where(
+                MassAnalysisAutomationRun.automation_id == automation_id,
+                MassAnalysisAutomationRun.started_at >= today_start_utc
+            )
+        )
+        res_today = await db.execute(stmt_today)
+        m_today = res_today.mappings().first()
+
+        stmt_evals_today = (
+            select(MassEvaluationResult)
+            .join(MassAnalysisAutomationRun, MassAnalysisAutomationRun.run_id == MassEvaluationResult.run_id)
+            .where(
+                MassAnalysisAutomationRun.automation_id == automation_id,
+                MassEvaluationResult.created_at >= today_start_utc
+            )
+        )
+        res_evals_today = await db.execute(stmt_evals_today)
+        evals_today_rows = res_evals_today.scalars().all()
+        evaluations_count = len(evals_today_rows)
+        alarms_count = sum(1 for ev in evals_today_rows if ev.alarma)
+
+        today_summary = MassAnalysisAutomationHealthTodaySummary(
+            date=today_date_str,
+            total_runs=int(m_today["total_runs"]) if m_today else 0,
+            calls_found=int(m_today["calls_found"]) if m_today else 0,
+            calls_selected=int(m_today["calls_selected"]) if m_today else 0,
+            calls_analyzed=int(m_today["calls_analyzed"]) if m_today else 0,
+            calls_failed=int(m_today["calls_failed"]) if m_today else 0,
+            calls_skipped=int(m_today["calls_skipped"]) if m_today else 0,
+            errors_count=int(m_today["errors_count"]) if m_today else 0,
+            evaluations_count=evaluations_count,
+            alarms_count=alarms_count,
+        )
+
+        # 3. Active run (pending or running)
+        stmt_active = (
+            select(MassAnalysisAutomationRun, MassEvaluationRun)
+            .outerjoin(MassEvaluationRun, MassEvaluationRun.run_id == MassAnalysisAutomationRun.run_id)
+            .where(
+                MassAnalysisAutomationRun.automation_id == automation_id,
+                or_(
+                    MassAnalysisAutomationRun.status.in_(["pending", "running"]),
+                    MassEvaluationRun.status.in_(["pending", "running", "cancelling"])
+                )
+            )
+            .order_by(desc(MassAnalysisAutomationRun.automation_run_id))
+            .limit(1)
+        )
+        res_active = await db.execute(stmt_active)
+        active_pair = res_active.first()
+
+        active_run = None
+        is_active_stale = False
+        active_run_age_minutes = 0.0
+        stale_threshold_min = settings.automation_running_stale_after_minutes or 60
+
+        if active_pair:
+            ar_act, mr_act = active_pair
+            # Check if underlying mass run is already terminal
+            is_mass_terminal = mr_act and mr_act.status in ("completed", "completed_with_errors", "failed", "cancelled")
+            reference_time = (mr_act.heartbeat_at if mr_act and mr_act.heartbeat_at else None) or ar_act.started_at
+            if reference_time and reference_time.tzinfo is None:
+                reference_time = reference_time.replace(tzinfo=timezone.utc)
+            age_min = (now - reference_time).total_seconds() / 60 if reference_time else 0.0
+
+            # If orphan without mass run and older than 10 min, or if mass run is finished -> not active
+            if is_mass_terminal or (mr_act is None and ar_act.run_id is None and age_min >= 10):
+                active_run = None
+            else:
+                active_run_age_minutes = age_min
+                if active_run_age_minutes >= stale_threshold_min:
+                    is_active_stale = True
+
+                active_run = MassAnalysisAutomationHealthActiveRun(
+                    automation_run_id=ar_act.automation_run_id,
+                    run_id=ar_act.run_id,
+                    status=mr_act.status if mr_act else ar_act.status,
+                    started_at=ar_act.started_at,
+                    heartbeat_at=mr_act.heartbeat_at if mr_act else None,
+                    calls_found=ar_act.calls_found or (mr_act.calls_found if mr_act else 0),
+                    calls_selected=ar_act.calls_selected or (mr_act.calls_selected if mr_act else 0),
+                    calls_analyzed=mr_act.calls_analyzed if mr_act else 0,
+                    calls_skipped=ar_act.calls_skipped or (mr_act.calls_skipped if mr_act else 0),
+                    calls_failed=mr_act.calls_failed if mr_act else 0,
+                )
+
+        # 4. Recent runs (last 5)
+        stmt_recent_runs = (
+            select(MassAnalysisAutomationRun, MassEvaluationRun)
+            .outerjoin(MassEvaluationRun, MassEvaluationRun.run_id == MassAnalysisAutomationRun.run_id)
+            .where(MassAnalysisAutomationRun.automation_id == automation_id)
+            .order_by(desc(MassAnalysisAutomationRun.automation_run_id))
+            .limit(5)
+        )
+        res_recent_runs = await db.execute(stmt_recent_runs)
+        recent_run_pairs = res_recent_runs.all()
+
+        recent_runs: list[MassAnalysisAutomationHealthRecentRun] = []
+        latest_terminal_run: MassAnalysisAutomationRun | None = None
+        latest_terminal_mass: MassEvaluationRun | None = None
+
+        for ar_item, mr_item in recent_run_pairs:
+            eff_status = mr_item.status if mr_item and mr_item.status not in ("running", "pending") else ar_item.status
+            if eff_status == "running" and mr_item is None and ar_item.run_id is None:
+                st_at_i = ar_item.started_at
+                if st_at_i and st_at_i.tzinfo is None:
+                    st_at_i = st_at_i.replace(tzinfo=timezone.utc)
+                age_min_i = (now - st_at_i).total_seconds() / 60 if st_at_i else 0.0
+                if age_min_i >= 10:
+                    eff_status = "skipped"
+
+            if latest_terminal_run is None and eff_status in ("completed", "completed_with_errors", "failed", "skipped", "cancelled"):
+                latest_terminal_run = ar_item
+                latest_terminal_mass = mr_item
+
+            recent_runs.append(
+                MassAnalysisAutomationHealthRecentRun(
+                    automation_run_id=ar_item.automation_run_id,
+                    run_id=ar_item.run_id,
+                    started_at=ar_item.started_at,
+                    finished_at=ar_item.finished_at or (mr_item.finished_at if mr_item else None),
+                    window_from=ar_item.window_from,
+                    window_to=ar_item.window_to,
+                    status=eff_status,
+                    calls_found=ar_item.calls_found or (mr_item.calls_found if mr_item else 0),
+                    calls_selected=ar_item.calls_selected or (mr_item.calls_selected if mr_item else 0),
+                    calls_analyzed=mr_item.calls_analyzed if mr_item else 0,
+                    calls_skipped=ar_item.calls_skipped or (mr_item.calls_skipped if mr_item else 0),
+                    calls_failed=mr_item.calls_failed if mr_item else 0,
+                    error_message=ar_item.error_message or (mr_item.error_message if mr_item else None),
+                )
+            )
+
+        # 5. Recent evaluations (last 5)
+        stmt_recent_evals = (
+            select(MassEvaluationResult)
+            .join(MassAnalysisAutomationRun, MassAnalysisAutomationRun.run_id == MassEvaluationResult.run_id)
+            .where(MassAnalysisAutomationRun.automation_id == automation_id)
+            .order_by(desc(MassEvaluationResult.mass_analysis_id))
+            .limit(5)
+        )
+        res_recent_evals = await db.execute(stmt_recent_evals)
+        recent_eval_rows = res_recent_evals.scalars().all()
+
+        recent_evaluations = [
+            MassAnalysisAutomationHealthRecentEvaluation(
+                mass_analysis_id=ev.mass_analysis_id,
+                call_id=ev.call_id,
+                agent_name=ev.agent_name,
+                call_timestamp=ev.call_timestamp,
+                evaluated_at=ev.analysis_timestamp or ev.created_at,
+                created_at=ev.created_at,
+                status=ev.status,
+                alarma=ev.alarma,
+                hubspot_ticket_id=ev.hubspot_ticket_id,
+                hubspot_ticket_status=ev.hubspot_ticket_status,
+                is_evaluable=ev.is_evaluable,
+                evaluacion_global=float(ev.evaluacion_global) if ev.evaluacion_global is not None else None,
+                execution_source=ev.execution_source,
+                run_id=ev.run_id,
+                job_id=ev.job_id,
+                automation_id=automation_id,
+            )
+            for ev in recent_eval_rows
+        ]
+
+        # 6. Health evaluation (healthy, warning, critical)
+        last_at = automation_obj.last_run_at
+        if last_at and last_at.tzinfo is None:
+            last_at = last_at.replace(tzinfo=timezone.utc)
+
+        elapsed_minutes = (now - last_at).total_seconds() / 60 if last_at else 0.0
+
+        if not automation_obj.is_active:
+            health_status = "critical"
+            health_label = "Desactivada"
+            health_reason = "La automatización se encuentra desactivada."
+        elif is_active_stale:
+            health_status = "critical"
+            health_label = "Incidencia"
+            health_reason = f"Existe una ejecución bloqueada desde hace {int(active_run_age_minutes)} minutos sin finalizar."
+        elif latest_terminal_run and latest_terminal_run.status == "failed":
+            health_status = "critical"
+            health_label = "Incidencia"
+            err = latest_terminal_run.error_message or (latest_terminal_mass.error_message if latest_terminal_mass else "") or "Error en el procesamiento"
+            health_reason = f"La última ejecución falló: {err}"
+        elif last_at and elapsed_minutes > 5 * interval_min:
+            health_status = "critical"
+            health_label = "Incidencia"
+            health_reason = f"El sistema lleva {int(elapsed_minutes)} minutos sin ejecutar (más de 5 veces el intervalo esperado de {interval_min} min)."
+        elif latest_terminal_run and latest_terminal_run.status == "completed_with_errors":
+            failed_count = latest_terminal_mass.calls_failed if latest_terminal_mass else 0
+            health_status = "warning"
+            health_label = "Atención"
+            health_reason = f"La última ejecución finalizó con {failed_count} llamadas fallidas."
+        elif latest_terminal_mass and latest_terminal_mass.calls_failed > 0:
+            health_status = "warning"
+            health_label = "Atención"
+            health_reason = f"Se registraron {latest_terminal_mass.calls_failed} llamadas fallidas en la última ejecución."
+        elif last_at and elapsed_minutes > 3 * interval_min:
+            health_status = "warning"
+            health_label = "Atención"
+            health_reason = f"Ligero retraso: última ejecución hace {int(elapsed_minutes)} minutos (intervalo configurado: {interval_min} min)."
+        elif last_at is None:
+            health_status = "healthy"
+            health_label = "Operativa"
+            health_reason = "Automatización activa en espera de su primera ejecución programada."
+        else:
+            health_status = "healthy"
+            health_label = "Operativa"
+            health_reason = f"El sistema se ejecuta puntualmente cada {interval_min} minutos."
+
+        # 7. Next run calculation
+        if automation_obj.is_active and last_at:
+            next_run_at = last_at + timedelta(minutes=interval_min)
+        elif automation_obj.is_active and not last_at and automation_obj.created_at:
+            next_run_at = automation_obj.created_at
+        else:
+            next_run_at = None
+
+        return MassAnalysisAutomationHealthResponse(
+            automation_id=automation_id,
+            name=automation_obj.name,
+            company_id=company_id,
+            service_id=service_id,
+            service_name=service_name,
+            is_active=automation_obj.is_active,
+            interval_minutes=interval_min,
+            health_status=health_status,
+            health_label=health_label,
+            health_reason=health_reason,
+            stale_threshold_minutes=stale_threshold_min,
+            is_stale_warning=is_active_stale,
+            last_run_at=last_at,
+            next_run_at=next_run_at,
+            active_run=active_run,
+            today_summary=today_summary,
+            recent_runs=recent_runs,
+            recent_evaluations=recent_evaluations,
+        )

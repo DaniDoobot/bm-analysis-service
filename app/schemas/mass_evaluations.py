@@ -752,5 +752,91 @@ class PagedMassEvaluationResultResponse(BaseModel):
         return self
 
 
+# ── Health Summary Schemas ───────────────────────────────────────────────────
+
+class MassAnalysisAutomationHealthActiveRun(BaseModel):
+    automation_run_id: int | None = None
+    run_id: int | None = None
+    status: str
+    started_at: datetime
+    heartbeat_at: datetime | None = None
+    calls_found: int = 0
+    calls_selected: int = 0
+    calls_analyzed: int = 0
+    calls_skipped: int = 0
+    calls_failed: int = 0
+
+    class Config:
+        from_attributes = True
 
 
+class MassAnalysisAutomationHealthTodaySummary(BaseModel):
+    date: str
+    total_runs: int = 0
+    calls_found: int = 0
+    calls_selected: int = 0
+    calls_analyzed: int = 0
+    calls_failed: int = 0
+    calls_skipped: int = 0
+    errors_count: int = 0
+    evaluations_count: int = 0
+    alarms_count: int = 0
+
+
+class MassAnalysisAutomationHealthRecentRun(BaseModel):
+    automation_run_id: int
+    run_id: int | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+    window_from: datetime | None = None
+    window_to: datetime | None = None
+    status: str
+    calls_found: int = 0
+    calls_selected: int = 0
+    calls_analyzed: int = 0
+    calls_skipped: int = 0
+    calls_failed: int = 0
+    error_message: str | None = None
+
+
+class MassAnalysisAutomationHealthRecentEvaluation(BaseModel):
+    mass_analysis_id: int
+    call_id: str
+    agent_name: str | None = None
+    call_timestamp: datetime | None = None
+    evaluated_at: datetime | None = None
+    created_at: datetime | None = None
+    status: str
+    alarma: bool = False
+    hubspot_ticket_id: str | None = None
+    hubspot_ticket_status: str | None = None
+    is_evaluable: bool | None = None
+    evaluacion_global: float | None = None
+    execution_source: str | None = None
+    run_id: int | None = None
+    job_id: int | None = None
+    automation_id: int | None = None
+
+
+class MassAnalysisAutomationHealthResponse(BaseModel):
+    automation_id: int
+    name: str
+    company_id: int | None = None
+    service_id: int | None = None
+    service_name: str | None = None
+    is_active: bool
+    interval_minutes: int
+    health_status: str  # healthy | warning | critical
+    health_label: str   # Operativa | Atención | Incidencia | Desactivada
+    health_reason: str
+    stale_threshold_minutes: int = 60
+    is_stale_warning: bool = False
+    last_run_at: datetime | None = None
+    next_run_at: datetime | None = None
+    active_run: MassAnalysisAutomationHealthActiveRun | None = None
+    today_summary: MassAnalysisAutomationHealthTodaySummary
+    recent_runs: list[MassAnalysisAutomationHealthRecentRun] = []
+    recent_evaluations: list[MassAnalysisAutomationHealthRecentEvaluation] = []
+
+    class Config:
+        from_attributes = True
