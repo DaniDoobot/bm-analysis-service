@@ -136,9 +136,11 @@ def parse_item_score_filters_detailed(raw_param: str | list | dict | None) -> di
             or (isinstance(item.get("value"), str) and item.get("value", "").lower() in ("si", "no", "sí", "true", "false") and "min" not in item and "max" not in item)
         )
 
-        if is_bool_filter:
+        if is_bool_filter or "expected_bool" in item:
             expected_bool = None
-            if operator == "is_true":
+            if "expected_bool" in item:
+                expected_bool = _parse_bool_value(item["expected_bool"])
+            elif operator == "is_true":
                 expected_bool = True
             elif operator == "is_false":
                 expected_bool = False
@@ -289,6 +291,71 @@ def build_item_filters_sql(item_filters: list[dict[str, Any]]) -> list[Any]:
             sql_conditions.append(exists(subq))
 
     return sql_conditions
+
+
+def build_item_filters_raw_sql(
+    active_filters: list[dict[str, Any]],
+    result_alias: str = "r",
+    param_prefix: str = "item_filt_"
+) -> tuple[str, dict[str, Any]]:
+    """
+    Builds raw SQL WHERE expressions with parameterized bindings for MassEvaluationResult queries
+    using EXISTS subqueries on bm_mass_evaluation_criterion_results.
+    Ensures non-evaluable calls (is_evaluable = False) never match evaluative item filters.
+
+    Returns:
+        tuple[str, dict[str, Any]]:
+            - sql_clause: Formatted SQL string starting with " AND ..." (or empty string if no active filters)
+            - params: Dictionary of parameter bindings for SQLAlchemy text()
+    """
+    if not active_filters:
+        return "", {}
+
+    sql_parts = [f"AND ({result_alias}.is_evaluable IS NOT FALSE)"]
+    params: dict[str, Any] = {}
+
+    for idx, filt in enumerate(active_filters):
+        key = filt["key"]
+        filt_type = filt.get("type", "numeric")
+        k_param = f"{param_prefix}key_{idx}"
+        params[k_param] = key
+
+        if filt_type == "boolean":
+            expected = filt.get("expected_bool")
+            if expected is True:
+                bool_cond = f"(c_filt_{idx}.boolean_value = true OR LOWER(COALESCE(c_filt_{idx}.text_value, '')) IN ('si', 'sí', 'true', '1'))"
+            else:
+                bool_cond = f"(c_filt_{idx}.boolean_value = false OR LOWER(COALESCE(c_filt_{idx}.text_value, '')) IN ('no', 'false', '0'))"
+
+            sql_parts.append(
+                f"AND EXISTS ("
+                f"SELECT 1 FROM bm_mass_evaluation_criterion_results c_filt_{idx} "
+                f"WHERE c_filt_{idx}.mass_analysis_id = {result_alias}.mass_analysis_id "
+                f"AND c_filt_{idx}.criterion_key = :{k_param} "
+                f"AND {bool_cond})"
+            )
+        else:
+            min_val = filt.get("min", 0.0)
+            max_val = filt.get("max", 10.0)
+            min_param = f"{param_prefix}min_{idx}"
+            max_param = f"{param_prefix}max_{idx}"
+            params[min_param] = min_val
+            params[max_param] = max_val
+
+            sql_parts.append(
+                f"AND EXISTS ("
+                f"SELECT 1 FROM bm_mass_evaluation_criterion_results c_filt_{idx} "
+                f"WHERE c_filt_{idx}.mass_analysis_id = {result_alias}.mass_analysis_id "
+                f"AND c_filt_{idx}.criterion_key = :{k_param} "
+                f"AND ("
+                f"(c_filt_{idx}.numeric_value IS NOT NULL AND c_filt_{idx}.numeric_value >= :{min_param} AND c_filt_{idx}.numeric_value <= :{max_param}) "
+                f"OR "
+                f"(c_filt_{idx}.percentage_value IS NOT NULL AND c_filt_{idx}.percentage_value >= :{min_param} AND c_filt_{idx}.percentage_value <= :{max_param})"
+                f"))"
+            )
+
+    sql_clause = " " + " ".join(sql_parts)
+    return sql_clause, params
 
 
 def extract_boolean_from_mass(result_json: Any, items_json: Any, key: str) -> bool | None:

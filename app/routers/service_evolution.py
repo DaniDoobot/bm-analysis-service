@@ -13,6 +13,7 @@ from app.schemas.service_evolution import (
 )
 from app.services.service_evolution_service import ServiceEvolutionService
 from app.utils.normalizers import normalize_typology, normalize_direction, normalize_status
+from app.utils.item_score_filters import parse_item_score_filters_detailed
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,8 @@ async def get_services(
     norm_status = normalize_status(status or result_status)
     try:
         return await ServiceEvolutionService.get_services(db, date_from=date_from, date_to=date_to, status=norm_status, context=context)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Error fetching services for evolution dashboard: %s", e, exc_info=True)
         raise HTTPException(
@@ -60,6 +63,8 @@ async def get_criteria(
     norm_status = normalize_status(status or result_status)
     try:
         return await ServiceEvolutionService.get_criteria(db, service_id=service_id, date_from=date_from, date_to=date_to, status=norm_status, context=context)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Error fetching criteria for evolution dashboard: %s", e, exc_info=True)
         raise HTTPException(
@@ -75,7 +80,7 @@ async def get_evolution(
     service_key: str | None = Query(None, description="Filtrar por clave del servicio"),
     date_from: str | None = Query(None, description="Fecha de inicio (ISO 8601 o YYYY-MM-DD)"),
     date_to: str | None = Query(None, description="Fecha de fin (ISO 8601 o YYYY-MM-DD)"),
-    granularity: str = Query("day", description="Granularidad de agrupación: day | week | month"),
+    granularity: Annotated[str, Query(description="Granularidad de agrupación: day | week | month")] = "day",
     typology_key: str | None = Query(None, description="Filtrar por clave de tipología"),
     typology: str | None = Query(None, description="Filtrar por clave/nombre de tipología"),
     tipo_llamada: str | None = Query(None, description="Filtrar por tipo de llamada"),
@@ -94,6 +99,10 @@ async def get_evolution(
     avg_score_max: float | None = Query(None, description="Max average score"),
     status: str | None = Query(None, description="Filter by evaluation status: completed | failed | all"),
     result_status: str | None = Query(None, description="Alias for status"),
+    item_filters: Annotated[str | None, Query(description="JSON url-encoded item score/boolean filters")] = None,
+    criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -102,58 +111,102 @@ async def get_evolution(
     """
     # Validation: granularity
     valid_granularities = {"day", "week", "month"}
-    if granularity.lower() not in valid_granularities:
+    granularity_val = getattr(granularity, "default", granularity) if not isinstance(granularity, str) else granularity
+    granularity_str = str(granularity_val).lower() if granularity_val else "day"
+    if granularity_str not in valid_granularities:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"La granularidad '{granularity}' no es válida. Use: day | week | month"
+            detail=f"La granularidad '{granularity_val}' no es válida. Use: day | week | month"
         )
 
-    typo_ids = None
-    if typology_ids and typology_ids.strip():
-        typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
+    def _extract_val(val, default=None):
+        if val is None or hasattr(val, "default"):
+            return default if val is None else (getattr(val, "default", default) if getattr(val, "default", None) is not Ellipsis else default)
+        return val
 
-    raw_typology = typology or typology_key or tipo_llamada or call_type or selected_typology or typologies
+    s_id = _extract_val(service_id)
+    s_key = _extract_val(service_key)
+    d_from = _extract_val(date_from)
+    d_to = _extract_val(date_to)
+    ag_owner = _extract_val(agent_owner_id)
+    crit = _extract_val(criteria)
+    t_ids_raw = _extract_val(typology_ids)
+    dur_min = _extract_val(duration_min_seconds)
+    dur_max = _extract_val(duration_max_seconds)
+    sc_min = _extract_val(avg_score_min)
+    sc_max = _extract_val(avg_score_max)
+
+    typo_ids = None
+    if t_ids_raw and str(t_ids_raw).strip():
+        typo_ids = [int(tid.strip()) for tid in str(t_ids_raw).split(",") if tid.strip().isdigit()]
+
+    raw_typology = (
+        _extract_val(typology)
+        or _extract_val(typology_key)
+        or _extract_val(tipo_llamada)
+        or _extract_val(call_type)
+        or _extract_val(selected_typology)
+        or _extract_val(typologies)
+    )
     norm_typology_key = normalize_typology(raw_typology)
-    raw_direction = direction or call_direction or inbound_outbound
+    raw_direction = (
+        _extract_val(direction)
+        or _extract_val(call_direction)
+        or _extract_val(inbound_outbound)
+    )
     norm_direction = normalize_direction(raw_direction)
 
-    if service_id is not None and not context.is_super_admin:
-        if context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+    if s_id is not None and not context.is_super_admin:
+        if context.allowed_service_ids is not None and s_id not in context.allowed_service_ids:
             raise HTTPException(
                 status_code=403,
                 detail="Acceso denegado: No tienes permisos para este servicio."
             )
 
     if context.allowed_agent_ids is not None:
-        if agent_owner_id:
-            if agent_owner_id not in context.allowed_agent_ids:
+        if ag_owner:
+            if ag_owner not in context.allowed_agent_ids:
                 raise HTTPException(
                     status_code=403,
                     detail="No tienes permiso para consultar la evolución de este agente."
                 )
 
-    norm_status = normalize_status(status or result_status)
+    raw_st = _extract_val(status) or _extract_val(result_status)
+    norm_status = normalize_status(raw_st)
+
+    effective_item_filters = None
+    for cand in (item_filters, criterion_filters, score_filters, item_score_filters):
+        extracted_cand = _extract_val(cand)
+        if extracted_cand is not None:
+            effective_item_filters = extracted_cand
+            break
+
+    parsed_item_filters = parse_item_score_filters_detailed(effective_item_filters)
+    active_item_filters = parsed_item_filters.get("active_filters", [])
 
     try:
         return await ServiceEvolutionService.get_evolution(
             db,
-            service_id=service_id,
-            service_key=service_key,
-            date_from=date_from,
-            date_to=date_to,
-            granularity=granularity.lower(),
+            service_id=s_id,
+            service_key=s_key,
+            date_from=d_from,
+            date_to=d_to,
+            granularity=granularity_str,
             typology_key=norm_typology_key,
             direction=norm_direction,
-            agent_owner_id=agent_owner_id,
-            criteria=criteria,
+            agent_owner_id=ag_owner,
+            criteria=crit,
             typology_ids=typo_ids,
-            duration_min_seconds=duration_min_seconds,
-            duration_max_seconds=duration_max_seconds,
-            avg_score_min=avg_score_min,
-            avg_score_max=avg_score_max,
+            duration_min_seconds=dur_min,
+            duration_max_seconds=dur_max,
+            avg_score_min=sc_min,
+            avg_score_max=sc_max,
             status=norm_status,
             context=context,
+            item_filters=active_item_filters,
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Error generating service evolution: %s", e, exc_info=True)
         raise HTTPException(

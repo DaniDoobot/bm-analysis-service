@@ -18,6 +18,7 @@ from app.schemas.service_evolution import (
 )
 
 from app.utils.normalizers import normalize_typology, normalize_direction
+from app.utils.item_score_filters import parse_item_score_filters_detailed, build_item_filters_raw_sql
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +250,7 @@ class ServiceEvolutionService:
         avg_score_max: float | None = None,
         status: str | None = None,
         context: TenantContext | None = None,
+        item_filters: list[dict[str, Any]] | str | None = None,
     ) -> ServiceEvolutionResponse:
         """
         GET /bm/service-evolution
@@ -372,6 +374,19 @@ class ServiceEvolutionService:
             extra_sql += f" AND ({_EG_EXPR}) <= :score_max_scaled"
             extra_sql_left_join += f" AND ({_EG_EXPR}) <= :score_max_scaled"
             params["score_max_scaled"] = score_max_scaled
+
+        # Apply item score / boolean filters if present
+        if isinstance(item_filters, (str, dict, list)):
+            parsed_item = parse_item_score_filters_detailed(item_filters)
+            active_item_filters = parsed_item.get("active_filters", [])
+        else:
+            active_item_filters = []
+
+        item_sql_r, item_params = build_item_filters_raw_sql(active_item_filters, result_alias="r")
+        if item_sql_r:
+            extra_sql += f" {item_sql_r}"
+            extra_sql_left_join += f" {item_sql_r}"
+            params.update(item_params)
 
         # 2. Get Summary metrics
         # evaluacion_global fallback: if result_json has no 'evaluacion_global' key (analyses produced
