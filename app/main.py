@@ -231,6 +231,38 @@ async def start_training_scheduler():
             await asyncio.sleep(60)
 
 
+# ── HubSpot Alarm Tickets Recovery Scheduler ──────────────────────────────────
+async def start_hubspot_alarm_recovery_scheduler():
+    """Background scheduler task checking for stale pending or failed alarm tickets every 5 minutes."""
+    logger.info("HubSpot alarm tickets recovery background scheduler task started.")
+    import asyncio
+    await asyncio.sleep(25)  # Give app some startup headroom
+
+    from app.db import get_engine
+    from app.services.mass_evaluation_service import MassEvaluationService
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    engine = get_engine()
+
+    while True:
+        try:
+            async with AsyncSession(engine) as db:
+                try:
+                    await MassEvaluationService.run_alarm_tickets_recovery_sweep(db)
+                except Exception as e_inner:
+                    await db.rollback()
+                    logger.error("Error in alarm tickets recovery sweep: %s", e_inner)
+                finally:
+                    await db.close()
+            await asyncio.sleep(300)  # Sweep every 5 minutes
+        except asyncio.CancelledError:
+            logger.info("HubSpot alarm tickets recovery background scheduler task cancelled.")
+            break
+        except Exception as e:
+            logger.error("Error in alarm tickets recovery scheduler loop: %s", e, exc_info=True)
+            await asyncio.sleep(60)
+
+
 # ── Startup ───────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup_event():
@@ -284,5 +316,11 @@ async def startup_event():
         asyncio.create_task(start_training_scheduler())
     else:
         logger.info("Personalized training background scheduler is DISABLED (ENABLE_TRAINING_SCHEDULER=false).")
+
+    # Start HubSpot alarm tickets recovery scheduler if enabled
+    if settings.hubspot_alarm_tickets_enabled:
+        asyncio.create_task(start_hubspot_alarm_recovery_scheduler())
+    else:
+        logger.info("HubSpot alarm tickets recovery scheduler is DISABLED (HUBSPOT_ALARM_TICKETS_ENABLED=false).")
 
 

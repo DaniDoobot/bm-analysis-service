@@ -181,6 +181,143 @@ class HubSpotService:
             response.raise_for_status()
             return response.json()
 
+    async def find_alarm_ticket(
+        self,
+        mass_analysis_id: int | None = None,
+        call_id: str | None = None,
+        subject: str = "REM doobot speechFront",
+        pipeline: str | None = None,
+        contact_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """
+        Locates an existing alarm ticket in HubSpot to ensure crash-safe idempotency.
+
+        Search strategy:
+        A. Primary: Search by mass_analysis_id in ticket 'content'.
+           Client-side verification: 'Speech BM Analysis ID: {mass_analysis_id}' in content
+           and subject matching.
+        B. Legacy fallback: Search by call_id in ticket 'content'.
+           Client-side verification: 'Call ID: {call_id}' or call_id in content and subject matching.
+
+        Returns:
+        - {"ticket_id": str, "created_at": str, "is_ambiguous": False} if exactly 1 valid ticket is found.
+        - {"is_ambiguous": True, "count": int, "ticket_id": None} if multiple matching tickets exist.
+        - None if 0 matching tickets exist.
+        """
+        if not self.token:
+            return None
+
+        url = f"{HUBSPOT_API_BASE}/crm/v3/objects/tickets/search"
+        headers = self._headers()
+
+        async def _query_tickets(search_term: str) -> list[dict[str, Any]]:
+            payload = {
+                "filterGroups": [
+                    {
+                        "filters": [
+                            {
+                                "propertyName": "content",
+                                "operator": "CONTAINS_TOKEN",
+                                "value": f"*{search_term}*"
+                            }
+                        ]
+                    }
+                ],
+                "properties": ["subject", "content", "hs_pipeline", "hs_pipeline_stage", "createdate"],
+                "limit": 10
+            }
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.post(url, headers=headers, json=payload)
+                    if resp.status_code == 200:
+                        return resp.json().get("results") or []
+                    # Fallback to query parameter if filter group rejected
+                    resp_fallback = await client.post(
+                        url,
+                        headers=headers,
+                        json={
+                            "query": str(search_term),
+                            "properties": ["subject", "content", "hs_pipeline", "hs_pipeline_stage", "createdate"],
+                            "limit": 10
+                        }
+                    )
+                    if resp_fallback.status_code == 200:
+                        return resp_fallback.json().get("results") or []
+            except Exception as e_search:
+                logger.warning("[alarm_ticket] HubSpot ticket search error for term %s: %s", search_term, e_search)
+            return []
+
+        # A. Primary search: by mass_analysis_id
+        if mass_analysis_id:
+            raw_results = await _query_tickets(str(mass_analysis_id))
+            primary_candidates = []
+            expected_marker = f"Speech BM Analysis ID: {mass_analysis_id}"
+            for item in raw_results:
+                props = item.get("properties") or {}
+                c_content = props.get("content") or ""
+                c_subject = props.get("subject") or ""
+
+                # Client-side validation: must contain the exact analysis ID marker and subject
+                if expected_marker in c_content and subject.strip().lower() in c_subject.strip().lower():
+                    primary_candidates.append(item)
+
+            if len(primary_candidates) == 1:
+                t_id = str(primary_candidates[0]["id"])
+                return {
+                    "ticket_id": t_id,
+                    "created_at": (primary_candidates[0].get("properties") or {}).get("createdate"),
+                    "is_ambiguous": False
+                }
+            elif len(primary_candidates) > 1:
+                logger.error(
+                    "[alarm_ticket] ALARM_TICKET_RECONCILIATION_AMBIGUOUS: Multiple tickets matched mass_analysis_id=%s: %s",
+                    mass_analysis_id, [t["id"] for t in primary_candidates]
+                )
+                return {
+                    "is_ambiguous": True,
+                    "count": len(primary_candidates),
+                    "ticket_id": None
+                }
+
+        # B. Fallback search: by call_id (for legacy tickets or if marker was not yet written)
+        if call_id:
+            raw_results_call = await _query_tickets(str(call_id))
+            legacy_candidates = []
+            expected_call_marker = f"Call ID: {call_id}"
+            for item in raw_results_call:
+                props = item.get("properties") or {}
+                c_content = props.get("content") or ""
+                c_subject = props.get("subject") or ""
+                c_pipeline = props.get("hs_pipeline")
+
+                # Verify call marker or call ID present and subject matches
+                has_call = (expected_call_marker in c_content) or (str(call_id) in c_content)
+                subject_matches = subject.strip().lower() in c_subject.strip().lower()
+                pipeline_matches = (pipeline is None) or (c_pipeline == pipeline)
+
+                if has_call and subject_matches and pipeline_matches:
+                    legacy_candidates.append(item)
+
+            if len(legacy_candidates) == 1:
+                t_id = str(legacy_candidates[0]["id"])
+                return {
+                    "ticket_id": t_id,
+                    "created_at": (legacy_candidates[0].get("properties") or {}).get("createdate"),
+                    "is_ambiguous": False
+                }
+            elif len(legacy_candidates) > 1:
+                logger.error(
+                    "[alarm_ticket] ALARM_TICKET_RECONCILIATION_AMBIGUOUS: Multiple legacy tickets matched call_id=%s: %s",
+                    call_id, [t["id"] for t in legacy_candidates]
+                )
+                return {
+                    "is_ambiguous": True,
+                    "count": len(legacy_candidates),
+                    "ticket_id": None
+                }
+
+        return None
+
     async def get_owner_name(self, owner_id: str) -> str | None:
         """Optionally resolve owner_id to a display name."""
         if not owner_id:

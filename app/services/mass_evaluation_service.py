@@ -1008,6 +1008,8 @@ class MassEvaluationService:
                     if service_obj:
                         service_key = service_obj.service_key
                         service_name = service_obj.service_name
+                        if company_id is None and service_obj.company_id:
+                            company_id = service_obj.company_id
 
                 # Fetch active typologies — prioritize base_structure associations, fallback to service
                 typology_list = []
@@ -1313,6 +1315,7 @@ class MassEvaluationService:
                         
                     # Process call analysis
                     res_row = None
+                    current_mass_analysis_id: int | None = None
                     call_success = False
                     has_alarm = False
                     alarma_feed = None
@@ -1513,12 +1516,13 @@ class MassEvaluationService:
                                 "error_message": None
                             }
                         )
+                        current_mass_analysis_id = res_row.mass_analysis_id if res_row else None
 
                         # Persist normalized criteria
                         from app.models.mass_evaluations import MassEvaluationCriterionResult
                         for item in items:
                             crit_res = MassEvaluationCriterionResult(
-                                mass_analysis_id=res_row.mass_analysis_id,
+                                mass_analysis_id=current_mass_analysis_id,
                                 run_id=run_id,
                                 job_id=job_id,
                                 execution_source=execution_source,
@@ -1555,7 +1559,7 @@ class MassEvaluationService:
                         if has_alarm:
                             logger.info(
                                 "[alarm_detected] ALARM_DETECTED: mass_analysis_id=%s, call_id=%s, run_id=%s, job_id=%s, execution_source=%s, company_id=%s, service_id=%s, is_evaluable=%s, has_alarm=True",
-                                getattr(res_row, "mass_analysis_id", None),
+                                current_mass_analysis_id,
                                 call_id,
                                 run_id,
                                 job_id,
@@ -1614,6 +1618,7 @@ class MassEvaluationService:
                                 "typology_name": None
                             }
                         )
+                        current_mass_analysis_id = res_row.mass_analysis_id if res_row else None
                         calls_failed += 1
                     finally:
                         # Explicitly release large audio and LLM response buffers
@@ -1650,10 +1655,10 @@ class MassEvaluationService:
                     await db.commit()
 
                     # Trigger HubSpot Alarm Ticket creation if alarm was detected and call succeeded
-                    if call_success and is_eval is not False and has_alarm and res_row:
+                    if call_success and is_eval is not False and has_alarm and current_mass_analysis_id:
                         logger.info(
                             "[alarm_ticket] ALARM_TICKET_TRIGGER: mass_analysis_id=%s, call_id=%s, execution_source=%s, company_id=%s",
-                            res_row.mass_analysis_id,
+                            current_mass_analysis_id,
                             call_id,
                             execution_source,
                             company_id,
@@ -1661,7 +1666,7 @@ class MassEvaluationService:
                         try:
                             await MassEvaluationService._process_alarm_hubspot_ticket(
                                 db=db,
-                                mass_analysis_id=res_row.mass_analysis_id,
+                                mass_analysis_id=current_mass_analysis_id,
                                 execution_source=execution_source,
                                 company_id=company_id,
                                 service_name=service_name,
@@ -1680,12 +1685,12 @@ class MassEvaluationService:
                             logger.error("[alarm_ticket] Unexpected error executing alarm ticket process: %s", e_alarm_outer)
                     elif has_alarm:
                         logger.info(
-                            "[alarm_ticket] ALARM_TICKET_SKIPPED: mass_analysis_id=%s, call_id=%s, reason=call_not_evaluable_or_failed (call_success=%s, is_eval=%s, res_row=%s)",
-                            getattr(res_row, "mass_analysis_id", None),
+                            "[alarm_ticket] ALARM_TICKET_SKIPPED: mass_analysis_id=%s, call_id=%s, reason=call_not_evaluable_or_failed (call_success=%s, is_eval=%s, has_id=%s)",
+                            current_mass_analysis_id,
                             call_id,
                             call_success,
                             is_eval,
-                            bool(res_row),
+                            bool(current_mass_analysis_id),
                         )
 
                     # Periodic memory check every 10 calls
@@ -2214,9 +2219,16 @@ class MassEvaluationService:
             )
             return
 
-        # 3. Company check
+        # 3. Company check & resolution (FAIL CLOSED)
         configured_company = getattr(settings, "hubspot_alarm_company_id", 1)
-        if company_id is not None and company_id != configured_company:
+        if company_id is None:
+            logger.info(
+                "[alarm_ticket] ALARM_TICKET_SKIPPED: mass_analysis_id=%s, call_id=%s, reason=company_unresolved",
+                mass_analysis_id, call_id
+            )
+            return
+
+        if configured_company is not None and company_id != configured_company:
             logger.info(
                 "[alarm_ticket] ALARM_TICKET_SKIPPED: mass_analysis_id=%s, call_id=%s, reason=company_not_allowed (company_id=%s, configured=%s)",
                 mass_analysis_id, call_id, company_id, configured_company
@@ -2240,7 +2252,8 @@ class MassEvaluationService:
                     .where(MassEvaluationResult.mass_analysis_id == mass_analysis_id)
                     .values(
                         hubspot_ticket_status="failed",
-                        hubspot_ticket_error="HubSpot Alarm Ticket configuration incomplete (missing pipeline, stage, tipo_de_rem or token)"
+                        hubspot_ticket_error="HubSpot Alarm Ticket configuration incomplete (missing pipeline, stage, tipo_de_rem or token)",
+                        updated_at=datetime.now(timezone.utc),
                     )
                 )
                 await db.execute(stmt_upd)
@@ -2272,22 +2285,78 @@ class MassEvaluationService:
                 )
                 return
 
+            now_utc = datetime.now(timezone.utc)
+            ref_time = record.updated_at or record.created_at
+            if ref_time and ref_time.tzinfo is None:
+                ref_time = ref_time.replace(tzinfo=timezone.utc)
+
+            # Stale check: pending must wait at least 5 minutes before being reclaimable
             if record.hubspot_ticket_status == "pending":
+                if not (ref_time and (now_utc - ref_time) >= timedelta(minutes=5)):
+                    logger.info(
+                        "[alarm_ticket] ALARM_TICKET_SKIPPED: mass_analysis_id=%s, call_id=%s, reason=already_pending",
+                        mass_analysis_id, call_id
+                    )
+                    return
+
+            # Cooldown check: failed must wait at least 15 minutes before being retried
+            if record.hubspot_ticket_status == "failed":
+                if not (ref_time and (now_utc - ref_time) >= timedelta(minutes=15)):
+                    logger.info(
+                        "[alarm_ticket] ALARM_TICKET_SKIPPED: mass_analysis_id=%s, call_id=%s, reason=cooldown_failed",
+                        mass_analysis_id, call_id
+                    )
+                    return
+
+            # Snapshot all required attributes locally BEFORE commit to avoid MissingGreenlet on expired ORM instance
+            rec_contact_id = record.hubspot_contact_id
+            rec_items_json = record.items_json
+            rec_result_json = record.result_json
+            rec_company_id = record.company_id
+
+            if rec_company_id is not None and configured_company is not None and rec_company_id != configured_company:
                 logger.info(
-                    "[alarm_ticket] ALARM_TICKET_SKIPPED: mass_analysis_id=%s, call_id=%s, reason=already_pending",
+                    "[alarm_ticket] ALARM_TICKET_SKIPPED: mass_analysis_id=%s, call_id=%s, reason=company_not_allowed (record.company_id=%s, configured=%s)",
+                    mass_analysis_id, call_id, rec_company_id, configured_company
+                )
+                return
+
+            stmt_pending = (
+                update(MassEvaluationResult)
+                .where(
+                    MassEvaluationResult.mass_analysis_id == mass_analysis_id,
+                    MassEvaluationResult.hubspot_ticket_status.is_distinct_from("created"),
+                    or_(
+                        MassEvaluationResult.hubspot_ticket_status.is_distinct_from("pending"),
+                        and_(
+                            MassEvaluationResult.hubspot_ticket_status == "pending",
+                            func.coalesce(MassEvaluationResult.updated_at, MassEvaluationResult.created_at) <= now_utc - timedelta(minutes=5)
+                        )
+                    )
+                )
+                .values(
+                    hubspot_ticket_status="pending",
+                    hubspot_ticket_error=None,
+                    updated_at=now_utc,
+                )
+            )
+            pending_res = await db.execute(stmt_pending)
+            await db.commit()
+
+            if pending_res.rowcount == 0:
+                logger.info(
+                    "[alarm_ticket] ALARM_TICKET_SKIPPED: mass_analysis_id=%s, call_id=%s, reason=already_in_flight_or_created",
                     mass_analysis_id, call_id
                 )
                 return
 
-            record.hubspot_ticket_status = "pending"
-            record.hubspot_ticket_error = None
-            await db.commit()
             logger.info(
                 "[alarm_ticket] ALARM_TICKET_PENDING: mass_analysis_id=%s, call_id=%s",
                 mass_analysis_id, call_id
             )
         except Exception as e_lock:
             logger.warning("[alarm_ticket] Failed to reserve pending status: %s", e_lock)
+            return
 
         # 6. Contact Resolution & Ticket Build
         try:
@@ -2295,9 +2364,9 @@ class MassEvaluationService:
 
             # Resolve effective contact_id:
             # 1) Provided argument `contact_id`
-            # 2) Stored `record.hubspot_contact_id` in database
+            # 2) Stored `rec_contact_id` in database
             # 3) Live HubSpot call lookup fallback
-            effective_contact_id = contact_id or (record.hubspot_contact_id if record else None)
+            effective_contact_id = contact_id or rec_contact_id
             is_ambiguous_contact = False
 
             if not effective_contact_id:
@@ -2307,9 +2376,16 @@ class MassEvaluationService:
                     is_ambiguous_contact = bool(call_meta.get("is_contact_ambiguous"))
                     if resolved_cid:
                         effective_contact_id = str(resolved_cid)
-                        if record:
-                            record.hubspot_contact_id = effective_contact_id
-                            await db.commit()
+                        stmt_cid = (
+                            update(MassEvaluationResult)
+                            .where(MassEvaluationResult.mass_analysis_id == mass_analysis_id)
+                            .values(
+                                hubspot_contact_id=effective_contact_id,
+                                updated_at=datetime.now(timezone.utc),
+                            )
+                        )
+                        await db.execute(stmt_cid)
+                        await db.commit()
                 except Exception as e_cid_lookup:
                     logger.warning("[alarm_ticket] Fallback contact lookup failed for call %s: %s", call_id, e_cid_lookup)
 
@@ -2328,10 +2404,17 @@ class MassEvaluationService:
                         call_id, mass_analysis_id
                     )
 
-                if record:
-                    record.hubspot_ticket_status = "failed"
-                    record.hubspot_ticket_error = err_msg
-                    await db.commit()
+                stmt_fail = (
+                    update(MassEvaluationResult)
+                    .where(MassEvaluationResult.mass_analysis_id == mass_analysis_id)
+                    .values(
+                        hubspot_ticket_status="failed",
+                        hubspot_ticket_error=err_msg,
+                        updated_at=datetime.now(timezone.utc),
+                    )
+                )
+                await db.execute(stmt_fail)
+                await db.commit()
                 logger.info(
                     "[alarm_ticket] ALARM_TICKET_FAILED: mass_analysis_id=%s, call_id=%s, error=%s",
                     mass_analysis_id, call_id, "ambiguous_contact" if is_ambiguous_contact else "no_contact_found"
@@ -2364,16 +2447,16 @@ class MassEvaluationService:
 
             # Resolve effective call summary:
             # 1) Provided argument `resumen_llamada`
-            # 2) `record.items_json`
-            # 3) `record.result_json["items"]`
+            # 2) `rec_items_json`
+            # 3) `rec_result_json["items"]`
             # 4) Fallback query `bm_mass_evaluation_criterion_results`
             raw_res = (resumen_llamada or "").strip()
             effective_resumen = raw_res if raw_res and raw_res.lower() not in ("none", "null", "undefined", "n/a") else None
-            if not effective_resumen and record:
-                if record.items_json:
-                    effective_resumen = MassEvaluationService._extract_call_summary(record.items_json)
-                if not effective_resumen and isinstance(record.result_json, dict):
-                    effective_resumen = MassEvaluationService._extract_call_summary(record.result_json.get("items"))
+            if not effective_resumen:
+                if rec_items_json:
+                    effective_resumen = MassEvaluationService._extract_call_summary(rec_items_json)
+                if not effective_resumen and isinstance(rec_result_json, dict):
+                    effective_resumen = MassEvaluationService._extract_call_summary(rec_result_json.get("items"))
                 if not effective_resumen:
                     try:
                         stmt_sum = select(MassEvaluationCriterionResult.text_value).where(
@@ -2400,6 +2483,7 @@ class MassEvaluationService:
                 f"Dirección: {direction or 'Sin datos'}\n"
                 f"Duración: {dur_str}\n"
                 f"Evaluación global: {score_str}\n"
+                f"Speech BM Analysis ID: {mass_analysis_id}\n"
                 f"Call ID: {call_id}\n"
                 f"{url_line}\n\n"
                 f"{summary_block}"
@@ -2415,11 +2499,65 @@ class MassEvaluationService:
                 "hs_pipeline_stage": stage,
             }
 
-            # 7. Create ticket in HubSpot API
+            # 7. Check if Ticket already exists in HubSpot (reconciliation / crash-safety)
+            existing_ticket = None
+            try:
+                existing_ticket = await hs_service.find_alarm_ticket(
+                    mass_analysis_id=mass_analysis_id,
+                    call_id=call_id,
+                    subject=subject,
+                    pipeline=pipeline,
+                    contact_id=effective_contact_id,
+                )
+            except Exception as e_find:
+                logger.warning("[alarm_ticket] Pre-creation remote ticket search failed for call %s: %s", call_id, e_find)
+
+            if existing_ticket and existing_ticket.get("is_ambiguous"):
+                err_msg = "Múltiples tickets candidatos encontrados en HubSpot para esta alarma (reconciliación ambigua)"
+                logger.error(
+                    "[alarm_ticket] ALARM_TICKET_FAILED: mass_analysis_id=%s, call_id=%s, error=reconciliation_ambiguous",
+                    mass_analysis_id, call_id
+                )
+                stmt_amb = (
+                    update(MassEvaluationResult)
+                    .where(MassEvaluationResult.mass_analysis_id == mass_analysis_id)
+                    .values(
+                        hubspot_ticket_status="failed",
+                        hubspot_ticket_error=err_msg,
+                        updated_at=datetime.now(timezone.utc),
+                    )
+                )
+                await db.execute(stmt_amb)
+                await db.commit()
+                return
+
+            if existing_ticket and existing_ticket.get("ticket_id"):
+                found_id = str(existing_ticket["ticket_id"])
+                logger.info(
+                    "[alarm_ticket] ALARM_TICKET_RECONCILED: mass_analysis_id=%s, call_id=%s, ticket_id=%s, contact_id=%s",
+                    mass_analysis_id, call_id, found_id, effective_contact_id
+                )
+                stmt_rec = (
+                    update(MassEvaluationResult)
+                    .where(MassEvaluationResult.mass_analysis_id == mass_analysis_id)
+                    .values(
+                        hubspot_contact_id=effective_contact_id,
+                        hubspot_ticket_id=found_id,
+                        hubspot_ticket_status="created",
+                        hubspot_ticket_created_at=datetime.now(timezone.utc),
+                        hubspot_ticket_error=None,
+                        updated_at=datetime.now(timezone.utc),
+                    )
+                )
+                await db.execute(stmt_rec)
+                await db.commit()
+                return
+
+            # 8. Create ticket in HubSpot API (only if not found remotely)
             ticket_data = await hs_service.create_ticket(properties=properties, contact_id=effective_contact_id)
             ticket_id = str(ticket_data.get("id", ""))
 
-            # 8. Persist success
+            # 9. Persist success
             stmt_ok = (
                 update(MassEvaluationResult)
                 .where(MassEvaluationResult.mass_analysis_id == mass_analysis_id)
@@ -2429,6 +2567,7 @@ class MassEvaluationService:
                     hubspot_ticket_status="created",
                     hubspot_ticket_created_at=datetime.now(timezone.utc),
                     hubspot_ticket_error=None,
+                    updated_at=datetime.now(timezone.utc),
                 )
             )
             await db.execute(stmt_ok)
@@ -2450,6 +2589,7 @@ class MassEvaluationService:
                     .values(
                         hubspot_ticket_status="failed",
                         hubspot_ticket_error=clean_err,
+                        updated_at=datetime.now(timezone.utc),
                     )
                 )
                 await db.execute(stmt_err)
@@ -2460,6 +2600,135 @@ class MassEvaluationService:
                 "[alarm_ticket] ALARM_TICKET_FAILED: mass_analysis_id=%s, call_id=%s, error=%s",
                 mass_analysis_id, call_id, clean_err
             )
+
+    @staticmethod
+    async def run_alarm_tickets_recovery_sweep(db: AsyncSession) -> dict[str, int]:
+        """
+        Periodic recovery sweep for stale pending and failed alarm tickets.
+        Batched to max 20 candidates per run.
+        """
+        from datetime import datetime, timezone, timedelta
+        from sqlalchemy import select, or_, and_, func
+        from app.config import get_settings
+        from app.models.services import Service
+
+        settings = get_settings()
+        if not getattr(settings, "hubspot_alarm_tickets_enabled", False):
+            return {"processed": 0, "recovered": 0, "failed": 0, "skipped": 0}
+
+        configured_company = getattr(settings, "hubspot_alarm_company_id", 1)
+        now_utc = datetime.now(timezone.utc)
+        stale_pending_cutoff = now_utc - timedelta(minutes=5)
+        stale_failed_cutoff = now_utc - timedelta(minutes=15)
+
+        stats = {"processed": 0, "recovered": 0, "failed": 0, "skipped": 0}
+
+        try:
+            # Query candidates: completed, evaluable is not False, pending (>=5m) or failed (>=15m)
+            stmt = (
+                select(MassEvaluationResult)
+                .where(
+                    MassEvaluationResult.status == "completed",
+                    MassEvaluationResult.is_evaluable.is_not(False),
+                    or_(
+                        and_(
+                            MassEvaluationResult.hubspot_ticket_status == "pending",
+                            func.coalesce(MassEvaluationResult.updated_at, MassEvaluationResult.created_at) <= stale_pending_cutoff
+                        ),
+                        and_(
+                            MassEvaluationResult.hubspot_ticket_status == "failed",
+                            func.coalesce(MassEvaluationResult.updated_at, MassEvaluationResult.created_at) <= stale_failed_cutoff
+                        )
+                    )
+                )
+                .order_by(MassEvaluationResult.mass_analysis_id.asc())
+                .limit(20)
+            )
+            res = await db.execute(stmt)
+            candidates = res.scalars().all()
+
+            if not candidates:
+                return stats
+
+            logger.info("[alarm_recovery] ALARM_RECOVERY_SWEEP_START: candidates_count=%d", len(candidates))
+
+            for row in candidates:
+                stats["processed"] += 1
+                mid = row.mass_analysis_id
+                cid = row.call_id
+                prev_status = row.hubspot_ticket_status
+
+                try:
+                    # 1. Verify alarm is actually detected in items_json
+                    has_alarm, alarma_feed = MassEvaluationService._is_alarm_detected(row.items_json)
+                    if not has_alarm:
+                        logger.info("[alarm_recovery] ALARM_TICKET_SKIPPED: mass_analysis_id=%s, call_id=%s, reason=no_alarm_detected", mid, cid)
+                        stats["skipped"] += 1
+                        continue
+
+                    # 2. Resolve company_id safely (job -> service -> fail closed)
+                    comp_id = row.company_id
+                    if comp_id is None and row.service_id:
+                        s_res = await db.execute(select(Service.company_id).where(Service.service_id == row.service_id))
+                        comp_id = s_res.scalar_one_or_none()
+
+                    if comp_id is None:
+                        logger.info("[alarm_recovery] ALARM_TICKET_SKIPPED: mass_analysis_id=%s, call_id=%s, reason=company_unresolved", mid, cid)
+                        stats["skipped"] += 1
+                        continue
+
+                    if configured_company is not None and comp_id != configured_company:
+                        logger.info("[alarm_recovery] ALARM_TICKET_SKIPPED: mass_analysis_id=%s, call_id=%s, reason=company_not_allowed (company_id=%s)", mid, cid, comp_id)
+                        stats["skipped"] += 1
+                        continue
+
+                    logger.info("[alarm_recovery] ALARM_RECOVERY_CLAIMED: mass_analysis_id=%s, call_id=%s, previous_status=%s", mid, cid, prev_status)
+
+                    resumen_llamada = MassEvaluationService._extract_call_summary(row.items_json)
+
+                    # 3. Reconcile / Process ticket
+                    await MassEvaluationService._process_alarm_hubspot_ticket(
+                        db=db,
+                        mass_analysis_id=mid,
+                        execution_source=row.execution_source or "automation",
+                        company_id=comp_id,
+                        service_name=row.service_name,
+                        agent_name=row.agent_name,
+                        call_id=cid,
+                        call_timestamp=row.call_timestamp,
+                        typology_name=row.typology_name,
+                        direction=row.direction,
+                        call_duration_seconds=row.call_duration_seconds,
+                        evaluacion_global=row.evaluacion_global,
+                        alarma_feed=alarma_feed,
+                        contact_id=row.hubspot_contact_id,
+                        resumen_llamada=resumen_llamada,
+                    )
+
+                    # Check final outcome in DB
+                    st_check = select(MassEvaluationResult.hubspot_ticket_status).where(MassEvaluationResult.mass_analysis_id == mid)
+                    res_check = await db.execute(st_check)
+                    final_status = res_check.scalar_one_or_none()
+
+                    if final_status == "created":
+                        stats["recovered"] += 1
+                    elif final_status == "failed":
+                        stats["failed"] += 1
+                    else:
+                        stats["skipped"] += 1
+
+                except Exception as e_item:
+                    logger.error("[alarm_recovery] Error processing recovery candidate %s: %s", mid, e_item)
+                    stats["failed"] += 1
+
+            logger.info(
+                "[alarm_recovery] ALARM_RECOVERY_SWEEP_FINISH: processed=%d, recovered=%d, failed=%d, skipped=%d",
+                stats["processed"], stats["recovered"], stats["failed"], stats["skipped"]
+            )
+        except Exception as e_sweep:
+            logger.error("[alarm_recovery] Unexpected error in alarm recovery sweep: %s", e_sweep)
+
+        return stats
 
     @staticmethod
     async def _upsert_mass_evaluation_result(

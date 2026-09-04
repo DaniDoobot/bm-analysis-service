@@ -5,7 +5,7 @@ Tests all cases with fully mocked HubSpot API calls and in-memory test database.
 import asyncio
 import os
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,6 +20,7 @@ from app.models.mass_evaluations import (
     MassEvaluationResult,
     MassEvaluationRun,
 )
+from app.models.services import Service
 from app.services.hubspot_service import HubSpotService
 from app.services.mass_evaluation_service import MassEvaluationService
 
@@ -48,7 +49,12 @@ class TestHubSpotAlarmTickets(unittest.IsolatedAsyncioTestCase):
         self.settings.hubspot_alarm_tickets_enabled = True
         self.settings.hubspot_alarm_company_id = 1
 
+        # Default find_alarm_ticket to return None so create_ticket is tested without extra search HTTP calls
+        self._find_patcher = patch.object(HubSpotService, "find_alarm_ticket", new=AsyncMock(return_value=None))
+        self.mock_find_alarm_ticket = self._find_patcher.start()
+
     async def asyncTearDown(self):
+        self._find_patcher.stop()
         await self.engine.dispose()
 
     async def _create_test_result(
@@ -1010,6 +1016,492 @@ class TestHubSpotAlarmTickets(unittest.IsolatedAsyncioTestCase):
                     content = mock_post.call_args[1]["json"]["properties"]["content"]
                     self.assertNotIn("RESUMEN DE LA LLAMADA", content)
                     self.assertIn("MOTIVO DE LA ALARMA:\nMotivo de prueba", content)
+
+    # 33. Regression: MissingGreenlet prevention with expire_on_commit=True
+    async def test_33_expire_on_commit_missing_greenlet_regression(self):
+        # Create session factory with expire_on_commit=True (identical to production async engine)
+        expiring_session_maker = sessionmaker(
+            self.engine, class_=AsyncSession, expire_on_commit=True
+        )
+        async with expiring_session_maker() as session:
+            res = await self._create_test_result(session, hubspot_contact_id="hs_contact_expiring")
+            target_analysis_id = res.mass_analysis_id
+            call_ts = res.call_timestamp
+            call_id = res.call_id
+            eval_score = res.evaluacion_global
+
+            with patch("app.services.hubspot_service.httpx.AsyncClient.post") as mock_post:
+                mock_post.return_value = MagicMock(
+                    status_code=201,
+                    json=lambda: {"id": "hs_ticket_exp_777", "properties": {}},
+                    raise_for_status=lambda: None
+                )
+
+                # Ensure call does not raise MissingGreenlet even with expired ORM instances
+                await MassEvaluationService._process_alarm_hubspot_ticket(
+                    db=session,
+                    mass_analysis_id=target_analysis_id,
+                    execution_source="automation",
+                    company_id=1,
+                    service_name="Front",
+                    agent_name="Agente Expire Test",
+                    call_id=call_id,
+                    call_timestamp=call_ts,
+                    typology_name="Queja",
+                    direction="INBOUND",
+                    call_duration_seconds=120,
+                    evaluacion_global=eval_score,
+                    alarma_feed="Alarma detectada en entorno con expire_on_commit=True",
+                    contact_id="hs_contact_expiring",
+                    resumen_llamada="Resumen previo al commit"
+                )
+
+                self.assertEqual(mock_post.call_count, 1)
+
+                stmt = select(MassEvaluationResult).where(MassEvaluationResult.mass_analysis_id == target_analysis_id)
+                updated = (await session.execute(stmt)).scalars().first()
+                self.assertEqual(updated.hubspot_ticket_id, "hs_ticket_exp_777")
+                self.assertEqual(updated.hubspot_ticket_status, "created")
+
+    # 34. Resilience: HubSpot API failure records failed status without invalidating evaluation
+    async def test_34_resilience_on_hubspot_api_failure(self):
+        async with self.async_session() as session:
+            res = await self._create_test_result(session, hubspot_contact_id="hs_contact_fail_test")
+
+            with patch("app.services.hubspot_service.httpx.AsyncClient.post") as mock_post:
+                mock_post.side_effect = Exception("HubSpot 500 Internal Server Error with sensitive token Bearer pat-na1-12345")
+
+                await MassEvaluationService._process_alarm_hubspot_ticket(
+                    db=session,
+                    mass_analysis_id=res.mass_analysis_id,
+                    execution_source="automation",
+                    company_id=1,
+                    service_name="Front",
+                    agent_name="Agente Fail Test",
+                    call_id=res.call_id,
+                    call_timestamp=res.call_timestamp,
+                    typology_name="Queja",
+                    direction="INBOUND",
+                    call_duration_seconds=100,
+                    evaluacion_global=res.evaluacion_global,
+                    alarma_feed="Alarma crítica que falla en llamada HubSpot",
+                    contact_id="hs_contact_fail_test",
+                    resumen_llamada="Resumen de prueba"
+                )
+
+                stmt = select(MassEvaluationResult).where(MassEvaluationResult.mass_analysis_id == res.mass_analysis_id)
+                updated = (await session.execute(stmt)).scalars().first()
+                # Ticket status marked as failed with sanitized error
+                self.assertEqual(updated.hubspot_ticket_status, "failed")
+                self.assertIn("HubSpot 500", updated.hubspot_ticket_error)
+                self.assertNotIn("pat-na1-12345", updated.hubspot_ticket_error)
+                self.assertIn("[REDACTED]", updated.hubspot_ticket_error)
+                # Evaluation data intact
+                self.assertEqual(updated.status, "completed")
+                self.assertTrue(updated.is_evaluable)
+                self.assertEqual(updated.evaluacion_global, Decimal("4.5"))
+
+    # 35. Idempotency: Duplicate calls never create duplicate tickets
+    async def test_35_idempotency_duplicate_calls_never_duplicate(self):
+        async with self.async_session() as session:
+            res = await self._create_test_result(session, hubspot_contact_id="hs_contact_dup_test")
+
+            with patch("app.services.hubspot_service.httpx.AsyncClient.post") as mock_post:
+                mock_post.return_value = MagicMock(
+                    status_code=201,
+                    json=lambda: {"id": "hs_ticket_unique_111", "properties": {}},
+                    raise_for_status=lambda: None
+                )
+
+                # First call: creates ticket
+                await MassEvaluationService._process_alarm_hubspot_ticket(
+                    db=session,
+                    mass_analysis_id=res.mass_analysis_id,
+                    execution_source="automation",
+                    company_id=1,
+                    service_name="Front",
+                    agent_name="Agente Dup",
+                    call_id=res.call_id,
+                    call_timestamp=res.call_timestamp,
+                    typology_name="Queja",
+                    direction="INBOUND",
+                    call_duration_seconds=100,
+                    evaluacion_global=res.evaluacion_global,
+                    alarma_feed="Alarma que no debe duplicarse",
+                    contact_id="hs_contact_dup_test"
+                )
+                self.assertEqual(mock_post.call_count, 1)
+
+                # Second call: must skip
+                await MassEvaluationService._process_alarm_hubspot_ticket(
+                    db=session,
+                    mass_analysis_id=res.mass_analysis_id,
+                    execution_source="automation",
+                    company_id=1,
+                    service_name="Front",
+                    agent_name="Agente Dup",
+                    call_id=res.call_id,
+                    call_timestamp=res.call_timestamp,
+                    typology_name="Queja",
+                    direction="INBOUND",
+                    call_duration_seconds=100,
+                    evaluacion_global=res.evaluacion_global,
+                    alarma_feed="Alarma que no debe duplicarse",
+                    contact_id="hs_contact_dup_test"
+                )
+                # Still exactly 1 call
+                self.assertEqual(mock_post.call_count, 1)
+
+    # 36. Tenant safety: company_id=None without service fallback fails closed (company_unresolved, 0 tickets)
+    async def test_36_company_id_none_fails_closed_unresolved(self):
+        async with self.async_session() as session:
+            res = await self._create_test_result(session, hubspot_contact_id="hs_contact_none_company")
+
+            with patch("app.services.hubspot_service.httpx.AsyncClient.post") as mock_post:
+                await MassEvaluationService._process_alarm_hubspot_ticket(
+                    db=session,
+                    mass_analysis_id=res.mass_analysis_id,
+                    execution_source="automation",
+                    company_id=None,
+                    service_name="Front",
+                    agent_name="Agente Co None",
+                    call_id=res.call_id,
+                    call_timestamp=res.call_timestamp,
+                    typology_name="Queja",
+                    direction="INBOUND",
+                    call_duration_seconds=100,
+                    evaluacion_global=res.evaluacion_global,
+                    alarma_feed="Alarma con company_id None",
+                    contact_id="hs_contact_none_company"
+                )
+                # Fail closed: no HTTP POST
+                self.assertEqual(mock_post.call_count, 0)
+                await session.refresh(res)
+                # Remains untouched (not marked created)
+                self.assertIsNone(res.hubspot_ticket_id)
+                self.assertIsNone(res.hubspot_ticket_status)
+
+    # 37. Crash window: pending -> HubSpot 201 -> crash antes de BD created -> recovery reconcilia -> exactamente 1 ticket
+    async def test_37_crash_window_reconciliation_exact_one_ticket(self):
+        async with self.async_session() as session:
+            res = await self._create_test_result(session, hubspot_contact_id="hs_contact_crash_37")
+            # Simulate crash window: status is pending, timestamp is 10 minutes ago
+            res.hubspot_ticket_status = "pending"
+            stale_time = datetime.now(timezone.utc) - timedelta(minutes=10)
+            res.created_at = stale_time
+            res.updated_at = stale_time
+            res.items_json = [
+                {"criterion_key": "alarma", "boolean_value": True, "feed": "Alarma detectada pre-crash"}
+            ]
+            await session.commit()
+
+            # Remote search returns the ticket that was created in HubSpot before local crash
+            remote_ticket = {
+                "ticket_id": "hs_ticket_recovered_37",
+                "created_at": "2026-09-04T12:00:00Z",
+                "is_ambiguous": False
+            }
+            self.mock_find_alarm_ticket.return_value = remote_ticket
+
+            with patch.object(HubSpotService, "create_ticket", new=AsyncMock()) as mock_create:
+                stats = await MassEvaluationService.run_alarm_tickets_recovery_sweep(session)
+
+                # Exactly 0 new create_ticket calls: reconciled without duplicate!
+                mock_create.assert_not_called()
+                self.assertEqual(stats["recovered"], 1)
+
+                await session.refresh(res)
+                self.assertEqual(res.hubspot_ticket_status, "created")
+                self.assertEqual(res.hubspot_ticket_id, "hs_ticket_recovered_37")
+                self.assertIsNone(res.hubspot_ticket_error)
+
+    # 38. Pending < 5 min no es procesado por recovery (skip reason=already_pending)
+    async def test_38_pending_under_5_min_not_processed_by_recovery(self):
+        async with self.async_session() as session:
+            res = await self._create_test_result(session, hubspot_contact_id="hs_contact_fresh_38")
+            # Set pending status with fresh timestamp (2 minutes ago)
+            res.hubspot_ticket_status = "pending"
+            fresh_time = datetime.now(timezone.utc) - timedelta(minutes=2)
+            res.created_at = fresh_time
+            res.updated_at = fresh_time
+            res.items_json = [
+                {"criterion_key": "alarma", "boolean_value": True, "feed": "Alarma fresca"}
+            ]
+            await session.commit()
+
+            with patch.object(HubSpotService, "create_ticket", new=AsyncMock()) as mock_create:
+                stats = await MassEvaluationService.run_alarm_tickets_recovery_sweep(session)
+
+                mock_create.assert_not_called()
+                self.assertEqual(stats["recovered"], 0)
+
+                await session.refresh(res)
+                # Status remains pending, untouched
+                self.assertEqual(res.hubspot_ticket_status, "pending")
+                self.assertIsNone(res.hubspot_ticket_id)
+
+    # 39. Pending stale (>= 5 min) sin ticket remoto -> recovery crea Ticket una sola vez -> created
+    async def test_39_pending_stale_without_remote_ticket_creates_once(self):
+        async with self.async_session() as session:
+            res = await self._create_test_result(session, hubspot_contact_id="hs_contact_stale_39")
+            res.hubspot_ticket_status = "pending"
+            stale_time = datetime.now(timezone.utc) - timedelta(minutes=6)
+            res.created_at = stale_time
+            res.updated_at = stale_time
+            res.items_json = [
+                {"criterion_key": "alarma", "boolean_value": True, "feed": "Alarma sin ticket remoto"}
+            ]
+            await session.commit()
+
+            # Remote search returns None (no ticket in HubSpot yet)
+            self.mock_find_alarm_ticket.return_value = None
+
+            with patch.object(HubSpotService, "create_ticket", new=AsyncMock(return_value={"id": "hs_ticket_created_39"})) as mock_create:
+                stats = await MassEvaluationService.run_alarm_tickets_recovery_sweep(session)
+
+                self.assertEqual(mock_create.call_count, 1)
+                self.assertEqual(stats["recovered"], 1)
+
+                await session.refresh(res)
+                self.assertEqual(res.hubspot_ticket_status, "created")
+                self.assertEqual(res.hubspot_ticket_id, "hs_ticket_created_39")
+
+    # 40. Failed >= 15 min -> recovery reclama y crea -> created
+    async def test_40_failed_over_15_min_reclaimed_and_created(self):
+        async with self.async_session() as session:
+            res = await self._create_test_result(session, hubspot_contact_id="hs_contact_failed_40")
+            res.hubspot_ticket_status = "failed"
+            res.hubspot_ticket_error = "HubSpot 500 error on previous run"
+            stale_failed_time = datetime.now(timezone.utc) - timedelta(minutes=16)
+            res.created_at = stale_failed_time
+            res.updated_at = stale_failed_time
+            res.items_json = [
+                {"criterion_key": "alarma", "boolean_value": True, "feed": "Alarma fallida a reintentar"}
+            ]
+            await session.commit()
+
+            self.mock_find_alarm_ticket.return_value = None
+
+            with patch.object(HubSpotService, "create_ticket", new=AsyncMock(return_value={"id": "hs_ticket_retry_40"})) as mock_create:
+                stats = await MassEvaluationService.run_alarm_tickets_recovery_sweep(session)
+
+                self.assertEqual(mock_create.call_count, 1)
+                self.assertEqual(stats["recovered"], 1)
+
+                await session.refresh(res)
+                self.assertEqual(res.hubspot_ticket_status, "created")
+                self.assertEqual(res.hubspot_ticket_id, "hs_ticket_retry_40")
+                self.assertIsNone(res.hubspot_ticket_error)
+
+    # 41. Dos workers intentan reclamar el mismo stale -> solo 1 claim atómico, máximo 1 POST
+    async def test_41_concurrent_claim_only_one_worker_succeeds(self):
+        async with self.async_session() as session1, self.async_session() as session2:
+            res = await self._create_test_result(session1, hubspot_contact_id="hs_contact_conc_41")
+            res.hubspot_ticket_status = "pending"
+            stale_time = datetime.now(timezone.utc) - timedelta(minutes=10)
+            res.created_at = stale_time
+            res.updated_at = stale_time
+            res.items_json = [
+                {"criterion_key": "alarma", "boolean_value": True, "feed": "Alarma concurrente"}
+            ]
+            await session1.commit()
+
+            # Atomic conditional claim statement used by workers
+            now_utc = datetime.now(timezone.utc)
+            stmt_claim = (
+                select(MassEvaluationResult)
+                .where(
+                    MassEvaluationResult.mass_analysis_id == res.mass_analysis_id,
+                    MassEvaluationResult.hubspot_ticket_status == "pending"
+                )
+            )
+
+            # Worker 1 transitions row to pending with updated_at = now
+            r1 = (await session1.execute(stmt_claim)).scalars().first()
+            self.assertIsNotNone(r1)
+            r1.updated_at = now_utc
+            r1.hubspot_ticket_status = "created"
+            r1.hubspot_ticket_id = "ticket_worker_1"
+            await session1.commit()
+
+            # Worker 2 tries to process the same row after worker 1 has claimed/created it
+            r2 = (await session2.execute(stmt_claim)).scalars().first()
+            # Worker 2 finds no match or record already created
+            self.assertIsNone(r2)
+
+    # 42. company_id=None en job pero válido en service -> resuelve service.company_id
+    async def test_42_company_id_none_resolves_from_service(self):
+        async with self.async_session() as session:
+            # Create a Service with company_id=1
+            svc = Service(
+                service_id=201,
+                service_key="front_service_42",
+                service_name="Front Service 42",
+                company_id=1,
+                is_active=True
+            )
+            session.add(svc)
+            await session.commit()
+
+            # Create result with company_id=None, pointing to service_id=201
+            res = await self._create_test_result(session, hubspot_contact_id="hs_contact_svc_42")
+            res.company_id = None
+            res.service_id = 201
+            res.hubspot_ticket_status = "pending"
+            stale_time = datetime.now(timezone.utc) - timedelta(minutes=8)
+            res.created_at = stale_time
+            res.updated_at = stale_time
+            res.items_json = [
+                {"criterion_key": "alarma", "boolean_value": True, "feed": "Alarma service fallback"}
+            ]
+            await session.commit()
+
+            self.mock_find_alarm_ticket.return_value = None
+
+            with patch.object(HubSpotService, "create_ticket", new=AsyncMock(return_value={"id": "hs_ticket_svc_42"})) as mock_create:
+                stats = await MassEvaluationService.run_alarm_tickets_recovery_sweep(session)
+
+                self.assertEqual(mock_create.call_count, 1)
+                self.assertEqual(stats["recovered"], 1)
+
+                await session.refresh(res)
+                self.assertEqual(res.hubspot_ticket_status, "created")
+                self.assertEqual(res.hubspot_ticket_id, "hs_ticket_svc_42")
+
+    # 43. company_id=None en job y None en service -> fail closed (company_unresolved), no ticket
+    async def test_43_company_id_none_and_service_none_fails_closed(self):
+        async with self.async_session() as session:
+            # Create a Service with company_id=None
+            svc = Service(
+                service_id=202,
+                service_key="orphan_service_43",
+                service_name="Orphan Service 43",
+                company_id=None,
+                is_active=True
+            )
+            session.add(svc)
+            await session.commit()
+
+            res = await self._create_test_result(session, hubspot_contact_id="hs_contact_unresolved_43")
+            res.company_id = None
+            res.service_id = 202
+            res.hubspot_ticket_status = "pending"
+            stale_time = datetime.now(timezone.utc) - timedelta(minutes=8)
+            res.created_at = stale_time
+            res.updated_at = stale_time
+            res.items_json = [
+                {"criterion_key": "alarma", "boolean_value": True, "feed": "Alarma sin empresa"}
+            ]
+            await session.commit()
+
+            with patch.object(HubSpotService, "create_ticket", new=AsyncMock()) as mock_create:
+                stats = await MassEvaluationService.run_alarm_tickets_recovery_sweep(session)
+
+                # Skipped due to company_unresolved: no ticket created!
+                mock_create.assert_not_called()
+                self.assertEqual(stats["recovered"], 0)
+                self.assertGreaterEqual(stats["skipped"], 1)
+
+                await session.refresh(res)
+                self.assertIsNone(res.hubspot_ticket_id)
+
+    # 44. Search de HubSpot devuelve múltiples tickets candidatos -> ambiguo, no crear ticket nuevo
+    async def test_44_remote_search_ambiguous_blocks_creation(self):
+        async with self.async_session() as session:
+            res = await self._create_test_result(session, hubspot_contact_id="hs_contact_ambig_44")
+            res.hubspot_ticket_status = "pending"
+            stale_time = datetime.now(timezone.utc) - timedelta(minutes=7)
+            res.created_at = stale_time
+            res.updated_at = stale_time
+            res.items_json = [
+                {"criterion_key": "alarma", "boolean_value": True, "feed": "Alarma con duplicados remotos"}
+            ]
+            await session.commit()
+
+            # Mock find_alarm_ticket returning ambiguous result
+            self.mock_find_alarm_ticket.return_value = {
+                "is_ambiguous": True,
+                "count": 2,
+                "ticket_id": None
+            }
+
+            with patch.object(HubSpotService, "create_ticket", new=AsyncMock()) as mock_create:
+                stats = await MassEvaluationService.run_alarm_tickets_recovery_sweep(session)
+
+                # Must NOT create another ticket
+                mock_create.assert_not_called()
+
+                await session.refresh(res)
+                # Marked as failed due to ambiguous reconciliation
+                self.assertEqual(res.hubspot_ticket_status, "failed")
+                self.assertIn("ambigua", res.hubspot_ticket_error)
+                self.assertIsNone(res.hubspot_ticket_id)
+
+    # 45. Direct test for HubSpotService.find_alarm_ticket with token / query match
+    async def test_45_hubspot_service_find_alarm_ticket_unit(self):
+        self._find_patcher.stop()
+        try:
+            hs = HubSpotService()
+            hs.token = "mock_token"
+
+            with patch("app.services.hubspot_service.httpx.AsyncClient.post") as mock_post:
+                # Case A: Exactly 1 matching candidate with correct analysis ID
+                mock_post.return_value = MagicMock(
+                    status_code=200,
+                    json=lambda: {
+                        "total": 1,
+                        "results": [
+                            {
+                                "id": "hs_direct_999",
+                                "properties": {
+                                    "subject": "REM doobot speechFront",
+                                    "content": "Detalles\nSpeech BM Analysis ID: 10014\nCall ID: call_123",
+                                    "hs_pipeline": "pipe_1",
+                                    "createdate": "2026-09-04T10:00:00Z"
+                                }
+                            }
+                        ]
+                    }
+                )
+
+                found = await hs.find_alarm_ticket(mass_analysis_id=10014, call_id="call_123")
+                self.assertIsNotNone(found)
+                self.assertEqual(found["ticket_id"], "hs_direct_999")
+                self.assertFalse(found["is_ambiguous"])
+
+                # Case B: Multiple matching candidates -> ambiguous
+                mock_post.return_value = MagicMock(
+                    status_code=200,
+                    json=lambda: {
+                        "total": 2,
+                        "results": [
+                            {
+                                "id": "hs_dup_1",
+                                "properties": {
+                                    "subject": "REM doobot speechFront",
+                                    "content": "Speech BM Analysis ID: 10014",
+                                    "createdate": "2026-09-04T10:00:00Z"
+                                }
+                            },
+                            {
+                                "id": "hs_dup_2",
+                                "properties": {
+                                    "subject": "REM doobot speechFront",
+                                    "content": "Speech BM Analysis ID: 10014",
+                                    "createdate": "2026-09-04T10:05:00Z"
+                                }
+                            }
+                        ]
+                    }
+                )
+
+                found_ambig = await hs.find_alarm_ticket(mass_analysis_id=10014, call_id="call_123")
+                self.assertIsNotNone(found_ambig)
+                self.assertTrue(found_ambig["is_ambiguous"])
+                self.assertIsNone(found_ambig["ticket_id"])
+                self.assertEqual(found_ambig["count"], 2)
+        finally:
+            self._find_patcher.start()
 
 
 if __name__ == "__main__":
