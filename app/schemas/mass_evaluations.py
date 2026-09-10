@@ -1,7 +1,7 @@
 """Pydantic schemas for mass evaluations."""
 from datetime import datetime, time
 from typing import Any
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class MassEvaluationJobCreate(BaseModel):
@@ -678,10 +678,11 @@ class MassAnalysisAutomationRunResponse(BaseModel):
     error_message: str | None
 
     @model_validator(mode="after")
-    def populate_status_label(self) -> 'MassAnalysisAutomationRunResponse':
+    def compute_status_label(self):
         labels = {
             "running": "En ejecución",
             "completed": "Completada",
+            "completed_empty": "Completada (Sin llamadas)",
             "failed": "Error",
             "skipped": "Omitida",
             "blocked": "Bloqueada",
@@ -693,6 +694,40 @@ class MassAnalysisAutomationRunResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class AdvanceAutomationCursorRequest(BaseModel):
+    target_cursor: datetime | None = Field(
+        default=None,
+        description="Target timestamp in UTC from which the automation should resume. If omitted, computes dynamically to the latest eligible full window."
+    )
+    reason: str = Field(
+        ...,
+        min_length=5,
+        max_length=500,
+        description="Mandatory audit note describing why the cursor is being advanced (minimum 5 characters)."
+    )
+
+    @field_validator("reason")
+    @classmethod
+    def sanitize_and_validate_reason(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Reason cannot be empty or whitespace.")
+        v_clean = v.strip()
+        if len(v_clean) < 5:
+            raise ValueError("Reason must have at least 5 characters.")
+        return v_clean
+
+
+class AdvanceAutomationCursorResponse(BaseModel):
+    ok: bool = True
+    automation_id: int
+    previous_watermark: datetime | None = None
+    new_watermark: datetime
+    marker_automation_run_id: int
+    next_expected_window_from: datetime
+    next_expected_window_to: datetime
+    message: str
 
 
 class MassEvaluationResultListItemResponse(BaseModel):

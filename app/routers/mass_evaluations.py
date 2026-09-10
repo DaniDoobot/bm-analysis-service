@@ -47,9 +47,11 @@ from app.schemas.mass_evaluations import (
     MassAnalysisAutomationResponse,
     MassAnalysisAutomationRunResponse,
     MassAnalysisAutomationHealthResponse,
+    AdvanceAutomationCursorRequest,
+    AdvanceAutomationCursorResponse,
     PagedMassEvaluationResultResponse,
 )
-from app.services.mass_evaluation_service import MassEvaluationService
+from app.services.mass_evaluation_service import MassEvaluationService, AutomationConflictError
 
 router = APIRouter(prefix="/bm", tags=["Mass Evaluations"])
 
@@ -1655,6 +1657,92 @@ async def run_automation_now(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to launch automation run: {str(e)}"
+        )
+
+
+@router.post(
+    "/mass-analysis/automations/{automation_id}/advance-cursor",
+    response_model=AdvanceAutomationCursorResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def advance_automation_cursor(
+    automation_id: int,
+    payload: AdvanceAutomationCursorRequest,
+    context: TenantContext = Depends(get_tenant_context),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Safely and auditably advances an automation's cursor to a new timestamp.
+    Requires administrative privileges (SUPER_ADMIN, COMPANY_ADMIN, or SERVICE_MANAGER).
+    Requires the automation to be inactive and with no runs in progress.
+    """
+    # 1. Role validation: reject agents, team coordinators, viewers, etc.
+    if context.normalized_role not in (
+        InternalRole.SUPER_ADMIN,
+        InternalRole.COMPANY_ADMIN,
+        InternalRole.SERVICE_MANAGER,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado: se requiere rol administrativo para avanzar el cursor de una automatización."
+        )
+
+    automation = await MassEvaluationService.get_automation(db, automation_id=automation_id)
+    if not automation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Automation configuration ID {automation_id} not found."
+        )
+
+    # 2. Scoping validation: company and service boundaries
+    if not context.is_super_admin:
+        if context.allowed_service_ids is not None:
+            if automation.service_id not in context.allowed_service_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: esta automatización pertenece a un servicio no asignado."
+                )
+        else:
+            stmt_svc = select(Service.company_id).where(Service.service_id == automation.service_id)
+            res_svc = await db.execute(stmt_svc)
+            svc_comp_id = res_svc.scalar()
+            if svc_comp_id not in context.allowed_company_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: esta automatización pertenece a otra empresa."
+                )
+
+    # 3. State precheck: must be inactive
+    if automation.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Automation must be inactive before advancing its cursor."
+        )
+
+    try:
+        res = await MassEvaluationService.advance_automation_cursor(
+            db=db,
+            automation_id=automation_id,
+            target_cursor=payload.target_cursor,
+            reason=payload.reason,
+            allow_backward=False,
+        )
+        return res
+    except AutomationConflictError as ce:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(ce),
+        )
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(ve),
+        )
+    except Exception as e:
+        logger.exception("Failed to advance automation cursor for automation_id=%d: %s", automation_id, e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to advance automation cursor: {str(e)}",
         )
 
 

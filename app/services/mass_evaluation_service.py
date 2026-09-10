@@ -248,6 +248,11 @@ async def enrich_job_prompt_info(db: AsyncSession, job: MassEvaluationJob) -> No
             job.prompt_version_label = v.version_label
 
 
+class AutomationConflictError(ValueError):
+    """Raised when an operation conflicts with the current operational state of an automation."""
+    pass
+
+
 class MassEvaluationService:
     _running_tasks: set[asyncio.Task] = set()
 
@@ -3696,6 +3701,147 @@ class MassEvaluationService:
 
         is_ready = window_to > window_from
         return window_from, window_to, is_ready, source_desc
+
+    @staticmethod
+    async def advance_automation_cursor(
+        db: AsyncSession,
+        automation_id: int,
+        target_cursor: datetime | None = None,
+        reason: str = "administrative_cursor_advance",
+        allow_backward: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Safely and auditably advances an automation's continuous cursor without modifying historical runs.
+        Inserts a marker MassAnalysisAutomationRun with status='completed_empty'.
+
+        Rules:
+        1. target_cursor cannot be in the future.
+        2. target_cursor must be strictly greater than current watermark (unless allow_backward=True).
+        3. If target_cursor is None, computes the latest full eligible window aligned to lookback_minutes.
+        """
+        stmt_aut = select(MassAnalysisAutomation).where(MassAnalysisAutomation.automation_id == automation_id).with_for_update()
+        res_aut = await db.execute(stmt_aut)
+        automation = res_aut.scalars().first()
+        if not automation:
+            raise ValueError(f"Automation configuration ID {automation_id} not found.")
+
+        # 1. State check: must be inactive
+        if automation.is_active:
+            raise AutomationConflictError("Automation must be inactive before advancing its cursor.")
+
+        # 2. In-progress run check
+        stmt_active_run = select(MassAnalysisAutomationRun).where(
+            MassAnalysisAutomationRun.automation_id == automation_id,
+            MassAnalysisAutomationRun.status.in_(["running", "pending"]),
+        )
+        res_active_run = await db.execute(stmt_active_run)
+        active_run = res_active_run.scalars().first()
+        if active_run:
+            raise AutomationConflictError(
+                f"Cannot advance cursor while an automation run is currently in progress "
+                f"(automation_run_id={active_run.automation_run_id}, status='{active_run.status}')."
+            )
+
+        # 3. Reason validation
+        reason_clean = (reason or "").strip()
+        if len(reason_clean) < 5:
+            raise ValueError("Reason must be non-empty and at least 5 characters long.")
+
+        now = datetime.now(timezone.utc)
+        lookback_min = automation.lookback_minutes or 10
+        delay_min = automation.delay_minutes or 5
+
+        # Query current watermark
+        stmt_last = (
+            select(MassAnalysisAutomationRun.window_to)
+            .where(
+                MassAnalysisAutomationRun.automation_id == automation_id,
+                MassAnalysisAutomationRun.status.in_(["completed", "completed_empty"]),
+                MassAnalysisAutomationRun.window_to.isnot(None),
+            )
+            .order_by(
+                desc(MassAnalysisAutomationRun.window_to),
+                desc(MassAnalysisAutomationRun.automation_run_id),
+            )
+            .limit(1)
+        )
+        res_last = await db.execute(stmt_last)
+        current_watermark = res_last.scalar()
+        if current_watermark is not None and current_watermark.tzinfo is None:
+            current_watermark = current_watermark.replace(tzinfo=timezone.utc)
+
+        if target_cursor is None:
+            # Dynamic calculation:
+            eligible_until = now - timedelta(minutes=delay_min)
+            end_minute = (eligible_until.minute // lookback_min) * lookback_min
+            target_window_to = eligible_until.replace(minute=end_minute, second=0, microsecond=0)
+            eff_target_cursor = target_window_to - timedelta(minutes=lookback_min)
+        else:
+            if target_cursor.tzinfo is None:
+                eff_target_cursor = target_cursor.replace(tzinfo=timezone.utc)
+            else:
+                eff_target_cursor = target_cursor.astimezone(timezone.utc)
+
+        # Validations
+        if eff_target_cursor > now:
+            raise ValueError(f"target_cursor ({eff_target_cursor.isoformat()}) cannot be in the future.")
+
+        if current_watermark is not None and eff_target_cursor <= current_watermark and not allow_backward:
+            raise ValueError(
+                f"target_cursor ({eff_target_cursor.isoformat()}) must be strictly greater than "
+                f"current watermark ({current_watermark.isoformat()}). Moving cursor backwards is forbidden."
+            )
+
+        # Create auditable marker run
+        marker_from = eff_target_cursor - timedelta(minutes=lookback_min)
+        audit_note = (
+            f"[administrative_cursor_advance] Watermark advanced from "
+            f"{current_watermark.isoformat() if current_watermark else 'none'} to "
+            f"{eff_target_cursor.isoformat()}. Reason: {reason_clean}"
+        )
+        marker_run = MassAnalysisAutomationRun(
+            automation_id=automation_id,
+            status="completed_empty",
+            started_at=now,
+            finished_at=now,
+            window_from=marker_from,
+            window_to=eff_target_cursor,
+            calls_found=0,
+            calls_selected=0,
+            calls_skipped=0,
+            job_id=automation.job_id,
+            run_id=None,
+            error_message=audit_note,
+        )
+        db.add(marker_run)
+        await db.commit()
+        await db.refresh(marker_run)
+
+        # Calculate next expected window using the updated state
+        next_from, next_to, is_ready, source_desc = await MassEvaluationService.get_automation_next_window(
+            db, automation_id, now=now
+        )
+
+        logger.info(
+            "[automation_cursor_advance] automation_id=%d previous=%s new=%s marker_run_id=%d next_window=[%s -> %s]",
+            automation_id,
+            current_watermark.isoformat() if current_watermark else "none",
+            eff_target_cursor.isoformat(),
+            marker_run.automation_run_id,
+            next_from.isoformat(),
+            next_to.isoformat(),
+        )
+
+        return {
+            "ok": True,
+            "automation_id": automation_id,
+            "previous_watermark": current_watermark,
+            "new_watermark": eff_target_cursor,
+            "marker_automation_run_id": marker_run.automation_run_id,
+            "next_expected_window_from": next_from,
+            "next_expected_window_to": next_to,
+            "message": f"Automation {automation_id} cursor successfully advanced to {eff_target_cursor.isoformat()}.",
+        }
 
     @staticmethod
     async def run_automation_run(
