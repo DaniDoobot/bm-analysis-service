@@ -976,6 +976,165 @@ class MassEvaluationService:
         task.add_done_callback(MassEvaluationService._running_tasks.discard)
         
         return run
+
+    @staticmethod
+    async def run_historical_recovery(
+        db: AsyncSession,
+        job_id: int,
+        call_ids: list[str],
+        reason: str,
+        dry_run: bool = False,
+        requested_by: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Executes an explicit, auditable historical recovery for specific call_ids.
+        Guarantees:
+        - Only the specified call_ids are fetched and evaluated (strictly no broad search).
+        - No creation or modification of MassAnalysisAutomationRun.
+        - No modification of automation cursors, windows or timestamps.
+        - Strict team/service scoping: all call_ids must belong to active owners of the resolved service.
+        - Strict collision prevention: rejects operation if any call_id already exists in bm_mass_evaluation_results.
+        - Strict suppression of HubSpot writes: execution_source="historical_recovery", suppress_hubspot_tickets=True.
+        """
+        from app.services.hubspot_service import HubSpotService
+
+        # 1. Resolve job
+        stmt = select(MassEvaluationJob).where(MassEvaluationJob.job_id == job_id)
+        res = await db.execute(stmt)
+        job = res.scalars().first()
+        if not job:
+            raise ValueError(f"Job ID {job_id} not found.")
+
+        # 2. Resolve prompt
+        prompt_id = job.prompt_id
+        if not prompt_id:
+            raise ValueError(f"Job {job_id} does not have an associated prompt_id.")
+        stmt_p = select(Prompt).where(Prompt.prompt_id == prompt_id)
+        res_p = await db.execute(stmt_p)
+        prompt_obj = res_p.scalars().first()
+        if not prompt_obj:
+            raise ValueError(f"Prompt {prompt_id} not found.")
+
+        # 3. Resolve service_id with priority: job -> prompt -> automation
+        eff_service_id = job.service_id or prompt_obj.service_id
+        if eff_service_id is None:
+            stmt_aut = select(MassAnalysisAutomation.service_id).where(MassAnalysisAutomation.job_id == job_id).limit(1)
+            res_aut = await db.execute(stmt_aut)
+            eff_service_id = res_aut.scalar()
+        if eff_service_id is None:
+            raise ValueError(f"Could not resolve service_id for Job {job_id}.")
+
+        # 4. Resolve prompt_version_id
+        if job.prompt_version_id:
+            stmt_v = select(PromptVersion).where(PromptVersion.id == job.prompt_version_id)
+        else:
+            stmt_v = (
+                select(PromptVersion)
+                .where(PromptVersion.prompt_id == prompt_id)
+                .order_by(PromptVersion.is_current.desc(), PromptVersion.id.desc())
+            )
+        res_v = await db.execute(stmt_v)
+        p_ver = res_v.scalars().first()
+        if not p_ver:
+            raise ValueError(f"No prompt version found for Prompt {prompt_id}.")
+
+        # 5. Check database collisions in bm_mass_evaluation_results
+        stmt_col = select(MassEvaluationResult.call_id).where(MassEvaluationResult.call_id.in_(call_ids))
+        res_col = await db.execute(stmt_col)
+        colliding_call_ids = [r[0] for r in res_col.fetchall()]
+        if colliding_call_ids:
+            raise ValueError(
+                f"Colisión de llamadas: {len(colliding_call_ids)} llamada(s) ya tienen resultado en base de datos: {colliding_call_ids}"
+            )
+
+        # 6. Resolve active owners for service
+        active_owners = set(await MassEvaluationService.get_active_owner_ids_for_service(db, eff_service_id))
+        if not active_owners:
+            raise ValueError(f"No active agent owners configured for service_id={eff_service_id}.")
+
+        # 7. Fetch call metadata from HubSpot by ID (read-only)
+        hs_service = HubSpotService()
+        preview_calls = []
+        for cid in call_ids:
+            call_meta = await hs_service.get_call(cid)
+            if not call_meta:
+                raise ValueError(f"Llamada {cid} no encontrada en HubSpot.")
+
+            owner_id = str(call_meta.get("hubspot_owner_id") or "")
+            if not owner_id or owner_id not in active_owners:
+                raise ValueError(
+                    f"Llamada {cid} pertenece al owner {owner_id}, que no está asignado al servicio {eff_service_id} de este Job."
+                )
+
+            dur_ms = call_meta.get("call_duration")
+            dur_sec = int(float(dur_ms) / 1000.0) if dur_ms else None
+
+            preview_calls.append({
+                "call_id": cid,
+                "hs_object_id": cid,
+                "recording_url": call_meta.get("recording_url"),
+                "hubspot_owner_id": owner_id,
+                "call_timestamp": call_meta.get("call_timestamp"),
+                "call_duration_seconds": dur_sec,
+                "direction": call_meta.get("call_direction") or "all",
+                "status": call_meta.get("status"),
+            })
+
+        if dry_run:
+            return {
+                "dry_run": True,
+                "job_id": job_id,
+                "service_id": eff_service_id,
+                "prompt_id": prompt_id,
+                "call_ids_count": len(call_ids),
+                "message": f"Dry run completado exitosamente para {len(call_ids)} llamada(s).",
+                "run_id": None,
+                "preview_calls": preview_calls,
+            }
+
+        # 8. Create execution run with historical_recovery markers
+        effective_filters = {
+            "selection_mode": "manual_call_ids",
+            "call_ids": call_ids,
+            "service_id": eff_service_id,
+            "max_calls": len(call_ids),
+            "reason": reason,
+            "requested_by": requested_by,
+            "suppress_hubspot_tickets": True,
+            "recovery_type": "historical_recovery",
+        }
+        run = MassEvaluationRun(
+            job_id=job_id,
+            company_id=job.company_id,
+            service_id=eff_service_id,
+            trigger_type="historical_recovery",
+            status="running",
+            started_at=datetime.now(timezone.utc),
+            effective_filters=effective_filters,
+            execution_source="historical_recovery",
+        )
+        db.add(run)
+        await db.commit()
+        await db.refresh(run)
+
+        # 9. Launch background run
+        task = asyncio.create_task(
+            MassEvaluationService._execute_background_run(job_id, run.run_id, effective_filters)
+        )
+        MassEvaluationService._running_tasks.add(task)
+        task.add_done_callback(MassEvaluationService._running_tasks.discard)
+
+        return {
+            "dry_run": False,
+            "run_id": run.run_id,
+            "job_id": job_id,
+            "service_id": eff_service_id,
+            "prompt_id": prompt_id,
+            "call_ids_count": len(call_ids),
+            "message": f"Recuperación histórica iniciada para {len(call_ids)} llamada(s). Run ID: {run.run_id}",
+            "preview_calls": preview_calls,
+        }
+
     @staticmethod
     async def _execute_background_run(job_id: int, run_id: int, filters_payload: dict[str, Any]) -> None:
         """Background executor for mass analyses."""
@@ -1225,6 +1384,18 @@ class MassEvaluationService:
                         except Exception as e_get:
                             logger.warning("Manual call ID %s not found in HubSpot during run: %s", cid, e_get)
                             not_found_call_ids.append(cid)
+
+                    selected_calls = calls
+
+                    # Refetch run freshly to avoid ORM expiration & MissingGreenlet
+                    fresh_run_stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == run_id)
+                    fresh_run_res = await db.execute(fresh_run_stmt)
+                    fresh_run_obj = fresh_run_res.scalars().first()
+                    if fresh_run_obj:
+                        fresh_run_obj.calls_found = len(call_ids_list)
+                        fresh_run_obj.calls_selected = len(selected_calls)
+                        fresh_run_obj.calls_skipped = len(not_found_call_ids)
+                    await db.commit()
                 elif filters_payload.get("job_mode") == "random_quality_monitoring":
                     date_from_str = filters_payload.get("date_from")
                     date_to_str = filters_payload.get("date_to")
@@ -1366,7 +1537,7 @@ class MassEvaluationService:
                     await db.commit()
                 
                 calls_analyzed = 0
-                calls_skipped = skipped_completed_count if "skipped_completed_count" in locals() else 0
+                calls_skipped = (skipped_completed_count if "skipped_completed_count" in locals() else 0) + len(not_found_call_ids)
                 calls_failed = 0
                 cancelled_by_user = False
                 
@@ -1796,34 +1967,47 @@ class MassEvaluationService:
                     await db.commit()
 
                     # Trigger HubSpot Alarm Ticket creation if alarm was detected and call succeeded
+                    suppress_hubspot_tickets = bool(
+                        filters_payload.get("suppress_hubspot_tickets")
+                        or execution_source == "historical_recovery"
+                    )
+
                     if call_success and is_eval is not False and has_alarm and current_mass_analysis_id:
-                        logger.info(
-                            "[alarm_ticket] ALARM_TICKET_TRIGGER: mass_analysis_id=%s, call_id=%s, execution_source=%s, company_id=%s",
-                            current_mass_analysis_id,
-                            call_id,
-                            execution_source,
-                            company_id,
-                        )
-                        try:
-                            await MassEvaluationService._process_alarm_hubspot_ticket(
-                                db=db,
-                                mass_analysis_id=current_mass_analysis_id,
-                                execution_source=execution_source,
-                                company_id=company_id,
-                                service_name=service_name,
-                                agent_name=resolved_agent,
-                                call_id=call_id,
-                                call_timestamp=safe_parse_datetime(call.get("call_timestamp")),
-                                typology_name=typology_name,
-                                direction=call.get("direction"),
-                                call_duration_seconds=call.get("call_duration_seconds"),
-                                evaluacion_global=eval_decimal,
-                                alarma_feed=alarma_feed,
-                                contact_id=call.get("contact_id"),
-                                resumen_llamada=resumen_llamada,
+                        if suppress_hubspot_tickets:
+                            logger.info(
+                                "[historical_recovery] alarm_detected=true hubspot_write_suppressed=true mass_analysis_id=%s call_id=%s execution_source=%s",
+                                current_mass_analysis_id,
+                                call_id,
+                                execution_source,
                             )
-                        except Exception as e_alarm_outer:
-                            logger.error("[alarm_ticket] Unexpected error executing alarm ticket process: %s", e_alarm_outer)
+                        else:
+                            logger.info(
+                                "[alarm_ticket] ALARM_TICKET_TRIGGER: mass_analysis_id=%s, call_id=%s, execution_source=%s, company_id=%s",
+                                current_mass_analysis_id,
+                                call_id,
+                                execution_source,
+                                company_id,
+                            )
+                            try:
+                                await MassEvaluationService._process_alarm_hubspot_ticket(
+                                    db=db,
+                                    mass_analysis_id=current_mass_analysis_id,
+                                    execution_source=execution_source,
+                                    company_id=company_id,
+                                    service_name=service_name,
+                                    agent_name=resolved_agent,
+                                    call_id=call_id,
+                                    call_timestamp=safe_parse_datetime(call.get("call_timestamp")),
+                                    typology_name=typology_name,
+                                    direction=call.get("direction"),
+                                    call_duration_seconds=call.get("call_duration_seconds"),
+                                    evaluacion_global=eval_decimal,
+                                    alarma_feed=alarma_feed,
+                                    contact_id=call.get("contact_id"),
+                                    resumen_llamada=resumen_llamada,
+                                )
+                            except Exception as e_alarm_outer:
+                                logger.error("[alarm_ticket] Unexpected error executing alarm ticket process: %s", e_alarm_outer)
                     elif has_alarm:
                         logger.info(
                             "[alarm_ticket] ALARM_TICKET_SKIPPED: mass_analysis_id=%s, call_id=%s, reason=call_not_evaluable_or_failed (call_success=%s, is_eval=%s, has_id=%s)",

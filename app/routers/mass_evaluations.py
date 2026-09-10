@@ -49,6 +49,8 @@ from app.schemas.mass_evaluations import (
     MassAnalysisAutomationHealthResponse,
     AdvanceAutomationCursorRequest,
     AdvanceAutomationCursorResponse,
+    MassEvaluationJobHistoricalRecoveryRequest,
+    MassEvaluationJobHistoricalRecoveryResponse,
     PagedMassEvaluationResultResponse,
 )
 from app.services.mass_evaluation_service import MassEvaluationService, AutomationConflictError
@@ -497,6 +499,99 @@ async def run_job(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Failed to launch job execution: {str(e)}"
             )
+
+
+@router.post(
+    "/mass-evaluation-jobs/{job_id}/historical-recovery",
+    response_model=MassEvaluationJobHistoricalRecoveryResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def run_historical_recovery(
+    job_id: int,
+    payload: MassEvaluationJobHistoricalRecoveryRequest,
+    context: TenantContext = Depends(get_tenant_context),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Trigger administrative historical recovery of explicit call_ids for an existing Job/Service/Prompt.
+    Guarantees:
+    - Only the explicit call_ids in the request are evaluated.
+    - Zero HubSpot write side effects (no tickets created/updated/closed).
+    - Zero automation side effects (no automation run created, no cursor advance).
+    - Rejects if any call already exists in bm_mass_evaluation_results.
+    - Rejects if any call belongs to an agent outside the job's service team.
+    - Strict RBAC: SUPER_ADMIN, COMPANY_ADMIN, or SERVICE_MANAGER only.
+    """
+    # 1. Role check: reject AGENT, TEAM_COORDINATOR, etc.
+    if context.normalized_role not in (
+        InternalRole.SUPER_ADMIN,
+        InternalRole.COMPANY_ADMIN,
+        InternalRole.SERVICE_MANAGER,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado: se requiere rol administrativo (SUPER_ADMIN, COMPANY_ADMIN o SERVICE_MANAGER) para ejecutar recuperación histórica."
+        )
+
+    # 2. Job resolution and scoping checks
+    job = await MassEvaluationService.get_job(db, job_id=job_id)
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job ID {job_id} no encontrado."
+        )
+
+    if not context.is_super_admin:
+        if job.company_id is not None and job.company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: este job pertenece a otra empresa."
+            )
+        eff_service_id = job.service_id
+        if eff_service_id is None and job.prompt_id:
+            stmt_p = select(Prompt.service_id).where(Prompt.prompt_id == job.prompt_id)
+            res_p = await db.execute(stmt_p)
+            eff_service_id = res_p.scalar()
+
+        if context.allowed_service_ids is not None and eff_service_id is not None and eff_service_id not in context.allowed_service_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: este job pertenece a un servicio no asignado a tu usuario."
+            )
+
+    try:
+        user_email = context.current_user.email if hasattr(context, "current_user") and context.current_user else None
+        res = await MassEvaluationService.run_historical_recovery(
+            db=db,
+            job_id=job_id,
+            call_ids=payload.call_ids,
+            reason=payload.reason,
+            dry_run=payload.dry_run,
+            requested_by=user_email,
+        )
+        return res
+    except ValueError as ve:
+        err_str = str(ve)
+        if "Colisión de llamadas" in err_str:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=err_str,
+            )
+        elif "no encontrada en HubSpot" in err_str or "no encontrado" in err_str:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=err_str,
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=err_str,
+            )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error inesperado en recuperación histórica: {str(e)}"
+        )
 
 
 # ── Runs Endpoints ────────────────────────────────────────────────────────────

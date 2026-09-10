@@ -875,3 +875,49 @@ class MassAnalysisAutomationHealthResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class MassEvaluationJobHistoricalRecoveryRequest(BaseModel):
+    call_ids: list[str] = Field(..., min_length=1, max_length=100)
+    reason: str = Field(..., min_length=5, max_length=500)
+    dry_run: bool = False
+
+    @field_validator("call_ids")
+    @classmethod
+    def validate_call_ids(cls, v: list[str]) -> list[str]:
+        cleaned = []
+        seen = set()
+        for raw in v:
+            cid = str(raw).strip()
+            if not cid:
+                raise ValueError("call_ids no puede contener identificadores vacíos.")
+            if cid not in seen:
+                seen.add(cid)
+                cleaned.append(cid)
+        if not cleaned:
+            raise ValueError("call_ids debe contener al menos un identificador.")
+        if len(cleaned) > 100:
+            raise ValueError("call_ids no puede exceder 100 identificadores por recuperación.")
+        return cleaned
+
+    @field_validator("reason")
+    @classmethod
+    def validate_reason(cls, v: str) -> str:
+        s = v.strip()
+        if len(s) < 5:
+            raise ValueError("reason debe tener al menos 5 caracteres no vacíos.")
+        return s
+
+
+class MassEvaluationJobHistoricalRecoveryResponse(BaseModel):
+    message: str
+    job_id: int
+    service_id: int
+    prompt_id: int
+    call_ids_count: int
+    dry_run: bool
+    run_id: int | None = None
+    preview_calls: list[dict[str, Any]] | None = None
+
+    class Config:
+        from_attributes = True
