@@ -721,6 +721,53 @@ class MassEvaluationService:
             "time_window_end": job.time_window_end,
             "timezone": job.timezone,
         }
+
+        # Resolve effective service_id for preview
+        preview_service_id = job.service_id
+        if preview_service_id is None and job.prompt_id:
+            prompt_stmt = select(Prompt.service_id).where(Prompt.prompt_id == job.prompt_id)
+            prompt_res = await db.execute(prompt_stmt)
+            preview_service_id = prompt_res.scalar()
+
+        if preview_service_id is None:
+            aut_stmt = select(MassAnalysisAutomation.service_id).where(MassAnalysisAutomation.job_id == job_id).limit(1)
+            aut_res = await db.execute(aut_stmt)
+            aut_row = aut_res.first()
+            if aut_row:
+                preview_service_id = aut_row[0]
+
+        raw_agent_owner_ids = job.agent_owner_ids
+        target_agent_owner_ids: list[str] | None = None
+        if raw_agent_owner_ids and len(raw_agent_owner_ids) > 0:
+            target_agent_owner_ids = [str(x).strip() for x in raw_agent_owner_ids if str(x).strip()]
+        elif job.execution_source == "automation" or preview_service_id is not None:
+            if preview_service_id is not None:
+                target_agent_owner_ids = await MassEvaluationService.get_active_owner_ids_for_service(db, preview_service_id)
+                if not target_agent_owner_ids:
+                    logger.warning(
+                        "[team_selection] preview service_id=%s no_valid_owner_ids=true action=skip",
+                        preview_service_id
+                    )
+                    eff_filters = dict(filters)
+                    eff_filters["service_id"] = preview_service_id
+                    eff_filters["agent_owner_ids"] = []
+                    return {
+                        "job_id": job_id,
+                        "calls_found": 0,
+                        "effective_filters": eff_filters,
+                        "calls": [],
+                        "found_call_ids": [],
+                        "not_found_call_ids": [],
+                        "duplicate_input_call_ids": [],
+                        "normalized_call_ids": []
+                    }
+        else:
+            target_agent_owner_ids = None
+
+        filters["agent_owner_ids"] = target_agent_owner_ids
+        filters["service_id"] = preview_service_id
+        filters["execution_source"] = job.execution_source
+        filters["allow_legacy_fallback"] = (job.execution_source != "automation" and preview_service_id is None)
         
         if job.job_mode == "random_quality_monitoring":
             calls, trace_meta = await MassEvaluationService.select_random_calls_for_quality_monitoring(hs_service, filters)
@@ -754,7 +801,8 @@ class MassEvaluationService:
             "effective_filters": {
                 "date_from": date_from.isoformat() if date_from else None,
                 "date_to": date_to.isoformat() if date_to else None,
-                "agent_owner_ids": job.agent_owner_ids,
+                "agent_owner_ids": target_agent_owner_ids,
+                "service_id": preview_service_id,
                 "direction": job.direction,
                 "only_with_recording": job.only_with_recording,
                 "max_calls": job.max_calls,
@@ -815,7 +863,15 @@ class MassEvaluationService:
         }
 
     @staticmethod
-    async def run_job(db: AsyncSession, job_id: int, trigger_type: str = "manual", override_date_from: datetime | None = None, override_date_to: datetime | None = None) -> MassEvaluationRun:
+    async def run_job(
+        db: AsyncSession,
+        job_id: int,
+        trigger_type: str = "manual",
+        override_date_from: datetime | None = None,
+        override_date_to: datetime | None = None,
+        automation_id: int | None = None,
+        service_id: int | None = None,
+    ) -> MassEvaluationRun:
         # Check active execution lock
         stmt_lock = select(MassEvaluationRun).where(MassEvaluationRun.job_id == job_id, MassEvaluationRun.status == "running")
         res_lock = await db.execute(stmt_lock)
@@ -828,6 +884,21 @@ class MassEvaluationService:
         job = res.scalars().first()
         if not job:
             raise ValueError(f"Job ID {job_id} not found")
+
+        # Resolve effective service_id
+        eff_service_id = service_id if service_id is not None else job.service_id
+        if eff_service_id is None:
+            stmt_aut = select(MassAnalysisAutomation.service_id, MassAnalysisAutomation.automation_id).where(MassAnalysisAutomation.job_id == job_id).limit(1)
+            res_aut = await db.execute(stmt_aut)
+            aut_row = res_aut.first()
+            if aut_row:
+                eff_service_id = aut_row[0]
+                if automation_id is None:
+                    automation_id = aut_row[1]
+            if eff_service_id is None and job.prompt_id:
+                stmt_p = select(Prompt.service_id).where(Prompt.prompt_id == job.prompt_id)
+                res_p = await db.execute(stmt_p)
+                eff_service_id = res_p.scalar()
             
         date_from, date_to = resolve_date_filters(job, job.timezone)
         if override_date_from:
@@ -841,8 +912,11 @@ class MassEvaluationService:
             effective_filters = {
                 "selection_mode": "manual_call_ids",
                 "call_ids": job.call_ids,
-                "max_calls": job.max_calls
+                "max_calls": job.max_calls,
+                "service_id": eff_service_id,
             }
+            if automation_id is not None:
+                effective_filters["automation_id"] = automation_id
         else:
             effective_filters = {
                 "job_mode": job.job_mode or "standard",
@@ -850,6 +924,7 @@ class MassEvaluationService:
                 "date_from": date_from.isoformat() if date_from else None,
                 "date_to": date_to.isoformat() if date_to else None,
                 "agent_owner_ids": job.agent_owner_ids,
+                "service_id": eff_service_id,
                 "duration_min_seconds": job.duration_min_seconds,
                 "duration_max_seconds": job.duration_max_seconds,
                 "direction": job.direction,
@@ -859,6 +934,8 @@ class MassEvaluationService:
                 "time_window_end": job.time_window_end.strftime("%H:%M:%S") if job.time_window_end else None,
                 "timezone": job.timezone,
             }
+            if automation_id is not None:
+                effective_filters["automation_id"] = automation_id
         
         # Update scheduling fields immediately to avoid duplicate scheduler triggers during background task startup
         job.last_run_at = datetime.now(timezone.utc)
@@ -873,11 +950,11 @@ class MassEvaluationService:
             )
 
         # Create Run record
-        exec_src = "automation" if trigger_type == "automation" else ("on_demand" if trigger_type == "manual" else (job.execution_source or "on_demand"))
+        exec_src = "automation" if trigger_type in ("automation", "scheduled") else ("on_demand" if trigger_type == "manual" else (job.execution_source or "on_demand"))
         run = MassEvaluationRun(
             job_id=job_id,
             company_id=job.company_id,
-            service_id=job.service_id,
+            service_id=eff_service_id,
             trigger_type=trigger_type,
             status="running",
             started_at=datetime.now(timezone.utc),
@@ -927,6 +1004,7 @@ class MassEvaluationService:
                 # because any subsequent commit() expires ORM instances.
                 effective_filters_snapshot = dict(run.effective_filters or {})
                 run_execution_source = run.execution_source
+                run_service_id = run.service_id
 
                 prompt_id = job.prompt_id
                 prompt_name = job.prompt_name
@@ -934,6 +1012,8 @@ class MassEvaluationService:
                 prompt_version_name = job.prompt_version_name
                 prompt_version_label = job.prompt_version_label
                 company_id = job.company_id
+                job_service_id = job.service_id
+                job_agent_owner_ids = list(job.agent_owner_ids) if job.agent_owner_ids else None
                 job_execution_source = job.execution_source
                 duration_min_seconds = job.duration_min_seconds
                 duration_max_seconds = job.duration_max_seconds
@@ -980,11 +1060,23 @@ class MassEvaluationService:
                 prompt_snapshot = v.prompt
                 prompt_version_id = v.id
 
-                # Resolve prompt's service
+                # Resolve service_id with priority: filters_payload -> run -> job -> prompt -> automation
                 prompt_stmt = select(Prompt).where(Prompt.prompt_id == prompt_id)
                 prompt_res = await db.execute(prompt_stmt)
                 prompt_obj = prompt_res.scalars().first()
-                service_id = prompt_obj.service_id if prompt_obj else None
+                service_id = (
+                    filters_payload.get("service_id")
+                    or run_service_id
+                    or job_service_id
+                    or (prompt_obj.service_id if prompt_obj else None)
+                )
+                if service_id is None:
+                    aut_stmt = select(MassAnalysisAutomation.service_id).where(MassAnalysisAutomation.job_id == job_id).limit(1)
+                    aut_res = await db.execute(aut_stmt)
+                    aut_row = aut_res.first()
+                    if aut_row:
+                        service_id = aut_row[0]
+
                 base_structure_id = prompt_obj.base_structure_id if prompt_obj else None
 
                 # Fetch Service details
@@ -993,7 +1085,7 @@ class MassEvaluationService:
                 from app.models.criteria import PromptCriterionTypology
                 from app.models.prompts import BaseStructureTypology
 
-                # Fallback to default service 'front'
+                # Fallback to default service 'front' only if no service resolved
                 if not service_id:
                     s_stmt = select(Service.service_id).where(Service.service_key == "front")
                     s_res = await db.execute(s_stmt)
@@ -1066,9 +1158,47 @@ class MassEvaluationService:
                 # 2. Query HubSpot
                 hs_service = HubSpotService()
                 
+                # Resolve target_agent_owner_ids based on team/service rules
+                raw_agent_owner_ids = filters_payload.get("agent_owner_ids") or job_agent_owner_ids
+                target_agent_owner_ids: list[str] | None = None
+                service_has_no_owners = False
+
+                if raw_agent_owner_ids and len(raw_agent_owner_ids) > 0:
+                    # Explicit list has absolute priority
+                    target_agent_owner_ids = [str(x).strip() for x in raw_agent_owner_ids if str(x).strip()]
+                elif execution_source == "automation" or service_id is not None:
+                    # Dynamically resolve active owners for the service
+                    if service_id is not None:
+                        target_agent_owner_ids = await MassEvaluationService.get_active_owner_ids_for_service(db, service_id)
+                    else:
+                        target_agent_owner_ids = []
+
+                    if not target_agent_owner_ids:
+                        service_has_no_owners = True
+                        logger.warning(
+                            "[team_selection] service_id=%s source=%s no_valid_owner_ids=true action=skip_fail_closed",
+                            service_id, execution_source
+                        )
+                else:
+                    # Legacy on-demand / manual without service scope
+                    target_agent_owner_ids = None
+
                 not_found_call_ids = []
                 random_trace_metadata = None
-                if filters_payload.get("selection_mode") == "manual_call_ids":
+                skipped_completed_count = 0
+
+                if service_has_no_owners:
+                    calls = []
+                    selected_calls = []
+                    fresh_run_stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == run_id)
+                    fresh_run_res = await db.execute(fresh_run_stmt)
+                    fresh_run_obj = fresh_run_res.scalars().first()
+                    if fresh_run_obj:
+                        fresh_run_obj.calls_found = 0
+                        fresh_run_obj.calls_selected = 0
+                        fresh_run_obj.calls_skipped = 0
+                    await db.commit()
+                elif filters_payload.get("selection_mode") == "manual_call_ids":
                     calls = []
                     call_ids_list = filters_payload.get("call_ids") or []
                     for cid in call_ids_list:
@@ -1106,7 +1236,10 @@ class MassEvaluationService:
                     search_filters = {
                         "date_from": date_from,
                         "date_to": date_to,
-                        "agent_owner_ids": filters_payload.get("agent_owner_ids"),
+                        "agent_owner_ids": target_agent_owner_ids,
+                        "service_id": service_id,
+                        "execution_source": execution_source,
+                        "allow_legacy_fallback": (execution_source != "automation" and service_id is None),
                         "duration_min_seconds": eff_duration_min_seconds,
                         "duration_max_seconds": duration_max_seconds,
                         "direction": filters_payload.get("direction"),
@@ -1162,7 +1295,10 @@ class MassEvaluationService:
                     search_filters = {
                         "date_from": effective_search_from,
                         "date_to": date_to,
-                        "agent_owner_ids": filters_payload.get("agent_owner_ids"),
+                        "agent_owner_ids": target_agent_owner_ids,
+                        "service_id": service_id,
+                        "execution_source": execution_source,
+                        "allow_legacy_fallback": (execution_source != "automation" and service_id is None),
                         "duration_min_seconds": eff_duration_min_seconds,
                         "duration_max_seconds": duration_max_seconds,
                         "direction": filters_payload.get("direction"),
@@ -3108,6 +3244,54 @@ class MassEvaluationService:
             "warnings": warnings
         }
 
+    @staticmethod
+    async def get_active_owner_ids_for_service(db: AsyncSession, service_id: int) -> list[str]:
+        """
+        Dynamically resolves distinct hubspot_owner_ids for active users belonging to a service.
+        Sources of truth:
+        1. Users associated via AgentTeamAssociation to an active Team with Team.service_id == service_id
+        2. Users associated via UserTeamAssociation to an active Team with Team.service_id == service_id
+        3. Users with User.primary_team_id pointing to an active Team with Team.service_id == service_id
+        4. Users associated via UserServiceAssociation with UserServiceAssociation.service_id == service_id
+        5. Users with User.primary_service_id == service_id
+        Only returns active users (User.is_active == True) with non-null, non-empty hubspot_owner_id.
+        """
+        from app.models.users import User
+        from app.models.teams import Team, AgentTeamAssociation, UserTeamAssociation, UserServiceAssociation
+        from sqlalchemy import or_, func
+
+        active_team_ids_subq = (
+            select(Team.team_id)
+            .where(Team.service_id == service_id, Team.is_active == True)
+        )
+
+        stmt = (
+            select(User.hubspot_owner_id)
+            .where(
+                User.is_active == True,
+                User.hubspot_owner_id.isnot(None),
+                User.hubspot_owner_id != "",
+                func.lower(func.trim(User.role)).in_(["agent", "agente"]),
+                or_(
+                    User.primary_service_id == service_id,
+                    User.primary_team_id.in_(active_team_ids_subq),
+                    User.user_id.in_(
+                        select(UserServiceAssociation.user_id).where(UserServiceAssociation.service_id == service_id)
+                    ),
+                    User.user_id.in_(
+                        select(AgentTeamAssociation.user_id).where(AgentTeamAssociation.team_id.in_(active_team_ids_subq))
+                    ),
+                    User.user_id.in_(
+                        select(UserTeamAssociation.user_id).where(UserTeamAssociation.team_id.in_(active_team_ids_subq))
+                    ),
+                ),
+            )
+            .distinct()
+        )
+        res = await db.execute(stmt)
+        owner_ids = [str(row[0]).strip() for row in res.all() if row[0] and str(row[0]).strip()]
+        return sorted(list(set(owner_ids)))
+
     # ── Automation Management ──────────────────────────────────────────────────
 
     @staticmethod
@@ -3127,6 +3311,8 @@ class MassEvaluationService:
             is_active=payload.is_active,
             prompt_id=payload.prompt_id,
             prompt_version_id=payload.prompt_version_id,
+            service_id=payload.service_id,
+            company_id=prompt.company_id if prompt else None,
             agent_owner_ids=payload.agent_owner_ids,
             duration_min_seconds=payload.min_duration_seconds,
             direction=payload.direction_filter,
@@ -3190,6 +3376,8 @@ class MassEvaluationService:
                     job.description = payload.description
                 if "is_active" in update_data:
                     job.is_active = payload.is_active
+                if "service_id" in update_data:
+                    job.service_id = payload.service_id
                 if "prompt_id" in update_data:
                     job.prompt_id = payload.prompt_id
                 if "prompt_version_id" in update_data:
@@ -3607,6 +3795,7 @@ class MassEvaluationService:
         # Snapshot scalar fields from automation BEFORE committing — after commit, the ORM object
         # is expired and lazy-loading outside an async greenlet causes greenlet_spawn errors.
         job_id_snapshot = automation.job_id
+        service_id_snapshot = automation.service_id
 
         await db.commit()       # Persist auto_run BEFORE calling run_job, so we have a valid ID
         await db.refresh(auto_run)
@@ -3622,7 +3811,9 @@ class MassEvaluationService:
                 job_id=job_id_snapshot,
                 trigger_type=trigger_type,
                 override_date_from=window_from,
-                override_date_to=window_to
+                override_date_to=window_to,
+                automation_id=automation_id,
+                service_id=service_id_snapshot
             )
 
             # Link run and job ids (use snapshot to avoid expired ORM access)

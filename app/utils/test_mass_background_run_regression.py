@@ -78,7 +78,16 @@ class TestBackgroundRunNoMissingGreenlet(unittest.IsolatedAsyncioTestCase):
             db.add(s1)
             await db.flush()
 
-            u1 = User(user_id=1, username="super", email="super@test.com", role="admin", password_hash="dummy")
+            u1 = User(
+                user_id=1,
+                username="super",
+                email="super@test.com",
+                role="agent",
+                password_hash="dummy",
+                hubspot_owner_id="owner_1",
+                primary_service_id=1,
+                is_active=True,
+            )
             db.add(u1)
             await db.flush()
 

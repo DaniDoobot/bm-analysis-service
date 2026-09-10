@@ -20,6 +20,7 @@ from app.models.mass_evaluations import (
 )
 from app.models.prompts import Prompt, PromptVersion
 from app.models.services import Service
+from app.models.users import User
 from app.services.mass_evaluation_service import MassEvaluationService
 
 
@@ -48,6 +49,19 @@ class TestAutomationMissingGreenletRegression(unittest.IsolatedAsyncioTestCase):
                 created_at=datetime.now(timezone.utc)
             )
             session.add(service)
+
+            user = User(
+                user_id=1,
+                company_id=1,
+                username="front_user_1",
+                email="front1@test.com",
+                password_hash="test",
+                name="Front User 1",
+                hubspot_owner_id="owner_1",
+                primary_service_id=1,
+                is_active=True
+            )
+            session.add(user)
 
             prompt = Prompt(
                 prompt_id=58,

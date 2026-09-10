@@ -380,18 +380,40 @@ class HubSpotService:
             
         # 2. Agent owner IDs filters
         agent_owner_ids = filters.get("agent_owner_ids")
-        if not agent_owner_ids:
-            from app.utils.hubspot_owners import OWNER_TO_NAME
-            agent_owner_ids = list(OWNER_TO_NAME.keys())
-            
-        if agent_owner_ids:
-            if len(agent_owner_ids) == 1:
+        if agent_owner_ids is not None:
+            # Explicit list provided (could be empty or populated)
+            if len(agent_owner_ids) == 0:
+                logger.info("[hubspot_search] agent_owner_ids is empty list; fail closed (0 calls returned)")
+                return []
+            elif len(agent_owner_ids) == 1:
                 hs_filters.append({
                     "propertyName": "hubspot_owner_id",
                     "operator": "EQ",
                     "value": str(agent_owner_ids[0])
                 })
             else:
+                hs_filters.append({
+                    "propertyName": "hubspot_owner_id",
+                    "operator": "IN",
+                    "values": [str(x) for x in agent_owner_ids]
+                })
+        else:
+            # agent_owner_ids was not provided (None)
+            is_automation = filters.get("execution_source") == "automation"
+            has_service_id = filters.get("service_id") is not None
+            allow_legacy = filters.get("allow_legacy_fallback") is True
+
+            if is_automation or has_service_id or not allow_legacy:
+                # Never use OWNER_TO_NAME fallback for automations or service-scoped queries: FAIL CLOSED
+                logger.warning(
+                    "[hubspot_search] No agent_owner_ids provided and fallback disallowed (service_id=%s, source=%s). Fail closed (0 calls returned).",
+                    filters.get("service_id"), filters.get("execution_source")
+                )
+                return []
+            else:
+                # Fallback allowed ONLY for legacy manual un-scoped callers
+                from app.utils.hubspot_owners import OWNER_TO_NAME
+                agent_owner_ids = list(OWNER_TO_NAME.keys())
                 hs_filters.append({
                     "propertyName": "hubspot_owner_id",
                     "operator": "IN",
