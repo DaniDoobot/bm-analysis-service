@@ -21,6 +21,7 @@ from app.services.users_service import (
     validate_user_services, save_user_service_associations, get_user_services_info,
     validate_user_teams, save_user_team_associations, get_user_teams_info
 )
+from app.services.agent_credentials_service import AgentCredentialsService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/bm/admin/users", tags=["Admin Users"])
@@ -102,6 +103,8 @@ class AdminUserUpdatePayload(BaseModel):
     allowed_service_ids: Optional[List[int]] = Field(default=None, validation_alias=AliasChoices("allowed_service_ids", "service_ids"))
     primary_team_id: Optional[int] = Field(default=None, validation_alias=AliasChoices("primary_team_id", "team_id"))
     allowed_team_ids: Optional[List[int]] = Field(default=None, validation_alias=AliasChoices("allowed_team_ids", "team_ids"))
+    hubspot_owner_id: Optional[str] = None
+    agent_initials: Optional[str] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -438,12 +441,16 @@ async def create_user(
         reset_token_expires_at=expires_at
     )
     db.add(new_user)
-    await db.commit()
-    await db.refresh(new_user)
+    await db.flush()
 
     await save_user_service_associations(db, new_user.user_id, val_allowed_ids)
     await save_user_team_associations(db, new_user.user_id, val_allowed_team_ids, role=new_user.role)
+
+    if target_role_norm == InternalRole.AGENT and new_user.hubspot_owner_id and new_user.agent_initials:
+        await AgentCredentialsService.ensure_agent_training_credentials(db, user=new_user, commit=False)
+
     await db.commit()
+    await db.refresh(new_user)
 
     logger.info("Actor (user_id=%s) CREATED administrative user %s (id=%s)", context.user_id, new_user.email, new_user.user_id)
 
@@ -715,6 +722,17 @@ async def update_user(
 
     if payload.role is not None:
         user.role = payload.role
+
+    if "hubspot_owner_id" in payload.model_fields_set:
+        clean_hs = payload.hubspot_owner_id.strip() if payload.hubspot_owner_id else None
+        user.hubspot_owner_id = clean_hs
+
+    if "agent_initials" in payload.model_fields_set:
+        clean_init = payload.agent_initials.strip() if payload.agent_initials else None
+        user.agent_initials = clean_init
+
+    if target_role_norm == InternalRole.AGENT and user.hubspot_owner_id and user.agent_initials:
+        await AgentCredentialsService.ensure_agent_training_credentials(db, user=user, commit=False)
 
     await db.commit()
     await db.refresh(user)

@@ -478,7 +478,13 @@ class TrainerService:
 
     @staticmethod
     async def validate_agent_code(db: AsyncSession, agent_code: str) -> Optional[dict]:
-        cleaned = agent_code.replace(" ", "").upper()
+        if not agent_code:
+            return None
+        from app.utils.phone_code_normalizer import normalize_spoken_code
+        normalized = normalize_spoken_code(agent_code)
+        cleaned = normalized if normalized else agent_code.replace(" ", "").upper()
+        if not cleaned:
+            return None
 
         # Count active agents that have at least one code set (for diagnostics)
         stmt_all = select(TrainingAgentSetting).where(

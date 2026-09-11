@@ -1072,7 +1072,10 @@ async def handle_verify_agent_code(
     attempts: int
 ) -> dict:
     """Validate voice-identified agent code, route call to start-roleplay or DTMF fallback."""
-    cleaned = normalize_training_code_input(agent_code)
+    from app.utils.phone_code_normalizer import normalize_spoken_code
+    cleaned = normalize_spoken_code(agent_code)
+    if not cleaned:
+        cleaned = normalize_training_code_input(agent_code)
     host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"
     
     engine = get_engine()
@@ -1082,7 +1085,10 @@ async def handle_verify_agent_code(
         else:
             stmt = select(TrainingAgentSetting).where(
                 and_(
-                    TrainingAgentSetting.training_numeric_code == cleaned,
+                    or_(
+                        func.upper(TrainingAgentSetting.training_code) == cleaned.upper(),
+                        TrainingAgentSetting.training_numeric_code == cleaned,
+                    ),
                     TrainingAgentSetting.training_code_enabled == True
                 )
             )

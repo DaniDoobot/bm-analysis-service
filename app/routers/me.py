@@ -25,7 +25,9 @@ from app.schemas.users import (
     ResetPasswordPayload,
     PasswordResetConfirmPayload,
     MyAgentCodeResponse,
+    MyAgentCodesResponse,
 )
+from app.services.agent_credentials_service import AgentCredentialsService
 from app.models.personalized_training import TrainingAgentSetting
 from app.services.users_service import get_user_services_info
 from app.utils.security import (
@@ -870,29 +872,23 @@ async def get_my_agent_code(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Retrieve personal training agent code for the authenticated user."""
-    if not current_user.hubspot_owner_id:
-        return MyAgentCodeResponse(agent_code=None, enabled=False)
-
-    stmt = select(TrainingAgentSetting).where(
-        TrainingAgentSetting.hubspot_owner_id == current_user.hubspot_owner_id
-    )
-    res = await db.execute(stmt)
-    setting = res.scalar_one_or_none()
-
-    if not setting:
-        return MyAgentCodeResponse(agent_code=None, enabled=False)
-
-    raw_num = setting.training_numeric_code
-    numeric_code = raw_num.strip() if raw_num and raw_num.strip() else None
-
+    """Retrieve personal training agent code for the authenticated user (legacy numeric endpoint)."""
+    _, numeric_code, enabled = await AgentCredentialsService.get_agent_credentials_for_user(db, current_user)
     if not numeric_code:
         return MyAgentCodeResponse(agent_code=None, enabled=False)
+    return MyAgentCodeResponse(agent_code=numeric_code, enabled=enabled)
 
-    enabled = bool(setting.training_code_enabled)
 
-    return MyAgentCodeResponse(
-        agent_code=numeric_code,
+@router.get("/me/agent-codes", response_model=MyAgentCodesResponse)
+async def get_my_agent_codes(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Retrieve personal training credentials (alphanumeric code and numeric PIN) for the authenticated user."""
+    training_code, numeric_code, enabled = await AgentCredentialsService.get_agent_credentials_for_user(db, current_user)
+    return MyAgentCodesResponse(
+        training_code=training_code,
+        training_numeric_code=numeric_code,
         enabled=enabled,
     )
 

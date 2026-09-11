@@ -32,6 +32,7 @@ from app.services.users_service import (
     validate_user_teams, save_user_team_associations, get_user_teams_info,
     check_can_manage_target_user, compute_user_management_flags
 )
+from app.services.agent_credentials_service import AgentCredentialsService
 from app.schemas.users import (
     UserOut,
     UserOutFull,
@@ -646,12 +647,16 @@ async def create_user(
         reset_token_expires_at=expires_at
     )
     db.add(new_user)
-    await db.commit()
-    await db.refresh(new_user)
+    await db.flush()
 
     await save_user_service_associations(db, new_user.user_id, val_allowed_ids)
     await save_user_team_associations(db, new_user.user_id, val_allowed_team_ids, role=new_user.role)
+
+    if target_role_norm == InternalRole.AGENT and new_user.hubspot_owner_id and new_user.agent_initials:
+        await AgentCredentialsService.ensure_agent_training_credentials(db, user=new_user, commit=False)
+
     await db.commit()
+    await db.refresh(new_user)
 
     logger.info("Admin %s CREATED user %s (id=%s, company_id=%s)", current_user.email, new_user.email, new_user.user_id, company_id)
     
@@ -918,6 +923,9 @@ async def update_user(
             changes_json=changes
         )
         db.add(audit)
+
+    if target_role_norm == InternalRole.AGENT and user.hubspot_owner_id and user.agent_initials:
+        await AgentCredentialsService.ensure_agent_training_credentials(db, user=user, commit=False)
 
     await db.commit()
     await db.refresh(user)

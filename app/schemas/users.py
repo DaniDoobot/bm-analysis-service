@@ -407,5 +407,8 @@ class MyAgentCodeResponse(BaseModel):
     enabled: bool = False
 
 
-
+class MyAgentCodesResponse(BaseModel):
+    training_code: Optional[str] = None
+    training_numeric_code: Optional[str] = None
+    enabled: bool = False
 
