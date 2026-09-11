@@ -316,11 +316,16 @@ async def verify_agent_dtmf(request: Request, call_sid: str = Query(...), db: As
     form_data = await request.form()
     digits = form_data.get("Digits", "").strip()
     
-    stmt = select(TrainingAgentSetting).where(TrainingAgentSetting.training_numeric_code == digits)
+    stmt = select(TrainingAgentSetting).where(
+        and_(
+            TrainingAgentSetting.training_numeric_code == digits,
+            TrainingAgentSetting.training_code_enabled == True,
+        )
+    )
     res = await db.execute(stmt)
     setting = res.scalars().first()
     
-    if setting and setting.is_enabled:
+    if setting:
         logger.info("Agent identified via DTMF: agent_id=%s, code=%s", setting.hubspot_owner_id, digits)
         host = request.headers.get("x-forwarded-host") or request.headers.get("host") or "localhost"
         action_url = f"/bm/training/hub/select-mode-menu?agent_id={setting.hubspot_owner_id}&amp;call_sid={call_sid}"

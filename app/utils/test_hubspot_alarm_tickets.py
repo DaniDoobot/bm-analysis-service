@@ -1358,7 +1358,8 @@ class TestHubSpotAlarmTickets(unittest.IsolatedAsyncioTestCase):
 
             self.mock_find_alarm_ticket.return_value = None
 
-            with patch.object(HubSpotService, "create_ticket", new=AsyncMock(return_value={"id": "hs_ticket_svc_42"})) as mock_create:
+            with patch.object(HubSpotService, "create_ticket", new=AsyncMock(return_value={"id": "hs_ticket_svc_42"})) as mock_create, \
+                 patch("app.services.hubspot_service.is_hubspot_side_effect_allowed", return_value=True):
                 stats = await MassEvaluationService.run_alarm_tickets_recovery_sweep(session)
 
                 self.assertEqual(mock_create.call_count, 1)

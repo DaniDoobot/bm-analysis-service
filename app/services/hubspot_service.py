@@ -13,6 +13,24 @@ settings = get_settings()
 
 HUBSPOT_API_BASE = "https://api.hubapi.com"
 
+# Centralized allowlist of service IDs permitted to generate HubSpot CRM side effects (Tickets, REMs)
+# Fail-closed: only Front (service_id=1) is currently permitted.
+HUBSPOT_SIDE_EFFECT_ALLOWED_SERVICE_IDS: frozenset[int] = frozenset({1})
+
+
+def is_hubspot_side_effect_allowed(service_id: int | None) -> bool:
+    """
+    Centralized, fail-closed gate for HubSpot side effects (Tickets, REMs, CRM writes).
+    Returns True ONLY if service_id is in HUBSPOT_SIDE_EFFECT_ALLOWED_SERVICE_IDS.
+    service_id=None, service_id=2 (EXPAC), or any future/other service -> False.
+    """
+    if service_id is None:
+        return False
+    try:
+        return int(service_id) in HUBSPOT_SIDE_EFFECT_ALLOWED_SERVICE_IDS
+    except (ValueError, TypeError):
+        return False
+
 
 class HubSpotService:
     def __init__(self):

@@ -482,7 +482,6 @@ class TrainerService:
 
         # Count active agents that have at least one code set (for diagnostics)
         stmt_all = select(TrainingAgentSetting).where(
-            TrainingAgentSetting.is_enabled == True,
             TrainingAgentSetting.training_code_enabled == True,
         )
         res_all = await db.execute(stmt_all)
@@ -510,7 +509,6 @@ class TrainerService:
                     func.upper(TrainingAgentSetting.training_code) == cleaned,
                     TrainingAgentSetting.training_numeric_code == cleaned,
                 ),
-                TrainingAgentSetting.is_enabled == True,
                 TrainingAgentSetting.training_code_enabled == True,
             )
         )
@@ -544,9 +542,7 @@ class TrainerService:
     @staticmethod
     async def log_agent_code_map(db: AsyncSession) -> None:
         """Startup diagnostic: print all active agent codes to logs."""
-        stmt = select(TrainingAgentSetting).where(
-            TrainingAgentSetting.is_enabled == True,
-        ).order_by(TrainingAgentSetting.agent_initials)
+        stmt = select(TrainingAgentSetting).order_by(TrainingAgentSetting.agent_initials)
         res = await db.execute(stmt)
         agents = list(res.scalars().all())
         lines = []

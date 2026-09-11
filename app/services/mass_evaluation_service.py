@@ -1542,6 +1542,7 @@ class MassEvaluationService:
                 cancelled_by_user = False
                 
                 # Process sequentially to avoid heavy concurrency issues
+                owner_name_cache: dict[tuple[int | None, str], str] = {}
                 for call in selected_calls:
                     # Cooperative cancellation check before processing each call
                     try:
@@ -1768,9 +1769,16 @@ class MassEvaluationService:
                                     "raw_value": None,
                                 })
                             
-                        # Resolve agent name display
+                        # Resolve agent name display canonically (bm_users -> OWNER_TO_NAME -> placeholder)
+                        from app.utils.hubspot_owners import resolve_agent_name_canonical
                         owner_id = call["hubspot_owner_id"]
-                        resolved_agent = resolve_agent_display(None, owner_id)
+                        resolved_agent = await resolve_agent_name_canonical(
+                            db=db,
+                            hubspot_owner_id=owner_id,
+                            company_id=company_id,
+                            raw_agent=None,
+                            cache=owner_name_cache,
+                        )
                         
                         # Determine evaluability dynamically across all services
                         from app.utils.evaluability import determine_evaluability
@@ -2005,6 +2013,7 @@ class MassEvaluationService:
                                     alarma_feed=alarma_feed,
                                     contact_id=call.get("contact_id"),
                                     resumen_llamada=resumen_llamada,
+                                    service_id=service_id,
                                 )
                             except Exception as e_alarm_outer:
                                 logger.error("[alarm_ticket] Unexpected error executing alarm ticket process: %s", e_alarm_outer)
@@ -2520,6 +2529,7 @@ class MassEvaluationService:
         alarma_feed: str | None,
         contact_id: str | None = None,
         resumen_llamada: str | None = None,
+        service_id: int | None = None,
     ) -> None:
         """
         Idempotent, non-blocking creation of HubSpot REM Ticket upon Alarm detection.
@@ -2541,6 +2551,22 @@ class MassEvaluationService:
             logger.info(
                 "[alarm_ticket] ALARM_TICKET_SKIPPED: mass_analysis_id=%s, call_id=%s, reason=execution_source_not_allowed (execution_source='%s')",
                 mass_analysis_id, call_id, execution_source
+            )
+            return
+
+        # 2b. Service check (FAIL CLOSED: ONLY Front service_id=1 allowed for HubSpot side effects)
+        from app.services.hubspot_service import is_hubspot_side_effect_allowed
+        effective_service_id = service_id
+        if effective_service_id is None:
+            # Fallback lookup from result row if not explicitly passed
+            stmt_sid = select(MassEvaluationResult.service_id).where(MassEvaluationResult.mass_analysis_id == mass_analysis_id)
+            res_sid = await db.execute(stmt_sid)
+            effective_service_id = res_sid.scalar_one_or_none()
+
+        if not is_hubspot_side_effect_allowed(effective_service_id):
+            logger.info(
+                "[hubspot_write_suppressed] mass_analysis_id=%s, call_id=%s, service_id=%s, reason=service_not_allowed, execution_source=%s",
+                mass_analysis_id, call_id, effective_service_id, execution_source
             )
             return
 
@@ -3007,6 +3033,16 @@ class MassEvaluationService:
                         stats["skipped"] += 1
                         continue
 
+                    # 2b. Check service_id (FAIL CLOSED: ONLY Front service_id=1 allowed for HubSpot side effects)
+                    from app.services.hubspot_service import is_hubspot_side_effect_allowed
+                    if not is_hubspot_side_effect_allowed(row.service_id):
+                        logger.info(
+                            "[hubspot_write_suppressed] mass_analysis_id=%s, call_id=%s, service_id=%s, reason=service_not_allowed, execution_source=alarm_recovery",
+                            mid, cid, row.service_id
+                        )
+                        stats["skipped"] += 1
+                        continue
+
                     logger.info("[alarm_recovery] ALARM_RECOVERY_CLAIMED: mass_analysis_id=%s, call_id=%s, previous_status=%s", mid, cid, prev_status)
 
                     resumen_llamada = MassEvaluationService._extract_call_summary(row.items_json)
@@ -3028,6 +3064,7 @@ class MassEvaluationService:
                         alarma_feed=alarma_feed,
                         contact_id=row.hubspot_contact_id,
                         resumen_llamada=resumen_llamada,
+                        service_id=row.service_id,
                     )
 
                     # Check final outcome in DB

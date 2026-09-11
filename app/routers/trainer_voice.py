@@ -225,7 +225,6 @@ async def verify_numeric_code(
     stmt = select(TrainingAgentSetting).where(
         and_(
             TrainingAgentSetting.training_numeric_code == digits,
-            TrainingAgentSetting.is_enabled == True,
             TrainingAgentSetting.training_code_enabled == True
         )
     )

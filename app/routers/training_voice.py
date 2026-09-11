@@ -307,7 +307,6 @@ async def handle_websocket_dtmf_verification(
         stmt = select(TrainingAgentSetting).where(
             and_(
                 TrainingAgentSetting.training_numeric_code == code,
-                TrainingAgentSetting.is_enabled == True,
                 TrainingAgentSetting.training_code_enabled == True
             )
         )
@@ -785,7 +784,6 @@ async def verify_numeric_code(
     stmt = select(TrainingAgentSetting).where(
         and_(
             TrainingAgentSetting.training_numeric_code == digits,
-            TrainingAgentSetting.is_enabled == True,
             TrainingAgentSetting.training_code_enabled == True
         )
     )
@@ -1085,7 +1083,6 @@ async def handle_verify_agent_code(
             stmt = select(TrainingAgentSetting).where(
                 and_(
                     TrainingAgentSetting.training_numeric_code == cleaned,
-                    TrainingAgentSetting.is_enabled == True,
                     TrainingAgentSetting.training_code_enabled == True
                 )
             )

@@ -13,7 +13,12 @@ from app.models.users import User
 from app.models.prompts import Prompt
 from app.models.services import Service
 import time
-from app.utils.hubspot_owners import resolve_owner_id_by_email
+from app.utils.hubspot_owners import (
+    resolve_owner_id_by_email,
+    is_placeholder_agent_name,
+    batch_resolve_agent_names,
+    resolve_agent_name_canonical,
+)
 from app.utils.normalizers import normalize_direction, normalize_typology, normalize_status, normalize_sort
 from app.utils.dates import parse_madrid_date_bounds
 
@@ -1137,6 +1142,14 @@ async def list_results(
     )
     db_ms = round((time.perf_counter() - t_db_start) * 1000.0, 1)
 
+    # Collect placeholder results that need agent name resolution
+    needed_pairs = set()
+    for r in results:
+        if is_placeholder_agent_name(r.agent_name) and r.hubspot_owner_id:
+            needed_pairs.add((r.company_id, str(r.hubspot_owner_id).strip()))
+
+    resolved_owners = await batch_resolve_agent_names(db, needed_pairs) if needed_pairs else {}
+
     items_out = []
     response_mode = "list_full" if include_detail else "list_light"
     for r in results:
@@ -1147,6 +1160,14 @@ async def list_results(
         d.items_visual = build_items_visual(r.items_json)
         if d.execution_source is None:
             d.execution_source = "on_demand"
+
+        # Dynamically enrich placeholder agent_name without touching DB snapshots
+        if is_placeholder_agent_name(d.agent_name) and r.hubspot_owner_id:
+            clean_oid = str(r.hubspot_owner_id).strip()
+            dynamic_name = resolved_owners.get((r.company_id, clean_oid)) or resolved_owners.get(("*", clean_oid))
+            if dynamic_name:
+                d.agent_name = dynamic_name
+
         items_out.append(d)
 
     total_ms = round((time.perf_counter() - t_start) * 1000.0, 1)
@@ -1261,6 +1282,17 @@ async def get_result(
     d.items_visual = build_items_visual(result.items_json)
     if d.execution_source is None:
         d.execution_source = "on_demand"
+
+    if is_placeholder_agent_name(d.agent_name) and result.hubspot_owner_id:
+        resolved_name = await resolve_agent_name_canonical(
+            db=db,
+            hubspot_owner_id=result.hubspot_owner_id,
+            company_id=result.company_id,
+            raw_agent=None,
+        )
+        if resolved_name and not is_placeholder_agent_name(resolved_name):
+            d.agent_name = resolved_name
+
     return d
 
 

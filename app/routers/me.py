@@ -889,7 +889,7 @@ async def get_my_agent_code(
     if not numeric_code:
         return MyAgentCodeResponse(agent_code=None, enabled=False)
 
-    enabled = bool(setting.is_enabled and setting.training_code_enabled)
+    enabled = bool(setting.training_code_enabled)
 
     return MyAgentCodeResponse(
         agent_code=numeric_code,

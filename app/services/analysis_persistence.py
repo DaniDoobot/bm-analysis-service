@@ -161,11 +161,8 @@ async def save_analysis(
     if call_timestamp is not None and call_timestamp.tzinfo is None:
         call_timestamp = call_timestamp.replace(tzinfo=timezone.utc)
 
-    # ── Resolve agent name defensively ────────────────────────────────────
-    from app.utils.hubspot_owners import resolve_agent_display
     raw_agent = call_metadata.get("agente_telefonico")
     owner_id = call_metadata.get("hubspot_owner_id")
-    resolved_agent = resolve_agent_display(raw_agent, owner_id)
 
     # ── Strip legacy keys from result ─────────────────────────────────────
     clean_result = _strip_legacy_keys(result_json)
@@ -211,6 +208,15 @@ async def save_analysis(
             resolved_service_id = s_row[0]
             if not resolved_company_id:
                 resolved_company_id = s_row[1]
+
+    # ── Resolve agent name defensively via canonical priority ────────────
+    from app.utils.hubspot_owners import resolve_agent_name_canonical
+    resolved_agent = await resolve_agent_name_canonical(
+        db=db,
+        hubspot_owner_id=owner_id,
+        company_id=resolved_company_id,
+        raw_agent=raw_agent,
+    )
 
     try:
         # ── 1. Insert bm_analyses ──────────────────────────────────────────
