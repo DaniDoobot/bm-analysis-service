@@ -26,10 +26,16 @@ class CompanyBase(BaseModel):
     company_key: str
     is_active: bool = True
 
-class CompanyCreate(CompanyBase):
+class CompanyCreate(BaseModel):
+    company_name: str
+    company_key: Optional[str] = None
+    is_active: bool = True
+
     @field_validator("company_key")
     @classmethod
-    def validate_key(cls, v: str) -> str:
+    def validate_key(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not v.strip():
+            return None
         return _validate_company_key(v)
 
     @field_validator("company_name")

@@ -1,8 +1,11 @@
 import logging
+import re
+import unicodedata
 from typing import Annotated, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import (
@@ -129,6 +132,28 @@ async def get_company(
     return await _build_admin_company_response(company, db)
 
 
+def _slugify_company_name(text: str) -> str:
+    s = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("utf-8")
+    s = s.lower().strip()
+    s = re.sub(r"[^\w\s-]", "", s)
+    s = re.sub(r"[-\s]+", "-", s).strip("-_")
+    s = re.sub(r"^[^a-z0-9]+", "", s)
+    return s or "company"
+
+
+async def _generate_unique_company_key(db: AsyncSession, name: str) -> str:
+    base = _slugify_company_name(name)
+    candidate = base
+    idx = 1
+    while True:
+        stmt = select(Company.company_id).where(Company.company_key == candidate)
+        res = await db.execute(stmt)
+        if res.scalar() is None:
+            return candidate
+        idx += 1
+        candidate = f"{base}-{idx}"
+
+
 # ---------------------------------------------------------------------------
 # POST /bm/companies — Create company
 # ---------------------------------------------------------------------------
@@ -142,30 +167,83 @@ async def create_company(
     """
     Create a new company. Super Admin only.
 
-    - company_key must be a valid slug (lowercase, digits, hyphens, underscores).
+    - If company_key is not provided, it is auto-generated from company_name.
     - company_key must be unique.
     - company_name must be unique.
     """
-    # Check uniqueness of key and name
-    dup_stmt = select(Company).where(
-        (Company.company_key == payload.company_key) |
-        (Company.company_name == payload.company_name)
-    )
-    dup_res = await db.execute(dup_stmt)
-    if dup_res.scalars().first():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Ya existe una empresa con ese nombre o clave única.",
+    if payload.company_key:
+        dup_stmt = select(Company).where(
+            (Company.company_key == payload.company_key) |
+            (Company.company_name == payload.company_name)
         )
+        dup_res = await db.execute(dup_stmt)
+        if dup_res.scalars().first():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Ya existe una empresa con ese nombre o clave única.",
+            )
+        company = Company(
+            company_name=payload.company_name,
+            company_key=payload.company_key,
+            is_active=payload.is_active,
+        )
+        db.add(company)
+        try:
+            await db.commit()
+            await db.refresh(company)
+        except IntegrityError as e:
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Ya existe una empresa con ese nombre o clave única.",
+            ) from e
+    else:
+        dup_stmt = select(Company).where(Company.company_name == payload.company_name)
+        dup_res = await db.execute(dup_stmt)
+        if dup_res.scalars().first():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Ya existe una empresa con ese nombre.",
+            )
 
-    company = Company(
-        company_name=payload.company_name,
-        company_key=payload.company_key,
-        is_active=payload.is_active,
-    )
-    db.add(company)
-    await db.commit()
-    await db.refresh(company)
+        max_retries = 3
+        created_company = None
+        for attempt in range(max_retries):
+            resolved_key = await _generate_unique_company_key(db, payload.company_name)
+            company = Company(
+                company_name=payload.company_name,
+                company_key=resolved_key,
+                is_active=payload.is_active,
+            )
+            db.add(company)
+            try:
+                await db.commit()
+                await db.refresh(company)
+                created_company = company
+                break
+            except IntegrityError as e:
+                await db.rollback()
+                err_orig = str(e.orig).lower() if hasattr(e, "orig") and e.orig else str(e).lower()
+                # If collision is on company_name, do not retry
+                if "company_name" in err_orig:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Ya existe una empresa con ese nombre.",
+                    ) from e
+                # If collision is on company_key and attempts remain, retry with next slug
+                if "company_key" in err_orig and attempt < max_retries - 1:
+                    logger.warning(
+                        "Concurrent company_key collision on '%s', retrying generation (attempt %d/%d)",
+                        resolved_key, attempt + 1, max_retries
+                    )
+                    continue
+                # Exhausted retries or other integrity constraint
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Conflicto de concurrencia al registrar la empresa. Por favor, reintente.",
+                ) from e
+
+        company = created_company
 
     logger.info(
         "Actor (user_id=%s) CREATED company '%s' (id=%s, key=%s)",

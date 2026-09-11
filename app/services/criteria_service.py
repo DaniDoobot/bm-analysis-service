@@ -15,6 +15,8 @@ from fastapi import HTTPException, status
 
 logger = logging.getLogger(__name__)
 
+MAX_AI_CRITERION_DESCRIPTION_CHARS = 50_000
+
 
 class CriterionSyncError(Exception):
     def __init__(self, val_result: dict):
@@ -1463,8 +1465,8 @@ async def generate_criterion_description_ai(db: AsyncSession, criterion_id: int 
         "6. Redacta en español profesional con lenguaje de auditoría de calidad.\n"
         "7. Devuelve EXCLUSIVAMENTE el texto del criterio, sin introducciones ni preámbulos "
         "('Aquí tienes...', 'Claro...', 'Por supuesto...').\n"
-        "8. Longitud mínima orientativa: 800 caracteres para criterios complejos. "
-        "Puedes llegar hasta 3500 caracteres si el contenido es estructurado y útil.\n"
+        "8. Longitud orientativa: adapta la extensión al nivel de detalle necesario sin resumir artificialmente. "
+        "Desarrolla las secciones, criterios y ejemplos de forma completa y operativa.\n"
         "9. Integra las instrucciones adicionales del usuario dentro de la estructura, "
         "no las añadas como comentario suelto al final.\n"
     )
@@ -1599,12 +1601,11 @@ async def generate_criterion_description_ai(db: AsyncSession, criterion_id: int 
         '', cleaned_desc, flags=re.IGNORECASE
     ).lstrip()
 
-    # D. Length control — allow up to 5000 chars
-    MAX_CHARS = 5000
-    if len(cleaned_desc) > MAX_CHARS:
-        cut = cleaned_desc[:MAX_CHARS]
+    # D. Length control — allow up to MAX_AI_CRITERION_DESCRIPTION_CHARS
+    if len(cleaned_desc) > MAX_AI_CRITERION_DESCRIPTION_CHARS:
+        cut = cleaned_desc[:MAX_AI_CRITERION_DESCRIPTION_CHARS]
         last_break = max(cut.rfind('\n\n'), cut.rfind('. '))
-        if last_break > int(MAX_CHARS * 0.75):
+        if last_break > int(MAX_AI_CRITERION_DESCRIPTION_CHARS * 0.75):
             cleaned_desc = cleaned_desc[:last_break].rstrip() + "\n\n[Descripción truncada por exceder la longitud máxima.]"
         else:
             cleaned_desc = cut.rstrip() + "..."

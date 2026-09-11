@@ -2,6 +2,8 @@
 from typing import Optional, Any, List
 from pydantic import BaseModel, field_validator, model_validator, Field, AliasChoices
 
+from app.utils.security import validate_password_policy
+
 
 def normalize_name_val(v):
     if v is None:
@@ -121,6 +123,11 @@ class BootstrapPayload(BaseModel):
             raise ValueError("Field cannot be empty")
         return v.strip()
 
+    @field_validator("password")
+    @classmethod
+    def validate_bootstrap_password(cls, v: str) -> str:
+        return validate_password_policy(v)
+
 
 # ── Admin CRUD ────────────────────────────────────────────────────────────────
 
@@ -187,6 +194,13 @@ class UserCreatePayload(BaseModel):
         v_clean = v.strip().lower().replace(" ", "_").replace("-", "_")
         if v.strip().lower() not in ROLE_MAPPINGS and v_clean not in ROLE_MAPPINGS:
             raise ValueError(f"Rol inválido '{v}'.")
+        return v
+
+    @field_validator("password")
+    @classmethod
+    def validate_create_password(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v != "":
+            return validate_password_policy(v)
         return v
 
     @model_validator(mode="after")
@@ -261,9 +275,21 @@ class UserAdminResetPasswordPayload(BaseModel):
     """Payload for admin resetting another user's password (no current_password required)."""
     new_password: str
 
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, v: str) -> str:
+        return validate_password_policy(v)
+
 
 class AdminPasswordResetPayload(BaseModel):
     temp_password: Optional[str] = None
+
+    @field_validator("temp_password")
+    @classmethod
+    def validate_temp_password(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v != "":
+            return validate_password_policy(v)
+        return v
 
 
 # ── Self-service (me) ─────────────────────────────────────────────────────────
@@ -304,6 +330,11 @@ class MePasswordUpdatePayload(BaseModel):
     new_password: str
     new_password_confirm: str
 
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, v: str) -> str:
+        return validate_password_policy(v)
+
 
 class ChangePasswordPayload(BaseModel):
     current_password: str
@@ -319,11 +350,7 @@ class ChangePasswordPayload(BaseModel):
     @field_validator("new_password")
     @classmethod
     def validate_new_password(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("La nueva contraseña no puede estar vacía.")
-        if len(v.strip()) < 8:
-            raise ValueError("La nueva contraseña debe tener al menos 8 caracteres.")
-        return v.strip()
+        return validate_password_policy(v)
 
 
 class RevealPasswordPayload(BaseModel):
@@ -337,6 +364,11 @@ class RequestPasswordResetPayload(BaseModel):
 class ResetPasswordPayload(BaseModel):
     token: str
     new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, v: str) -> str:
+        return validate_password_policy(v)
 
 
 # ── Sharing / Permissions Eligible Users ───────────────────────────────────
@@ -363,6 +395,16 @@ class PasswordResetConfirmPayload(BaseModel):
     token: str
     new_password: str
     confirm_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, v: str) -> str:
+        return validate_password_policy(v)
+
+
+class MyAgentCodeResponse(BaseModel):
+    agent_code: Optional[str] = None
+    enabled: bool = False
 
 
 

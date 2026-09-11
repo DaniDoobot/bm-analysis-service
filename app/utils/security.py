@@ -10,7 +10,43 @@ import json
 import secrets
 import time
 
+import string
+
 SECRET_KEY = "bm-dev-secret-key-for-token-signing-12345"
+
+SPECIAL_CHARACTERS = "!@#$%&*_-."
+
+
+def validate_password_policy(password: str) -> str:
+    """
+    Validates canonical password policy:
+    - Minimum 10 characters
+    - At least 1 special character (non-alphanumeric and non-whitespace)
+    """
+    if not password:
+        raise ValueError("La contraseña no puede estar vacía.")
+    if len(password) < 10:
+        raise ValueError("La contraseña debe tener al menos 10 caracteres.")
+    if not any(not c.isalnum() and not c.isspace() for c in password):
+        raise ValueError("La contraseña debe incluir al menos un carácter especial.")
+    return password
+
+
+def generate_temporary_password(length: int = 16) -> str:
+    """
+    Generates a cryptographically secure temporary password using `secrets`
+    guaranteed to satisfy `validate_password_policy`.
+    """
+    if length < 10:
+        length = 16
+    specials = [secrets.choice(SPECIAL_CHARACTERS) for _ in range(2)]
+    digits = [secrets.choice(string.digits) for _ in range(2)]
+    letters = [secrets.choice(string.ascii_letters) for _ in range(length - 4)]
+    all_chars = specials + digits + letters
+    sys_rand = secrets.SystemRandom()
+    sys_rand.shuffle(all_chars)
+    pwd = "".join(all_chars)
+    return validate_password_policy(pwd)
 
 
 def hash_password(password: str) -> str:

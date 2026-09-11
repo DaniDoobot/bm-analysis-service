@@ -310,7 +310,7 @@ async def create_user(
 ):
     """Create a new administrative user with hierarchical roles and tenant compliance."""
     import secrets
-    from app.utils.security import hash_password
+    from app.utils.security import hash_password, generate_temporary_password
     from datetime import datetime, timezone, timedelta
 
     if is_disallowed_creation_role(payload.role):
@@ -416,7 +416,7 @@ async def create_user(
             detail=f"El correo electrónico '{email}' ya está en uso."
         )
 
-    temp_pass = secrets.token_urlsafe(32)
+    temp_pass = generate_temporary_password(24)
     pass_hash = hash_password(temp_pass)
     token = secrets.token_urlsafe(32)
     expires_at = datetime.now(timezone.utc) + timedelta(hours=24)

@@ -24,7 +24,9 @@ from app.schemas.users import (
     RequestPasswordResetPayload,
     ResetPasswordPayload,
     PasswordResetConfirmPayload,
+    MyAgentCodeResponse,
 )
+from app.models.personalized_training import TrainingAgentSetting
 from app.services.users_service import get_user_services_info
 from app.utils.security import (
     verify_password,
@@ -860,5 +862,37 @@ async def get_my_tenant_context(
         can_manage_trainer=can_manage_trainer,
         can_manage_structures=can_manage_structures,
         branding=branding,
+    )
+
+
+@router.get("/me/agent-code", response_model=MyAgentCodeResponse)
+async def get_my_agent_code(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Retrieve personal training agent code for the authenticated user."""
+    if not current_user.hubspot_owner_id:
+        return MyAgentCodeResponse(agent_code=None, enabled=False)
+
+    stmt = select(TrainingAgentSetting).where(
+        TrainingAgentSetting.hubspot_owner_id == current_user.hubspot_owner_id
+    )
+    res = await db.execute(stmt)
+    setting = res.scalar_one_or_none()
+
+    if not setting:
+        return MyAgentCodeResponse(agent_code=None, enabled=False)
+
+    raw_num = setting.training_numeric_code
+    numeric_code = raw_num.strip() if raw_num and raw_num.strip() else None
+
+    if not numeric_code:
+        return MyAgentCodeResponse(agent_code=None, enabled=False)
+
+    enabled = bool(setting.is_enabled and setting.training_code_enabled)
+
+    return MyAgentCodeResponse(
+        agent_code=numeric_code,
+        enabled=enabled,
     )
 

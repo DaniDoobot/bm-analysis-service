@@ -43,7 +43,7 @@ from app.schemas.users import (
     PasswordSetupLinkResponse,
     UserPasswordSetupMode,
 )
-from app.utils.security import hash_password
+from app.utils.security import hash_password, generate_temporary_password
 
 logger = logging.getLogger(__name__)
 
@@ -611,13 +611,13 @@ async def create_user(
     expires_at = None
 
     if body.password_setup == UserPasswordSetupMode.invite_link:
-        temp_pass = secrets.token_urlsafe(32)
+        temp_pass = generate_temporary_password(24)
         pass_hash = hash_password(temp_pass)
         token = secrets.token_urlsafe(32)
         expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
         must_reset = True
     elif body.password_setup == UserPasswordSetupMode.temporary_password:
-        temp_pass = body.password if body.password else secrets.token_urlsafe(12)
+        temp_pass = body.password if body.password else generate_temporary_password(16)
         pass_hash = hash_password(temp_pass)
         must_reset = True
     else:
@@ -625,7 +625,7 @@ async def create_user(
             pass_hash = hash_password(body.password)
             must_reset = body.must_reset_password
         else:
-            temp_pass = secrets.token_urlsafe(16)
+            temp_pass = generate_temporary_password(16)
             pass_hash = hash_password(temp_pass)
             must_reset = True
 
@@ -1061,7 +1061,7 @@ async def administrative_password_reset(
 
     temp_pass = body.temp_password
     if not temp_pass:
-        temp_pass = secrets.token_urlsafe(9)  # ~12 characters
+        temp_pass = generate_temporary_password(16)
 
     user.password_hash = hash_password(temp_pass)
     user.password_plain_dev = None

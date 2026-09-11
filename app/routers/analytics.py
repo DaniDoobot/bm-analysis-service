@@ -15,6 +15,8 @@ from app.core.roles import InternalRole
 from app.models.users import User
 from app.models.mass_evaluations import MassEvaluationResult, MassEvaluationCriterionResult
 from app.models.analyses import Analysis, AnalysisCriterionResult
+from app.models.criteria import PromptCriterion
+from app.models.prompts import Prompt
 from app.schemas.analytics import (
     AnalyticsItem,
     AgentInfo,
@@ -108,7 +110,11 @@ def normalize_key(raw_key: str) -> str:
     }
     return special_mappings.get(s, s)
 
-async def get_all_metrics(db: AsyncSession, context: TenantContext | None = None) -> list[dict]:
+async def get_all_metrics(
+    db: AsyncSession,
+    context: TenantContext | None = None,
+    service_id: int | None = None,
+) -> list[dict]:
     metrics = list(BASE_METRICS)
     existing_keys = {m["key"] for m in metrics}
     
@@ -122,6 +128,8 @@ async def get_all_metrics(db: AsyncSession, context: TenantContext | None = None
         ).where(
             MassEvaluationCriterionResult.criterion_key != None
         )
+        if service_id is not None:
+            stmt1 = stmt1.where(MassEvaluationResult.service_id == service_id)
         if context and not context.is_super_admin:
             stmt1 = stmt1.where(
                 or_(
@@ -148,6 +156,8 @@ async def get_all_metrics(db: AsyncSession, context: TenantContext | None = None
         ).where(
             AnalysisCriterionResult.criterion_key != None
         )
+        if service_id is not None:
+            stmt2 = stmt2.where(Analysis.service_id == service_id)
         if context and not context.is_super_admin:
             stmt2 = stmt2.where(
                 or_(
@@ -163,9 +173,40 @@ async def get_all_metrics(db: AsyncSession, context: TenantContext | None = None
     except Exception as e:
         logger.warning(f"Error querying AnalysisCriterionResult for catalog: {e}")
         rows2 = []
+
+    try:
+        stmt3 = select(
+            PromptCriterion.criterion_key,
+            func.max(PromptCriterion.criterion_name).label("name"),
+            func.max(PromptCriterion.criterion_type).label("type")
+        ).join(
+            Prompt, Prompt.prompt_id == PromptCriterion.prompt_id
+        ).where(
+            PromptCriterion.criterion_key != None,
+            PromptCriterion.is_active == True,
+            PromptCriterion.deleted_at.is_(None)
+        )
+        if service_id is not None:
+            stmt3 = stmt3.where(Prompt.service_id == service_id)
+        if context and not context.is_super_admin:
+            if context.allowed_service_ids is not None:
+                stmt3 = stmt3.where(Prompt.service_id.in_(context.allowed_service_ids))
+            if context.allowed_company_ids is not None:
+                stmt3 = stmt3.where(
+                    or_(
+                        Prompt.company_id.in_(context.allowed_company_ids),
+                        Prompt.company_id.is_(None)
+                    )
+                )
+        stmt3 = stmt3.group_by(PromptCriterion.criterion_key)
+        res3 = await db.execute(stmt3)
+        rows3 = res3.all()
+    except Exception as e:
+        logger.warning(f"Error querying PromptCriterion for catalog: {e}")
+        rows3 = []
         
     discovered = {}
-    for row in rows1 + rows2:
+    for row in rows1 + rows2 + rows3:
         key = row[0]
         name = row[1]
         c_type = row[2]
@@ -175,10 +216,11 @@ async def get_all_metrics(db: AsyncSession, context: TenantContext | None = None
         if norm not in discovered:
             discovered[norm] = {"name": name or key, "type": c_type}
             
-    for fallback in KNOWN_CRITERIA_FALLBACK:
-        k = fallback["key"]
-        if k not in existing_keys and k not in discovered:
-            discovered[k] = {"name": fallback["label"], "type": fallback["type"]}
+    if service_id is None:
+        for fallback in KNOWN_CRITERIA_FALLBACK:
+            k = fallback["key"]
+            if k not in existing_keys and k not in discovered:
+                discovered[k] = {"name": fallback["label"], "type": fallback["type"]}
             
     order = 70
     for key, info in sorted(discovered.items(), key=lambda x: x[0]):
@@ -347,7 +389,13 @@ async def get_analytics_items(
         service_param=service,
         company_ids=None if context.is_super_admin else context.allowed_company_ids
     )
-    return await get_all_metrics(db, context=context)
+    if eff_service_id is not None and context and not context.is_super_admin:
+        if context.allowed_service_ids is not None and eff_service_id not in context.allowed_service_ids:
+            raise HTTPException(
+                status_code=http_status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: No tiene permisos para este servicio."
+            )
+    return await get_all_metrics(db, context=context, service_id=eff_service_id)
 
 
 @router.get(
@@ -603,7 +651,7 @@ async def get_agents_comparison(
             else:
                 agents_list = available_catalog
 
-            all_metrics = await get_all_metrics(db, context=context)
+            all_metrics = await get_all_metrics(db, context=context, service_id=eff_service_id)
             if item_req_keys:
                 effective_keys = item_req_keys[:50] if len(item_req_keys) > 50 else item_req_keys
                 items_to_use = [item for item in all_metrics if item["key"] in effective_keys]
@@ -898,7 +946,7 @@ async def get_items_evolution(
                     b_key = (ts - timedelta(days=ts.weekday())).strftime("%Y-%m-%d")
                 buckets_map.setdefault(b_key, []).append(r)
 
-            all_metrics = await get_all_metrics(db, context=context)
+            all_metrics = await get_all_metrics(db, context=context, service_id=eff_service_id)
             if item_req_keys:
                 effective_keys = item_req_keys[:50] if len(item_req_keys) > 50 else item_req_keys
                 items_to_use = [item for item in all_metrics if item["key"] in effective_keys]
