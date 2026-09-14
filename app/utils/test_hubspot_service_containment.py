@@ -57,6 +57,11 @@ class TestHubSpotServiceContainment(unittest.IsolatedAsyncioTestCase):
         self._find_patcher = patch.object(HubSpotService, "find_alarm_ticket", new=AsyncMock(return_value=None))
         self.mock_find = self._find_patcher.start()
 
+        from app.models.companies import Company
+        async with self.async_session() as session:
+            session.add(Company(company_id=1, company_key="boston-medical", company_name="Boston Medical Group", is_demo=False))
+            await session.commit()
+
     async def asyncTearDown(self):
         self._find_patcher.stop()
         await self.engine.dispose()

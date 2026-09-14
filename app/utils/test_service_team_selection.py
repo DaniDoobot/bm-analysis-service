@@ -85,6 +85,10 @@ class TestServiceTeamSelection(unittest.IsolatedAsyncioTestCase):
             pv2 = PromptVersion(id=590, prompt_id=59, version_label="v1", prompt="Test expac prompt", is_current=True)
             session.add_all([p1, pv1, p2, pv2])
 
+            from app.models.companies import Company
+            comp1 = Company(company_id=1, company_key="boston-medical", company_name="Boston Medical Group", is_demo=False)
+            session.add(comp1)
+
             await session.commit()
 
     async def asyncTearDown(self):
@@ -255,7 +259,7 @@ class TestServiceTeamSelection(unittest.IsolatedAsyncioTestCase):
 
     async def test_case_g_hubspot_service_direct_filtering(self):
         """Direct tests of HubSpotService.search_calls_for_mass_evaluation filter rules."""
-        hs = HubSpotService()
+        hs = HubSpotService(is_demo=False)
 
         # 1. agent_owner_ids = [] -> returns [] without HTTP request
         res_empty = await hs.search_calls_for_mass_evaluation({"agent_owner_ids": []})

@@ -33,11 +33,22 @@ def is_hubspot_side_effect_allowed(service_id: int | None) -> bool:
 
 
 class HubSpotService:
-    def __init__(self):
+    def __init__(self, is_demo: bool | None = None):
+        self.is_demo: bool | None = bool(is_demo) if is_demo is not None else None
         self.token = settings.hubspot_access_token
         self.portal_id = settings.hubspot_portal_id
         if not self.token:
             logger.warning("HUBSPOT_ACCESS_TOKEN not set — HubSpot calls will fail")
+
+    def _resolve_is_demo(self, explicit_is_demo: bool | None) -> bool | None:
+        """
+        Resolves effective is_demo tri-state (True / False / None).
+        Precedence: explicit call parameter > instance setting.
+        Only explicit False represents a confirmed real tenant.
+        """
+        if explicit_is_demo is not None:
+            return bool(explicit_is_demo)
+        return self.is_demo
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -111,11 +122,21 @@ class HubSpotService:
 
         return (None, False)
 
-    async def get_call(self, call_id: str) -> dict[str, Any]:
+    async def get_call(self, call_id: str, is_demo: bool | None = None) -> dict[str, Any]:
         """
         Fetch call engagement from HubSpot CRM API.
         Returns normalized metadata dict.
+        Fail-closed: Returns empty dict if is_demo is True or UNKNOWN (None).
+        Only is_demo is False (confirmed real) authorizes external HTTP.
         """
+        eff_is_demo = self._resolve_is_demo(is_demo)
+        if eff_is_demo is not False:
+            logger.warning(
+                "[hubspot_frontier] BLOCKED get_call: demo tenant or unconfirmed demo status (is_demo=%s, fail-closed)",
+                eff_is_demo,
+            )
+            return {}
+
         if not self.token:
             logger.warning("HUBSPOT_ACCESS_TOKEN not set — returning empty call dict")
             return {}
@@ -165,12 +186,34 @@ class HubSpotService:
         }
 
     async def create_ticket(
-        self, properties: dict[str, Any], contact_id: str | None = None
+        self,
+        properties: dict[str, Any],
+        contact_id: str | None = None,
+        is_demo: bool | None = None,
+        service_id: int | None = None,
     ) -> dict[str, Any]:
         """
         Create a Ticket object in HubSpot CRM API v3.
         Optionally associates with a Contact if contact_id is provided (associationTypeId=16).
+        Fail-closed: Returns empty dict and executes 0 HTTP requests if is_demo is True or UNKNOWN (None).
+        Only is_demo is False (confirmed real) authorizes external HTTP.
+        If service_id is provided, also enforces is_hubspot_side_effect_allowed(service_id).
         """
+        eff_is_demo = self._resolve_is_demo(is_demo)
+        if eff_is_demo is not False:
+            logger.warning(
+                "[hubspot_frontier] BLOCKED create_ticket: demo tenant or unconfirmed demo status (is_demo=%s, fail-closed)",
+                eff_is_demo,
+            )
+            return {}
+
+        if service_id is not None and not is_hubspot_side_effect_allowed(service_id):
+            logger.warning(
+                "[hubspot_frontier] BLOCKED create_ticket: service_id %s not permitted for HubSpot CRM side effects",
+                service_id,
+            )
+            return {}
+
         if not self.token:
             raise ValueError("HUBSPOT_ACCESS_TOKEN not set — cannot create ticket")
 
@@ -206,6 +249,7 @@ class HubSpotService:
         subject: str = "REM doobot speechFront",
         pipeline: str | None = None,
         contact_id: str | None = None,
+        is_demo: bool | None = None,
     ) -> dict[str, Any] | None:
         """
         Locates an existing alarm ticket in HubSpot to ensure crash-safe idempotency.
@@ -222,6 +266,14 @@ class HubSpotService:
         - {"is_ambiguous": True, "count": int, "ticket_id": None} if multiple matching tickets exist.
         - None if 0 matching tickets exist.
         """
+        eff_is_demo = self._resolve_is_demo(is_demo)
+        if eff_is_demo is not False:
+            logger.warning(
+                "[hubspot_frontier] BLOCKED find_alarm_ticket: demo tenant or unconfirmed demo status (is_demo=%s, fail-closed)",
+                eff_is_demo,
+            )
+            return None
+
         if not self.token:
             return None
 
@@ -336,10 +388,14 @@ class HubSpotService:
 
         return None
 
-    async def get_owner_name(self, owner_id: str) -> str | None:
+    async def get_owner_name(self, owner_id: str, is_demo: bool | None = None) -> str | None:
         """Optionally resolve owner_id to a display name."""
         if not owner_id:
             return None
+        eff_is_demo = self._resolve_is_demo(is_demo)
+        if eff_is_demo is not False:
+            return owner_id
+
         url = f"{HUBSPOT_API_BASE}/crm/v3/owners/{owner_id}"
         try:
             async with httpx.AsyncClient(timeout=10) as client:
@@ -353,12 +409,31 @@ class HubSpotService:
             logger.warning("Could not resolve owner %s: %s", owner_id, e)
             return owner_id
 
-    async def search_calls_for_mass_evaluation(self, filters: dict[str, Any]) -> list[dict[str, Any]]:
+    async def search_calls_for_mass_evaluation(
+        self,
+        filters: dict[str, Any],
+        is_demo: bool | None = None,
+    ) -> list[dict[str, Any]]:
         """
         Search calls in HubSpot based on provided filters.
         Supports pagination to retrieve all matched calls up to the job's max_calls limit.
         Apply post-filtering by local call timestamp in job's timezone.
+        Fail-closed: Returns empty list and executes 0 HTTP requests if is_demo is True or UNKNOWN (None).
+        Only is_demo is False (confirmed real) authorizes external HTTP.
+        filters['is_demo'] is only used to BLOCK if True; it NEVER authorizes when False.
         """
+        if filters.get("is_demo") is True:
+            logger.warning("[hubspot_frontier] BLOCKED search_calls_for_mass_evaluation: demo filter flag detected (fail-closed)")
+            return []
+
+        eff_is_demo = self._resolve_is_demo(is_demo)
+        if eff_is_demo is not False:
+            logger.warning(
+                "[hubspot_frontier] BLOCKED search_calls_for_mass_evaluation: demo tenant or unconfirmed demo status (is_demo=%s, fail-closed)",
+                eff_is_demo,
+            )
+            return []
+
         if not self.token:
             logger.warning("HUBSPOT_ACCESS_TOKEN not set — returning empty results list")
             return []

@@ -53,6 +53,11 @@ class TestHubSpotAlarmTickets(unittest.IsolatedAsyncioTestCase):
         self._find_patcher = patch.object(HubSpotService, "find_alarm_ticket", new=AsyncMock(return_value=None))
         self.mock_find_alarm_ticket = self._find_patcher.start()
 
+        from app.models.companies import Company
+        async with self.async_session() as session:
+            session.add(Company(company_id=1, company_key="boston-medical", company_name="Boston Medical Group", is_demo=False))
+            await session.commit()
+
     async def asyncTearDown(self):
         self._find_patcher.stop()
         await self.engine.dispose()
@@ -493,7 +498,7 @@ class TestHubSpotAlarmTickets(unittest.IsolatedAsyncioTestCase):
 
     # 17. Contacto encontrado → asociación ID 16
     async def test_17_contact_association_id_16(self):
-        hs_service = HubSpotService()
+        hs_service = HubSpotService(is_demo=False)
         with patch("app.services.hubspot_service.httpx.AsyncClient.post") as mock_post:
             mock_post.return_value = MagicMock(
                 status_code=201,
@@ -1442,7 +1447,7 @@ class TestHubSpotAlarmTickets(unittest.IsolatedAsyncioTestCase):
     async def test_45_hubspot_service_find_alarm_ticket_unit(self):
         self._find_patcher.stop()
         try:
-            hs = HubSpotService()
+            hs = HubSpotService(is_demo=False)
             hs.token = "mock_token"
 
             with patch("app.services.hubspot_service.httpx.AsyncClient.post") as mock_post:

@@ -3378,6 +3378,16 @@ class PersonalizedTrainingService:
         if allowed_agent_ids is not None:
             stmt_set = stmt_set.where(TrainingAgentSetting.hubspot_owner_id.in_(allowed_agent_ids))
 
+        # Central guard: automatic scheduled training passes strictly exclude demo tenants and unresolvable companies
+        if triggered_by == "scheduler":
+            from app.models.companies import Company
+            eff_company_id = func.coalesce(TrainingAgentSetting.company_id, User.company_id)
+            stmt_set = (
+                stmt_set.outerjoin(User, User.hubspot_owner_id == TrainingAgentSetting.hubspot_owner_id)
+                .join(Company, Company.company_id == eff_company_id)
+                .where(Company.is_demo == False)
+            )
+
         res_set = await db.execute(stmt_set)
         active_settings = res_set.scalars().all()
 

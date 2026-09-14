@@ -670,9 +670,48 @@ class MassEvaluationService:
         job = res.scalars().first()
         if not job:
             raise ValueError(f"Job ID {job_id} not found")
-            
-        hs_service = HubSpotService()
-        
+
+        # Resolve preview_service_id early for security guard
+        preview_service_id = job.service_id
+        if preview_service_id is None and job.prompt_id:
+            prompt_stmt = select(Prompt.service_id).where(Prompt.prompt_id == job.prompt_id)
+            prompt_res = await db.execute(prompt_stmt)
+            preview_service_id = prompt_res.scalar()
+
+        if preview_service_id is None:
+            aut_stmt = select(MassAnalysisAutomation.service_id).where(MassAnalysisAutomation.job_id == job_id).limit(1)
+            aut_res = await db.execute(aut_stmt)
+            aut_row = aut_res.first()
+            if aut_row:
+                preview_service_id = aut_row[0]
+
+        from app.core.side_effects import is_external_side_effect_allowed
+        if not await is_external_side_effect_allowed(
+            db,
+            company_id=job.company_id,
+            service_id=preview_service_id,
+            integration="hubspot_read",
+        ):
+            logger.info(
+                "[search_calls_for_job_preview] Skipping HubSpot preview search: demo tenant or external read blocked (job_id=%s, company_id=%s)",
+                job_id, job.company_id
+            )
+            return {
+                "job_id": job_id,
+                "calls_found": 0,
+                "effective_filters": {
+                    "selection_mode": job.selection_mode,
+                    "service_id": preview_service_id,
+                },
+                "calls": [],
+                "found_call_ids": [],
+                "not_found_call_ids": [],
+                "duplicate_input_call_ids": [],
+                "normalized_call_ids": [],
+            }
+
+        hs_service = HubSpotService(is_demo=False)
+
         if job.selection_mode == "manual_call_ids":
             calls = []
             not_found_call_ids = []
@@ -773,7 +812,7 @@ class MassEvaluationService:
         filters["service_id"] = preview_service_id
         filters["execution_source"] = job.execution_source
         filters["allow_legacy_fallback"] = (job.execution_source != "automation" and preview_service_id is None)
-        
+
         if job.job_mode == "random_quality_monitoring":
             calls, trace_meta = await MassEvaluationService.select_random_calls_for_quality_monitoring(hs_service, filters)
             effective_filters = dict(filters)
@@ -998,12 +1037,25 @@ class MassEvaluationService:
         """
         from app.services.hubspot_service import HubSpotService
 
-        # 1. Resolve job
         stmt = select(MassEvaluationJob).where(MassEvaluationJob.job_id == job_id)
         res = await db.execute(stmt)
         job = res.scalars().first()
         if not job:
             raise ValueError(f"Job ID {job_id} not found.")
+
+        # Central guard: demo tenants cannot run historical recovery against HubSpot
+        from app.core.side_effects import is_external_side_effect_allowed
+        if not await is_external_side_effect_allowed(
+            db,
+            company_id=job.company_id,
+            service_id=job.service_id,
+            integration="hubspot_read",
+        ):
+            logger.info(
+                "[historical_recovery] Historical recovery rejected for demo tenant: job_id=%s, company_id=%s",
+                job_id, job.company_id
+            )
+            raise ValueError(f"Historical recovery is not allowed for demo tenants (job_id={job_id}).")
 
         # 2. Resolve prompt
         prompt_id = job.prompt_id
@@ -1053,7 +1105,7 @@ class MassEvaluationService:
             raise ValueError(f"No active agent owners configured for service_id={eff_service_id}.")
 
         # 7. Fetch call metadata from HubSpot by ID (read-only)
-        hs_service = HubSpotService()
+        hs_service = HubSpotService(is_demo=False)
         preview_calls = []
         for cid in call_ids:
             call_meta = await hs_service.get_call(cid)
@@ -1267,6 +1319,16 @@ class MassEvaluationService:
                         if company_id is None and service_obj.company_id:
                             company_id = service_obj.company_id
 
+                from app.core.side_effects import (
+                    is_external_side_effect_allowed,
+                    resolve_company_demo_status,
+                )
+                run_company_id, run_is_demo = await resolve_company_demo_status(
+                    db, company_id=company_id, service_id=service_id
+                )
+                if run_company_id is not None and company_id is None:
+                    company_id = run_company_id
+
                 # Fetch active typologies — prioritize base_structure associations, fallback to service
                 typology_list = []
                 if base_structure_id:
@@ -1320,7 +1382,7 @@ class MassEvaluationService:
                         assoc_map[assoc.criterion_id].add(assoc.typology_id)
 
                 # 2. Query HubSpot
-                hs_service = HubSpotService()
+                hs_service = HubSpotService(is_demo=run_is_demo)
                 
                 # Resolve target_agent_owner_ids based on team/service rules
                 raw_agent_owner_ids = filters_payload.get("agent_owner_ids") or job_agent_owner_ids
@@ -1351,7 +1413,31 @@ class MassEvaluationService:
                 random_trace_metadata = None
                 skipped_completed_count = 0
 
-                if service_has_no_owners:
+                # Central guard: check if external HubSpot call ingestion is permitted
+                is_hs_read_allowed = await is_external_side_effect_allowed(
+                    db,
+                    company_id=company_id,
+                    service_id=service_id,
+                    integration="hubspot_read",
+                    is_demo=run_is_demo,
+                )
+
+                if not is_hs_read_allowed:
+                    logger.info(
+                        "[run_job] Skipping HubSpot external call ingestion: demo tenant or external read blocked (company_id=%s, service_id=%s)",
+                        company_id, service_id
+                    )
+                    calls = []
+                    selected_calls = []
+                    fresh_run_stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == run_id)
+                    fresh_run_res = await db.execute(fresh_run_stmt)
+                    fresh_run_obj = fresh_run_res.scalars().first()
+                    if fresh_run_obj:
+                        fresh_run_obj.calls_found = 0
+                        fresh_run_obj.calls_selected = 0
+                        fresh_run_obj.calls_skipped = 0
+                    await db.commit()
+                elif service_has_no_owners:
                     calls = []
                     selected_calls = []
                     fresh_run_stmt = select(MassEvaluationRun).where(MassEvaluationRun.run_id == run_id)
@@ -2014,6 +2100,7 @@ class MassEvaluationService:
                                     contact_id=call.get("contact_id"),
                                     resumen_llamada=resumen_llamada,
                                     service_id=service_id,
+                                    is_demo=run_is_demo,
                                 )
                             except Exception as e_alarm_outer:
                                 logger.error("[alarm_ticket] Unexpected error executing alarm ticket process: %s", e_alarm_outer)
@@ -2536,6 +2623,7 @@ class MassEvaluationService:
         contact_id: str | None = None,
         resumen_llamada: str | None = None,
         service_id: int | None = None,
+        is_demo: bool | None = None,
     ) -> None:
         """
         Idempotent, non-blocking creation of HubSpot REM Ticket upon Alarm detection.
@@ -2560,8 +2648,8 @@ class MassEvaluationService:
             )
             return
 
-        # 2b. Service check (FAIL CLOSED: ONLY Front service_id=1 allowed for HubSpot side effects)
-        from app.services.hubspot_service import is_hubspot_side_effect_allowed
+        # 2b. Central Demo Guard & HubSpot Service Containment (FAIL CLOSED)
+        from app.core.side_effects import is_external_side_effect_allowed
         effective_service_id = service_id
         if effective_service_id is None:
             # Fallback lookup from result row if not explicitly passed
@@ -2569,10 +2657,16 @@ class MassEvaluationService:
             res_sid = await db.execute(stmt_sid)
             effective_service_id = res_sid.scalar_one_or_none()
 
-        if not is_hubspot_side_effect_allowed(effective_service_id):
+        if not await is_external_side_effect_allowed(
+            db,
+            company_id=company_id,
+            service_id=effective_service_id,
+            integration="hubspot_write",
+            is_demo=is_demo,
+        ):
             logger.info(
-                "[hubspot_write_suppressed] mass_analysis_id=%s, call_id=%s, service_id=%s, reason=service_not_allowed, execution_source=%s",
-                mass_analysis_id, call_id, effective_service_id, execution_source
+                "[hubspot_write_suppressed] mass_analysis_id=%s, call_id=%s, company_id=%s, service_id=%s, reason=side_effect_blocked, execution_source=%s",
+                mass_analysis_id, call_id, company_id, effective_service_id, execution_source
             )
             return
 
@@ -2717,7 +2811,7 @@ class MassEvaluationService:
 
         # 6. Contact Resolution & Ticket Build
         try:
-            hs_service = HubSpotService()
+            hs_service = HubSpotService(is_demo=bool(is_demo))
 
             # Resolve effective contact_id:
             # 1) Provided argument `contact_id`
@@ -2728,7 +2822,7 @@ class MassEvaluationService:
 
             if not effective_contact_id:
                 try:
-                    call_meta = await hs_service.get_call(call_id)
+                    call_meta = await hs_service.get_call(call_id, is_demo=is_demo)
                     resolved_cid = call_meta.get("contact_id")
                     is_ambiguous_contact = bool(call_meta.get("is_contact_ambiguous"))
                     if resolved_cid:
@@ -2865,6 +2959,7 @@ class MassEvaluationService:
                     subject=subject,
                     pipeline=pipeline,
                     contact_id=effective_contact_id,
+                    is_demo=is_demo,
                 )
             except Exception as e_find:
                 logger.warning("[alarm_ticket] Pre-creation remote ticket search failed for call %s: %s", call_id, e_find)
@@ -2911,7 +3006,12 @@ class MassEvaluationService:
                 return
 
             # 8. Create ticket in HubSpot API (only if not found remotely)
-            ticket_data = await hs_service.create_ticket(properties=properties, contact_id=effective_contact_id)
+            ticket_data = await hs_service.create_ticket(
+                properties=properties,
+                contact_id=effective_contact_id,
+                is_demo=is_demo,
+                service_id=effective_service_id,
+            )
             ticket_id = str(ticket_data.get("id", ""))
 
             # 9. Persist success
@@ -3009,6 +3109,7 @@ class MassEvaluationService:
 
             logger.info("[alarm_recovery] ALARM_RECOVERY_SWEEP_START: candidates_count=%d", len(candidates))
 
+            company_demo_cache: dict[int, bool] = {}
             for row in candidates:
                 stats["processed"] += 1
                 mid = row.mass_analysis_id
@@ -3034,18 +3135,30 @@ class MassEvaluationService:
                         stats["skipped"] += 1
                         continue
 
-                    if configured_company is not None and comp_id != configured_company:
-                        logger.info("[alarm_recovery] ALARM_TICKET_SKIPPED: mass_analysis_id=%s, call_id=%s, reason=company_not_allowed (company_id=%s)", mid, cid, comp_id)
+                    # Central guard: check if external HubSpot write is allowed (caching company status to avoid N+1)
+                    if comp_id not in company_demo_cache:
+                        from app.core.side_effects import resolve_company_demo_status
+                        _, is_d = await resolve_company_demo_status(db, company_id=comp_id)
+                        company_demo_cache[comp_id] = is_d
+
+                    from app.core.side_effects import is_external_side_effect_allowed
+                    is_rec_allowed = await is_external_side_effect_allowed(
+                        db,
+                        company_id=comp_id,
+                        service_id=row.service_id,
+                        integration="hubspot_write",
+                        is_demo=company_demo_cache.get(comp_id),
+                    )
+                    if not is_rec_allowed:
+                        logger.info(
+                            "[alarm_recovery] ALARM_TICKET_SKIPPED: mass_analysis_id=%s, call_id=%s, reason=side_effect_blocked",
+                            mid, cid
+                        )
                         stats["skipped"] += 1
                         continue
 
-                    # 2b. Check service_id (FAIL CLOSED: ONLY Front service_id=1 allowed for HubSpot side effects)
-                    from app.services.hubspot_service import is_hubspot_side_effect_allowed
-                    if not is_hubspot_side_effect_allowed(row.service_id):
-                        logger.info(
-                            "[hubspot_write_suppressed] mass_analysis_id=%s, call_id=%s, service_id=%s, reason=service_not_allowed, execution_source=alarm_recovery",
-                            mid, cid, row.service_id
-                        )
+                    if configured_company is not None and comp_id != configured_company:
+                        logger.info("[alarm_recovery] ALARM_TICKET_SKIPPED: mass_analysis_id=%s, call_id=%s, reason=company_not_allowed (company_id=%s)", mid, cid, comp_id)
                         stats["skipped"] += 1
                         continue
 
@@ -3071,6 +3184,7 @@ class MassEvaluationService:
                         contact_id=row.hubspot_contact_id,
                         resumen_llamada=resumen_llamada,
                         service_id=row.service_id,
+                        is_demo=company_demo_cache.get(comp_id),
                     )
 
                     # Check final outcome in DB
@@ -3216,6 +3330,19 @@ class MassEvaluationService:
                 logger.info("Scheduler skipped due job ID %d ('%s') because it is already running.", job.job_id, job.job_name)
                 continue
                 
+            from app.core.side_effects import is_external_side_effect_allowed
+            if not await is_external_side_effect_allowed(
+                db,
+                company_id=job.company_id,
+                service_id=job.service_id,
+                integration="mass_scheduler",
+            ):
+                logger.info(
+                    "[mass_scheduler] Skipping due job ID %d ('%s'): demo tenant external execution disabled",
+                    job.job_id, job.job_name
+                )
+                continue
+
             try:
                 # Trigger the run (which handles schedule update, run creation, background spawn and commits)
                 await MassEvaluationService.run_job(db, job.job_id, trigger_type="scheduled")
@@ -4087,6 +4214,34 @@ class MassEvaluationService:
         now = datetime.now(timezone.utc)
         automation_id = automation.automation_id
 
+        # Central guard: demo tenants cannot run automations
+        from app.core.side_effects import is_external_side_effect_allowed
+        if not await is_external_side_effect_allowed(
+            db,
+            service_id=automation.service_id,
+            integration="automation",
+        ):
+            logger.info(
+                "[automation_run] Skipping automation %d ('%s'): demo tenant external execution disabled",
+                automation_id, automation.name
+            )
+            auto_run = MassAnalysisAutomationRun(
+                automation_id=automation_id,
+                status="skipped",
+                started_at=now,
+                finished_at=now,
+                window_from=now,
+                window_to=now,
+                calls_found=0,
+                calls_selected=0,
+                calls_skipped=0,
+                error_message="demo_tenant_external_execution_disabled",
+            )
+            db.add(auto_run)
+            await db.commit()
+            await db.refresh(auto_run)
+            return auto_run
+
         # Calculate continuous window
         window_from, window_to, is_ready, source_desc = await MassEvaluationService.get_automation_next_window(
             db, automation, now=now
@@ -4510,7 +4665,8 @@ class MassEvaluationService:
                 aut.interval_minutes or 30,
                 aut.lookback_minutes or 30,
                 aut.delay_minutes or 5,
-                last_at
+                last_at,
+                aut.service_id,
             ))
 
         due_count = 0
@@ -4519,8 +4675,34 @@ class MassEvaluationService:
         executions_detail = []
 
         threshold_minutes = settings.automation_running_stale_after_minutes or 60
+        service_demo_cache: dict[int, bool] = {}
 
-        for automation_id, automation_name, interval_minutes, lookback_min, delay_min, last_run_at in automations_list:
+        for automation_id, automation_name, interval_minutes, lookback_min, delay_min, last_run_at, aut_service_id in automations_list:
+            # Central guard: check if automation belongs to a demo tenant (with service caching to avoid N+1)
+            if aut_service_id is not None:
+                if aut_service_id not in service_demo_cache:
+                    from app.core.side_effects import is_external_side_effect_allowed
+                    is_aut_allowed = await is_external_side_effect_allowed(
+                        db, service_id=aut_service_id, integration="automation"
+                    )
+                    service_demo_cache[aut_service_id] = is_aut_allowed
+                else:
+                    is_aut_allowed = service_demo_cache[aut_service_id]
+
+                if not is_aut_allowed:
+                    skipped_count += 1
+                    logger.info(
+                        "[automation_scheduler] Skipping automation %d ('%s'): demo tenant external execution disabled",
+                        automation_id, automation_name
+                    )
+                    executions_detail.append({
+                        "automation_id": automation_id,
+                        "automation_name": automation_name,
+                        "status": "skipped",
+                        "reason_skipped": "demo_tenant_external_execution_disabled",
+                    })
+                    continue
+
             # Check next continuous window readiness
             window_from, window_to, is_ready, source_desc = await MassEvaluationService.get_automation_next_window(
                 db, automation_id, now=now
