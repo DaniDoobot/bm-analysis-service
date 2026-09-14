@@ -11,6 +11,7 @@ class Company(Base):
     company_name: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     company_key: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    is_demo: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
     
     # Branding & Customization fields
     brand_name: Mapped[str | None] = mapped_column(Text, nullable=True)

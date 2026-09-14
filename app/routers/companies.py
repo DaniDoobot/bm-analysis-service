@@ -62,6 +62,7 @@ async def _build_admin_company_response(company: Company, db: AsyncSession) -> A
         company_name=company.company_name,
         company_key=company.company_key,
         is_active=company.is_active,
+        is_demo=bool(getattr(company, "is_demo", False)),
         services_count=services_count,
         users_count=users_count,
         teams_count=teams_count,

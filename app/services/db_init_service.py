@@ -260,6 +260,14 @@ async def init_db():
                     )
                     logger.info("Column '%s' added successfully to 'bm_companies'.", col_name)
 
+            # 1.1.b.2 Ensure is_demo column exists on bm_companies
+            if not await check_column_exists_safely(conn, "bm_companies", "is_demo"):
+                logger.info("Adding column 'is_demo' to 'bm_companies' table...")
+                await conn.execute(
+                    text("ALTER TABLE bm_companies ADD COLUMN is_demo BOOLEAN DEFAULT FALSE NOT NULL;")
+                )
+                logger.info("Column 'is_demo' added successfully to 'bm_companies'.")
+
         # 1.1.c Backfill Boston Medical branding
         from app.models.companies import Company
         async with AsyncSession(engine) as session:

@@ -68,6 +68,7 @@ class CompanyUpdate(BaseModel):
 
 class CompanyResponse(CompanyBase):
     company_id: int
+    is_demo: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -79,6 +80,7 @@ class AdminCompanyResponse(BaseModel):
     company_name: str
     company_key: str
     is_active: bool
+    is_demo: bool = False
     services_count: int = 0
     users_count: int = 0
     teams_count: int = 0
