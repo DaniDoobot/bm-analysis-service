@@ -18,6 +18,8 @@ class AgentInfo(BaseModel):
     label: str | None = Field(None, description="Formatted label e.g. LD · Luci Dos Santos")
     service_id: int | None = Field(None, description="Service ID if applicable")
     service_name: str | None = Field(None, description="Service name if applicable")
+    has_data: bool | None = Field(None, description="Whether the agent has evaluation data in the selected period")
+    analysis_count: int | None = Field(None, description="Total number of analyses/evaluations in the period")
 
 
 class AgentComparisonRow(BaseModel):
@@ -34,6 +36,8 @@ class AgentComparisonResponse(BaseModel):
     agents: list[AgentInfo] = Field(..., description="List of all available agents matching filters")
     items: list[AnalyticsItem] = Field(..., description="List of all compared metrics catalogue")
     comparison: list[AgentComparisonRow] = Field(..., description="Agent-by-agent metric comparison breakdown rows")
+    selected_agents_count: int | None = Field(None, description="Total number of agents selected/requested in comparison")
+    agents_with_data_count: int | None = Field(None, description="Total number of selected agents that have evaluation data")
 
 
 class EvolutionPoint(BaseModel):

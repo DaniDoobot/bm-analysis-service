@@ -153,3 +153,82 @@ async def get_team_assigned_users(
 
     res = await db.execute(stmt)
     return {str(u.hubspot_owner_id).strip(): u for u in res.scalars().all() if u.hubspot_owner_id}
+
+
+async def get_service_assigned_users(
+    db: AsyncSession,
+    service_id: Optional[int] = None,
+    context: Optional[TenantContext] = None,
+) -> Dict[str, Any]:
+    """
+    Query active users from bm_users with a valid hubspot_owner_id.
+    If service_id is provided, filters for users assigned to service_id via:
+    - User.primary_service_id == service_id
+    - User.primary_team_id -> Team.service_id == service_id
+    - UserServiceAssociation (bm_user_services) -> service_id
+    - UserTeamAssociation (bm_user_teams) -> Team.service_id == service_id
+    - AgentTeamAssociation (bm_agent_teams) -> Team.service_id == service_id
+    Returns dict mapping hubspot_owner_id (str) -> User object.
+    """
+    from app.models.users import User
+    from app.models.teams import Team, UserServiceAssociation, UserTeamAssociation, AgentTeamAssociation
+
+    if service_id is None:
+        stmt = select(User).where(User.is_active == True, User.hubspot_owner_id.is_not(None))
+        if context and not context.is_super_admin:
+            stmt = stmt.where(
+                or_(
+                    User.company_id.in_(context.allowed_company_ids),
+                    User.company_id.is_(None)
+                )
+            )
+            if context.allowed_agent_ids is not None:
+                stmt = stmt.where(User.hubspot_owner_id.in_(context.allowed_agent_ids))
+        res = await db.execute(stmt)
+        return {str(u.hubspot_owner_id).strip(): u for u in res.scalars().all() if u.hubspot_owner_id}
+
+    # Find team IDs belonging to this service_id
+    team_stmt = select(Team.team_id).where(Team.service_id == service_id)
+    team_res = await db.execute(team_stmt)
+    team_ids = [t for t in team_res.scalars().all()]
+
+    user_conds = [
+        User.primary_service_id == service_id,
+        User.user_id.in_(select(UserServiceAssociation.user_id).where(UserServiceAssociation.service_id == service_id))
+    ]
+    if team_ids:
+        user_conds.extend([
+            User.primary_team_id.in_(team_ids),
+            User.user_id.in_(select(UserTeamAssociation.user_id).where(UserTeamAssociation.team_id.in_(team_ids))),
+            User.user_id.in_(select(AgentTeamAssociation.user_id).where(AgentTeamAssociation.team_id.in_(team_ids))),
+        ])
+
+    stmt = select(User).where(
+        User.is_active == True,
+        User.hubspot_owner_id.is_not(None),
+        or_(*user_conds)
+    )
+    if context and not context.is_super_admin:
+        stmt = stmt.where(
+            or_(
+                User.company_id.in_(context.allowed_company_ids),
+                User.company_id.is_(None)
+            )
+        )
+        if context.allowed_agent_ids is not None:
+            stmt = stmt.where(User.hubspot_owner_id.in_(context.allowed_agent_ids))
+
+    res = await db.execute(stmt)
+    return {str(u.hubspot_owner_id).strip(): u for u in res.scalars().all() if u.hubspot_owner_id}
+
+
+async def get_service_assigned_owner_ids(
+    db: AsyncSession,
+    service_id: Optional[int] = None,
+    context: Optional[TenantContext] = None,
+) -> Set[str]:
+    """
+    Returns the set of active hubspot_owner_ids assigned to service_id.
+    """
+    users_map = await get_service_assigned_users(db, service_id=service_id, context=context)
+    return set(users_map.keys())

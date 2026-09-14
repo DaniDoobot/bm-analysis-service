@@ -997,71 +997,7 @@ async def get_dashboard_summary(
 
 
 
-async def get_service_assigned_users(
-    db: AsyncSession,
-    service_id: int | None = None,
-    context: TenantContext | None = None,
-) -> dict[str, Any]:
-    """
-    Query active users from bm_users with a valid hubspot_owner_id.
-    If service_id is provided, filters for users assigned to service_id via:
-    - User.primary_service_id == service_id
-    - User.primary_team_id -> Team.service_id == service_id
-    - UserServiceAssociation (bm_user_services) -> service_id
-    - UserTeamAssociation (bm_user_teams) -> Team.service_id == service_id
-    - AgentTeamAssociation (bm_agent_teams) -> Team.service_id == service_id
-    Returns dict mapping hubspot_owner_id (str) -> User object.
-    """
-    from app.models.users import User
-    from app.models.teams import Team, UserServiceAssociation, UserTeamAssociation, AgentTeamAssociation
-
-    if service_id is None:
-        stmt = select(User).where(User.is_active == True, User.hubspot_owner_id.is_not(None))
-        if context and not context.is_super_admin:
-            stmt = stmt.where(
-                or_(
-                    User.company_id.in_(context.allowed_company_ids),
-                    User.company_id.is_(None)
-                )
-            )
-            if context.allowed_agent_ids is not None:
-                stmt = stmt.where(User.hubspot_owner_id.in_(context.allowed_agent_ids))
-        res = await db.execute(stmt)
-        return {str(u.hubspot_owner_id).strip(): u for u in res.scalars().all() if u.hubspot_owner_id}
-
-    # Find team IDs belonging to this service_id
-    team_stmt = select(Team.team_id).where(Team.service_id == service_id)
-    team_res = await db.execute(team_stmt)
-    team_ids = [t for t in team_res.scalars().all()]
-
-    user_conds = [
-        User.primary_service_id == service_id,
-        User.user_id.in_(select(UserServiceAssociation.user_id).where(UserServiceAssociation.service_id == service_id))
-    ]
-    if team_ids:
-        user_conds.extend([
-            User.primary_team_id.in_(team_ids),
-            User.user_id.in_(select(UserTeamAssociation.user_id).where(UserTeamAssociation.team_id.in_(team_ids))),
-            User.user_id.in_(select(AgentTeamAssociation.user_id).where(AgentTeamAssociation.team_id.in_(team_ids))),
-        ])
-
-    stmt = select(User).where(
-        User.is_active == True,
-        User.hubspot_owner_id.is_not(None),
-        or_(*user_conds)
-    )
-    if context and not context.is_super_admin:
-        stmt = stmt.where(
-            or_(
-                User.company_id.in_(context.allowed_company_ids),
-                User.company_id.is_(None)
-            )
-        )
-        if context.allowed_agent_ids is not None:
-            stmt = stmt.where(User.hubspot_owner_id.in_(context.allowed_agent_ids))
-
-    res = await db.execute(stmt)
-    return {str(u.hubspot_owner_id).strip(): u for u in res.scalars().all() if u.hubspot_owner_id}
+from app.utils.team_resolvers import get_service_assigned_users, get_service_assigned_owner_ids
 
 
 # ── A) GET /bm/agents ──────────────────────────────────────────────────────────
@@ -1272,20 +1208,14 @@ async def get_agents_list(
         assigned_users = {oid: u for oid, u in assigned_users.items() if oid in team_owner_ids}
 
     target_owner_ids: set[str] = set(assigned_users.keys())
-
-    # Add any agent with historical results in this service during the period
-    for oid in db_stats.keys():
-        if context and context.allowed_agent_ids is not None and oid not in context.allowed_agent_ids:
-            continue
-        if team_id is not None and oid not in team_owner_ids:
-            continue
-        target_owner_ids.add(oid)
+    if context and context.allowed_agent_ids is not None:
+        target_owner_ids = {oid for oid in target_owner_ids if oid in context.allowed_agent_ids}
 
     results = []
     for oid in sorted(target_owner_ids):
         if oid in assigned_users:
             u_obj = assigned_users[oid]
-            disp_name = u_obj.display_name or resolve_owner_name(oid) or oid
+            disp_name = getattr(u_obj, "display_name", None) or (u_obj.name and u_obj.name.strip()) or (u_obj.username and u_obj.username.strip()) or resolve_owner_name(oid) or oid
         elif oid in db_stats:
             row = db_stats[oid]
             disp_name = resolve_owner_name(oid) or row.agent_name or oid

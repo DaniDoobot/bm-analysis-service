@@ -56,7 +56,7 @@ BASE_METRICS = [
     {"key": "claridad", "label": "Claridad", "type": "score", "order": 30, "default_selected": True},
     {"key": "simpatia", "label": "Simpatía", "type": "score", "order": 40, "default_selected": True},
     {"key": "procedimiento", "label": "Procedimiento", "type": "score", "order": 50, "default_selected": True},
-    {"key": "cierre_cita", "label": "Cierre de cita", "type": "percentage", "order": 60, "default_selected": False},
+    {"key": "cierre_cita", "label": "Cierre de cita", "type": "percentage", "order": 60, "default_selected": True},
 ]
 
 KNOWN_CRITERIA_FALLBACK = [
@@ -637,40 +637,41 @@ async def get_agents_comparison(
                     for c in res_crit.all():
                         criteria_by_analysis.setdefault(c.mass_analysis_id, []).append(c)
 
-            available_catalog = await get_available_agents(db, context=context, service_id=eff_service_id)
+            available_catalog = await get_available_agents(db, context=context, service_id=eff_service_id, team_id=team_id)
             cat_by_oid = {a.hubspot_owner_id: a for a in available_catalog}
 
-            agents_found = {}
-            for r in results:
-                oid = r.hubspot_owner_id
-                if oid and oid not in agents_found:
-                    name = resolve_owner_name(oid)
-                    if not name and r.agent_name and not r.agent_name.isdigit():
-                        name = r.agent_name
-                    if not name:
-                        name = oid
-                    agents_found[oid] = name
-
-            if agents_found:
-                agents_list = []
-                for oid, name in sorted(agents_found.items(), key=lambda x: x[1]):
-                    if oid in cat_by_oid:
-                        agents_list.append(cat_by_oid[oid])
-                    else:
-                        agents_list.append(
-                            AgentInfo(
-                                hubspot_owner_id=oid,
-                                agent_name=name,
-                                name=name,
-                                agent_initials=None,
-                                initials=None,
-                                label=name,
-                                service_id=eff_service_id,
-                                service_name=None,
-                            )
-                        )
+            if owner_ids:
+                # Explicit agent request: intersect with allowed available catalog
+                # Preserve requested agents even if they have 0 results in the period
+                target_oids = [oid for oid in owner_ids if oid in cat_by_oid]
             else:
-                agents_list = available_catalog
+                # Non-explicit request: only include agents with evaluation data under active filters
+                oids_with_results = {r.hubspot_owner_id for r in results if r.hubspot_owner_id and r.hubspot_owner_id in cat_by_oid}
+                target_oids = list(oids_with_results)
+
+            # Sort target_oids by agent name from catalog
+            target_oids_sorted = sorted(target_oids, key=lambda oid: (cat_by_oid[oid].agent_name if oid in cat_by_oid else oid).lower())
+
+            agents_list = []
+            for oid in target_oids_sorted:
+                agent_results = [r for r in results if r.hubspot_owner_id == oid]
+                has_data = len(agent_results) > 0
+                analysis_count = len(agent_results)
+                base = cat_by_oid[oid]
+                agents_list.append(
+                    AgentInfo(
+                        hubspot_owner_id=oid,
+                        agent_name=base.agent_name,
+                        name=base.name,
+                        agent_initials=base.agent_initials,
+                        initials=base.initials,
+                        label=base.label,
+                        service_id=base.service_id or eff_service_id,
+                        service_name=base.service_name,
+                        has_data=has_data,
+                        analysis_count=analysis_count,
+                    )
+                )
 
             all_metrics = await get_all_metrics(db, context=context, service_id=eff_service_id)
             if item_req_keys:
@@ -686,20 +687,28 @@ async def get_agents_comparison(
             items_list = [AnalyticsItem(**item) for item in items_to_use]
 
             comparison_rows = []
-            for oid, agent_name in sorted(agents_found.items(), key=lambda x: x[1]):
+            for agent in agents_list:
+                oid = agent.hubspot_owner_id
+                agent_name = agent.agent_name
                 agent_results = [r for r in results if r.hubspot_owner_id == oid]
+                has_data = len(agent_results) > 0
+
                 for item in items_to_use:
                     key = item["key"]
-                    extracted_vals = []
-                    for r in agent_results:
-                        crit_rows = criteria_by_analysis.get(r.mass_analysis_id, [])
-                        val = extract_metric_value(r, crit_rows, key)
-                        if val is not None:
-                            extracted_vals.append(val)
-                    
-                    count = len(extracted_vals)
-                    value = round(sum(extracted_vals) / count, 1) if count > 0 else None
-                    
+                    if has_data:
+                        extracted_vals = []
+                        for r in agent_results:
+                            crit_rows = criteria_by_analysis.get(r.mass_analysis_id, [])
+                            val = extract_metric_value(r, crit_rows, key)
+                            if val is not None:
+                                extracted_vals.append(val)
+
+                        count = len(extracted_vals)
+                        value = round(sum(extracted_vals) / count, 1) if count > 0 else None
+                    else:
+                        count = 0
+                        value = None
+
                     comparison_rows.append(
                         AgentComparisonRow(
                             hubspot_owner_id=oid,
@@ -712,10 +721,15 @@ async def get_agents_comparison(
                         )
                     )
 
+            selected_agents_count = len(agents_list)
+            agents_with_data_count = sum(1 for a in agents_list if a.has_data)
+
             return AgentComparisonResponse(
                 agents=agents_list,
                 items=items_list,
-                comparison=comparison_rows
+                comparison=comparison_rows,
+                selected_agents_count=selected_agents_count,
+                agents_with_data_count=agents_with_data_count,
             ), len(results), len(comparison_rows), db_ms
 
         (resp, rows_scanned, rows_returned, db_ms), is_cache_hit = await analytics_cache.get_or_compute(cache_key, _compute, ttl=30)
@@ -1053,80 +1067,68 @@ async def get_available_agents(
     """
     Retrieve all available call center agents for the current scope/service,
     returning full metadata including initials and label for frontend selectors.
+    Canonical multitenancy resolution:
+    - Service scoping: User.primary_service_id, UserServiceAssociation, or Team.service_id == service_id
+    - Team scoping: User.primary_team_id, UserTeamAssociation, AgentTeamAssociation
+    - Resolution priority: bm_users.hubspot_owner_id -> non-placeholder stored agent_name -> OWNER_TO_NAME -> placeholder
     """
+    from app.utils.team_resolvers import get_service_assigned_users, get_team_assigned_owner_ids
+    from app.utils.hubspot_owners import batch_resolve_agent_names, is_placeholder_agent_name, OWNER_TO_NAME
     from app.utils.agent_resolvers import build_user_initials_maps, resolve_agent_initials
-    from app.utils.hubspot_owners import OWNER_TO_NAME, resolve_owner_name
 
+    # 1. Team isolation
     if team_id is not None:
-        from app.utils.team_resolvers import get_team_assigned_owner_ids
         team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context)
+        if not team_owner_ids:
+            return []
+        team_owner_ids = set(team_owner_ids)
     else:
         team_owner_ids = None
 
-    by_owner, by_name, users_list = await build_user_initials_maps(db, company_id=None)
+    # 2. Service assigned users
+    assigned_users = await get_service_assigned_users(db, service_id=service_id, context=context)
+    if team_id is not None:
+        assigned_users = {oid: u for oid, u in assigned_users.items() if oid in team_owner_ids}
 
-    query = """
-        SELECT DISTINCT hubspot_owner_id, agent_name, service_id, service_name
-        FROM bm_mass_evaluation_results
-        WHERE status = 'completed' AND hubspot_owner_id IS NOT NULL
-    """
-    params = {}
-    if context and not context.is_super_admin:
-        query += f" AND (company_id IN {_format_int_list(context.allowed_company_ids)} OR company_id IS NULL)"
-        if context.allowed_service_ids is not None:
-            query += f" AND service_id IN {_format_int_list(context.allowed_service_ids)}"
-        if context.allowed_agent_ids is not None:
-            query += f" AND hubspot_owner_id IN {_format_str_list(context.allowed_agent_ids)}"
+    target_owner_ids = set(assigned_users.keys())
+    if context and context.allowed_agent_ids is not None:
+        target_owner_ids = {oid for oid in target_owner_ids if oid in context.allowed_agent_ids}
 
+    if not target_owner_ids:
+        return []
+
+    # 3. Batch resolve names canonically from bm_users
+    company_id = context.company_id if context and not context.is_super_admin else None
+    resolved_names = await batch_resolve_agent_names(
+        db,
+        [(company_id, oid) for oid in target_owner_ids]
+    )
+
+    by_owner, by_name, users_list = await build_user_initials_maps(db, company_id=company_id)
+
+    service_names_map: dict[int, str] = {}
     if service_id is not None:
-        if context and context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
-            query += " AND service_id = -1"
-        else:
-            query += " AND service_id = :service_id"
-            params["service_id"] = service_id
+        from app.models.services import Service
+        stmt_s = select(Service.service_id, Service.service_name).where(Service.service_id == service_id)
+        res_s = await db.execute(stmt_s)
+        for row in res_s.fetchall():
+            service_names_map[row[0]] = row[1]
 
-    res = await db.execute(text(query), params)
-    db_rows = res.fetchall()
+    agents_list: list[AgentInfo] = []
+    for oid in sorted(target_owner_ids):
+        # 1. Canonical bm_users name
+        disp_name = resolved_names.get((company_id, oid)) or resolved_names.get(("*", oid))
+        u_obj = assigned_users.get(oid)
+        if not disp_name and u_obj:
+            disp_name = getattr(u_obj, "display_name", None) or (u_obj.name and u_obj.name.strip()) or (u_obj.username and u_obj.username.strip())
 
-    agents_map: dict[str, dict[str, Any]] = {}
+        # 2. Legacy fallback mapping
+        if not disp_name:
+            disp_name = OWNER_TO_NAME.get(oid)
 
-    # 1. Standard known mapping (only include globally if service_id is None)
-    if service_id is None:
-        for oid, name in OWNER_TO_NAME.items():
-            if context and context.allowed_agent_ids is not None and oid not in context.allowed_agent_ids:
-                continue
-            initials = resolve_agent_initials(
-                hubspot_owner_id=oid,
-                agent_name=name,
-                by_owner=by_owner,
-                by_name=by_name,
-                users_list=users_list,
-            )
-            label = f"{initials} · {name}" if initials else name
-            agents_map[oid] = {
-                "hubspot_owner_id": oid,
-                "agent_name": name,
-                "name": name,
-                "agent_initials": initials,
-                "initials": initials,
-                "label": label,
-                "service_id": None,
-                "service_name": None,
-            }
-
-    # 2. Add agents from DB results matching service scope
-    for row in db_rows:
-        oid = str(row[0]).strip()
-        r_name = row[1]
-        svc_id = row[2]
-        svc_name = row[3]
-
-        if context and context.allowed_agent_ids is not None and oid not in context.allowed_agent_ids:
-            continue
-
-        disp_name = resolve_owner_name(oid) or (r_name if r_name and not r_name.isdigit() else oid)
-        if disp_name.startswith("Agente no identificado") and oid not in OWNER_TO_NAME:
-            pass
+        # 3. Final placeholder
+        if not disp_name:
+            disp_name = f"Agente no identificado ({oid})"
 
         initials = resolve_agent_initials(
             hubspot_owner_id=oid,
@@ -1137,60 +1139,23 @@ async def get_available_agents(
         )
         label = f"{initials} · {disp_name}" if initials else disp_name
 
-        if oid not in agents_map:
-            agents_map[oid] = {
-                "hubspot_owner_id": oid,
-                "agent_name": disp_name,
-                "name": disp_name,
-                "agent_initials": initials,
-                "initials": initials,
-                "label": label,
-                "service_id": svc_id or service_id,
-                "service_name": svc_name,
-            }
-        else:
-            if svc_id and not agents_map[oid]["service_id"]:
-                agents_map[oid]["service_id"] = svc_id
-            if svc_name and not agents_map[oid]["service_name"]:
-                agents_map[oid]["service_name"] = svc_name
+        svc_id = service_id or (getattr(u_obj, "primary_service_id", None) if u_obj else None)
+        svc_name = service_names_map.get(svc_id) if svc_id else None
 
-    # 3. Add users from bm_users with hubspot_owner_id matching service scope
-    for u in users_list:
-        oid = u.get("hubspot_owner_id")
-        if not oid:
-            continue
-        if context and context.allowed_agent_ids is not None and oid not in context.allowed_agent_ids:
-            continue
-        if service_id is not None and u.get("service_id") and u.get("service_id") != service_id:
-            continue
-        u_name = u.get("name") or u.get("username") or resolve_owner_name(oid) or oid
-        u_inits = u.get("agent_initials") or resolve_agent_initials(
-            hubspot_owner_id=oid,
-            agent_name=u_name,
-            by_owner=by_owner,
-            by_name=by_name,
-            users_list=users_list,
+        agents_list.append(
+            AgentInfo(
+                hubspot_owner_id=oid,
+                agent_name=disp_name,
+                name=disp_name,
+                agent_initials=initials,
+                initials=initials,
+                label=label,
+                service_id=svc_id,
+                service_name=svc_name,
+            )
         )
-        label = f"{u_inits} · {u_name}" if u_inits else u_name
-        if oid not in agents_map:
-            agents_map[oid] = {
-                "hubspot_owner_id": oid,
-                "agent_name": u_name,
-                "name": u_name,
-                "agent_initials": u_inits,
-                "initials": u_inits,
-                "label": label,
-                "service_id": u.get("service_id") or service_id,
-                "service_name": None,
-            }
 
-    if team_id is not None:
-        agents_map = {oid: v for oid, v in agents_map.items() if oid in team_owner_ids}
-
-    agents_list = [
-        AgentInfo(**item)
-        for item in sorted(list(agents_map.values()), key=lambda x: x["name"])
-    ]
+    agents_list.sort(key=lambda x: (x.agent_name or x.name or "").lower())
     return agents_list
 
 

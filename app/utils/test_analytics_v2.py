@@ -46,7 +46,7 @@ async def test_analytics_v2_workflow():
         await db.execute(delete(MassEvaluationResult).where(MassEvaluationResult.call_id.in_(["call_test_1", "call_test_2", "call_test_3"])))
         await db.execute(delete(MassEvaluationRun).where(MassEvaluationRun.trigger_type == "test_analytics"))
         await db.execute(delete(MassEvaluationJob).where(MassEvaluationJob.job_name == "Analytics Test Job"))
-        await db.execute(delete(User).where(User.username.in_(["test_analytics_admin", "test_analytics_agent"])))
+        await db.execute(delete(User).where(User.username.in_(["test_analytics_admin", "test_analytics_agent", "test_analytics_cris"])))
         await db.execute(delete(Company).where(Company.company_key == "boston-medical"))
         await db.commit()
 
@@ -73,7 +73,16 @@ async def test_analytics_v2_workflow():
             is_active=True,
             password_hash=hash_password("agentpass123")
         )
-        db.add_all([admin_user, agent_user])
+        agent_user_cris = User(
+            username="test_analytics_cris",
+            email="analytics_cris@boston.es",
+            role="agente",
+            company_id=company.company_id,
+            hubspot_owner_id="99999998", # Cristina test ID
+            is_active=True,
+            password_hash=hash_password("agentpass123")
+        )
+        db.add_all([admin_user, agent_user, agent_user_cris])
         await db.commit()
 
         # 3. Seed Mass Evaluation structure (Job, Run)
@@ -347,7 +356,7 @@ async def test_analytics_v2_workflow():
             await db.execute(delete(MassEvaluationResult).where(MassEvaluationResult.call_id.in_(["call_test_1", "call_test_2", "call_test_3"])))
             await db.execute(delete(MassEvaluationRun).where(MassEvaluationRun.trigger_type == "test_analytics"))
             await db.execute(delete(MassEvaluationJob).where(MassEvaluationJob.job_name == "Analytics Test Job"))
-            await db.execute(delete(User).where(User.username.in_(["test_analytics_admin", "test_analytics_agent"])))
+            await db.execute(delete(User).where(User.username.in_(["test_analytics_admin", "test_analytics_agent", "test_analytics_cris"])))
             await db.execute(delete(Company).where(Company.company_key == "boston-medical"))
             await db.commit()
             print("=== TODAS LAS PRUEBAS DE ANALYTICS V2 HAN PASADO CON ÉXITO ===")
