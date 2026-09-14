@@ -17,6 +17,9 @@ from app.db import get_engine, Base
 from app.core.tenant_context import TenantContext
 from app.core.roles import InternalRole
 from app.models.mass_evaluations import MassEvaluationResult, MassEvaluationCriterionResult
+from app.models.companies import Company
+from app.models.services import Service
+from app.models.users import User
 from app.routers.analytics import get_agents_comparison
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,6 +36,21 @@ async def run_tests():
         await conn.run_sync(Base.metadata.create_all)
 
     async with AsyncSession(engine) as db:
+        c = Company(company_id=1, company_name="Test Company", company_key="test_co", is_active=True)
+        s = Service(service_id=1, company_id=1, service_name="Test Service", service_key="test_svc", is_active=True)
+        u1 = User(
+            user_id=10, username="agent_1", email="a1@test.com", name="Agent agent_1",
+            role="agent", company_id=1, primary_service_id=1, hubspot_owner_id="agent_1",
+            agent_initials="A1", is_active=True, password_hash="dummy"
+        )
+        u2 = User(
+            user_id=11, username="agent_2", email="a2@test.com", name="Agent agent_2",
+            role="agent", company_id=1, primary_service_id=1, hubspot_owner_id="agent_2",
+            agent_initials="A2", is_active=True, password_hash="dummy"
+        )
+        db.add_all([c, s, u1, u2])
+        await db.flush()
+
         now = datetime(2026, 6, 15, 12, 0, 0)
         for i in range(10):
             agent_id = "agent_1" if i % 2 == 0 else "agent_2"

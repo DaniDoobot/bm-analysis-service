@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
-from sqlalchemy import select, func, text, or_
+from sqlalchemy import select, func, text, or_, case, cast, Float, exists, distinct, literal, false
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_db, get_tenant_context
@@ -503,43 +503,49 @@ async def get_agents_comparison(
         )
 
         async def _compute():
-            # 2. Build Mass Evaluation Results filter query - select ONLY scalar columns needed
-            stmt = select(
-                MassEvaluationResult.mass_analysis_id,
-                MassEvaluationResult.hubspot_owner_id,
-                MassEvaluationResult.agent_name,
-                MassEvaluationResult.evaluacion_global,
-                MassEvaluationResult.result_json,
-                MassEvaluationResult.items_json,
-                MassEvaluationResult.call_timestamp,
-                MassEvaluationResult.analysis_timestamp,
-            )
+            # 1. Resolve items to compare
+            all_metrics = await get_all_metrics(db, context=context, service_id=eff_service_id)
+            if item_req_keys:
+                effective_keys = item_req_keys[:50] if len(item_req_keys) > 50 else item_req_keys
+                items_to_use = [item for item in all_metrics if item["key"] in effective_keys]
+            else:
+                default_items = [item for item in all_metrics if item.get("default_selected")]
+                if default_items:
+                    items_to_use = default_items[:20]
+                else:
+                    items_to_use = all_metrics[:20]
+
+            items_list = [AnalyticsItem(**item) for item in items_to_use]
+            compared_criterion_keys = [item["key"].lower() for item in items_to_use if item["key"] != "evaluacion_global"]
+
+            # 2. Build Mass Evaluation Results base filter clauses
+            base_filters = []
             if norm_status == "failed":
-                stmt = stmt.where(MassEvaluationResult.status == "failed")
+                base_filters.append(MassEvaluationResult.status == "failed")
             elif norm_status == "all":
                 pass
             else:
-                stmt = stmt.where(MassEvaluationResult.status == "completed")
+                base_filters.append(MassEvaluationResult.status == "completed")
 
             if not context.is_super_admin:
-                stmt = stmt.where(
+                base_filters.append(
                     or_(
                         MassEvaluationResult.company_id.in_(context.allowed_company_ids),
                         MassEvaluationResult.company_id.is_(None)
                     )
                 )
             if context.allowed_service_ids is not None:
-                stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
-                
+                base_filters.append(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
+
             if dt_from:
-                stmt = stmt.where(
+                base_filters.append(
                     func.coalesce(
                         MassEvaluationResult.call_timestamp,
                         MassEvaluationResult.analysis_timestamp,
                     ) >= dt_from
                 )
             if dt_to:
-                stmt = stmt.where(
+                base_filters.append(
                     func.coalesce(
                         MassEvaluationResult.call_timestamp,
                         MassEvaluationResult.analysis_timestamp,
@@ -547,19 +553,19 @@ async def get_agents_comparison(
                 )
             if eff_service_id is not None:
                 if context.allowed_service_ids is not None and eff_service_id not in context.allowed_service_ids:
-                    stmt = stmt.where(MassEvaluationResult.service_id == -1)
+                    base_filters.append(MassEvaluationResult.service_id == -1)
                 else:
-                    stmt = stmt.where(MassEvaluationResult.service_id == eff_service_id)
+                    base_filters.append(MassEvaluationResult.service_id == eff_service_id)
             elif eff_service_key is not None:
-                stmt = stmt.where(MassEvaluationResult.service_key == eff_service_key)
+                base_filters.append(MassEvaluationResult.service_key == eff_service_key)
 
             typo_ids = None
             if typology_ids and typology_ids.strip():
                 typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
             if typo_ids:
-                stmt = stmt.where(MassEvaluationResult.typology_id.in_(typo_ids))
+                base_filters.append(MassEvaluationResult.typology_id.in_(typo_ids))
             elif norm_t:
-                stmt = stmt.where(
+                base_filters.append(
                     or_(
                         func.lower(MassEvaluationResult.typology_key) == norm_t,
                         func.lower(func.coalesce(MassEvaluationResult.result_json["tipo_llamada"].astext, "")) == norm_t
@@ -567,24 +573,24 @@ async def get_agents_comparison(
                 )
 
             if norm_d:
-                stmt = stmt.where(
+                base_filters.append(
                     or_(
                         func.lower(MassEvaluationResult.direction) == norm_d,
                         func.lower(func.coalesce(MassEvaluationResult.result_json["inbound_outbound"].astext, "")) == norm_d
                     )
                 )
             if duration_min_seconds is not None:
-                stmt = stmt.where(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
+                base_filters.append(MassEvaluationResult.call_duration_seconds >= duration_min_seconds)
             if duration_max_seconds is not None:
-                stmt = stmt.where(MassEvaluationResult.call_duration_seconds <= duration_max_seconds)
-                
+                base_filters.append(MassEvaluationResult.call_duration_seconds <= duration_max_seconds)
+
             score_min_scaled = (avg_score_min / 10.0 if avg_score_min > 10.0 else avg_score_min) if avg_score_min is not None else None
             score_max_scaled = (avg_score_max / 10.0 if avg_score_max > 10.0 else avg_score_max) if avg_score_max is not None else None
-                
+
             if score_min_scaled is not None:
-                stmt = stmt.where(MassEvaluationResult.evaluacion_global >= score_min_scaled)
+                base_filters.append(MassEvaluationResult.evaluacion_global >= score_min_scaled)
             if score_max_scaled is not None:
-                stmt = stmt.where(MassEvaluationResult.evaluacion_global <= score_max_scaled)
+                base_filters.append(MassEvaluationResult.evaluacion_global <= score_max_scaled)
 
             if team_id is not None:
                 if owner_ids:
@@ -593,52 +599,281 @@ async def get_agents_comparison(
                     target_owners = list(team_owner_ids)
                 if context.allowed_agent_ids is not None:
                     target_owners = [oid for oid in target_owners if oid in context.allowed_agent_ids]
-                stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(target_owners if target_owners else ["-1"]))
+                base_filters.append(MassEvaluationResult.hubspot_owner_id.in_(target_owners if target_owners else ["-1"]))
             elif context.allowed_agent_ids is not None:
                 if owner_ids:
                     allowed_requested = [oid for oid in owner_ids if oid in context.allowed_agent_ids]
                     if not allowed_requested:
-                        stmt = stmt.where(MassEvaluationResult.hubspot_owner_id == "-1")
+                        base_filters.append(MassEvaluationResult.hubspot_owner_id == "-1")
                     else:
-                        stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(allowed_requested))
+                        base_filters.append(MassEvaluationResult.hubspot_owner_id.in_(allowed_requested))
                 else:
-                    stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(context.allowed_agent_ids))
+                    base_filters.append(MassEvaluationResult.hubspot_owner_id.in_(context.allowed_agent_ids))
             else:
                 if owner_ids:
-                    stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(owner_ids))
+                    base_filters.append(MassEvaluationResult.hubspot_owner_id.in_(owner_ids))
 
             if active_filters:
                 sql_filter_conds = build_item_filters_sql(active_filters)
                 for cond in sql_filter_conds:
-                    stmt = stmt.where(cond)
+                    base_filters.append(cond)
 
             t_db_start = time.perf_counter()
-            res = await db.execute(stmt)
-            results = res.all()
-            db_ms = (time.perf_counter() - t_db_start) * 1000.0
 
-            analysis_ids = [r.mass_analysis_id for r in results]
-            criteria_by_analysis = {}
-            if analysis_ids:
-                chunk_size = 1000
-                for i in range(0, len(analysis_ids), chunk_size):
-                    chunk = analysis_ids[i:i + chunk_size]
-                    stmt_crit = select(
-                        MassEvaluationCriterionResult.mass_analysis_id,
-                        MassEvaluationCriterionResult.criterion_key,
-                        MassEvaluationCriterionResult.numeric_value,
-                        MassEvaluationCriterionResult.boolean_value,
-                        MassEvaluationCriterionResult.percentage_value
-                    ).where(
-                        MassEvaluationCriterionResult.mass_analysis_id.in_(chunk),
-                        MassEvaluationCriterionResult.is_applicable == True
+            # Query A: Agent call counts and global evaluation score
+            stmt_a = (
+                select(
+                    MassEvaluationResult.hubspot_owner_id,
+                    func.count(distinct(MassEvaluationResult.mass_analysis_id)).label("total_calls"),
+                    func.avg(MassEvaluationResult.evaluacion_global).label("avg_global"),
+                    func.count(MassEvaluationResult.evaluacion_global).label("count_global"),
+                )
+                .where(*base_filters, MassEvaluationResult.hubspot_owner_id.is_not(None))
+                .group_by(MassEvaluationResult.hubspot_owner_id)
+            )
+            res_a = await db.execute(stmt_a)
+            results_a = res_a.all()
+
+            # Query B: Criterion aggregations
+            results_b = []
+            raw_keys_to_match = set()
+            mapped_criterion_key = None
+            if compared_criterion_keys:
+                key_aliases = {
+                    "cierre_cita": ["cierre_cita", "cita_resultado", "cita", "cierre"],
+                    "simpatia": ["simpatia", "tono_simpatia", "prueba_simpatia"],
+                    "procedimiento": ["procedimiento", "adherencia_procedimiento"],
+                    "despedida_refuerzo": ["despedida_refuerzo", "despedida_con_refuerzo"],
+                    "reformula_patologia": ["reformula_patologia", "reformulacion_patologia"],
+                }
+                for k in compared_criterion_keys:
+                    raw_keys_to_match.add(k)
+                    if k in key_aliases:
+                        raw_keys_to_match.update(key_aliases[k])
+
+                mapped_criterion_key = case(
+                    (func.lower(MassEvaluationCriterionResult.criterion_key).in_(["cierre_cita", "cita_resultado", "cita", "cierre"]), "cierre_cita"),
+                    (func.lower(MassEvaluationCriterionResult.criterion_key).in_(["tono_simpatia", "prueba_simpatia", "simpatia"]), "simpatia"),
+                    (func.lower(MassEvaluationCriterionResult.criterion_key).in_(["adherencia_procedimiento", "procedimiento"]), "procedimiento"),
+                    (func.lower(MassEvaluationCriterionResult.criterion_key).in_(["despedida_con_refuerzo", "despedida_refuerzo"]), "despedida_refuerzo"),
+                    (func.lower(MassEvaluationCriterionResult.criterion_key).in_(["reformulacion_patologia", "reformula_patologia"]), "reformula_patologia"),
+                    else_=func.lower(MassEvaluationCriterionResult.criterion_key)
+                )
+
+                val_expr = case(
+                    (
+                        mapped_criterion_key == "cierre_cita",
+                        case(
+                            (MassEvaluationCriterionResult.boolean_value == True, 100.0),
+                            (MassEvaluationCriterionResult.boolean_value == False, 0.0),
+                            (MassEvaluationCriterionResult.percentage_value.is_not(None), cast(MassEvaluationCriterionResult.percentage_value, Float)),
+                            (MassEvaluationCriterionResult.numeric_value.is_not(None), cast(MassEvaluationCriterionResult.numeric_value, Float)),
+                            else_=None
+                        )
+                    ),
+                    else_=case(
+                        (MassEvaluationCriterionResult.numeric_value.is_not(None), cast(MassEvaluationCriterionResult.numeric_value, Float)),
+                        (MassEvaluationCriterionResult.boolean_value == True, 10.0),
+                        (MassEvaluationCriterionResult.boolean_value == False, 0.0),
+                        (MassEvaluationCriterionResult.percentage_value.is_not(None), cast(MassEvaluationCriterionResult.percentage_value, Float) / 10.0),
+                        else_=None
                     )
-                    res_crit = await db.execute(stmt_crit)
-                    for c in res_crit.all():
-                        criteria_by_analysis.setdefault(c.mass_analysis_id, []).append(c)
+                )
+
+                alias_priority = case(
+                    # cierre_cita
+                    (func.lower(MassEvaluationCriterionResult.criterion_key) == "cierre_cita", 1),
+                    (func.lower(MassEvaluationCriterionResult.criterion_key) == "cita_resultado", 2),
+                    (func.lower(MassEvaluationCriterionResult.criterion_key) == "cita", 3),
+                    (func.lower(MassEvaluationCriterionResult.criterion_key) == "cierre", 4),
+                    # simpatia
+                    (func.lower(MassEvaluationCriterionResult.criterion_key) == "simpatia", 1),
+                    (func.lower(MassEvaluationCriterionResult.criterion_key) == "tono_simpatia", 2),
+                    (func.lower(MassEvaluationCriterionResult.criterion_key) == "prueba_simpatia", 3),
+                    # procedimiento
+                    (func.lower(MassEvaluationCriterionResult.criterion_key) == "procedimiento", 1),
+                    (func.lower(MassEvaluationCriterionResult.criterion_key) == "adherencia_procedimiento", 2),
+                    # despedida_refuerzo
+                    (func.lower(MassEvaluationCriterionResult.criterion_key) == "despedida_refuerzo", 1),
+                    (func.lower(MassEvaluationCriterionResult.criterion_key) == "despedida_con_refuerzo", 2),
+                    # reformula_patologia
+                    (func.lower(MassEvaluationCriterionResult.criterion_key) == "reformula_patologia", 1),
+                    (func.lower(MassEvaluationCriterionResult.criterion_key) == "reformulacion_patologia", 2),
+                    else_=10
+                )
+
+                rn_col = func.row_number().over(
+                    partition_by=[
+                        MassEvaluationCriterionResult.mass_analysis_id,
+                        mapped_criterion_key
+                    ],
+                    order_by=[
+                        case((val_expr.is_not(None), 0), else_=1).asc(),
+                        alias_priority.asc(),
+                        MassEvaluationCriterionResult.id.asc()
+                    ]
+                ).label("rn")
+
+                subq_ranked = (
+                    select(
+                        MassEvaluationCriterionResult.mass_analysis_id,
+                        mapped_criterion_key.label("criterion_key"),
+                        val_expr.label("metric_val"),
+                        rn_col
+                    )
+                    .where(
+                        or_(
+                            MassEvaluationCriterionResult.is_applicable == True,
+                            MassEvaluationCriterionResult.is_applicable.is_(None)
+                        ),
+                        func.lower(MassEvaluationCriterionResult.criterion_key).in_(list(raw_keys_to_match))
+                    )
+                ).subquery()
+
+                subq_crit = (
+                    select(
+                        subq_ranked.c.mass_analysis_id,
+                        subq_ranked.c.criterion_key,
+                        subq_ranked.c.metric_val
+                    )
+                    .where(
+                        subq_ranked.c.rn == 1
+                    )
+                ).subquery()
+
+                stmt_b = (
+                    select(
+                        MassEvaluationResult.hubspot_owner_id,
+                        subq_crit.c.criterion_key,
+                        func.count(subq_crit.c.metric_val).label("val_count"),
+                        func.avg(subq_crit.c.metric_val).label("avg_val"),
+                    )
+                    .select_from(MassEvaluationResult)
+                    .join(
+                        subq_crit,
+                        subq_crit.c.mass_analysis_id == MassEvaluationResult.mass_analysis_id
+                    )
+                    .where(
+                        *base_filters,
+                        subq_crit.c.metric_val.is_not(None)
+                    )
+                    .group_by(
+                        MassEvaluationResult.hubspot_owner_id,
+                        subq_crit.c.criterion_key
+                    )
+                )
+                res_b = await db.execute(stmt_b)
+                results_b = res_b.all()
+
+            # Selective Legacy Fallback: only if evaluations lack criterion rows or column evaluacion_global
+            legacy_vals_by_agent_item = {}
+            total_scanned_calls = sum(r.total_calls for r in results_a)
+            if total_scanned_calls > 0:
+                crit_count_subq = (
+                    select(func.count(distinct(mapped_criterion_key)))
+                    .where(
+                        MassEvaluationCriterionResult.mass_analysis_id == MassEvaluationResult.mass_analysis_id,
+                        func.lower(MassEvaluationCriterionResult.criterion_key).in_(list(raw_keys_to_match))
+                    )
+                    .scalar_subquery()
+                ) if (compared_criterion_keys and mapped_criterion_key is not None) else literal(0)
+
+                cond_missing_crit = (crit_count_subq < len(compared_criterion_keys)) if compared_criterion_keys else false()
+                cond_missing_global = MassEvaluationResult.evaluacion_global.is_(None) if "evaluacion_global" in [it["key"] for it in items_to_use] else false()
+
+                stmt_has_legacy_candidates = (
+                    select(MassEvaluationResult.mass_analysis_id)
+                    .where(
+                        *base_filters,
+                        or_(
+                            MassEvaluationResult.result_json.is_not(None),
+                            MassEvaluationResult.items_json.is_not(None),
+                        ),
+                        or_(
+                            cond_missing_crit,
+                            cond_missing_global,
+                        ),
+                    )
+                    .limit(1)
+                )
+                has_legacy_candidates = (await db.execute(stmt_has_legacy_candidates)).scalar() is not None
+
+                if has_legacy_candidates:
+                    stmt_candidate_calls = (
+                        select(
+                            MassEvaluationResult.mass_analysis_id,
+                            MassEvaluationResult.hubspot_owner_id,
+                            MassEvaluationResult.evaluacion_global,
+                            MassEvaluationResult.result_json,
+                            MassEvaluationResult.items_json,
+                        ).where(
+                            *base_filters,
+                            or_(
+                                MassEvaluationResult.result_json.is_not(None),
+                                MassEvaluationResult.items_json.is_not(None),
+                            ),
+                            or_(
+                                cond_missing_crit,
+                                cond_missing_global,
+                            ),
+                        )
+                    )
+                    candidate_calls = (await db.execute(stmt_candidate_calls)).all()
+                    candidate_ids = [c.mass_analysis_id for c in candidate_calls]
+
+                    existing_pairs = set()
+                    if candidate_ids and compared_criterion_keys and mapped_criterion_key is not None:
+                        stmt_existing = (
+                            select(
+                                MassEvaluationCriterionResult.mass_analysis_id,
+                                mapped_criterion_key.label("criterion_key")
+                            )
+                            .where(
+                                MassEvaluationCriterionResult.mass_analysis_id.in_(candidate_ids),
+                                func.lower(MassEvaluationCriterionResult.criterion_key).in_(list(raw_keys_to_match))
+                            )
+                        )
+                        existing_pairs = set((row.mass_analysis_id, row.criterion_key) for row in (await db.execute(stmt_existing)).all())
+
+                    for lr in candidate_calls:
+                        oid = lr.hubspot_owner_id
+                        if not oid:
+                            continue
+                        for item in items_to_use:
+                            k = item["key"]
+                            if k == "evaluacion_global":
+                                if lr.evaluacion_global is None:
+                                    val = extract_score_from_mass(lr.result_json, lr.items_json, "evaluacion_global")
+                                    if val is not None:
+                                        legacy_vals_by_agent_item.setdefault((oid, k), []).append(float(val))
+                            else:
+                                if (lr.mass_analysis_id, k) not in existing_pairs:
+                                    val = extract_metric_value(lr, [], k)
+                                    if val is not None:
+                                        legacy_vals_by_agent_item.setdefault((oid, k), []).append(float(val))
 
             available_catalog = await get_available_agents(db, context=context, service_id=eff_service_id, team_id=team_id)
             cat_by_oid = {a.hubspot_owner_id: a for a in available_catalog}
+            db_ms = (time.perf_counter() - t_db_start) * 1000.0
+
+            summary_by_oid = {
+                r.hubspot_owner_id: {
+                    "total_calls": r.total_calls,
+                    "avg_global": float(r.avg_global) if r.avg_global is not None else None,
+                    "count_global": r.count_global,
+                }
+                for r in results_a
+                if r.hubspot_owner_id is not None
+            }
+
+            crit_by_agent_item = {
+                (r.hubspot_owner_id, r.criterion_key): {
+                    "count": int(r.val_count or 0),
+                    "avg": float(r.avg_val) if r.avg_val is not None else None,
+                }
+                for r in results_b
+                if r.hubspot_owner_id is not None and r.criterion_key is not None
+            }
 
             if owner_ids:
                 # Explicit agent request: intersect with allowed available catalog
@@ -646,7 +881,7 @@ async def get_agents_comparison(
                 target_oids = [oid for oid in owner_ids if oid in cat_by_oid]
             else:
                 # Non-explicit request: only include agents with evaluation data under active filters
-                oids_with_results = {r.hubspot_owner_id for r in results if r.hubspot_owner_id and r.hubspot_owner_id in cat_by_oid}
+                oids_with_results = {r.hubspot_owner_id for r in results_a if r.hubspot_owner_id and r.hubspot_owner_id in cat_by_oid and r.total_calls > 0}
                 target_oids = list(oids_with_results)
 
             # Sort target_oids by agent name from catalog
@@ -654,9 +889,9 @@ async def get_agents_comparison(
 
             agents_list = []
             for oid in target_oids_sorted:
-                agent_results = [r for r in results if r.hubspot_owner_id == oid]
-                has_data = len(agent_results) > 0
-                analysis_count = len(agent_results)
+                agent_summary = summary_by_oid.get(oid)
+                has_data = agent_summary is not None and agent_summary["total_calls"] > 0
+                analysis_count = agent_summary["total_calls"] if agent_summary else 0
                 base = cat_by_oid[oid]
                 agents_list.append(
                     AgentInfo(
@@ -673,41 +908,43 @@ async def get_agents_comparison(
                     )
                 )
 
-            all_metrics = await get_all_metrics(db, context=context, service_id=eff_service_id)
-            if item_req_keys:
-                effective_keys = item_req_keys[:50] if len(item_req_keys) > 50 else item_req_keys
-                items_to_use = [item for item in all_metrics if item["key"] in effective_keys]
-            else:
-                default_items = [item for item in all_metrics if item.get("default_selected")]
-                if default_items:
-                    items_to_use = default_items[:20]
-                else:
-                    items_to_use = all_metrics[:20]
-
-            items_list = [AnalyticsItem(**item) for item in items_to_use]
-
             comparison_rows = []
             for agent in agents_list:
                 oid = agent.hubspot_owner_id
                 agent_name = agent.agent_name
-                agent_results = [r for r in results if r.hubspot_owner_id == oid]
-                has_data = len(agent_results) > 0
+                has_data = agent.has_data
 
                 for item in items_to_use:
                     key = item["key"]
-                    if has_data:
-                        extracted_vals = []
-                        for r in agent_results:
-                            crit_rows = criteria_by_analysis.get(r.mass_analysis_id, [])
-                            val = extract_metric_value(r, crit_rows, key)
-                            if val is not None:
-                                extracted_vals.append(val)
-
-                        count = len(extracted_vals)
-                        value = round(sum(extracted_vals) / count, 1) if count > 0 else None
-                    else:
+                    if not has_data:
                         count = 0
                         value = None
+                    elif key == "evaluacion_global":
+                        sum_info = summary_by_oid.get(oid)
+                        sql_count = sum_info["count_global"] if sum_info else 0
+                        sql_avg = sum_info["avg_global"] if (sum_info and sum_info["avg_global"] is not None) else None
+                        leg_vals = legacy_vals_by_agent_item.get((oid, "evaluacion_global"), [])
+                        if leg_vals:
+                            tot_cnt = sql_count + len(leg_vals)
+                            tot_sum = ((sql_avg or 0.0) * sql_count) + sum(leg_vals)
+                            count = tot_cnt
+                            value = round(tot_sum / tot_cnt, 1) if tot_cnt > 0 else None
+                        else:
+                            count = sql_count
+                            value = round(sql_avg, 1) if (sql_avg is not None and sql_count > 0) else None
+                    else:
+                        crit_info = crit_by_agent_item.get((oid, key))
+                        sql_count = crit_info["count"] if crit_info else 0
+                        sql_avg = crit_info["avg"] if (crit_info and crit_info["avg"] is not None) else None
+                        leg_vals = legacy_vals_by_agent_item.get((oid, key), [])
+                        if leg_vals:
+                            tot_cnt = sql_count + len(leg_vals)
+                            tot_sum = ((sql_avg or 0.0) * sql_count) + sum(leg_vals)
+                            count = tot_cnt
+                            value = round(tot_sum / tot_cnt, 1) if tot_cnt > 0 else None
+                        else:
+                            count = sql_count
+                            value = round(sql_avg, 1) if (sql_avg is not None and sql_count > 0) else None
 
                     comparison_rows.append(
                         AgentComparisonRow(
@@ -723,6 +960,7 @@ async def get_agents_comparison(
 
             selected_agents_count = len(agents_list)
             agents_with_data_count = sum(1 for a in agents_list if a.has_data)
+            rows_scanned = total_scanned_calls
 
             return AgentComparisonResponse(
                 agents=agents_list,
@@ -730,7 +968,7 @@ async def get_agents_comparison(
                 comparison=comparison_rows,
                 selected_agents_count=selected_agents_count,
                 agents_with_data_count=agents_with_data_count,
-            ), len(results), len(comparison_rows), db_ms
+            ), rows_scanned, len(comparison_rows), db_ms
 
         (resp, rows_scanned, rows_returned, db_ms), is_cache_hit = await analytics_cache.get_or_compute(cache_key, _compute, ttl=30)
         total_processing_ms = round((time.perf_counter() - t_start) * 1000.0, 1)
