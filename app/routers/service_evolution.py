@@ -54,6 +54,7 @@ async def get_criteria(
     date_to: str | None = Query(None, description="Fecha de fin (ISO 8601 o YYYY-MM-DD) para filtrar recuento de criterios"),
     status: str | None = Query(None, description="Filter by evaluation status: completed | failed | all"),
     result_status: str | None = Query(None, description="Alias for status"),
+    team_id: int | None = Query(None, description="Filtrar por equipo"),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -62,7 +63,7 @@ async def get_criteria(
     """
     norm_status = normalize_status(status or result_status)
     try:
-        return await ServiceEvolutionService.get_criteria(db, service_id=service_id, date_from=date_from, date_to=date_to, status=norm_status, context=context)
+        return await ServiceEvolutionService.get_criteria(db, service_id=service_id, date_from=date_from, date_to=date_to, status=norm_status, context=context, team_id=team_id)
     except HTTPException:
         raise
     except Exception as e:
@@ -103,6 +104,7 @@ async def get_evolution(
     criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    team_id: int | None = Query(None, description="Filtrar por equipo"),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -204,6 +206,7 @@ async def get_evolution(
             status=norm_status,
             context=context,
             item_filters=active_item_filters,
+            team_id=team_id,
         )
     except HTTPException:
         raise

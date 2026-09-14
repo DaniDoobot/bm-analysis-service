@@ -27,10 +27,24 @@ async def list_teams(
     context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
     company_id: Optional[int] = Query(None),
-    service_id: Optional[int] = Query(None)
+    service_id: Optional[int] = Query(None),
+    service_key: Optional[str] = Query(None),
+    service: Optional[str] = Query(None),
 ):
     """List all teams accessible by the authenticated user's context, with optional filters."""
-    stmt = select(Team)
+    if service or service_key:
+        from app.utils.service_resolvers import resolve_service_id
+        resolved_id, _ = await resolve_service_id(
+            db,
+            service_id=service_id,
+            service_key=service_key,
+            service_param=service,
+            company_ids=None if context.is_super_admin else context.allowed_company_ids
+        )
+        if resolved_id is not None:
+            service_id = resolved_id
+
+    stmt = select(Team).where(Team.is_active == True)
     
     if not context.is_super_admin:
         # Constrain to user's assigned company
@@ -41,11 +55,17 @@ async def list_teams(
                 detail="Acceso denegado a equipos de otra empresa."
             )
         
+        # Check service_id authorization if provided
+        if service_id is not None and context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: No tienes permisos para este servicio."
+            )
         # Limit to allowed services/teams
         if context.allowed_team_ids is not None:
-            stmt = stmt.where(Team.team_id.in_(context.allowed_team_ids))
+            stmt = stmt.where(Team.team_id.in_(context.allowed_team_ids if context.allowed_team_ids else [-1]))
         if context.allowed_service_ids is not None:
-            stmt = stmt.where(Team.service_id.in_(context.allowed_service_ids))
+            stmt = stmt.where(Team.service_id.in_(context.allowed_service_ids if context.allowed_service_ids else [-1]))
     else:
         if company_id is not None:
             stmt = stmt.where(Team.company_id == company_id)

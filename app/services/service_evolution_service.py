@@ -165,6 +165,7 @@ class ServiceEvolutionService:
         date_to: str | None = None,
         status: str | None = None,
         context: TenantContext | None = None,
+        team_id: int | None = None,
     ) -> list[CriterionListItem]:
         """
         GET /bm/service-evolution/criteria
@@ -172,8 +173,8 @@ class ServiceEvolutionService:
         """
         parsed_date_from, parsed_date_to = parse_date_bounds(date_from, date_to)
         logger.info(
-            "Fetching criteria list: service_id=%s, date_from=%s (parsed: %s), date_to=%s (parsed: %s), status=%s",
-            service_id, date_from, parsed_date_from, date_to, parsed_date_to, status
+            "Fetching criteria list: service_id=%s, date_from=%s (parsed: %s), date_to=%s (parsed: %s), status=%s, team_id=%s",
+            service_id, date_from, parsed_date_from, date_to, parsed_date_to, status, team_id
         )
 
         if status == "failed":
@@ -182,6 +183,13 @@ class ServiceEvolutionService:
             where_clause = "WHERE 1=1"
         else:
             where_clause = "WHERE r.status = 'completed'"
+
+        if team_id is not None or service_id is not None:
+            from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
+            await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context)
+            if team_id is not None:
+                team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context)
+                where_clause += f" AND r.hubspot_owner_id IN {_format_str_list(team_owner_ids)}"
 
         params = {
             "service_id": service_id,
@@ -252,6 +260,7 @@ class ServiceEvolutionService:
         status: str | None = None,
         context: TenantContext | None = None,
         item_filters: list[dict[str, Any]] | str | None = None,
+        team_id: int | None = None,
     ) -> ServiceEvolutionResponse:
         """
         GET /bm/service-evolution
@@ -262,9 +271,9 @@ class ServiceEvolutionService:
         parsed_date_from, parsed_date_to = parse_date_bounds(date_from, date_to)
         logger.info(
             "Service evolution query: service_id=%s, service_key=%s, granularity=%s, typology=%s, agent=%s, "
-            "date_from_raw=%s (parsed: %s), date_to_raw=%s (parsed: %s), status=%s",
+            "date_from_raw=%s (parsed: %s), date_to_raw=%s (parsed: %s), status=%s, team_id=%s",
             service_id, service_key, granularity, typology_key, agent_owner_id,
-            date_from, parsed_date_from, date_to, parsed_date_to, status
+            date_from, parsed_date_from, date_to, parsed_date_to, status, team_id
         )
 
         if status == "failed":
@@ -350,6 +359,19 @@ class ServiceEvolutionService:
             if context.allowed_service_ids is not None:
                 typo_extra_where += f" AND service_id IN {_format_int_list(context.allowed_service_ids)}"
             typo_extra_where += ")"
+
+        if team_id is not None or service_id is not None:
+            from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
+            await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context)
+            if team_id is not None:
+                team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context)
+                if agent_owner_id:
+                    if agent_owner_id not in team_owner_ids:
+                        extra_sql += " AND r.hubspot_owner_id = '-1'"
+                        extra_sql_left_join += " AND r.hubspot_owner_id = '-1'"
+                else:
+                    extra_sql += f" AND r.hubspot_owner_id IN {_format_str_list(team_owner_ids)}"
+                    extra_sql_left_join += f" AND r.hubspot_owner_id IN {_format_str_list(team_owner_ids)}"
 
         if norm_d:
             extra_sql += " AND (LOWER(COALESCE(r.direction, '')) = :direction OR LOWER(COALESCE(r.result_json->>'inbound_outbound', '')) = :direction)"

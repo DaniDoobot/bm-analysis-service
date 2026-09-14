@@ -375,6 +375,7 @@ async def get_analytics_items(
     service_id: Annotated[int | None, Query(description="Filter by service ID")] = None,
     service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
     service: Annotated[str | None, Query(description="Filter by service key, slug, or ID")] = None,
+    team_id: Annotated[int | None, Query(description="Filter by team ID")] = None,
 ):
     """Retrieve the catalogue of compared metrics available in Analytics v2."""
     if context.normalized_role == InternalRole.AGENT:
@@ -389,6 +390,10 @@ async def get_analytics_items(
         service_param=service,
         company_ids=None if context.is_super_admin else context.allowed_company_ids
     )
+    if team_id is not None or eff_service_id is not None:
+        from app.utils.team_resolvers import validate_team_service_cascade
+        await validate_team_service_cascade(db, service_id=eff_service_id, team_id=team_id, context=context)
+
     if eff_service_id is not None and context and not context.is_super_admin:
         if context.allowed_service_ids is not None and eff_service_id not in context.allowed_service_ids:
             raise HTTPException(
@@ -440,6 +445,7 @@ async def get_agents_comparison(
     criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    team_id: Annotated[int | None, Query(description="Filter by team ID")] = None,
 ):
     """
     Retrieve agents performance comparison breakdown.
@@ -459,6 +465,13 @@ async def get_agents_comparison(
             service_param=service,
             company_ids=None if context.is_super_admin else context.allowed_company_ids
         )
+
+        if team_id is not None or eff_service_id is not None:
+            from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
+            await validate_team_service_cascade(db, service_id=eff_service_id, team_id=team_id, context=context)
+            team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context) if team_id is not None else None
+        else:
+            team_owner_ids = None
 
         raw_typology = typology or typology_key or tipo_llamada or call_type or selected_typology or typologies
         norm_t = normalize_typology(raw_typology)
@@ -484,7 +497,7 @@ async def get_agents_comparison(
         owner_ids = parse_list_param(agent_owner_ids) + parse_list_param(agent_owner_ids_bracket)
         item_req_keys = parse_list_param(item_keys) + parse_list_param(item_keys_bracket)
         cache_key = (
-            f"agents_comp:{context.company_id}:{context.normalized_role}:{eff_service_id}:{eff_service_key}:"
+            f"agents_comp:{context.company_id}:{context.normalized_role}:{eff_service_id}:{eff_service_key}:{team_id}:"
             f"{date_from}:{date_to}:{sorted(owner_ids)}:{sorted(item_req_keys)}:{stable_item_filters_key}:{norm_t}:{norm_d}:"
             f"{duration_min_seconds}:{duration_max_seconds}:{avg_score_min}:{avg_score_max}:{norm_status}"
         )
@@ -573,7 +586,15 @@ async def get_agents_comparison(
             if score_max_scaled is not None:
                 stmt = stmt.where(MassEvaluationResult.evaluacion_global <= score_max_scaled)
 
-            if context.allowed_agent_ids is not None:
+            if team_id is not None:
+                if owner_ids:
+                    target_owners = [oid for oid in owner_ids if oid in team_owner_ids]
+                else:
+                    target_owners = list(team_owner_ids)
+                if context.allowed_agent_ids is not None:
+                    target_owners = [oid for oid in target_owners if oid in context.allowed_agent_ids]
+                stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(target_owners if target_owners else ["-1"]))
+            elif context.allowed_agent_ids is not None:
                 if owner_ids:
                     allowed_requested = [oid for oid in owner_ids if oid in context.allowed_agent_ids]
                     if not allowed_requested:
@@ -761,6 +782,7 @@ async def get_items_evolution(
     criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    team_id: Annotated[int | None, Query(description="Filter by team ID")] = None,
 ):
     """
     Retrieve chronological evolution timeline for chosen analytics metrics.
@@ -780,6 +802,14 @@ async def get_items_evolution(
             service_param=service,
             company_ids=None if context.is_super_admin else context.allowed_company_ids
         )
+
+        if team_id is not None or eff_service_id is not None:
+            from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
+            await validate_team_service_cascade(db, service_id=eff_service_id, team_id=team_id, context=context)
+            team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context) if team_id is not None else None
+        else:
+            team_owner_ids = None
+
         raw_typology = typology or typology_key or tipo_llamada or call_type or selected_typology or typologies
         norm_t = normalize_typology(raw_typology)
         raw_direction = direction or call_direction or inbound_outbound
@@ -804,7 +834,7 @@ async def get_items_evolution(
         owner_ids = parse_list_param(agent_owner_ids) + parse_list_param(agent_owner_ids_bracket)
         item_req_keys = parse_list_param(item_keys) + parse_list_param(item_keys_bracket)
         cache_key = (
-            f"items_evo:{context.company_id}:{context.normalized_role}:{eff_service_id}:{eff_service_key}:"
+            f"items_evo:{context.company_id}:{context.normalized_role}:{eff_service_id}:{eff_service_key}:{team_id}:"
             f"{date_from}:{date_to}:{sorted(owner_ids)}:{sorted(item_req_keys)}:{bucket_interval}:{stable_item_filters_key}:{norm_t}:{norm_d}:"
             f"{duration_min_seconds}:{duration_max_seconds}:{avg_score_min}:{avg_score_max}:{norm_status}"
         )
@@ -892,7 +922,15 @@ async def get_items_evolution(
             if score_max_scaled is not None:
                 stmt = stmt.where(MassEvaluationResult.evaluacion_global <= score_max_scaled)
 
-            if context.allowed_agent_ids is not None:
+            if team_id is not None:
+                if owner_ids:
+                    target_owners = [oid for oid in owner_ids if oid in team_owner_ids]
+                else:
+                    target_owners = list(team_owner_ids)
+                if context.allowed_agent_ids is not None:
+                    target_owners = [oid for oid in target_owners if oid in context.allowed_agent_ids]
+                stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(target_owners if target_owners else ["-1"]))
+            elif context.allowed_agent_ids is not None:
                 if owner_ids:
                     allowed_requested = [oid for oid in owner_ids if oid in context.allowed_agent_ids]
                     if not allowed_requested:
@@ -1010,6 +1048,7 @@ async def get_available_agents(
     db: AsyncSession,
     context: TenantContext | None = None,
     service_id: int | None = None,
+    team_id: int | None = None,
 ) -> list[AgentInfo]:
     """
     Retrieve all available call center agents for the current scope/service,
@@ -1017,6 +1056,12 @@ async def get_available_agents(
     """
     from app.utils.agent_resolvers import build_user_initials_maps, resolve_agent_initials
     from app.utils.hubspot_owners import OWNER_TO_NAME, resolve_owner_name
+
+    if team_id is not None:
+        from app.utils.team_resolvers import get_team_assigned_owner_ids
+        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context)
+    else:
+        team_owner_ids = None
 
     by_owner, by_name, users_list = await build_user_initials_maps(db, company_id=None)
 
@@ -1139,6 +1184,9 @@ async def get_available_agents(
                 "service_name": None,
             }
 
+    if team_id is not None:
+        agents_map = {oid: v for oid, v in agents_map.items() if oid in team_owner_ids}
+
     agents_list = [
         AgentInfo(**item)
         for item in sorted(list(agents_map.values()), key=lambda x: x["name"])
@@ -1153,6 +1201,7 @@ async def get_filter_options(
     service_id: Annotated[int | None, Query(description="Filter active typologies by service ID")] = None,
     service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
     service: Annotated[str | None, Query(description="Filter by service key, slug, or ID")] = None,
+    team_id: Annotated[int | None, Query(description="Filter by team ID")] = None,
     db: Annotated[AsyncSession, Depends(get_db)] = None,
 ):
     """
@@ -1167,8 +1216,12 @@ async def get_filter_options(
             company_ids=None if context.is_super_admin else context.allowed_company_ids
         )
 
+        if team_id is not None or eff_service_id is not None:
+            from app.utils.team_resolvers import validate_team_service_cascade
+            await validate_team_service_cascade(db, service_id=eff_service_id, team_id=team_id, context=context)
+
         # 1. Fetch available agents list for current scope
-        available_agents = await get_available_agents(db, context=context, service_id=eff_service_id)
+        available_agents = await get_available_agents(db, context=context, service_id=eff_service_id, team_id=team_id)
 
         # 2. Fetch active typologies per service
         typo_query = f"SELECT t.typology_id, t.typology_key, t.typology_name, t.service_id, s.service_key FROM bm_typologies t JOIN bm_services s ON t.service_id = s.service_id WHERE t.is_active = true AND s.company_id IN {_format_int_list(context.allowed_company_ids)}"
@@ -1228,6 +1281,8 @@ async def get_filter_options(
                 "scale": "score_0_10"
             }
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Failed to retrieve filter options")
         raise HTTPException(

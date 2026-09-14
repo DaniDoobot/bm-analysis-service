@@ -974,6 +974,7 @@ async def list_results(
     service_id: int | None = Query(None, description="Filter by service ID"),
     service_key: str | None = Query(None, description="Filter by service key"),
     service: str | None = Query(None, description="Filter by service ID, key or slug"),
+    team_id: int | None = Query(None, description="Filter by team ID"),
     typology_key: str | None = Query(None, description="Filter by typology key"),
     typology: str | None = Query(None, description="Alias for typology_key"),
     tipo_llamada: str | None = Query(None, description="Alias for typology_key"),
@@ -1069,13 +1070,15 @@ async def list_results(
                 detail="global_score_min cannot be greater than global_score_max",
             )
 
-    # Validate query service_id if provided
-    if service_id is not None and context.allowed_service_ids is not None:
-        if service_id not in context.allowed_service_ids:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="No tienes acceso al servicio seleccionado."
-            )
+    if team_id is not None or service_id is not None:
+        from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
+        await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context)
+        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context) if team_id is not None else None
+        if effective_owner_id and team_owner_ids is not None:
+            if effective_owner_id not in team_owner_ids:
+                effective_owner_id = "-1"
+    else:
+        team_owner_ids = None
 
     from app.utils.visual_formatters import build_items_visual
     typo_ids = None
@@ -1108,6 +1111,7 @@ async def list_results(
         allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None,
         status=eff_status,
         item_filters=effective_item_filters,
+        team_owner_ids=team_owner_ids,
     )
 
     results = await MassEvaluationService.list_results(
@@ -1139,6 +1143,7 @@ async def list_results(
         item_filters=effective_item_filters,
         sort_by=norm_sort_by,
         sort_order=norm_sort_order,
+        team_owner_ids=team_owner_ids,
     )
     db_ms = round((time.perf_counter() - t_db_start) * 1000.0, 1)
 

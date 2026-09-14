@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 # Set dummy DATABASE_URL for test isolation
-os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///test_dashboard_filters.db"
 
 from fastapi import HTTPException
 
@@ -155,6 +155,14 @@ class TestDashboardFilterImports(unittest.IsolatedAsyncioTestCase):
         """Verify dashboard router can be imported."""
         import app.routers.dashboard as dashboard_router
         self.assertIsNotNone(dashboard_router.router)
+
+
+def tearDownModule():
+    if os.path.exists("test_dashboard_filters.db"):
+        try:
+            os.remove("test_dashboard_filters.db")
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

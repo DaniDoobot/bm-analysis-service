@@ -70,6 +70,7 @@ async def dashboard_summary(
     criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    team_id: Annotated[int | None, Query(description="Filter by team ID")] = None,
 ):
     """
     Get dashboard summary metrics including KPIs, evolution charts,
@@ -143,6 +144,7 @@ async def dashboard_summary(
                 item_filters=effective_item_filters,
                 status=norm_status,
                 context=context,
+                team_id=team_id,
             )
             return data
     except HTTPException:
@@ -185,6 +187,7 @@ async def agents_comparison(
     criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    team_id: Annotated[int | None, Query(description="Filter by team ID")] = None,
 ):
     """
     Get multi-agent comparison analytics for dashboard reporting.
@@ -227,8 +230,11 @@ async def agents_comparison(
             item_filters=effective_item_filters,
             status=norm_status,
             context=context,
+            team_id=team_id,
         )
         return data
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Failed to retrieve agent comparison metrics")
         raise HTTPException(status_code=500, detail=str(e))
@@ -271,6 +277,7 @@ async def list_agents(
     criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    team_id: Annotated[int | None, Query(description="Filter by team ID")] = None,
 ):
     """
     Get all active call center agents with their accumulated real metrics.
@@ -317,6 +324,7 @@ async def list_agents(
             item_filters=effective_item_filters,
             status=norm_status,
             context=context,
+            team_id=team_id,
         )
         return data
     except HTTPException:
@@ -469,6 +477,7 @@ async def objections_breakdown(
     criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    team_id: Annotated[int | None, Query(description="Filter by team ID")] = None,
 ):
     """
     Get categorized objection lists, agent-specific counts,
@@ -513,8 +522,11 @@ async def objections_breakdown(
             item_filters=effective_item_filters,
             status=norm_status,
             context=context,
+            team_id=team_id,
         )
         return data
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Failed to retrieve objections breakdown")
         raise HTTPException(status_code=500, detail=str(e))
@@ -720,6 +732,7 @@ async def get_evaluation_items_filter_options(
     service_id: Annotated[int | None, Query(description="Filter criteria by service ID")] = None,
     service_key: Annotated[str | None, Query(description="Filter criteria by service key")] = None,
     service: Annotated[str | None, Query(description="Filter criteria by service key, slug, or ID")] = None,
+    team_id: Annotated[int | None, Query(description="Filter criteria by team ID")] = None,
 ):
     """
     Retrieve available evaluation criteria item filter options dynamically for frontend UI.
@@ -734,6 +747,10 @@ async def get_evaluation_items_filter_options(
         service_param=service,
         company_ids=None if context.is_super_admin else context.allowed_company_ids
     )
+
+    if team_id is not None or eff_service_id is not None:
+        from app.utils.team_resolvers import validate_team_service_cascade
+        await validate_team_service_cascade(db, service_id=eff_service_id, team_id=team_id, context=context)
 
     eff_service_ids = [eff_service_id] if eff_service_id is not None else context.allowed_service_ids
 

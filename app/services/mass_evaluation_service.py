@@ -2237,9 +2237,12 @@ class MassEvaluationService:
         item_filters: str | list | dict | None = None,
         sort_by: str | None = None,
         sort_order: str | None = "desc",
+        team_owner_ids: list[str] | set[str] | None = None,
     ) -> list[MassEvaluationResult]:
         stmt = select(MassEvaluationResult).options(defer(MassEvaluationResult.prompt_snapshot))
         filters = []
+        if team_owner_ids is not None:
+            filters.append(MassEvaluationResult.hubspot_owner_id.in_(team_owner_ids if team_owner_ids else ["-1"]))
         if status is not None and status.strip() and status.strip().lower() != "all":
             filters.append(MassEvaluationResult.status == status.strip().lower())
         if run_id is not None:
@@ -2377,10 +2380,13 @@ class MassEvaluationService:
         allowed_agent_ids: list[str] | None = None,
         status: str | None = None,
         item_filters: str | list | dict | None = None,
+        team_owner_ids: list[str] | set[str] | None = None,
     ) -> int:
         from sqlalchemy import func
         stmt = select(func.count(MassEvaluationResult.mass_analysis_id))
         filters = []
+        if team_owner_ids is not None:
+            filters.append(MassEvaluationResult.hubspot_owner_id.in_(team_owner_ids if team_owner_ids else ["-1"]))
         if status is not None and status.strip() and status.strip().lower() != "all":
             filters.append(MassEvaluationResult.status == status.strip().lower())
         if run_id is not None:

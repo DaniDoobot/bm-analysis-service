@@ -456,10 +456,18 @@ async def get_dashboard_summary(
     item_filters: str | list | dict | None = None,
     status: str | None = None,
     context: TenantContext | None = None,
+    team_id: int | None = None,
 ) -> dict[str, Any]:
     from app.utils.item_score_filters import parse_item_score_filters_detailed, apply_item_score_filters_sql_or_python
     t_start = time.perf_counter()
     now = datetime.now(timezone.utc)
+
+    if team_id is not None or service_id is not None:
+        from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
+        await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context)
+        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context) if team_id is not None else None
+    else:
+        team_owner_ids = None
 
     item_filter_info = parse_item_score_filters_detailed(item_filters)
     parsed_item_filters = item_filter_info["active_filters"]
@@ -468,8 +476,8 @@ async def get_dashboard_summary(
 
     logger.info(
         "[dashboard_summary] typology_filter_raw=%r typology_filter_normalized=%r "
-        "direction_filter_raw=%r direction_filter_normalized=%r period=%r date_from=%r date_to=%r item_filters_info=%s status=%r",
-        typology_key, norm_t, direction, norm_d, period, date_from, date_to, item_filter_info, status
+        "direction_filter_raw=%r direction_filter_normalized=%r period=%r date_from=%r date_to=%r item_filters_info=%s status=%r team_id=%r",
+        typology_key, norm_t, direction, norm_d, period, date_from, date_to, item_filter_info, status, team_id
     )
 
     # Resolve custom range or period
@@ -554,7 +562,23 @@ async def get_dashboard_summary(
     elif service_key is not None:
         stmt = stmt.where(MassEvaluationResult.service_key == service_key)
 
-    if hubspot_owner_ids:
+    if team_id is not None:
+        if hubspot_owner_ids:
+            combined_agents = [oid for oid in hubspot_owner_ids if oid in team_owner_ids]
+            if context and context.allowed_agent_ids is not None:
+                combined_agents = [oid for oid in combined_agents if oid in context.allowed_agent_ids]
+            stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(combined_agents if combined_agents else ["__NONE__"]))
+        elif hubspot_owner_id:
+            if hubspot_owner_id in team_owner_ids and (not context or context.allowed_agent_ids is None or hubspot_owner_id in context.allowed_agent_ids):
+                stmt = stmt.where(MassEvaluationResult.hubspot_owner_id == hubspot_owner_id)
+            else:
+                stmt = stmt.where(MassEvaluationResult.hubspot_owner_id == "__NONE__")
+        else:
+            allowed_team_owners = team_owner_ids
+            if context and context.allowed_agent_ids is not None:
+                allowed_team_owners = {oid for oid in team_owner_ids if oid in context.allowed_agent_ids}
+            stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(allowed_team_owners if allowed_team_owners else ["__NONE__"]))
+    elif hubspot_owner_ids:
         if context and context.allowed_agent_ids is not None:
             filtered_agents = [oid for oid in hubspot_owner_ids if oid in context.allowed_agent_ids]
             stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(filtered_agents if filtered_agents else ["__NONE__"]))
@@ -1060,6 +1084,7 @@ async def get_agents_list(
     item_filters: str | list | dict | None = None,
     status: str | None = None,
     context: TenantContext | None = None,
+    team_id: int | None = None,
 ) -> list[dict[str, Any]]:
     """Return agents list with metrics calculated from bm_mass_evaluation_results only."""
     from app.models.mass_evaluations import MassEvaluationResult
@@ -1072,6 +1097,13 @@ async def get_agents_list(
         service_param=service,
         company_ids=None if (context and context.is_super_admin) else (context.allowed_company_ids if context else None)
     )
+
+    if team_id is not None or eff_service_id is not None:
+        from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
+        await validate_team_service_cascade(db, service_id=eff_service_id, team_id=team_id, context=context)
+        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context) if team_id is not None else None
+    else:
+        team_owner_ids = None
 
     norm_t = normalize_typology(typology_key)
     norm_d = normalize_direction(direction)
@@ -1094,6 +1126,8 @@ async def get_agents_list(
     ).where(
         MassEvaluationResult.hubspot_owner_id.is_not(None),
     )
+    if team_id is not None:
+        agg_stmt = agg_stmt.where(MassEvaluationResult.hubspot_owner_id.in_(team_owner_ids if team_owner_ids else ["__NONE__"]))
     if status == "failed":
         agg_stmt = agg_stmt.where(MassEvaluationResult.status == "failed")
     elif status == "all":
@@ -1234,12 +1268,16 @@ async def get_agents_list(
 
     # Fetch active users assigned to service
     assigned_users = await get_service_assigned_users(db, service_id=eff_service_id, context=context)
+    if team_id is not None:
+        assigned_users = {oid: u for oid, u in assigned_users.items() if oid in team_owner_ids}
 
     target_owner_ids: set[str] = set(assigned_users.keys())
 
     # Add any agent with historical results in this service during the period
     for oid in db_stats.keys():
         if context and context.allowed_agent_ids is not None and oid not in context.allowed_agent_ids:
+            continue
+        if team_id is not None and oid not in team_owner_ids:
             continue
         target_owner_ids.add(oid)
 
@@ -1673,11 +1711,19 @@ async def get_objections_breakdown(
     item_filters: str | list | dict | None = None,
     status: str | None = None,
     context: TenantContext | None = None,
+    team_id: int | None = None,
 ) -> dict[str, Any]:
     norm_t = normalize_typology(typology_key or tipo_llamada)
     norm_d = normalize_direction(direction)
     now = datetime.now(timezone.utc)
     
+    if team_id is not None or service_id is not None:
+        from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
+        await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context)
+        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context) if team_id is not None else None
+    else:
+        team_owner_ids = None
+
     dt_from, dt_to, _ = resolve_date_range(date_from, date_to, period, default_period="7d")
         
     stmt = select(MassEvaluationResult).options(defer(MassEvaluationResult.prompt_snapshot))
@@ -1687,7 +1733,28 @@ async def get_objections_breakdown(
         pass
     else:
         stmt = stmt.where(MassEvaluationResult.status == "completed")
-    if context and not context.is_super_admin:
+
+    if team_id is not None:
+        if context and not context.is_super_admin:
+            stmt = stmt.where(
+                or_(
+                    MassEvaluationResult.company_id.in_(context.allowed_company_ids),
+                    MassEvaluationResult.company_id.is_(None)
+                )
+            )
+            if context.allowed_service_ids is not None:
+                stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
+        if agent_id:
+            if agent_id in team_owner_ids and (not context or context.allowed_agent_ids is None or agent_id in context.allowed_agent_ids):
+                stmt = stmt.where(MassEvaluationResult.hubspot_owner_id == agent_id)
+            else:
+                stmt = stmt.where(MassEvaluationResult.hubspot_owner_id == "-1")
+        else:
+            allowed_team_owners = team_owner_ids
+            if context and context.allowed_agent_ids is not None:
+                allowed_team_owners = {oid for oid in team_owner_ids if oid in context.allowed_agent_ids}
+            stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(allowed_team_owners if allowed_team_owners else ["-1"]))
+    elif context and not context.is_super_admin:
         stmt = stmt.where(
             or_(
                 MassEvaluationResult.company_id.in_(context.allowed_company_ids),
@@ -2055,12 +2122,20 @@ async def get_agents_comparison(
     item_filters: str | list | dict | None = None,
     status: str | None = None,
     context: TenantContext | None = None,
+    team_id: int | None = None,
 ) -> dict[str, Any]:
     """Retrieve multi-agent comparison analytics using MassEvaluationResult."""
     t_start = time.perf_counter()
     norm_t = normalize_typology(typology_key)
     norm_d = normalize_direction(direction)
     now = datetime.now(timezone.utc)
+
+    if team_id is not None or service_id is not None:
+        from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
+        await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context)
+        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context) if team_id is not None else None
+    else:
+        team_owner_ids = None
     
     if not metric_key:
         metric_key = "evaluacion_global"
@@ -2130,7 +2205,28 @@ async def get_agents_comparison(
         pass
     else:
         stmt = stmt.where(MassEvaluationResult.status == "completed")
-    if context and not context.is_super_admin:
+
+    if team_id is not None:
+        if context and not context.is_super_admin:
+            stmt = stmt.where(
+                or_(
+                    MassEvaluationResult.company_id.in_(context.allowed_company_ids),
+                    MassEvaluationResult.company_id.is_(None)
+                )
+            )
+            if context.allowed_service_ids is not None:
+                stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
+        if hubspot_owner_ids:
+            filtered = [oid for oid in hubspot_owner_ids if oid in team_owner_ids]
+            if context and context.allowed_agent_ids is not None:
+                filtered = [oid for oid in filtered if oid in context.allowed_agent_ids]
+            stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(filtered if filtered else ["-1"]))
+        else:
+            allowed_team_owners = team_owner_ids
+            if context and context.allowed_agent_ids is not None:
+                allowed_team_owners = {oid for oid in team_owner_ids if oid in context.allowed_agent_ids}
+            stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(allowed_team_owners if allowed_team_owners else ["-1"]))
+    elif context and not context.is_super_admin:
         stmt = stmt.where(
             or_(
                 MassEvaluationResult.company_id.in_(context.allowed_company_ids),
