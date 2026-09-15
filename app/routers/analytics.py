@@ -702,6 +702,19 @@ async def get_agents_comparison(
                     else_=10
                 )
 
+                # 1. Scoped results subquery containing all base filters
+                subq_scoped_results = (
+                    select(
+                        MassEvaluationResult.mass_analysis_id,
+                        MassEvaluationResult.hubspot_owner_id,
+                    )
+                    .where(
+                        *base_filters,
+                        MassEvaluationResult.hubspot_owner_id.is_not(None)
+                    )
+                ).subquery()
+
+                # 2. Join criterion_results by mass_analysis_id and apply ROW_NUMBER only over scoped evaluations
                 rn_col = func.row_number().over(
                     partition_by=[
                         MassEvaluationCriterionResult.mass_analysis_id,
@@ -716,10 +729,16 @@ async def get_agents_comparison(
 
                 subq_ranked = (
                     select(
+                        subq_scoped_results.c.hubspot_owner_id,
                         MassEvaluationCriterionResult.mass_analysis_id,
                         mapped_criterion_key.label("criterion_key"),
                         val_expr.label("metric_val"),
                         rn_col
+                    )
+                    .select_from(subq_scoped_results)
+                    .join(
+                        MassEvaluationCriterionResult,
+                        MassEvaluationCriterionResult.mass_analysis_id == subq_scoped_results.c.mass_analysis_id
                     )
                     .where(
                         or_(
@@ -730,35 +749,30 @@ async def get_agents_comparison(
                     )
                 ).subquery()
 
+                # 3. Filter top-ranked alias (rn == 1) with non-null metric
                 subq_crit = (
                     select(
-                        subq_ranked.c.mass_analysis_id,
+                        subq_ranked.c.hubspot_owner_id,
                         subq_ranked.c.criterion_key,
                         subq_ranked.c.metric_val
                     )
                     .where(
-                        subq_ranked.c.rn == 1
+                        subq_ranked.c.rn == 1,
+                        subq_ranked.c.metric_val.is_not(None)
                     )
                 ).subquery()
 
+                # 4. Group by agent and criterion
                 stmt_b = (
                     select(
-                        MassEvaluationResult.hubspot_owner_id,
+                        subq_crit.c.hubspot_owner_id,
                         subq_crit.c.criterion_key,
                         func.count(subq_crit.c.metric_val).label("val_count"),
                         func.avg(subq_crit.c.metric_val).label("avg_val"),
                     )
-                    .select_from(MassEvaluationResult)
-                    .join(
-                        subq_crit,
-                        subq_crit.c.mass_analysis_id == MassEvaluationResult.mass_analysis_id
-                    )
-                    .where(
-                        *base_filters,
-                        subq_crit.c.metric_val.is_not(None)
-                    )
+                    .select_from(subq_crit)
                     .group_by(
-                        MassEvaluationResult.hubspot_owner_id,
+                        subq_crit.c.hubspot_owner_id,
                         subq_crit.c.criterion_key
                     )
                 )

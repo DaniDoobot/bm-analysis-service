@@ -910,6 +910,62 @@ class TestAgentsComparisonSqlOptimization(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(r4["value"], 7.0)
             self.assertEqual(r4["count"], 1)
 
+    async def test_18_query_b_filters_results_before_criteria_windowagg(self):
+        """Validates that Query B filters MassEvaluationResult first and joins criteria before WindowAgg."""
+        async with AsyncSession(self.engine) as db:
+            c = Company(company_id=1, company_name="Corp Plan", company_key="plan", is_active=True)
+            s = Service(service_id=1, company_id=1, service_name="Front", service_key="front", is_active=True)
+            u = User(
+                user_id=700, username="plan_agent", email="plan@test.com",
+                name="Plan Agent", role="agent", company_id=1, primary_service_id=1,
+                hubspot_owner_id="plan_owner", agent_initials="PA", is_active=True, password_hash="dummy"
+            )
+            db.add_all([c, s, u])
+            await db.flush()
+
+            now = datetime.now(timezone.utc)
+            db.add(MassEvaluationResult(
+                mass_analysis_id=7001, run_id=1, job_id=1, prompt_id=1, prompt_snapshot="{}",
+                call_id="call_plan_1", company_id=1, service_id=1, service_key="front",
+                hubspot_owner_id="plan_owner", agent_name="Plan Agent",
+                call_timestamp=now, analysis_timestamp=now, evaluacion_global=Decimal("9.0"), status="completed"
+            ))
+            db.add(MassEvaluationCriterionResult(
+                id=7001, mass_analysis_id=7001, run_id=1, job_id=1, call_id="call_plan_1",
+                criterion_key="claridad", criterion_name="Claridad", criterion_type="score",
+                numeric_value=Decimal("8.0"), is_applicable=True
+            ))
+            await db.commit()
+
+        captured_queries = []
+        def listener(conn, cursor, statement, parameters, context, executemany):
+            captured_queries.append(statement)
+
+        event.listen(self.engine.sync_engine, "before_cursor_execute", listener)
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                res = await client.get(
+                    "/bm/analytics/agents-comparison?service_id=1&item_keys=claridad",
+                    headers={"Authorization": f"Bearer {self.token_admin}"}
+                )
+                self.assertEqual(res.status_code, 200)
+        finally:
+            event.remove(self.engine.sync_engine, "before_cursor_execute", listener)
+
+        # Locate Query B (contains row_number and criterion_key aggregation)
+        query_b = next((q for q in captured_queries if "row_number()" in q.lower() and "bm_mass_evaluation_criterion_results" in q.lower()), None)
+        self.assertIsNotNone(query_b, "Query B with row_number() must be executed")
+
+        q_lower = query_b.lower()
+        # Verify that Query B defines a scoped subquery on bm_mass_evaluation_results first
+        # and joins bm_mass_evaluation_criterion_results on mass_analysis_id
+        self.assertIn("bm_mass_evaluation_results", q_lower)
+        self.assertIn("bm_mass_evaluation_criterion_results", q_lower)
+        self.assertIn("join bm_mass_evaluation_criterion_results on bm_mass_evaluation_criterion_results.mass_analysis_id =", q_lower)
+        # Verify that row_number window function is partitioned by mass_analysis_id
+        self.assertIn("partition by bm_mass_evaluation_criterion_results.mass_analysis_id", q_lower)
+
 
 if __name__ == "__main__":
     unittest.main()
