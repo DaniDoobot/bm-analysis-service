@@ -291,9 +291,55 @@ async def update_agent_setting(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
 
 
+async def _resolve_training_agent_scope(
+    db: AsyncSession,
+    context: TenantContext,
+    service_id: Optional[int] = None,
+    team_id: Optional[int] = None,
+) -> Optional[List[str]]:
+    """
+    Validates cascade and resolves the allowed hubspot_owner_ids based on role, service_id, and team_id.
+    Returns:
+      - None if all agents in company are allowed (no agent-level restriction)
+      - List[str] if scoped to specific agents (empty list [] if empty team/service or no agents in scope)
+    """
+    from app.utils.team_resolvers import (
+        validate_team_service_cascade,
+        get_team_assigned_owner_ids,
+        get_service_assigned_owner_ids,
+    )
+
+    base_role_set: Optional[set[str]] = None
+    if context.normalized_role == InternalRole.SERVICE_MANAGER:
+        manager_agents = await get_service_manager_agent_ids(db, context)
+        base_role_set = set(manager_agents)
+    elif context.normalized_role == InternalRole.TEAM_COORDINATOR:
+        coord_agents = context.allowed_agent_ids or []
+        base_role_set = set(coord_agents)
+
+    if service_id is not None or team_id is not None:
+        await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context)
+
+    target_filter_set: Optional[set[str]] = None
+    if team_id is not None:
+        target_filter_set = await get_team_assigned_owner_ids(db, team_id=team_id, context=context)
+    elif service_id is not None:
+        target_filter_set = await get_service_assigned_owner_ids(db, service_id=service_id, context=context)
+
+    if base_role_set is not None and target_filter_set is not None:
+        return list(base_role_set.intersection(target_filter_set))
+    elif base_role_set is not None:
+        return list(base_role_set)
+    elif target_filter_set is not None:
+        return list(target_filter_set)
+    return None
+
+
 @router.get("/admin/agents-overview", response_model=List[AgentOverviewItem])
 async def list_agents_overview(
     context: Annotated[TenantContext, Depends(get_tenant_context)],
+    service_id: Annotated[Optional[int], Query(description="Filter by service ID")] = None,
+    team_id: Annotated[Optional[int], Query(description="Filter by team ID")] = None,
     db: AsyncSession = Depends(get_db)
 ):
     """Overview list of all active agents and their current training statuses."""
@@ -304,11 +350,9 @@ async def list_agents_overview(
         )
 
     company_ids = context.allowed_company_ids if not context.is_super_admin else None
-    allowed_agent_ids = None
-    if context.normalized_role == InternalRole.SERVICE_MANAGER:
-        allowed_agent_ids = await get_service_manager_agent_ids(db, context)
-    elif context.normalized_role == InternalRole.TEAM_COORDINATOR:
-        allowed_agent_ids = context.allowed_agent_ids or []
+    allowed_agent_ids = await _resolve_training_agent_scope(
+        db, context=context, service_id=service_id, team_id=team_id
+    )
 
     return await PersonalizedTrainingService.get_agent_overview(
         db,
@@ -320,6 +364,8 @@ async def list_agents_overview(
 @router.get("/admin/cycles-summary", response_model=CyclesTeamSummaryResponse)
 async def get_team_cycles_summary(
     context: Annotated[TenantContext, Depends(get_tenant_context)],
+    service_id: Annotated[Optional[int], Query(description="Filter by service ID")] = None,
+    team_id: Annotated[Optional[int], Query(description="Filter by team ID")] = None,
     db: AsyncSession = Depends(get_db)
 ):
     """Get team-wide training metrics, aggregates and priority targets."""
@@ -330,11 +376,9 @@ async def get_team_cycles_summary(
         )
 
     company_ids = context.allowed_company_ids if not context.is_super_admin else None
-    allowed_agent_ids = None
-    if context.normalized_role == InternalRole.SERVICE_MANAGER:
-        allowed_agent_ids = await get_service_manager_agent_ids(db, context)
-    elif context.normalized_role == InternalRole.TEAM_COORDINATOR:
-        allowed_agent_ids = context.allowed_agent_ids or []
+    allowed_agent_ids = await _resolve_training_agent_scope(
+        db, context=context, service_id=service_id, team_id=team_id
+    )
 
     return await PersonalizedTrainingService.get_cycles_team_summary(
         db,

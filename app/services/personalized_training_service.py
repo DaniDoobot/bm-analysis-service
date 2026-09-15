@@ -1,10 +1,11 @@
 """Service for personalized training report generation and management using Azure OpenAI."""
 import json
 import logging
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, List, Optional
-from sqlalchemy import select, and_, or_, desc, func
+from sqlalchemy import select, and_, or_, desc, func, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_engine
 
@@ -289,50 +290,72 @@ class PersonalizedTrainingService:
         settings = await PersonalizedTrainingService.get_agent_settings(
             db, company_ids=company_ids, allowed_agent_ids=allowed_agent_ids
         )
+        if not settings:
+            return []
+
+        owner_ids = [s.hubspot_owner_id for s in settings if s.hubspot_owner_id]
+        if not owner_ids:
+            return []
+
+        # Batch Query 1: All active non-archived reports for these agents
+        stmt_reps = select(TrainingAgentReport).where(
+            and_(
+                TrainingAgentReport.hubspot_owner_id.in_(owner_ids),
+                TrainingAgentReport.status != "archived"
+            )
+        ).order_by(desc(TrainingAgentReport.training_report_id))
+        res_reps = await db.execute(stmt_reps)
+        all_agent_reps_list = list(res_reps.scalars().all())
+
+        reps_by_owner: dict[str, list[TrainingAgentReport]] = defaultdict(list)
+        current_rep_by_owner: dict[str, TrainingAgentReport] = {}
+        for r in all_agent_reps_list:
+            reps_by_owner[r.hubspot_owner_id].append(r)
+            if r.is_current and r.hubspot_owner_id not in current_rep_by_owner:
+                current_rep_by_owner[r.hubspot_owner_id] = r
+
+        all_report_ids = [r.training_report_id for r in all_agent_reps_list]
+
+        # Batch Query 2: Completion status counts for all reports
+        sim_comp_by_report_id: dict[int, int] = {}
+        if all_report_ids:
+            stmt_sim_c = select(
+                TrainingCompletionStatus.training_report_id,
+                func.count(TrainingCompletionStatus.completion_id)
+            ).where(
+                and_(
+                    TrainingCompletionStatus.training_report_id.in_(all_report_ids),
+                    TrainingCompletionStatus.status == "completed"
+                )
+            ).group_by(TrainingCompletionStatus.training_report_id)
+            res_sim_c = await db.execute(stmt_sim_c)
+            sim_comp_by_report_id = {row[0]: (row[1] or 0) for row in res_sim_c.all()}
+
+        # Batch Query 3: Simulation prompts count for all reports
+        prompts_count_by_report_id: dict[int, int] = {}
+        if all_report_ids:
+            stmt_prompts = select(
+                TrainingSimulationPrompt.training_report_id,
+                func.count(TrainingSimulationPrompt.simulation_prompt_id)
+            ).where(
+                TrainingSimulationPrompt.training_report_id.in_(all_report_ids)
+            ).group_by(TrainingSimulationPrompt.training_report_id)
+            res_prompts = await db.execute(stmt_prompts)
+            prompts_count_by_report_id = {row[0]: (row[1] or 0) for row in res_prompts.all()}
+
         overview = []
-
         for s in settings:
-            # Fetch all reports for this agent
-            stmt_reps = select(TrainingAgentReport).where(
-                and_(
-                    TrainingAgentReport.hubspot_owner_id == s.hubspot_owner_id,
-                    TrainingAgentReport.status != "archived"
-                )
-            ).order_by(desc(TrainingAgentReport.training_report_id))
-            res_reps = await db.execute(stmt_reps)
-            all_agent_reps = list(res_reps.scalars().all())
-
-            # Fetch current (latest, is_current=True) report for the agent
-            stmt_rep = select(TrainingAgentReport).where(
-                and_(
-                    TrainingAgentReport.hubspot_owner_id == s.hubspot_owner_id,
-                    TrainingAgentReport.is_current == True,
-                    TrainingAgentReport.status != "archived"
-                )
-            ).order_by(desc(TrainingAgentReport.training_report_id))
-            res_rep = await db.execute(stmt_rep)
-            report = res_rep.scalars().first()
-
-            # Count previous reports
+            all_agent_reps = reps_by_owner.get(s.hubspot_owner_id, [])
+            report = current_rep_by_owner.get(s.hubspot_owner_id)
             prev_count = len(all_agent_reps)
 
-            # Compute cycle aggregates
             pending_cycles = 0
             pending_simulations = 0
             active_cycles = 0
             completed_cycles = 0
-            
+
             for r in all_agent_reps:
-                # Count completed simulations for this report
-                stmt_sim_c = select(func.count(TrainingCompletionStatus.completion_id)).where(
-                    and_(
-                        TrainingCompletionStatus.training_report_id == r.training_report_id,
-                        TrainingCompletionStatus.status == "completed"
-                    )
-                )
-                res_sim_c = await db.execute(stmt_sim_c)
-                sim_comp_count = res_sim_c.scalar() or 0
-                
+                sim_comp_count = sim_comp_by_report_id.get(r.training_report_id, 0)
                 if r.status in ["completed", "superseded"]:
                     completed_cycles += 1
                 elif r.status in ["pending", "in_progress", "running", "finalization_failed"]:
@@ -341,7 +364,6 @@ class PersonalizedTrainingService:
                     if sim_comp_count > 0:
                         active_cycles += 1
 
-            # Latest cycle info
             active_reps = [r for r in all_agent_reps if r.status != "superseded"]
             latest_r = active_reps[0] if active_reps else None
             latest_cycle_status = "no_data"
@@ -350,20 +372,12 @@ class PersonalizedTrainingService:
             latest_cycle_period_start = None
             latest_cycle_period_end = None
             latest_cycle_avg_score = None
-            
+
             if latest_r:
                 latest_cycle_period_start = latest_r.period_start
                 latest_cycle_period_end = latest_r.period_end
                 latest_cycle_avg_score = latest_r.avg_evaluacion_global
-                
-                stmt_latest_comp = select(func.count(TrainingCompletionStatus.completion_id)).where(
-                    and_(
-                        TrainingCompletionStatus.training_report_id == latest_r.training_report_id,
-                        TrainingCompletionStatus.status == "completed"
-                    )
-                )
-                res_latest_comp = await db.execute(stmt_latest_comp)
-                latest_comp_count = res_latest_comp.scalar() or 0
+                latest_comp_count = sim_comp_by_report_id.get(latest_r.training_report_id, 0)
                 latest_cycle_progress_completed = latest_comp_count
 
                 if latest_r.status == "failed":
@@ -431,24 +445,8 @@ class PersonalizedTrainingService:
                     g_count = len(report.general_objectives_json) if report.general_objectives_json else 0
                     s_count = len(report.specific_objectives_json) if report.specific_objectives_json else 0
                     item["objectives_count"] = g_count + s_count
-                    
-                    # Fetch simulation prompts count dynamically
-                    stmt_prompts = select(func.count(TrainingSimulationPrompt.simulation_prompt_id)).where(
-                        TrainingSimulationPrompt.training_report_id == report.training_report_id
-                    )
-                    res_prompts = await db.execute(stmt_prompts)
-                    item["simulation_prompts_count"] = res_prompts.scalar() or 0
-                    
-                    # Fetch completion progress
-                    stmt_comp = select(func.count(TrainingCompletionStatus.completion_id)).where(
-                        and_(
-                            TrainingCompletionStatus.training_report_id == report.training_report_id,
-                            TrainingCompletionStatus.status == "completed"
-                        )
-                    )
-                    res_comp = await db.execute(stmt_comp)
-                    comp_count = res_comp.scalar() or 0
-                    
+                    item["simulation_prompts_count"] = prompts_count_by_report_id.get(report.training_report_id, 0)
+                    comp_count = sim_comp_by_report_id.get(report.training_report_id, 0)
                     item["progress_completed"] = comp_count
                     item["progress_percentage"] = Decimal(str(comp_count / 4.0 * 100.0)).quantize(Decimal("0.01"))
 
@@ -1302,8 +1300,170 @@ class PersonalizedTrainingService:
             db, company_ids=company_ids, allowed_agent_ids=allowed_agent_ids
         )
 
+        if not all_settings:
+            return {
+                "active_agents": 0,
+                "monitored_agents": 0,
+                "generation_enabled_agents": 0,
+                "total_cycles": 0,
+                "completed_cycles_total": 0,
+                "running_cycles_total": 0,
+                "team_avg_score": 0.0,
+                "team_avg_score_delta": 0.0,
+                "avg_close_rate": 0.0,
+                "agents_requiring_attention": 0,
+                "agents_improving": 0,
+                "agents_stagnant": 0,
+                "agents_declining": 0,
+                "pending_cycles": 0,
+                "pending_simulations": 0,
+                "pending_approval_cycles": 0,
+                "priority_agents": [],
+                "recurring_patterns": [
+                    {
+                        "label": "Sin desviaciones recurrentes",
+                        "category": "General",
+                        "affected_agents": 0,
+                        "affected_cycles": 0,
+                        "occurrences": 0,
+                        "avg_score": 0.0,
+                        "severity": "low",
+                        "reason": "No se han detectado desviaciones repetidas en los ciclos actuales",
+                        "source": "weaknesses_and_objectives",
+                        "examples": ["El equipo mantiene un desempeño alineado con los protocolos"],
+                        "count": 0,
+                        "total_agents": 0
+                    }
+                ],
+                "cycle_evolution": [
+                    {
+                        "cycle_label": "Ciclo 1",
+                        "team_avg_score": 0.0,
+                        "close_rate": 0.0,
+                        "completed_cycles": 0,
+                        "pending_simulations": 0
+                    }
+                ]
+            }
+
+        owner_ids = [s.hubspot_owner_id for s in all_settings if s.hubspot_owner_id]
+        if not owner_ids:
+            return {
+                "active_agents": 0,
+                "monitored_agents": 0,
+                "generation_enabled_agents": 0,
+                "total_cycles": 0,
+                "completed_cycles_total": 0,
+                "running_cycles_total": 0,
+                "team_avg_score": 0.0,
+                "team_avg_score_delta": 0.0,
+                "avg_close_rate": 0.0,
+                "agents_requiring_attention": 0,
+                "agents_improving": 0,
+                "agents_stagnant": 0,
+                "agents_declining": 0,
+                "pending_cycles": 0,
+                "pending_simulations": 0,
+                "pending_approval_cycles": 0,
+                "priority_agents": [],
+                "recurring_patterns": [
+                    {
+                        "label": "Sin desviaciones recurrentes",
+                        "category": "General",
+                        "affected_agents": 0,
+                        "affected_cycles": 0,
+                        "occurrences": 0,
+                        "avg_score": 0.0,
+                        "severity": "low",
+                        "reason": "No se han detectado desviaciones repetidas en los ciclos actuales",
+                        "source": "weaknesses_and_objectives",
+                        "examples": ["El equipo mantiene un desempeño alineado con los protocolos"],
+                        "count": 0,
+                        "total_agents": 0
+                    }
+                ],
+                "cycle_evolution": [
+                    {
+                        "cycle_label": "Ciclo 1",
+                        "team_avg_score": 0.0,
+                        "close_rate": 0.0,
+                        "completed_cycles": 0,
+                        "pending_simulations": 0
+                    }
+                ]
+            }
+
         # Count how many agents have generation enabled (for informational purposes)
         generation_enabled_agents = sum(1 for s in all_settings if s.is_enabled)
+
+        # Batch Query 1: All active non-archived reports for these agents ordered by period start desc
+        stmt_reps = select(TrainingAgentReport).where(
+            and_(
+                TrainingAgentReport.hubspot_owner_id.in_(owner_ids),
+                TrainingAgentReport.status != "archived"
+            )
+        ).order_by(desc(TrainingAgentReport.period_start))
+        res_reps = await db.execute(stmt_reps)
+        all_reps_list = list(res_reps.scalars().all())
+
+        reps_by_owner: dict[str, list[TrainingAgentReport]] = defaultdict(list)
+        for r in all_reps_list:
+            reps_by_owner[r.hubspot_owner_id].append(r)
+
+        all_report_ids = [r.training_report_id for r in all_reps_list]
+
+        # Batch Query 2: Simulation completion status counts for all fetched reports
+        sim_comp_by_report_id: dict[int, int] = {}
+        if all_report_ids:
+            stmt_sim_c = select(
+                TrainingCompletionStatus.training_report_id,
+                func.count(TrainingCompletionStatus.completion_id)
+            ).where(
+                and_(
+                    TrainingCompletionStatus.training_report_id.in_(all_report_ids),
+                    TrainingCompletionStatus.status == "completed"
+                )
+            ).group_by(TrainingCompletionStatus.training_report_id)
+            res_sim_c = await db.execute(stmt_sim_c)
+            sim_comp_by_report_id = {row[0]: (row[1] or 0) for row in res_sim_c.all()}
+
+        # Batch Query 3: Close rates for all agents with completed reports
+        agent_period_conditions = []
+        for s in all_settings:
+            agent_reps = reps_by_owner.get(s.hubspot_owner_id, [])
+            completed_reps = [r for r in agent_reps if r.status == "completed"]
+            if completed_reps:
+                latest_r = completed_reps[0]
+                if latest_r.period_start and latest_r.period_end:
+                    agent_period_conditions.append(
+                        and_(
+                            MassEvaluationResult.hubspot_owner_id == s.hubspot_owner_id,
+                            MassEvaluationResult.call_timestamp >= latest_r.period_start,
+                            MassEvaluationResult.call_timestamp <= latest_r.period_end
+                        )
+                    )
+
+        agent_close_rate_stats: dict[str, tuple[int, int]] = {}
+        if agent_period_conditions:
+            stmt_close = select(
+                MassEvaluationResult.hubspot_owner_id,
+                func.count(case((MassEvaluationCriterionResult.boolean_value == True, MassEvaluationCriterionResult.id))),
+                func.count(case((MassEvaluationCriterionResult.boolean_value.is_not(None), MassEvaluationCriterionResult.id)))
+            ).join(
+                MassEvaluationCriterionResult,
+                MassEvaluationResult.mass_analysis_id == MassEvaluationCriterionResult.mass_analysis_id
+            ).where(
+                and_(
+                    MassEvaluationResult.status == "completed",
+                    MassEvaluationCriterionResult.criterion_key == "cierre_cita",
+                    MassEvaluationCriterionResult.is_applicable == True,
+                    or_(*agent_period_conditions)
+                )
+            ).group_by(MassEvaluationResult.hubspot_owner_id)
+            res_close = await db.execute(stmt_close)
+            agent_close_rate_stats = {
+                row[0]: (row[1] or 0, row[2] or 0) for row in res_close.all()
+            }
 
         team_scores = []
         team_prev_scores = []
@@ -1325,15 +1485,7 @@ class PersonalizedTrainingService:
         total_pending_approval_cycles = 0
 
         for s in all_settings:
-            # Get all reports for this agent (excluding archived) ordered by period start desc
-            stmt_reps = select(TrainingAgentReport).where(
-                and_(
-                    TrainingAgentReport.hubspot_owner_id == s.hubspot_owner_id,
-                    TrainingAgentReport.status != "archived"
-                )
-            ).order_by(desc(TrainingAgentReport.period_start))
-            res_reps = await db.execute(stmt_reps)
-            reps = list(res_reps.scalars().all())
+            reps = reps_by_owner.get(s.hubspot_owner_id, [])
 
             # Skip agents with no valid reports at all (they have no data to show)
             # Skipped and failed reports do not count as valid/active training cycles
@@ -1361,17 +1513,10 @@ class PersonalizedTrainingService:
             
             for r in reps:
                 if r.status in ["pending", "in_progress", "running", "finalization_failed"]:
-                    stmt_sim_c = select(func.count(TrainingCompletionStatus.completion_id)).where(
-                        and_(
-                            TrainingCompletionStatus.training_report_id == r.training_report_id,
-                            TrainingCompletionStatus.status == "completed"
-                        )
-                    )
-                    res_sim_c = await db.execute(stmt_sim_c)
-                    sim_comp_count = res_sim_c.scalar() or 0
+                    sim_comp_count = sim_comp_by_report_id.get(r.training_report_id, 0)
                     agent_pending_cycles += 1
                     agent_pending_simulations += max(0, 4 - sim_comp_count)
- 
+
             total_pending_cycles += agent_pending_cycles
             total_pending_simulations += agent_pending_simulations
             
@@ -1388,39 +1533,7 @@ class PersonalizedTrainingService:
                         team_prev_scores.append(prev_score)
                         score_delta = round(score - prev_score, 2)
                         
-                # Compute close rate for latest report period
-                stmt_close = select(
-                    func.count(MassEvaluationCriterionResult.id)
-                ).join(
-                    MassEvaluationResult, MassEvaluationResult.mass_analysis_id == MassEvaluationCriterionResult.mass_analysis_id
-                ).where(
-                    MassEvaluationResult.hubspot_owner_id == s.hubspot_owner_id,
-                    MassEvaluationResult.call_timestamp >= latest_r.period_start,
-                    MassEvaluationResult.call_timestamp <= latest_r.period_end,
-                    MassEvaluationResult.status == "completed",
-                    MassEvaluationCriterionResult.criterion_key == "cierre_cita",
-                    MassEvaluationCriterionResult.is_applicable == True,
-                    MassEvaluationCriterionResult.boolean_value == True
-                )
-                res_close = await db.execute(stmt_close)
-                close_count = res_close.scalar() or 0
-                
-                stmt_total = select(
-                    func.count(MassEvaluationCriterionResult.id)
-                ).join(
-                    MassEvaluationResult, MassEvaluationResult.mass_analysis_id == MassEvaluationCriterionResult.mass_analysis_id
-                ).where(
-                    MassEvaluationResult.hubspot_owner_id == s.hubspot_owner_id,
-                    MassEvaluationResult.call_timestamp >= latest_r.period_start,
-                    MassEvaluationResult.call_timestamp <= latest_r.period_end,
-                    MassEvaluationResult.status == "completed",
-                    MassEvaluationCriterionResult.criterion_key == "cierre_cita",
-                    MassEvaluationCriterionResult.is_applicable == True,
-                    MassEvaluationCriterionResult.boolean_value.is_not(None)
-                )
-                res_total = await db.execute(stmt_total)
-                total_count = res_total.scalar() or 0
-                
+                close_count, total_count = agent_close_rate_stats.get(s.hubspot_owner_id, (0, 0))
                 if total_count > 0:
                     agent_close_rate = close_count / total_count
                     team_close_rates.append(agent_close_rate)
@@ -1595,15 +1708,8 @@ class PersonalizedTrainingService:
                 "fallback_reason": p["fallback_reason"]
             }
 
-        # We fetch all current valid reports (status = completed, is_current = True, not archived/superseded)
-        stmt_curr_reps = select(TrainingAgentReport).where(
-            and_(
-                TrainingAgentReport.is_current == True,
-                TrainingAgentReport.status == "completed"
-            )
-        )
-        res_curr_reps = await db.execute(stmt_curr_reps)
-        current_reports = list(res_curr_reps.scalars().all())
+        # Current valid reports (status = completed, is_current = True) from already fetched reports
+        current_reports = [r for r in all_reps_list if r.is_current and r.status == "completed"]
 
         # Process textual weaknesses and objectives
         for r in current_reports:
@@ -1663,15 +1769,8 @@ class PersonalizedTrainingService:
                     if short_text not in patterns_db[pid]["examples"]:
                         patterns_db[pid]["examples"].append(short_text)
 
-        # We also query mass evaluation criterion results for the periods of all current reports (pending, running or completed)
-        stmt_all_curr = select(TrainingAgentReport).where(
-            and_(
-                TrainingAgentReport.is_current == True,
-                TrainingAgentReport.status.in_(["completed", "pending", "running"])
-            )
-        )
-        res_all_curr = await db.execute(stmt_all_curr)
-        all_current_reports = list(res_all_curr.scalars().all())
+        # Current reports (pending, running or completed) from already fetched reports
+        all_current_reports = [r for r in all_reps_list if r.is_current and r.status in ["completed", "pending", "running"]]
 
         if all_current_reports:
             conditions = []
@@ -1833,78 +1932,114 @@ class PersonalizedTrainingService:
         # 3. Cycle evolution (grouped by training runs)
         stmt_runs = select(TrainingRun).where(
             TrainingRun.status == "completed"
-        ).order_by(desc(TrainingRun.created_at)).limit(5)
+        )
+        if company_ids:
+            stmt_runs = stmt_runs.where(TrainingRun.company_id.in_(company_ids))
+        stmt_runs = stmt_runs.order_by(desc(TrainingRun.created_at)).limit(5)
         res_runs = await db.execute(stmt_runs)
         runs = list(res_runs.scalars().all())
         runs.reverse()  # Chronological order
+
+        run_ids = [run.training_run_id for run in runs]
+        all_run_reps: list[TrainingAgentReport] = []
+        if run_ids:
+            stmt_run_reps = select(TrainingAgentReport).where(
+                and_(
+                    TrainingAgentReport.training_run_id.in_(run_ids),
+                    TrainingAgentReport.hubspot_owner_id.in_(owner_ids),
+                    TrainingAgentReport.status == "completed"
+                )
+            )
+            res_run_reps = await db.execute(stmt_run_reps)
+            all_run_reps = list(res_run_reps.scalars().all())
+
+        run_reps_by_run_id: dict[int, list[TrainingAgentReport]] = defaultdict(list)
+        for r in all_run_reps:
+            run_reps_by_run_id[r.training_run_id].append(r)
+
+        # Batch simulation completion counts for any run report not already fetched
+        missing_run_rep_ids = [r.training_report_id for r in all_run_reps if r.training_report_id not in sim_comp_by_report_id]
+        if missing_run_rep_ids:
+            stmt_run_sim = select(
+                TrainingCompletionStatus.training_report_id,
+                func.count(TrainingCompletionStatus.completion_id)
+            ).where(
+                and_(
+                    TrainingCompletionStatus.training_report_id.in_(missing_run_rep_ids),
+                    TrainingCompletionStatus.status == "completed"
+                )
+            ).group_by(TrainingCompletionStatus.training_report_id)
+            res_run_sim = await db.execute(stmt_run_sim)
+            for row in res_run_sim.all():
+                sim_comp_by_report_id[row[0]] = row[1] or 0
+
+        # Close rates for runs (at most 5 runs) in a single batched query
+        run_close_counts: dict[int, int] = {}
+        run_total_counts: dict[int, int] = {}
+        run_conditions = []
+        for run in runs:
+            if run.period_start and run.period_end:
+                cond = and_(
+                    MassEvaluationResult.call_timestamp >= run.period_start,
+                    MassEvaluationResult.call_timestamp <= run.period_end
+                )
+                run_conditions.append((run.training_run_id, cond))
+
+        if run_conditions:
+            run_cases_close = [
+                func.count(case((and_(cond, MassEvaluationCriterionResult.boolean_value == True), MassEvaluationCriterionResult.id)))
+                for _, cond in run_conditions
+            ]
+            run_cases_total = [
+                func.count(case((and_(cond, MassEvaluationCriterionResult.boolean_value.is_not(None)), MassEvaluationCriterionResult.id)))
+                for _, cond in run_conditions
+            ]
+            stmt_runs_close = select(
+                *run_cases_close,
+                *run_cases_total
+            ).select_from(MassEvaluationResult).join(
+                MassEvaluationCriterionResult,
+                MassEvaluationResult.mass_analysis_id == MassEvaluationCriterionResult.mass_analysis_id
+            ).where(
+                and_(
+                    MassEvaluationResult.hubspot_owner_id.in_(owner_ids),
+                    MassEvaluationResult.status == "completed",
+                    MassEvaluationCriterionResult.criterion_key == "cierre_cita",
+                    MassEvaluationCriterionResult.is_applicable == True,
+                    or_(*[cond for _, cond in run_conditions])
+                )
+            )
+            res_runs_close = await db.execute(stmt_runs_close)
+            row_runs = res_runs_close.first()
+            if row_runs:
+                num_c = len(run_conditions)
+                for idx, (rid, _) in enumerate(run_conditions):
+                    run_close_counts[rid] = row_runs[idx] or 0
+                    run_total_counts[rid] = row_runs[num_c + idx] or 0
 
         # Cycle evolution includes ALL agents with valid completed reports,
         # regardless of is_enabled. Only archived reports are excluded.
         cycle_evolution = []
         cycle_counter = 1
         for run in runs:
-            stmt_run_reps = select(TrainingAgentReport).where(
-                and_(
-                    TrainingAgentReport.training_run_id == run.training_run_id,
-                    TrainingAgentReport.status == "completed"
-                    # Note: archived reports have status='archived', so status=="completed" already excludes them
-                )
-            )
-            res_run_reps = await db.execute(stmt_run_reps)
-            run_reps = list(res_run_reps.scalars().all())
-            
+            run_reps = run_reps_by_run_id.get(run.training_run_id, [])
             if not run_reps:
                 continue
-            
+
             run_scores = [float(r.avg_evaluacion_global) for r in run_reps if r.avg_evaluacion_global is not None and float(r.avg_evaluacion_global) > 0]
             if not run_scores:
                 continue  # Skip runs with no valid scores (e.g., all 0.0 avg scores)
             run_avg_score = round(sum(run_scores) / len(run_scores), 2)
-            
-            stmt_run_close = select(
-                func.count(MassEvaluationCriterionResult.id)
-            ).join(
-                MassEvaluationResult, MassEvaluationResult.mass_analysis_id == MassEvaluationCriterionResult.mass_analysis_id
-            ).where(
-                MassEvaluationResult.call_timestamp >= run.period_start,
-                MassEvaluationResult.call_timestamp <= run.period_end,
-                MassEvaluationResult.status == "completed",
-                MassEvaluationCriterionResult.criterion_key == "cierre_cita",
-                MassEvaluationCriterionResult.is_applicable == True,
-                MassEvaluationCriterionResult.boolean_value == True
-            )
-            res_run_close = await db.execute(stmt_run_close)
-            run_close_count = res_run_close.scalar() or 0
-            
-            stmt_run_total = select(
-                func.count(MassEvaluationCriterionResult.id)
-            ).join(
-                MassEvaluationResult, MassEvaluationResult.mass_analysis_id == MassEvaluationCriterionResult.mass_analysis_id
-            ).where(
-                MassEvaluationResult.call_timestamp >= run.period_start,
-                MassEvaluationResult.call_timestamp <= run.period_end,
-                MassEvaluationResult.status == "completed",
-                MassEvaluationCriterionResult.criterion_key == "cierre_cita",
-                MassEvaluationCriterionResult.is_applicable == True,
-                MassEvaluationCriterionResult.boolean_value.is_not(None)
-            )
-            res_run_total = await db.execute(stmt_run_total)
-            run_total_count = res_run_total.scalar() or 0
-            
+
+            run_close_count = run_close_counts.get(run.training_run_id, 0)
+            run_total_count = run_total_counts.get(run.training_run_id, 0)
             run_close_rate = round(run_close_count / run_total_count, 2) if run_total_count > 0 else 0.0
 
             completed_cycles = 0
             pending_simulations = 0
-            
+
             for r in run_reps:
-                stmt_sim_c = select(func.count(TrainingCompletionStatus.completion_id)).where(
-                    and_(
-                        TrainingCompletionStatus.training_report_id == r.training_report_id,
-                        TrainingCompletionStatus.status == "completed"
-                    )
-                )
-                res_sim_c = await db.execute(stmt_sim_c)
-                sim_comp_count = res_sim_c.scalar() or 0
+                sim_comp_count = sim_comp_by_report_id.get(r.training_report_id, 0)
                 if sim_comp_count == 4:
                     completed_cycles += 1
                 else:
