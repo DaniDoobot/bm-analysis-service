@@ -199,66 +199,19 @@ def _get_sentiment(result: Any) -> float | None:
         return None
 
 
-from app.utils.dates import MADRID_TZ
+from app.utils.dates import (
+    MADRID_TZ,
+    to_madrid_dt,
+    round_to_bucket,
+    next_bucket,
+    format_bucket_key,
+    resolve_granularity,
+)
 
-
-def _to_madrid(dt: datetime) -> datetime:
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(MADRID_TZ)
-
-
-def _round_dt(dt: datetime, interval: str) -> datetime:
-    dt_m = _to_madrid(dt)
-    if interval == "hour":
-        return dt_m.replace(minute=0, second=0, microsecond=0)
-    elif interval == "week":
-        # Start of week (Monday) in Europe/Madrid
-        monday = dt_m - timedelta(days=dt_m.weekday())
-        return monday.replace(hour=0, minute=0, second=0, microsecond=0)
-    elif interval == "month":
-        # 1st of month in Europe/Madrid
-        return dt_m.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    else:  # day
-        return dt_m.replace(hour=0, minute=0, second=0, microsecond=0)
-
-
-def _next_bucket(dt_bucket: datetime, interval: str) -> datetime:
-    if interval == "hour":
-        return dt_bucket + timedelta(hours=1)
-    elif interval == "week":
-        return dt_bucket + timedelta(weeks=1)
-    elif interval == "month":
-        # advance to 1st of next month
-        y = dt_bucket.year + (1 if dt_bucket.month == 12 else 0)
-        m = 1 if dt_bucket.month == 12 else dt_bucket.month + 1
-        return dt_bucket.replace(year=y, month=m, day=1, hour=0, minute=0, second=0, microsecond=0)
-    else:  # day
-        return dt_bucket + timedelta(days=1)
-
-
-def resolve_granularity(span: timedelta, requested_granularity: str | None = "auto") -> str:
-    """
-    Resolves the effective bucket granularity.
-    If explicitly provided as 'hour', 'day', 'week', or 'month', returns that interval.
-    Otherwise ('auto' or unrecognized), resolves based on span:
-      <= 48h  -> 'hour'
-      <= 60d  -> 'day'
-      <= 180d -> 'week'
-      > 180d  -> 'month'
-    """
-    norm = (requested_granularity or "auto").strip().lower()
-    if norm in ("hour", "day", "week", "month"):
-        return norm
-
-    if span <= timedelta(hours=48):
-        return "hour"
-    elif span <= timedelta(days=60):
-        return "day"
-    elif span <= timedelta(days=180):
-        return "week"
-    else:
-        return "month"
+# Aliases for backwards compatibility within dashboard_service and tests
+_to_madrid = to_madrid_dt
+_round_dt = round_to_bucket
+_next_bucket = next_bucket
 
 
 def _calc_delta(actual: Any, anterior: Any) -> float | None:
@@ -1313,6 +1266,7 @@ async def get_agent_evolution(
     item_filters: str | list | dict | None = None,
     status: str | None = None,
     context: TenantContext | None = None,
+    granularity: str = "auto",
 ) -> dict[str, Any]:
     """Evolution metrics from bm_mass_evaluation_results only."""
     from app.models.mass_evaluations import MassEvaluationResult
@@ -1332,7 +1286,12 @@ async def get_agent_evolution(
 
     # 1. Resolve timeframe
     dt_from, dt_to, recommended_bucket = resolve_date_range(date_from, date_to, period, default_period="30d")
-    bucket_interval = bucket_param if bucket_param in ["hour", "day", "week"] else recommended_bucket
+    eff_granularity = (bucket_param or granularity or "auto").strip().lower()
+    if eff_granularity in ("hour", "day", "week", "month"):
+        bucket_interval = eff_granularity
+    else:
+        span = (dt_to - dt_from) if (dt_from and dt_to) else timedelta(days=30)
+        bucket_interval = resolve_granularity(span, eff_granularity)
 
     stmt = select(MassEvaluationResult).options(defer(MassEvaluationResult.prompt_snapshot)).where(
         MassEvaluationResult.hubspot_owner_id == hubspot_owner_id,
@@ -1505,12 +1464,7 @@ async def get_agent_evolution(
         ts = _effective_ts(r)
         if not ts:
             continue
-        if bucket_interval == "hour":
-            b_key = ts.strftime("%Y-%m-%d %H:00")
-        elif bucket_interval == "day":
-            b_key = ts.strftime("%Y-%m-%d")
-        else:
-            b_key = (ts - timedelta(days=ts.weekday())).strftime("%Y-%m-%d")
+        b_key = format_bucket_key(ts, bucket_interval)
         buckets_map.setdefault(b_key, []).append(r)
 
 
@@ -2104,6 +2058,7 @@ async def get_agents_comparison(
     status: str | None = None,
     context: TenantContext | None = None,
     team_id: int | None = None,
+    granularity: str = "auto",
 ) -> dict[str, Any]:
     """Retrieve multi-agent comparison analytics using MassEvaluationResult."""
     t_start = time.perf_counter()
@@ -2120,7 +2075,9 @@ async def get_agents_comparison(
     
     if not metric_key:
         metric_key = "evaluacion_global"
-        
+
+    eff_granularity = (bucket or granularity or "auto").strip().lower()
+
     # 1. Resolve date range
     dt_from = parse_date(date_from)
     dt_to = parse_date(date_to)
@@ -2139,44 +2096,28 @@ async def get_agents_comparison(
         span = end_actual - start_actual
         start_anterior = start_actual - span
         end_anterior = start_actual
-        
-        if not bucket:
-            if span <= timedelta(hours=24):
-                bucket_interval = "hour"
-            elif span <= timedelta(days=7):
-                bucket_interval = "day"
-            elif span <= timedelta(days=30):
-                bucket_interval = "day"
-            else:
-                bucket_interval = "week"
-        else:
-            bucket_interval = bucket
     else:
         p = period or "30d"
         if p == "24h":
             delta = timedelta(hours=24)
-            default_bucket = "hour"
         elif p == "7d":
             delta = timedelta(days=7)
-            default_bucket = "day"
         elif p == "30d":
             delta = timedelta(days=30)
-            default_bucket = "day"
         elif p == "90d":
             delta = timedelta(days=90)
-            default_bucket = "day"
         elif p == "all":
             delta = timedelta(days=365)
-            default_bucket = "week"
         else:
             delta = timedelta(days=30)
-            default_bucket = "day"
             
         start_actual = now - delta
         end_actual = now
         start_anterior = now - (delta * 2)
         end_anterior = now - delta
-        bucket_interval = bucket or default_bucket
+        span = delta
+
+    bucket_interval = resolve_granularity(span, eff_granularity)
 
     # 2. Query completed mass evaluation results (defer prompt_snapshot)
     stmt = select(MassEvaluationResult).options(defer(MassEvaluationResult.prompt_snapshot))
@@ -2528,24 +2469,13 @@ async def get_agents_comparison(
             "typology_name": t.typology_name
         })
 
-    # 8. Generate time buckets
+    # 8. Generate time buckets in Europe/Madrid
     buckets = []
-    if bucket_interval == "hour":
-        curr = start_actual.replace(minute=0, second=0, microsecond=0)
-        while curr <= end_actual:
-            buckets.append(curr)
-            curr += timedelta(hours=1)
-    elif bucket_interval == "week":
-        curr = start_actual.replace(hour=0, minute=0, second=0, microsecond=0)
-        curr = curr - timedelta(days=curr.weekday())
-        while curr <= end_actual:
-            buckets.append(curr)
-            curr += timedelta(days=7)
-    else: # day
-        curr = start_actual.replace(hour=0, minute=0, second=0, microsecond=0)
-        while curr <= end_actual:
-            buckets.append(curr)
-            curr += timedelta(days=1)
+    curr = round_to_bucket(start_actual, bucket_interval)
+    end_curr = round_to_bucket(end_actual, bucket_interval)
+    while curr <= end_curr:
+        buckets.append(curr)
+        curr = next_bucket(curr, bucket_interval)
 
     # 9. Aggregate per-agent metrics, series, typologies, and criteria summaries
     agents_list = []
@@ -2718,28 +2648,13 @@ async def get_agents_comparison(
         # Time Series Points
         points = []
         for b_dt in buckets:
-            if bucket_interval == "hour":
-                b_key = b_dt.strftime("%Y-%m-%d %H:00")
-            elif bucket_interval == "day":
-                b_key = b_dt.strftime("%Y-%m-%d")
-            else:
-                b_key = b_dt.strftime("%Y-%m-%d")
-                
+            b_key = format_bucket_key(b_dt, bucket_interval)
             b_rows = []
             for r in agent_actual_rows:
                 ts = r.call_timestamp
                 if not ts:
                     continue
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-                    
-                if bucket_interval == "hour":
-                    row_key = ts.strftime("%Y-%m-%d %H:00")
-                elif bucket_interval == "day":
-                    row_key = ts.strftime("%Y-%m-%d")
-                else:
-                    row_key = (ts - timedelta(days=ts.weekday())).strftime("%Y-%m-%d")
-                    
+                row_key = format_bucket_key(ts, bucket_interval)
                 if row_key == b_key:
                     b_rows.append(r)
                     

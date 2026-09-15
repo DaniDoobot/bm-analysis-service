@@ -81,7 +81,8 @@ async def get_evolution(
     service_key: str | None = Query(None, description="Filtrar por clave del servicio"),
     date_from: str | None = Query(None, description="Fecha de inicio (ISO 8601 o YYYY-MM-DD)"),
     date_to: str | None = Query(None, description="Fecha de fin (ISO 8601 o YYYY-MM-DD)"),
-    granularity: Annotated[str, Query(description="Granularidad de agrupación: day | week | month")] = "day",
+    granularity: Annotated[str, Query(description="Granularidad de agrupación: auto | hour | day | week | month")] = "auto",
+    bucket: Annotated[str | None, Query(description="Alias para granularity")] = None,
     typology_key: str | None = Query(None, description="Filtrar por clave de tipología"),
     typology: str | None = Query(None, description="Filtrar por clave/nombre de tipología"),
     tipo_llamada: str | None = Query(None, description="Filtrar por tipo de llamada"),
@@ -112,13 +113,14 @@ async def get_evolution(
     If no service filter is set, retrieves all services combined or unclassified.
     """
     # Validation: granularity
-    valid_granularities = {"day", "week", "month"}
-    granularity_val = getattr(granularity, "default", granularity) if not isinstance(granularity, str) else granularity
-    granularity_str = str(granularity_val).lower() if granularity_val else "day"
+    effective_gran = bucket or granularity or "auto"
+    granularity_val = getattr(effective_gran, "default", effective_gran) if not isinstance(effective_gran, str) else effective_gran
+    granularity_str = str(granularity_val).lower().strip() if granularity_val else "auto"
+    valid_granularities = {"auto", "hour", "day", "week", "month"}
     if granularity_str not in valid_granularities:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"La granularidad '{granularity_val}' no es válida. Use: day | week | month"
+            detail=f"La granularidad '{granularity_val}' no es válida. Use: auto | hour | day | week | month"
         )
 
     def _extract_val(val, default=None):

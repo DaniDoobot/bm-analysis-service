@@ -1,5 +1,5 @@
 """Date utilities."""
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 
@@ -181,3 +181,75 @@ def parse_madrid_date_bounds(
 
     return dt_from_utc, dt_to_utc
 
+
+def to_madrid_dt(dt: datetime) -> datetime:
+    """Ensure datetime is timezone-aware and converted to Europe/Madrid."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(MADRID_TZ)
+
+
+def round_to_bucket(dt: datetime, interval: str) -> datetime:
+    """Round a datetime to the bucket start in Europe/Madrid timezone."""
+    dt_m = to_madrid_dt(dt)
+    if interval == "hour":
+        return dt_m.replace(minute=0, second=0, microsecond=0)
+    elif interval == "week":
+        monday = dt_m - timedelta(days=dt_m.weekday())
+        return monday.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif interval == "month":
+        return dt_m.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    else:  # day
+        return dt_m.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def next_bucket(dt_bucket: datetime, interval: str) -> datetime:
+    """Advance a bucket start datetime to the next bucket boundary."""
+    if interval == "hour":
+        return dt_bucket + timedelta(hours=1)
+    elif interval == "week":
+        return dt_bucket + timedelta(weeks=1)
+    elif interval == "month":
+        y = dt_bucket.year + (1 if dt_bucket.month == 12 else 0)
+        m = 1 if dt_bucket.month == 12 else dt_bucket.month + 1
+        return dt_bucket.replace(year=y, month=m, day=1, hour=0, minute=0, second=0, microsecond=0)
+    else:  # day
+        return dt_bucket + timedelta(days=1)
+
+
+def format_bucket_key(dt: datetime, interval: str) -> str:
+    """Format datetime into standard string key according to granularity in Europe/Madrid."""
+    dt_m = to_madrid_dt(dt)
+    if interval == "hour":
+        return dt_m.strftime("%Y-%m-%d %H:00")
+    elif interval == "month":
+        return dt_m.strftime("%Y-%m-01")
+    elif interval == "week":
+        monday = dt_m - timedelta(days=dt_m.weekday())
+        return monday.strftime("%Y-%m-%d")
+    else:  # day
+        return dt_m.strftime("%Y-%m-%d")
+
+
+def resolve_granularity(span: timedelta, requested_granularity: str | None = "auto") -> str:
+    """
+    Resolves the effective bucket granularity according to the product contract:
+    auto:
+      <= 48h  -> 'hour'
+      <= 60d  -> 'day'
+      <= 180d -> 'week'
+      > 180d  -> 'month'
+    Explicit override: 'hour' | 'day' | 'week' | 'month' (case-insensitive).
+    """
+    norm = (requested_granularity or "auto").strip().lower()
+    if norm in ("hour", "day", "week", "month"):
+        return norm
+
+    if span <= timedelta(hours=48):
+        return "hour"
+    elif span <= timedelta(days=60):
+        return "day"
+    elif span <= timedelta(days=180):
+        return "week"
+    else:
+        return "month"

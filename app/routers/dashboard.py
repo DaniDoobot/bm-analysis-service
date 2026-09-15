@@ -179,7 +179,8 @@ async def agents_comparison(
     period: Annotated[str | None, Query(description="24h | 7d | 30d | 90d | all")] = None,
     date_from: Annotated[str | None, Query(description="Custom start date (ISO or YYYY-MM-DD)")] = None,
     date_to: Annotated[str | None, Query(description="Custom end date (ISO or YYYY-MM-DD)")] = None,
-    bucket: Annotated[str | None, Query(description="hour | day | week")] = None,
+    granularity: Annotated[str, Query(description="auto | hour | day | week | month")] = "auto",
+    bucket: Annotated[str | None, Query(description="Alias for granularity")] = None,
     metric_key: Annotated[str | None, Query(description="Selected metric key to compare")] = None,
     typology_ids: Annotated[str | None, Query(description="Comma-separated typology IDs")] = None,
     duration_min_seconds: Annotated[int | None, Query(description="Min duration in seconds")] = None,
@@ -212,6 +213,7 @@ async def agents_comparison(
     norm_typology_key = normalize_typology(raw_typology)
     raw_direction = direction or call_direction or inbound_outbound
     norm_direction = normalize_direction(raw_direction)
+    effective_granularity = bucket or granularity or "auto"
 
     try:
         data = await get_agents_comparison(
@@ -225,7 +227,8 @@ async def agents_comparison(
             period=period,
             date_from=date_from,
             date_to=date_to,
-            bucket=bucket,
+            bucket=effective_granularity,
+            granularity=effective_granularity,
             metric_key=metric_key,
             typology_ids=typo_ids,
             duration_min_seconds=duration_min_seconds,
@@ -352,7 +355,8 @@ async def agent_evolution(
     db: Annotated[AsyncSession, Depends(get_db)],
     type: Annotated[str, Query(description="audio | text")] = "audio",
     period: Annotated[str, Query(description="24h | 7d | 30d | 90d | all")] = "30d",
-    bucket: Annotated[str | None, Query(description="hour | day | week")] = None,
+    granularity: Annotated[str, Query(description="auto | hour | day | week | month")] = "auto",
+    bucket: Annotated[str | None, Query(description="Alias for granularity")] = None,
     prompt_version_id: Annotated[int | None, Query(description="Filter by prompt version")] = None,
     service_id: Annotated[int | None, Query(description="Filter by service ID")] = None,
     service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
@@ -393,6 +397,7 @@ async def agent_evolution(
     effective_item_filters = item_filters or criterion_filters or score_filters or item_score_filters
     raw_status = status or result_status
     norm_status = normalize_status(raw_status)
+    effective_granularity = bucket or granularity or "auto"
     if context.allowed_agent_ids is not None and hubspot_owner_id not in context.allowed_agent_ids:
         raise HTTPException(
             status_code=403,
@@ -425,7 +430,8 @@ async def agent_evolution(
             hubspot_owner_id=hubspot_owner_id,
             analysis_type=analysis_type,
             period=period,
-            bucket_param=bucket,
+            bucket_param=effective_granularity,
+            granularity=effective_granularity,
             prompt_version_id=prompt_version_id,
             service_id=service_id,
             service_key=service_key,
@@ -544,7 +550,8 @@ async def get_my_evolution(
     email: Annotated[str | None, Query(description="For backwards compatibility, ignored for agents")] = None,
     type: Annotated[str, Query(description="audio | text")] = "audio",
     period: Annotated[str, Query(description="24h | 7d | 30d | 90d | all")] = "30d",
-    bucket: Annotated[str | None, Query(description="hour | day | week")] = None,
+    granularity: Annotated[str, Query(description="auto | hour | day | week | month")] = "auto",
+    bucket: Annotated[str | None, Query(description="Alias for granularity")] = None,
     prompt_version_id: Annotated[int | None, Query(description="Filter by prompt version")] = None,
     service_id: Annotated[int | None, Query(description="Filter by service ID")] = None,
     service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
@@ -581,6 +588,7 @@ async def get_my_evolution(
     effective_item_filters = item_filters or criterion_filters or score_filters or item_score_filters
     raw_status = status or result_status
     norm_status = normalize_status(raw_status)
+    effective_granularity = bucket or granularity or "auto"
     # Use context's normalized role and fields instead of legacy strings
     is_manager_or_admin = (
         context.is_super_admin or
@@ -638,7 +646,8 @@ async def get_my_evolution(
             hubspot_owner_id=owner_id,
             analysis_type=analysis_type,
             period=period,
-            bucket_param=bucket,
+            bucket_param=effective_granularity,
+            granularity=effective_granularity,
             prompt_version_id=prompt_version_id,
             service_id=service_id,
             service_key=service_key,

@@ -32,6 +32,7 @@ from app.utils.normalizers import normalize_typology, normalize_direction, norma
 from app.utils.cache import analytics_cache
 from app.utils.service_resolvers import resolve_service_id
 from app.utils.item_score_filters import parse_item_score_filters_detailed, build_item_filters_sql
+from app.utils.dates import resolve_granularity, format_bucket_key
 
 def _format_int_list(lst) -> str:
     if not lst:
@@ -1028,7 +1029,8 @@ async def get_items_evolution(
     agent_owner_ids_bracket: Annotated[list[str] | None, Query(alias="agent_owner_ids[]", description="Filter agent owner IDs (array format)")] = None,
     item_keys: Annotated[list[str] | None, Query(description="Filter compared item keys")] = None,
     item_keys_bracket: Annotated[list[str] | None, Query(alias="item_keys[]", description="Filter compared item keys (array format)")] = None,
-    bucket: Annotated[str | None, Query(description="Timeline grouping interval: hour | day | week")] = None,
+    granularity: Annotated[str, Query(description="Timeline grouping interval: auto | hour | day | week | month")] = "auto",
+    bucket: Annotated[str | None, Query(description="Alias for granularity")] = None,
     typology_ids: Annotated[str | None, Query(description="Comma-separated typology IDs")] = None,
     typology: Annotated[str | None, Query(description="Filter by typology key/name")] = None,
     typology_key: Annotated[str | None, Query(description="Filter by typology key")] = None,
@@ -1090,9 +1092,13 @@ async def get_items_evolution(
         active_filters = parsed_item_filters.get("active_filters", [])
         stable_item_filters_key = json.dumps(active_filters, sort_keys=True)
 
-        dt_from, dt_to, bucket_interval = resolve_date_range(date_from, date_to, period=None, default_period="30d")
-        if bucket and bucket.strip().lower() in ("hour", "day", "week"):
-            bucket_interval = bucket.strip().lower()
+        effective_granularity = (bucket or granularity or "auto").strip().lower()
+        dt_from, dt_to, _ = resolve_date_range(date_from, date_to, period=None, default_period="30d")
+        if effective_granularity in ("hour", "day", "week", "month"):
+            bucket_interval = effective_granularity
+        else:
+            span = (dt_to - dt_from) if (dt_from and dt_to) else timedelta(days=30)
+            bucket_interval = resolve_granularity(span, effective_granularity)
         if dt_from and dt_to and dt_from > dt_to:
             raise HTTPException(
                 status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -1244,12 +1250,7 @@ async def get_items_evolution(
                 ts = _effective_ts(r)
                 if not ts:
                     continue
-                if bucket_interval == "hour":
-                    b_key = ts.strftime("%Y-%m-%d %H:00")
-                elif bucket_interval == "day":
-                    b_key = ts.strftime("%Y-%m-%d")
-                else:
-                    b_key = (ts - timedelta(days=ts.weekday())).strftime("%Y-%m-%d")
+                b_key = format_bucket_key(ts, bucket_interval)
                 buckets_map.setdefault(b_key, []).append(r)
 
             all_metrics = await get_all_metrics(db, context=context, service_id=eff_service_id)

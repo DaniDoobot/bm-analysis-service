@@ -1,11 +1,12 @@
 """Service logic for Service Evolution dashboard."""
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.tenant_context import TenantContext
+from app.utils.dates import resolve_granularity
 from app.schemas.service_evolution import (
     ServiceEvolutionResponse,
     ServiceEvolutionFilters,
@@ -43,8 +44,15 @@ def clean_sql(query: str, dialect_name: str) -> str:
     if dialect_name != "sqlite":
         return query
     # Apply SQLite syntax replacements
+    query = query.replace(" AT TIME ZONE 'Europe/Madrid'", "")
     query = query.replace("r.result_json->>'evaluacion_global'", "json_extract(r.result_json, '$.evaluacion_global')")
-    query = query.replace("result_json->>'evaluacion_global'", "json_extract(result_json, '$.evaluacion_global')")
+    query = query.replace("to_char(date_trunc('hour', r.call_timestamp), 'YYYY-MM-DD HH24:00')", "strftime('%Y-%m-%d %H:00', r.call_timestamp)")
+    query = query.replace("date_trunc('hour', r.call_timestamp)", "strftime('%Y-%m-%d %H:00', r.call_timestamp)")
+    query = query.replace("date_trunc('week', r.call_timestamp)", "DATE(r.call_timestamp, 'weekday 0', '-6 days')")
+    query = query.replace("date_trunc('month', r.call_timestamp)", "DATE(r.call_timestamp, 'start of month')")
+    query = query.replace("r.created_at::date", "DATE(r.created_at)")
+    query = query.replace("r.call_timestamp::date", "DATE(r.call_timestamp)")
+    query = query.replace("(r.call_timestamp)::date", "DATE(r.call_timestamp)")
     query = query.replace("::numeric", "")
     query = query.replace("::int", "")
     query = query.replace("::text", "")
@@ -57,10 +65,6 @@ def clean_sql(query: str, dialect_name: str) -> str:
     query = query.replace("CAST(:agent_owner_id AS text)", ":agent_owner_id")
     query = query.replace("CAST(:direction AS text)", ":direction")
     query = query.replace("timestamptz", "datetime")
-    query = query.replace("date_trunc('week', r.call_timestamp)", "DATE(r.call_timestamp, 'weekday 0', '-6 days')")
-    query = query.replace("date_trunc('month', r.call_timestamp)", "DATE(r.call_timestamp, 'start of month')")
-    query = query.replace("r.created_at::date", "DATE(r.created_at)")
-    query = query.replace("r.call_timestamp::date", "DATE(r.call_timestamp)")
     return query
 
 
@@ -308,13 +312,22 @@ class ServiceEvolutionService:
                     service_id = -1
                     service_name = None
 
+        # Resolve effective granularity
+        eff_granularity = (granularity or "auto").strip().lower()
+        if eff_granularity not in ("hour", "day", "week", "month"):
+            if parsed_date_from and parsed_date_to:
+                span = parsed_date_to - parsed_date_from
+            else:
+                span = timedelta(days=30)
+            eff_granularity = resolve_granularity(span, eff_granularity)
+
         filters = ServiceEvolutionFilters(
             service_id=service_id,
             service_key=service_key,
             service_name=service_name,
             date_from=date_from,
             date_to=date_to,
-            granularity=granularity
+            granularity=eff_granularity
         )
 
         norm_t = normalize_typology(typology_key)
@@ -494,12 +507,14 @@ class ServiceEvolutionService:
         # 4. Get Series data (granularity-based period grouping)
         # NOTE: we group by call_timestamp (when the call actually happened), NOT created_at
         # (when the mass analysis ran). Using created_at collapses everything into one day.
-        if granularity == "week":
-            period_expr = "date_trunc('week', r.call_timestamp)::date"
-        elif granularity == "month":
-            period_expr = "date_trunc('month', r.call_timestamp)::date"
+        if eff_granularity == "hour":
+            period_expr = "to_char(date_trunc('hour', r.call_timestamp AT TIME ZONE 'Europe/Madrid'), 'YYYY-MM-DD HH24:00')"
+        elif eff_granularity == "week":
+            period_expr = "(date_trunc('week', r.call_timestamp AT TIME ZONE 'Europe/Madrid'))::date"
+        elif eff_granularity == "month":
+            period_expr = "(date_trunc('month', r.call_timestamp AT TIME ZONE 'Europe/Madrid'))::date"
         else:
-            period_expr = "r.call_timestamp::date"
+            period_expr = "(r.call_timestamp AT TIME ZONE 'Europe/Madrid')::date"
 
         # Column indices:  0=period, 1=service_id, 2=service_name, 3=total_calls,
         #   4=avg_evaluacion_global (fallback: mean of score_1_10 criteria if not in result_json),
