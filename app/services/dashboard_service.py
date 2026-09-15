@@ -199,11 +199,66 @@ def _get_sentiment(result: Any) -> float | None:
         return None
 
 
+from app.utils.dates import MADRID_TZ
+
+
+def _to_madrid(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(MADRID_TZ)
+
+
 def _round_dt(dt: datetime, interval: str) -> datetime:
+    dt_m = _to_madrid(dt)
     if interval == "hour":
-        return dt.replace(minute=0, second=0, microsecond=0)
+        return dt_m.replace(minute=0, second=0, microsecond=0)
+    elif interval == "week":
+        # Start of week (Monday) in Europe/Madrid
+        monday = dt_m - timedelta(days=dt_m.weekday())
+        return monday.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif interval == "month":
+        # 1st of month in Europe/Madrid
+        return dt_m.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    else:  # day
+        return dt_m.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _next_bucket(dt_bucket: datetime, interval: str) -> datetime:
+    if interval == "hour":
+        return dt_bucket + timedelta(hours=1)
+    elif interval == "week":
+        return dt_bucket + timedelta(weeks=1)
+    elif interval == "month":
+        # advance to 1st of next month
+        y = dt_bucket.year + (1 if dt_bucket.month == 12 else 0)
+        m = 1 if dt_bucket.month == 12 else dt_bucket.month + 1
+        return dt_bucket.replace(year=y, month=m, day=1, hour=0, minute=0, second=0, microsecond=0)
+    else:  # day
+        return dt_bucket + timedelta(days=1)
+
+
+def resolve_granularity(span: timedelta, requested_granularity: str | None = "auto") -> str:
+    """
+    Resolves the effective bucket granularity.
+    If explicitly provided as 'hour', 'day', 'week', or 'month', returns that interval.
+    Otherwise ('auto' or unrecognized), resolves based on span:
+      <= 48h  -> 'hour'
+      <= 60d  -> 'day'
+      <= 180d -> 'week'
+      > 180d  -> 'month'
+    """
+    norm = (requested_granularity or "auto").strip().lower()
+    if norm in ("hour", "day", "week", "month"):
+        return norm
+
+    if span <= timedelta(hours=48):
+        return "hour"
+    elif span <= timedelta(days=60):
+        return "day"
+    elif span <= timedelta(days=180):
+        return "week"
     else:
-        return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        return "month"
 
 
 def _calc_delta(actual: Any, anterior: Any) -> float | None:
@@ -457,6 +512,7 @@ async def get_dashboard_summary(
     status: str | None = None,
     context: TenantContext | None = None,
     team_id: int | None = None,
+    granularity: str = "auto",
 ) -> dict[str, Any]:
     from app.utils.item_score_filters import parse_item_score_filters_detailed, apply_item_score_filters_sql_or_python
     t_start = time.perf_counter()
@@ -476,8 +532,8 @@ async def get_dashboard_summary(
 
     logger.info(
         "[dashboard_summary] typology_filter_raw=%r typology_filter_normalized=%r "
-        "direction_filter_raw=%r direction_filter_normalized=%r period=%r date_from=%r date_to=%r item_filters_info=%s status=%r team_id=%r",
-        typology_key, norm_t, direction, norm_d, period, date_from, date_to, item_filter_info, status, team_id
+        "direction_filter_raw=%r direction_filter_normalized=%r period=%r date_from=%r date_to=%r item_filters_info=%s status=%r team_id=%r granularity=%r",
+        typology_key, norm_t, direction, norm_d, period, date_from, date_to, item_filter_info, status, team_id, granularity
     )
 
     # Resolve custom range or period
@@ -497,26 +553,24 @@ async def get_dashboard_summary(
         span = end_actual - start_actual
         start_anterior = start_actual - span
         end_anterior = start_actual
-        if span <= timedelta(hours=24):
-            bucket_interval = "hour"
-        else:
-            bucket_interval = "day"
     else:
         if period == "7d":
             delta = timedelta(days=7)
-            bucket_interval = "day"
         elif period == "30d":
             delta = timedelta(days=30)
-            bucket_interval = "day"
+        elif period == "90d":
+            delta = timedelta(days=90)
         else:
             period = "24h"
             delta = timedelta(hours=24)
-            bucket_interval = "hour"
 
         start_actual = now - delta
         end_actual = now
         start_anterior = now - (delta * 2)
         end_anterior = now - delta
+        span = delta
+
+    bucket_interval = resolve_granularity(span, granularity)
 
     # Query from MassEvaluationResult exclusively (defer large prompt_snapshot to minimize memory footprint)
     stmt = select(MassEvaluationResult).options(defer(MassEvaluationResult.prompt_snapshot))
@@ -712,16 +766,11 @@ async def get_dashboard_summary(
     }
 
     buckets = []
-    if bucket_interval == "hour":
-        curr = _round_dt(start_actual, "hour")
-        while curr <= end_actual:
-            buckets.append(curr)
-            curr += timedelta(hours=1)
-    else:
-        curr = _round_dt(start_actual, "day")
-        while curr <= end_actual:
-            buckets.append(curr)
-            curr += timedelta(days=1)
+    curr = _round_dt(start_actual, bucket_interval)
+    end_curr = _round_dt(end_actual, bucket_interval)
+    while curr <= end_curr:
+        buckets.append(curr)
+        curr = _next_bucket(curr, bucket_interval)
 
     grouped_evolution = {}
     for r in actual_rows:
@@ -967,6 +1016,8 @@ async def get_dashboard_summary(
             "service_id": service_id,
             "hubspot_owner_id": hubspot_owner_id,
             "hubspot_owner_ids": hubspot_owner_ids,
+            "granularity": granularity,
+            "bucket_interval": bucket_interval,
             "item_filters_raw_count": item_filter_info["raw_count"],
             "item_filters_normalized": parsed_item_filters,
             "item_filters_discarded_neutral_count": item_filter_info["discarded_neutral_count"],

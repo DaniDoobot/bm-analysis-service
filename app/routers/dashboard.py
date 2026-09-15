@@ -71,6 +71,8 @@ async def dashboard_summary(
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     team_id: Annotated[int | None, Query(description="Filter by team ID")] = None,
+    granularity: Annotated[str, Query(description="auto | hour | day | week | month")] = "auto",
+    bucket: Annotated[str | None, Query(description="Alias for granularity")] = None,
 ):
     """
     Get dashboard summary metrics including KPIs, evolution charts,
@@ -120,6 +122,8 @@ async def dashboard_summary(
                 detail="Acceso denegado: No tienes permisos para este servicio."
             )
 
+    effective_granularity = bucket or granularity or "auto"
+
     from app.utils.memory_utils import track_memory_async
 
     try:
@@ -145,6 +149,7 @@ async def dashboard_summary(
                 status=norm_status,
                 context=context,
                 team_id=team_id,
+                granularity=effective_granularity,
             )
             return data
     except HTTPException:
