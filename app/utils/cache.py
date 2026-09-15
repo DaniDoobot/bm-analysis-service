@@ -40,40 +40,48 @@ class AnalyticsCache:
         self,
         key: str,
         compute_fn: Callable[[], Coroutine[Any, Any, T]],
-        ttl: int | None = None
+        ttl: int | None = None,
+        bypass_cache: bool = False,
     ) -> tuple[T, bool]:
         """
         Returns (result, cache_hit).
-        If result is cached, returns (result, True).
-        If request is in-flight, awaits the in-flight task and returns (result, True).
-        Otherwise, computes result, caches it for `ttl` seconds, and returns (result, False).
+        If bypass_cache is False and result is cached, returns (result, True).
+        If bypass_cache is False and request is in-flight, awaits the in-flight task and returns (result, True).
+        Otherwise (or when bypass_cache is True), computes result, caches/refreshes it for `ttl` seconds, and returns (result, False).
         """
         effective_ttl = ttl if ttl is not None else self.default_ttl
         now = time.monotonic()
 
-        async with self._lock:
-            self._clean_expired()
+        if not bypass_cache:
+            async with self._lock:
+                self._clean_expired()
 
-            # 1. Check valid cache entry
-            if key in self._store:
-                exp, val = self._store[key]
-                if now <= exp:
-                    return val, True
-                else:
-                    del self._store[key]
+                # 1. Check valid cache entry
+                if key in self._store:
+                    exp, val = self._store[key]
+                    if now <= exp:
+                        return val, True
+                    else:
+                        del self._store[key]
 
-            # 2. Check if identical request is already in-flight
+                # 2. Check if identical request is already in-flight
+                if key in self._inflight:
+                    task = self._inflight[key]
+                    pass
+
             if key in self._inflight:
-                task = self._inflight[key]
-                pass
-
-        if key in self._inflight:
-            try:
-                val = await self._inflight[key]
-                return val, True
-            except Exception:
-                # If in-flight task failed, fallback to computing
-                pass
+                try:
+                    val = await self._inflight[key]
+                    return val, True
+                except Exception:
+                    # If in-flight task failed, fallback to computing
+                    pass
+        else:
+            async with self._lock:
+                self._clean_expired()
+                # Remove cached entry if bypassing so stale value is evicted immediately
+                if key in self._store:
+                    del self._store[key]
 
         # 3. Register new in-flight task under lock
         async with self._lock:

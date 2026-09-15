@@ -446,6 +446,7 @@ async def get_agents_comparison(
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     team_id: Annotated[int | None, Query(description="Filter by team ID")] = None,
+    refresh: Annotated[bool, Query(description="Bypass cached results and fetch fresh data")] = False,
 ):
     """
     Retrieve agents performance comparison breakdown.
@@ -984,7 +985,7 @@ async def get_agents_comparison(
                 agents_with_data_count=agents_with_data_count,
             ), rows_scanned, len(comparison_rows), db_ms
 
-        (resp, rows_scanned, rows_returned, db_ms), is_cache_hit = await analytics_cache.get_or_compute(cache_key, _compute, ttl=30)
+        (resp, rows_scanned, rows_returned, db_ms), is_cache_hit = await analytics_cache.get_or_compute(cache_key, _compute, ttl=30, bypass_cache=refresh)
         total_processing_ms = round((time.perf_counter() - t_start) * 1000.0, 1)
         aggregation_ms = round(max(0.0, total_processing_ms - db_ms), 1)
 
@@ -1049,6 +1050,7 @@ async def get_items_evolution(
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     team_id: Annotated[int | None, Query(description="Filter by team ID")] = None,
+    refresh: Annotated[bool, Query(description="Bypass cached results and fetch fresh data")] = False,
 ):
     """
     Retrieve chronological evolution timeline for chosen analytics metrics.
@@ -1297,7 +1299,7 @@ async def get_items_evolution(
 
             return series_list
 
-        series_res, _ = await analytics_cache.get_or_compute(cache_key, _compute, ttl=30)
+        series_res, _ = await analytics_cache.get_or_compute(cache_key, _compute, ttl=30, bypass_cache=refresh)
         return series_res
     except HTTPException:
         raise

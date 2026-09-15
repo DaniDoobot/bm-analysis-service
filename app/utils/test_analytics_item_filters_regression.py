@@ -23,6 +23,7 @@ from app.core.tenant_context import TenantContext
 from app.core.roles import InternalRole
 from app.models.mass_evaluations import MassEvaluationResult, MassEvaluationCriterionResult
 from app.models.services import Service
+from app.models.users import User
 from app.routers.analytics import get_agents_comparison, get_items_evolution
 from app.utils.cache import analytics_cache
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,6 +46,20 @@ class TestAnalyticsItemFiltersRegression(unittest.IsolatedAsyncioTestCase):
                 is_active=True
             )
             db.add(svc)
+
+            user = User(
+                user_id=101,
+                username="agent_one",
+                email="agent1@test.com",
+                name="Agent One",
+                hubspot_owner_id="owner_1",
+                company_id=1,
+                primary_service_id=1,
+                role="agent",
+                is_active=True,
+                password_hash="dummy"
+            )
+            db.add(user)
 
             now = datetime.now(timezone.utc)
             # Call 1: conexion_emocional=9, empatia=8, cierre_cita=True
