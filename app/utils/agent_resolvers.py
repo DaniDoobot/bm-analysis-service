@@ -42,6 +42,118 @@ def get_fallback_initials(name: Optional[str]) -> str:
     return "??"
 
 
+def get_demo_agent_index(
+    hubspot_owner_id: Optional[Any] = None,
+    agent_name: Optional[str] = None,
+) -> Optional[int]:
+    """
+    Extract 1-based index (1..60) for a demo agent from hubspot_owner_id (e.g. 'demo_owner_01')
+    or agent_name (e.g. 'Agente Demo 01').
+    """
+    if hubspot_owner_id is not None:
+        s_oid = str(hubspot_owner_id).strip()
+        m_oid = re.search(r"demo_owner_(\d+)", s_oid, re.IGNORECASE)
+        if m_oid:
+            idx = int(m_oid.group(1))
+            if 1 <= idx <= 60:
+                return idx
+    if agent_name:
+        s_name = str(agent_name).strip()
+        m_name = re.search(r"agente\s+demo\s+(\d+)", s_name, re.IGNORECASE)
+        if m_name:
+            idx = int(m_name.group(1))
+            if 1 <= idx <= 60:
+                return idx
+    return None
+
+
+def calculate_demo_agent_code(index: int) -> str:
+    """
+    Calculate the official unique visible agent_code for a demo agent index (1..60).
+    - 01..10 -> AC-F01..AC-F10 (Atención al Cliente - Front Atención)
+    - 11..30 -> AC-B01..AC-B20 (Atención al Cliente - Backoffice Atención)
+    - 31..40 -> VT-C01..VT-C10 (Ventas - Equipo Comercial)
+    - 41..60 -> VT-R01..VT-R20 (Ventas - Equipo Retención)
+    """
+    if 1 <= index <= 10:
+        return f"AC-F{index:02d}"
+    elif 11 <= index <= 30:
+        return f"AC-B{(index - 10):02d}"
+    elif 31 <= index <= 40:
+        return f"VT-C{(index - 30):02d}"
+    elif 41 <= index <= 60:
+        return f"VT-R{(index - 40):02d}"
+    return f"DM-{index:02d}"
+
+
+def resolve_demo_agent_code(
+    hubspot_owner_id: Optional[Any] = None,
+    agent_name: Optional[str] = None,
+    persisted_initials: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Resolve unique agent_code for demo agents:
+    1. If persisted_initials matches pattern 'AC-F..', 'AC-B..', 'VT-C..', 'VT-R..', return it.
+    2. Extract index (1..60) from hubspot_owner_id or agent_name and compute code.
+    """
+    if persisted_initials:
+        clean_init = str(persisted_initials).strip().upper()
+        if re.match(r"^(AC-[FB]|VT-[CR])\d{2}$", clean_init):
+            return clean_init
+
+    idx = get_demo_agent_index(hubspot_owner_id=hubspot_owner_id, agent_name=agent_name)
+    if idx is not None:
+        return calculate_demo_agent_code(idx)
+
+    return None
+
+
+def is_demo_agent_code(code: Optional[Any]) -> bool:
+    """Check if a given code matches the demo pattern e.g. 'AC-F01', 'AC-B02', 'VT-C03', 'VT-R04'."""
+    if not code:
+        return False
+    return bool(re.match(r"^(AC-[FB]|VT-[CR])\d{2}$", str(code).strip().upper()))
+
+
+def resolve_agent_code(
+    hubspot_owner_id: Optional[Any] = None,
+    agent_name: Optional[str] = None,
+    company_id: Optional[int] = None,
+    is_demo: bool = False,
+    persisted_initials: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Resolve agent_code:
+    - For demo company (company_id == 6, is_demo=True, or demo_owner_*/Agente Demo*):
+      Returns structured code e.g. 'AC-F01'.
+    - For real companies (e.g. Boston Medical, company_id=1):
+      Fallback to agent_name if no explicit code exists.
+    """
+    is_demo_agent = (
+        is_demo
+        or company_id == 6
+        or (hubspot_owner_id and "demo_owner_" in str(hubspot_owner_id).lower())
+        or (agent_name and "agente demo" in str(agent_name).lower())
+        or (persisted_initials and re.match(r"^(AC-[FB]|VT-[CR])\d{2}$", str(persisted_initials).strip().upper()))
+    )
+
+    if is_demo_agent:
+        demo_code = resolve_demo_agent_code(
+            hubspot_owner_id=hubspot_owner_id,
+            agent_name=agent_name,
+            persisted_initials=persisted_initials,
+        )
+        if demo_code:
+            return demo_code
+
+    # Real company: fallback to agent_name or str(hubspot_owner_id)
+    if agent_name and str(agent_name).strip():
+        return str(agent_name).strip()
+    if hubspot_owner_id is not None:
+        return str(hubspot_owner_id).strip()
+    return None
+
+
 async def build_user_initials_maps(
     db: AsyncSession, company_id: Optional[int] = None
 ) -> Tuple[Dict[str, str], Dict[str, str], List[Dict[str, Any]]]:
@@ -65,27 +177,35 @@ async def build_user_initials_maps(
     users_list: List[Dict[str, Any]] = []
 
     for u in users:
-        init = (u.agent_initials or "").strip().upper()
-        if u.hubspot_owner_id and init:
-            by_owner[str(u.hubspot_owner_id).strip()] = init
+        # Check if user has explicit initials or demo code
+        init = (u.agent_initials or "").strip()
+        demo_c = resolve_demo_agent_code(
+            hubspot_owner_id=u.hubspot_owner_id,
+            agent_name=u.name,
+            persisted_initials=init,
+        )
+        if demo_c:
+            init = demo_c
 
         u_dict = {
             "user_id": u.user_id,
-            "hubspot_owner_id": str(u.hubspot_owner_id).strip() if u.hubspot_owner_id else None,
-            "primary_team_id": u.primary_team_id,
-            "primary_service_id": u.primary_service_id,
             "company_id": u.company_id,
+            "primary_service_id": u.primary_service_id,
+            "primary_team_id": u.primary_team_id,
+            "hubspot_owner_id": u.hubspot_owner_id,
             "name": u.name,
             "username": u.username,
             "email": u.email,
-            "agent_initials": init if init else None,
+            "agent_initials": init,
             "norm_name": normalize_name_key(u.name),
             "norm_username": normalize_name_key(u.username),
-            "norm_email_prefix": normalize_name_key(u.email.split("@")[0]) if u.email and "@" in u.email else "",
+            "norm_email_prefix": normalize_name_key(u.email.split("@")[0]) if u.email else "",
         }
         users_list.append(u_dict)
 
         if init:
+            if u.hubspot_owner_id:
+                by_owner[str(u.hubspot_owner_id).strip()] = init
             if u_dict["norm_name"]:
                 by_name[u_dict["norm_name"]] = init
             if u_dict["norm_username"]:
@@ -107,11 +227,21 @@ def resolve_agent_initials(
 ) -> str:
     """
     Resolve agent initials prioritizing:
+    0. demo agent unique code (AC-F01, etc.) if it's a demo agent
     1. bm_users.agent_initials by hubspot_owner_id
     2. bm_users.agent_initials by normalized name match if unique
     3. persisted initials in result if present
     4. fallback calculated by name
     """
+    # 0. Demo agent code priority
+    demo_code = resolve_demo_agent_code(
+        hubspot_owner_id=hubspot_owner_id,
+        agent_name=agent_name,
+        persisted_initials=persisted_initials,
+    )
+    if demo_code:
+        return demo_code
+
     # 1. By hubspot_owner_id
     if hubspot_owner_id is not None:
         oid_str = str(hubspot_owner_id).strip()

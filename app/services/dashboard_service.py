@@ -912,7 +912,7 @@ async def get_dashboard_summary(
                 agent_data[bucket_key]["citas"] += 1
 
     # ── Agent ranking & initials resolution ──
-    from app.utils.agent_resolvers import build_user_initials_maps, resolve_agent_initials
+    from app.utils.agent_resolvers import build_user_initials_maps, resolve_agent_initials, resolve_agent_code
 
     by_owner, by_name, users_list = await build_user_initials_maps(db, company_id=effective_company_id)
 
@@ -929,8 +929,15 @@ async def get_dashboard_summary(
             by_name=by_name,
             users_list=users_list,
         )
+        agent_code = resolve_agent_code(
+            hubspot_owner_id=owner_id,
+            agent_name=name,
+            company_id=effective_company_id,
+        )
         ranking.append({
             "agente_telefonico": name,
+            "name": name,
+            "agent_code": agent_code,
             "hubspot_owner_id": owner_id,
             "initials": initials,
             "agent_initials": initials,
@@ -1262,9 +1269,22 @@ async def get_agents_list(
         u_team_id = getattr(u_obj, "primary_team_id", None) if u_obj else None
         u_user_id = getattr(u_obj, "user_id", None) if u_obj else None
         u_team_name = team_names_map.get(u_team_id) if u_team_id is not None else None
+        u_persisted = getattr(u_obj, "agent_initials", None) if u_obj else None
 
-        # Build descriptive label: "Nombre · Equipo" if team name is known, else just "Nombre"
-        if u_team_name:
+        from app.utils.agent_resolvers import resolve_agent_code, is_demo_agent_code
+        agent_code = resolve_agent_code(
+            hubspot_owner_id=oid,
+            agent_name=name,
+            company_id=effective_company_id,
+            persisted_initials=u_persisted,
+        )
+
+        # Build descriptive label:
+        # For demo agents: "AC-F01 · Agente Demo 01"
+        # For real companies: "Nombre · Equipo" if team name is known, else just "Nombre"
+        if is_demo_agent_code(agent_code):
+            label = f"{agent_code} · {name}"
+        elif u_team_name:
             label = f"{name} · {u_team_name}"
         else:
             label = name
@@ -1275,6 +1295,7 @@ async def get_agents_list(
             "hubspot_owner_id": oid,
             "name": name,
             "agent_name": name,
+            "agent_code": agent_code,
             "agent_initials": initials,
             "initials": initials,
             "label": label,
@@ -1683,8 +1704,57 @@ async def get_agent_evolution(
             "execution_source": r.execution_source
         })
 
+    # Resolve agent user details
+    stmt_u = select(User).where(User.hubspot_owner_id == hubspot_owner_id)
+    if effective_company_id is not None:
+        stmt_u = stmt_u.where(or_(User.company_id == effective_company_id, User.company_id.is_(None)))
+    res_u = await db.execute(stmt_u)
+    u_obj = res_u.scalars().first()
+
+    u_user_id = getattr(u_obj, "user_id", None) if u_obj else None
+    u_team_id = getattr(u_obj, "primary_team_id", None) if u_obj else None
+    u_team_name = None
+    if u_team_id is not None:
+        from app.models.teams import Team as TeamModel
+        stmt_t = select(TeamModel.team_name).where(TeamModel.team_id == u_team_id)
+        res_t = await db.execute(stmt_t)
+        u_team_name = res_t.scalar()
+
+    from app.utils.agent_resolvers import resolve_agent_code, resolve_agent_initials, is_demo_agent_code
+    u_persisted = getattr(u_obj, "agent_initials", None) if u_obj else None
+    agent_code = resolve_agent_code(
+        hubspot_owner_id=hubspot_owner_id,
+        agent_name=agent_name,
+        company_id=effective_company_id,
+        persisted_initials=u_persisted,
+    )
+    initials = resolve_agent_initials(
+        hubspot_owner_id=hubspot_owner_id,
+        agent_name=agent_name,
+        persisted_initials=u_persisted,
+    )
+    if is_demo_agent_code(agent_code):
+        label = f"{agent_code} · {agent_name}"
+    elif u_team_name:
+        label = f"{agent_name} · {u_team_name}"
+    else:
+        label = agent_name
+
     return {
-        "agent": {"hubspot_owner_id": hubspot_owner_id, "agent_name": agent_name},
+        "agent": {
+            "user_id": u_user_id,
+            "id": u_user_id,
+            "hubspot_owner_id": hubspot_owner_id,
+            "agent_name": agent_name,
+            "name": agent_name,
+            "agent_code": agent_code,
+            "agent_initials": initials or agent_code,
+            "initials": initials or agent_code,
+            "label": label,
+            "service_id": eff_service_id,
+            "team_id": u_team_id,
+            "team_name": u_team_name,
+        },
         "period": period,
         "source": "mass_evaluations",
         "generated_at": now.isoformat(),

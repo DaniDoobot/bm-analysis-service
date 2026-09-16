@@ -10,7 +10,10 @@ from pydantic import BaseModel, Field
 class TrainingAgentSettingBase(BaseModel):
     hubspot_owner_id: str
     agent_name: str
+    name: Optional[str] = None
+    agent_code: Optional[str] = None
     agent_initials: str
+    team_name: Optional[str] = None
     company_id: Optional[int] = None
     is_enabled: bool = True
     training_code: Optional[str] = None
@@ -138,7 +141,10 @@ class TrainingAgentReportBase(BaseModel):
     service_id: Optional[int] = None
     hubspot_owner_id: str
     agent_name: str
+    name: Optional[str] = None
+    agent_code: Optional[str] = None
     agent_initials: str
+    team_name: Optional[str] = None
     period_start: datetime
     period_end: datetime
     status: str
@@ -208,8 +214,11 @@ class TrainingRunResponse(BaseModel):
 
 class AgentOverviewItem(BaseModel):
     hubspot_owner_id: str
-    agent_initials: str
     agent_name: str
+    name: Optional[str] = None
+    agent_code: Optional[str] = None
+    agent_initials: str
+    team_name: Optional[str] = None
     is_enabled: bool
     current_report_id: Optional[int] = None
     current_period_start: Optional[datetime] = None

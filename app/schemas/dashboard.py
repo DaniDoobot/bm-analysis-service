@@ -139,6 +139,7 @@ class AgentInfo(BaseModel):
     hubspot_owner_id: str
     agent_name: str
     name: str | None = None
+    agent_code: str | None = None
     agent_initials: str | None = None
     initials: str | None = None
     label: str | None = None

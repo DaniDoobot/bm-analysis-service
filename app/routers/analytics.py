@@ -980,14 +980,19 @@ async def get_agents_comparison(
                 base = cat_by_oid[oid]
                 agents_list.append(
                     AgentInfo(
+                        user_id=base.user_id,
+                        id=base.id,
                         hubspot_owner_id=oid,
                         agent_name=base.agent_name,
                         name=base.name,
+                        agent_code=base.agent_code,
                         agent_initials=base.agent_initials,
                         initials=base.initials,
                         label=base.label,
                         service_id=base.service_id or eff_service_id,
                         service_name=base.service_name,
+                        team_id=base.team_id,
+                        team_name=base.team_name,
                         has_data=has_data,
                         analysis_count=analysis_count,
                     )
@@ -1512,9 +1517,22 @@ async def get_available_agents(
         u_team_id = getattr(u_obj, "primary_team_id", None) if u_obj else None
         u_user_id = getattr(u_obj, "user_id", None) if u_obj else None
         u_team_name = team_names_map.get(u_team_id) if u_team_id is not None else None
+        u_persisted = getattr(u_obj, "agent_initials", None) if u_obj else None
 
-        # Build descriptive label: "Nombre · Equipo" if team is known, else just "Nombre"
-        if u_team_name:
+        from app.utils.agent_resolvers import resolve_agent_code, is_demo_agent_code
+        agent_code = resolve_agent_code(
+            hubspot_owner_id=oid,
+            agent_name=disp_name,
+            company_id=effective_company_id,
+            persisted_initials=u_persisted,
+        )
+
+        # Build descriptive label:
+        # For demo agents: "AC-F01 · Agente Demo 01"
+        # For real companies: "Nombre · Equipo" if team is known, else just "Nombre"
+        if is_demo_agent_code(agent_code):
+            label = f"{agent_code} · {disp_name}"
+        elif u_team_name:
             label = f"{disp_name} · {u_team_name}"
         else:
             label = disp_name
@@ -1526,6 +1544,7 @@ async def get_available_agents(
                 hubspot_owner_id=oid,
                 agent_name=disp_name,
                 name=disp_name,
+                agent_code=agent_code,
                 agent_initials=initials,
                 initials=initials,
                 label=label,

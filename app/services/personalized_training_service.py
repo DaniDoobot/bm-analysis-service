@@ -396,10 +396,20 @@ class PersonalizedTrainingService:
                     else:
                         latest_cycle_status = "in_progress"
 
+            from app.utils.agent_resolvers import resolve_agent_code
+            agent_code = resolve_agent_code(
+                hubspot_owner_id=s.hubspot_owner_id,
+                agent_name=s.agent_name,
+                company_id=s.company_id,
+                persisted_initials=s.agent_initials,
+            )
             item = {
                 "hubspot_owner_id": s.hubspot_owner_id,
                 "agent_name": s.agent_name,
+                "name": s.agent_name,
+                "agent_code": agent_code,
                 "agent_initials": s.agent_initials,
+                "team_name": None,
                 "is_enabled": s.is_enabled,
                 "current_report_id": None,
                 "current_period_start": None,
@@ -428,7 +438,7 @@ class PersonalizedTrainingService:
                 "latest_cycle_progress_total": latest_cycle_progress_total,
                 "latest_cycle_period_start": latest_cycle_period_start,
                 "latest_cycle_period_end": latest_cycle_period_end,
-                "latest_cycle_avg_score": latest_cycle_avg_score
+                "latest_cycle_avg_score": latest_cycle_avg_score,
             }
 
             if report:
@@ -458,11 +468,21 @@ class PersonalizedTrainingService:
     def _map_setting_to_dict(s: TrainingAgentSetting) -> Optional[dict]:
         if not s:
             return None
+        from app.utils.agent_resolvers import resolve_agent_code
+        agent_code = resolve_agent_code(
+            hubspot_owner_id=s.hubspot_owner_id,
+            agent_name=s.agent_name,
+            company_id=s.company_id,
+            persisted_initials=s.agent_initials,
+        )
         return {
             "setting_id": s.setting_id,
             "hubspot_owner_id": s.hubspot_owner_id,
             "agent_name": s.agent_name,
+            "name": s.agent_name,
+            "agent_code": agent_code,
             "agent_initials": s.agent_initials,
+            "team_name": None,
             "is_enabled": s.is_enabled,
             "training_code": s.training_code,
             "training_numeric_code": s.training_numeric_code,
