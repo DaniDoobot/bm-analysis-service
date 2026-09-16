@@ -27,9 +27,10 @@ def compile_bigint_sqlite(type_, compiler, **kw):
     return "INTEGER"
 
 from httpx import AsyncClient, ASGITransport
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-from app.db import get_engine, Base
+from app.db import Base
+from app.dependencies import get_db
 from app.main import app
 from app.models.companies import Company
 from app.models.services import Service
@@ -41,18 +42,26 @@ from app.utils.security import create_access_token
 class TestAgentEvolutionServiceFilter(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
-        engine = get_engine()
-        if os.path.exists("agent_evolution_svc_test.db"):
+        db_path = "agent_evolution_svc_test.db"
+        if os.path.exists(db_path):
             try:
-                os.remove("agent_evolution_svc_test.db")
+                os.remove(db_path)
             except Exception:
                 pass
+
+        engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
 
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
             await conn.run_sync(Base.metadata.create_all)
 
         self.engine = engine
+
+        async def override_get_db():
+            async with AsyncSession(engine, expire_on_commit=False) as session:
+                yield session
+
+        app.dependency_overrides[get_db] = override_get_db
 
         async with AsyncSession(engine) as db:
             c1 = Company(company_id=1, company_name="Boston Medical", company_key="boston_medical", is_active=True)
@@ -120,6 +129,17 @@ class TestAgentEvolutionServiceFilter(unittest.IsolatedAsyncioTestCase):
             data = res.json()
             self.assertEqual(data["summary"]["total_analyses"], 0.0)
             self.assertEqual(data["trend"]["evaluacion_global_direction"], "no_data")
+
+    async def asyncTearDown(self):
+        app.dependency_overrides.clear()
+        if hasattr(self, "engine"):
+            await self.engine.dispose()
+        db_path = "agent_evolution_svc_test.db"
+        if os.path.exists(db_path):
+            try:
+                os.remove(db_path)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

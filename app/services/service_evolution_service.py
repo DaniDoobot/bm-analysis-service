@@ -206,9 +206,9 @@ class ServiceEvolutionService:
         else:
             where_clause = "WHERE r.status = 'completed'"
 
-        if team_id is not None or service_id is not None:
+        if team_id is not None or service_id is not None or effective_company_id is not None:
             from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
-            await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context)
+            await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context, company_id=effective_company_id)
             if team_id is not None:
                 team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=effective_company_id)
                 where_clause += f" AND r.hubspot_owner_id IN {_format_str_list(team_owner_ids)}"
@@ -418,9 +418,9 @@ class ServiceEvolutionService:
                     extra_sql += f" AND r.hubspot_owner_id IN {_format_str_list(context.allowed_agent_ids)}"
                     extra_sql_left_join += f" AND r.hubspot_owner_id IN {_format_str_list(context.allowed_agent_ids)}"
 
-        if team_id is not None or service_id is not None:
+        if team_id is not None or service_id is not None or effective_company_id is not None:
             from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
-            await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context)
+            await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context, company_id=effective_company_id, hubspot_owner_id=agent_owner_id)
             if team_id is not None:
                 team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=effective_company_id)
                 if agent_owner_id:

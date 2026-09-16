@@ -36,6 +36,7 @@ from app.core.tenant_context import TenantContext
 from app.core.roles import InternalRole
 from app.schemas.multitenancy import CompanyResponse
 from app.utils.team_resolvers import (
+    validate_team_service_cascade,
     get_team_assigned_owner_ids,
     get_service_assigned_users,
 )
@@ -43,7 +44,8 @@ from app.utils.service_resolvers import resolve_service_id
 from app.services.dashboard_service import get_dashboard_summary, get_agents_list
 from app.services.service_evolution_service import ServiceEvolutionService
 from app.services.mass_evaluation_service import MassEvaluationService
-from app.routers.analytics import get_available_agents
+from app.routers.analytics import get_available_agents, get_filter_options
+from app.routers.services import list_services
 
 
 class TestMultiCompanyAnalyticsFilters(unittest.IsolatedAsyncioTestCase):
@@ -355,6 +357,201 @@ class TestMultiCompanyAnalyticsFilters(unittest.IsolatedAsyncioTestCase):
                 if company_id not in context.allowed_company_ids:
                     raise HTTPException(status_code=403, detail="Acceso denegado a otra empresa.")
         self.assertEqual(cm.exception.status_code, 403)
+
+    async def test_filter_options_cascading_and_unified_response(self):
+        """get_filter_options must return scoped companies, services, teams, agents, typologies for company_id."""
+        async with self.async_session() as db:
+            # Company 6 scope
+            res_c6 = await get_filter_options(
+                context=self.superadmin_ctx,
+                company_id=6,
+                db=db,
+            )
+            self.assertIn("companies", res_c6)
+            self.assertIn("services", res_c6)
+            self.assertIn("teams", res_c6)
+            self.assertIn("agents", res_c6)
+            self.assertIn("typologies", res_c6)
+
+            # Services for Company 6: exactly service 6
+            s_ids_c6 = [s["service_id"] for s in res_c6["services"]]
+            self.assertEqual(s_ids_c6, [6])
+
+            # Teams for Company 6: exactly team 6
+            t_ids_c6 = [t["team_id"] for t in res_c6["teams"]]
+            self.assertEqual(t_ids_c6, [6])
+
+            # Agents for Company 6: exactly agent_demo_6
+            agent_owners_c6 = [a.hubspot_owner_id for a in res_c6["agents"]]
+            self.assertEqual(agent_owners_c6, ["agent_demo_6"])
+
+            # Company 1 scope
+            res_c1 = await get_filter_options(
+                context=self.superadmin_ctx,
+                company_id=1,
+                db=db,
+            )
+            s_ids_c1 = [s["service_id"] for s in res_c1["services"]]
+            self.assertIn(1, s_ids_c1)
+            self.assertIn(2, s_ids_c1)
+            self.assertNotIn(6, s_ids_c1)
+
+            t_ids_c1 = [t["team_id"] for t in res_c1["teams"]]
+            self.assertIn(1, t_ids_c1)
+            self.assertNotIn(6, t_ids_c1)
+
+            agent_owners_c1 = [a.hubspot_owner_id for a in res_c1["agents"]]
+            self.assertIn("agent_bm_1", agent_owners_c1)
+            self.assertIn("agent_bm_2", agent_owners_c1)
+            self.assertNotIn("agent_demo_6", agent_owners_c1)
+
+    async def test_retroactive_cascade_service_mismatch_rejection(self):
+        """Cross-company mismatch (service from company 1 queried under company 6) must reject with 400."""
+        from fastapi import HTTPException
+        async with self.async_session() as db:
+            # 1. Direct cascade validation
+            with self.assertRaises(HTTPException) as cm:
+                await validate_team_service_cascade(
+                    db,
+                    service_id=1,  # Belongs to Company 1
+                    company_id=6,   # Queried under Company 6
+                )
+            self.assertEqual(cm.exception.status_code, 400)
+            self.assertIn("El servicio seleccionado no pertenece a la empresa indicada", cm.exception.detail)
+
+            # 2. Service resolution rejection
+            with self.assertRaises(HTTPException) as cm_res:
+                await resolve_service_id(
+                    db,
+                    service_id=1,
+                    company_ids=[6]
+                )
+            self.assertEqual(cm_res.exception.status_code, 400)
+            self.assertIn("El servicio seleccionado no pertenece a la empresa indicada", cm_res.exception.detail)
+
+            # 3. get_filter_options rejection
+            with self.assertRaises(HTTPException) as cm_opt:
+                await get_filter_options(
+                    context=self.superadmin_ctx,
+                    company_id=6,
+                    service_id=1,
+                    db=db,
+                )
+            self.assertEqual(cm_opt.exception.status_code, 400)
+
+    async def test_retroactive_cascade_team_mismatch_rejection(self):
+        """Cross-company mismatch (team from company 1 queried under company 6) must reject with 400."""
+        from fastapi import HTTPException
+        async with self.async_session() as db:
+            with self.assertRaises(HTTPException) as cm:
+                await validate_team_service_cascade(
+                    db,
+                    team_id=1,     # Belongs to Company 1
+                    company_id=6,   # Queried under Company 6
+                )
+            self.assertEqual(cm.exception.status_code, 400)
+            self.assertIn("El equipo seleccionado no pertenece a la empresa indicada", cm.exception.detail)
+
+            with self.assertRaises(HTTPException) as cm_opt:
+                await get_filter_options(
+                    context=self.superadmin_ctx,
+                    company_id=6,
+                    team_id=1,
+                    db=db,
+                )
+            self.assertEqual(cm_opt.exception.status_code, 400)
+
+    async def test_list_services_company_isolation(self):
+        """list_services must strictly isolate services by company_id and enforce tenant permissions."""
+        from fastapi import HTTPException
+        async with self.async_session() as db:
+            # Superadmin querying company 6
+            svcs_c6 = await list_services(
+                context=self.superadmin_ctx,
+                company_id=6,
+                db=db,
+            )
+            self.assertEqual(len(svcs_c6), 1)
+            self.assertEqual(svcs_c6[0].service_id, 6)
+
+            # Superadmin querying company 1
+            svcs_c1 = await list_services(
+                context=self.superadmin_ctx,
+                company_id=1,
+                db=db,
+            )
+            s_ids_c1 = [s.service_id for s in svcs_c1]
+            self.assertIn(1, s_ids_c1)
+            self.assertIn(2, s_ids_c1)
+            self.assertNotIn(6, s_ids_c1)
+
+            # Company 1 admin attempting to list company 6 services -> 403
+            with self.assertRaises(HTTPException) as cm:
+                await list_services(
+                    context=self.c1_admin_ctx,
+                    company_id=6,
+                    db=db,
+                )
+            self.assertEqual(cm.exception.status_code, 403)
+
+    async def test_retroactive_cascade_service_demo_under_c1_rejection(self):
+        """Querying Demo service (service_id=6) under company_id=1 must reject with 400."""
+        from fastapi import HTTPException
+        async with self.async_session() as db:
+            with self.assertRaises(HTTPException) as cm:
+                await validate_team_service_cascade(
+                    db,
+                    service_id=6,   # Belongs to Company 6 (Demo)
+                    company_id=1,   # Queried under Company 1 (BM)
+                )
+            self.assertEqual(cm.exception.status_code, 400)
+            self.assertIn("El servicio seleccionado no pertenece a la empresa indicada", cm.exception.detail)
+
+    async def test_retroactive_cascade_agent_mismatch_rejection(self):
+        """Querying an agent belonging to company 1 under company 6 (or vice versa) must reject with 400."""
+        from fastapi import HTTPException
+        async with self.async_session() as db:
+            # 1. Direct cascade validation with BM agent under company 6
+            with self.assertRaises(HTTPException) as cm1:
+                await validate_team_service_cascade(
+                    db,
+                    company_id=6,
+                    hubspot_owner_id="agent_bm_1",
+                )
+            self.assertEqual(cm1.exception.status_code, 400)
+            self.assertIn("El agente seleccionado no pertenece a la empresa indicada", cm1.exception.detail)
+
+            # 2. Direct cascade validation with Demo agent under company 1
+            with self.assertRaises(HTTPException) as cm2:
+                await validate_team_service_cascade(
+                    db,
+                    company_id=1,
+                    hubspot_owner_id="agent_demo_6",
+                )
+            self.assertEqual(cm2.exception.status_code, 400)
+            self.assertIn("El agente seleccionado no pertenece a la empresa indicada", cm2.exception.detail)
+
+    async def test_real_company_names_and_no_demo_codes(self):
+        """Boston Medical (company_id=1) must maintain real agent names and NO demo codes (AC/VT)."""
+        async with self.async_session() as db:
+            agents_c1 = await get_available_agents(
+                db,
+                context=self.superadmin_ctx,
+                company_id=1,
+            )
+            # Find agent_bm_1 and agent_bm_2
+            bm_names = {a.hubspot_owner_id: a.agent_name for a in agents_c1}
+            bm_codes = {a.hubspot_owner_id: a.agent_code for a in agents_c1}
+
+            self.assertEqual(bm_names.get("agent_bm_1"), "Agente BM 1")
+            self.assertEqual(bm_names.get("agent_bm_2"), "Agente BM 2")
+
+            # Must NOT use demo code pattern (AC-F, AC-B, VT-C, VT-R)
+            for oid, code in bm_codes.items():
+                self.assertFalse(
+                    code.startswith("AC-") or code.startswith("VT-"),
+                    f"Agent {oid} in company 1 unexpectedly received demo code {code}"
+                )
 
 
 if __name__ == "__main__":

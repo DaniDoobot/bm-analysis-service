@@ -482,9 +482,9 @@ async def get_dashboard_summary(
         if company_id not in context.allowed_company_ids:
             raise HTTPException(status_code=403, detail="Acceso denegado a otra empresa.")
 
-    if team_id is not None or service_id is not None:
+    if team_id is not None or service_id is not None or effective_company_id is not None:
         from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
-        await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context)
+        await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context, company_id=effective_company_id)
         team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=effective_company_id) if team_id is not None else None
     else:
         team_owner_ids = None
@@ -1087,9 +1087,9 @@ async def get_agents_list(
         company_ids=[effective_company_id] if effective_company_id is not None else (None if (context and context.is_super_admin) else (context.allowed_company_ids if context else None))
     )
 
-    if team_id is not None or eff_service_id is not None:
+    if team_id is not None or eff_service_id is not None or effective_company_id is not None:
         from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
-        await validate_team_service_cascade(db, service_id=eff_service_id, team_id=team_id, context=context)
+        await validate_team_service_cascade(db, service_id=eff_service_id, team_id=team_id, context=context, company_id=effective_company_id)
         team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=effective_company_id) if team_id is not None else None
     else:
         team_owner_ids = None
@@ -1860,9 +1860,9 @@ async def get_objections_breakdown(
         if company_id not in context.allowed_company_ids:
             raise HTTPException(status_code=403, detail="Acceso denegado a otra empresa.")
 
-    if team_id is not None or service_id is not None:
+    if team_id is not None or service_id is not None or effective_company_id is not None:
         from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
-        await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context)
+        await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context, company_id=effective_company_id)
         team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=effective_company_id) if team_id is not None else None
     else:
         team_owner_ids = None
@@ -2290,9 +2290,9 @@ async def get_agents_comparison(
         if company_id not in context.allowed_company_ids:
             raise HTTPException(status_code=403, detail="Acceso denegado a otra empresa.")
 
-    if team_id is not None or service_id is not None:
+    if team_id is not None or service_id is not None or effective_company_id is not None:
         from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
-        await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context)
+        await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context, company_id=effective_company_id)
         team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=effective_company_id) if team_id is not None else None
     else:
         team_owner_ids = None

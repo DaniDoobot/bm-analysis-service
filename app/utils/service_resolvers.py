@@ -24,15 +24,31 @@ async def resolve_service_id(
     Returns (resolved_service_id, resolved_service_key).
     If a string service is provided but cannot be resolved, raises 422 Unprocessable Entity.
     """
+    # Build company filtering clause if company_ids provided
+    company_clause = None
+    if company_ids:
+        if 1 in company_ids:
+            company_clause = or_(Service.company_id.in_(company_ids), Service.company_id.is_(None))
+        else:
+            company_clause = Service.company_id.in_(company_ids)
+
     # 1. Direct integer service_id
     if service_id is not None:
         stmt = select(Service).where(Service.service_id == service_id)
-        if company_ids:
-            stmt = stmt.where(Service.company_id.in_(company_ids))
+        if company_clause is not None:
+            stmt = stmt.where(company_clause)
         res = await db.execute(stmt)
         svc = res.scalar_one_or_none()
         if svc:
             return svc.service_id, svc.service_key
+        # If company_ids was specified and service exists under another company, reject with 400
+        if company_ids:
+            res_any = await db.execute(select(Service).where(Service.service_id == service_id))
+            if res_any.scalar_one_or_none() is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="El servicio seleccionado no pertenece a la empresa indicada."
+                )
         return service_id, service_key
 
     # 2. Extract raw string param from service_param or service_key
@@ -67,8 +83,8 @@ async def resolve_service_id(
             func.lower(func.replace(func.replace(func.replace(Service.service_name, "-", ""), "_", ""), " ", "")) == raw_clean,
         )
     )
-    if company_ids:
-        stmt = stmt.where(Service.company_id.in_(company_ids))
+    if company_clause is not None:
+        stmt = stmt.where(company_clause)
 
     res = await db.execute(stmt)
     svc = res.scalar_one_or_none()
@@ -82,8 +98,8 @@ async def resolve_service_id(
             func.lower(Service.service_key).like(f"%{raw_lower}%")
         )
     )
-    if company_ids:
-        stmt_like = stmt_like.where(Service.company_id.in_(company_ids))
+    if company_clause is not None:
+        stmt_like = stmt_like.where(company_clause)
     svcs = (await db.execute(stmt_like)).scalars().all()
     if len(svcs) == 1:
         return svcs[0].service_id, svcs[0].service_key

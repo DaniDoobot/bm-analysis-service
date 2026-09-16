@@ -2,7 +2,7 @@
 import re
 from typing import Annotated, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_db, get_tenant_context
@@ -19,9 +19,9 @@ router = APIRouter(prefix="/bm/services", tags=["Services"])
 @router.get("", response_model=list[ServiceOut])
 async def list_services(
     context: Annotated[TenantContext, Depends(get_tenant_context)],
-    company_id: Optional[int] = Query(None),
-    is_active: Optional[bool] = Query(None),
-    include_inactive: bool = Query(True),
+    company_id: Annotated[Optional[int], Query()] = None,
+    is_active: Annotated[Optional[bool], Query()] = None,
+    include_inactive: Annotated[bool, Query()] = True,
     db: AsyncSession = Depends(get_db)
 ):
     """Retrieve all services accessible by the authenticated user's context, with optional filters."""
@@ -29,7 +29,10 @@ async def list_services(
 
     if not context.is_super_admin:
         # Constrain to user's assigned company
-        stmt = stmt.where(Service.company_id == context.company_id)
+        if context.company_id == 1:
+            stmt = stmt.where(or_(Service.company_id == 1, Service.company_id.is_(None)))
+        else:
+            stmt = stmt.where(Service.company_id == context.company_id)
         if company_id is not None and company_id != context.company_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -40,7 +43,10 @@ async def list_services(
             stmt = stmt.where(Service.service_id.in_(context.allowed_service_ids))
     else:
         if company_id is not None:
-            stmt = stmt.where(Service.company_id == company_id)
+            if company_id == 1:
+                stmt = stmt.where(or_(Service.company_id == 1, Service.company_id.is_(None)))
+            else:
+                stmt = stmt.where(Service.company_id == company_id)
 
     if is_active is not None:
         stmt = stmt.where(Service.is_active == is_active)
@@ -70,7 +76,8 @@ async def get_service(
 
     # Permission check
     if not context.is_super_admin:
-        if service.company_id != context.company_id:
+        eff_svc_comp = service.company_id if service.company_id is not None else 1
+        if eff_svc_comp != context.company_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Acceso denegado a servicios de otra empresa."

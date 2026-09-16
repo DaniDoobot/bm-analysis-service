@@ -327,8 +327,8 @@ async def _resolve_training_agent_scope(
         coord_agents = context.allowed_agent_ids or []
         base_role_set = set(coord_agents)
 
-    if service_id is not None or team_id is not None:
-        await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context)
+    if service_id is not None or team_id is not None or company_id is not None:
+        await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context, company_id=company_id)
 
     target_filter_set: Optional[set[str]] = None
     if team_id is not None:

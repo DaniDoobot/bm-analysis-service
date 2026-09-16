@@ -20,20 +20,71 @@ async def validate_team_service_cascade(
     service_id: Optional[int] = None,
     team_id: Optional[int] = None,
     context: Optional[TenantContext] = None,
+    company_id: Optional[int] = None,
+    hubspot_owner_id: Optional[str] = None,
 ) -> None:
     """
-    Validates that team_id exists, belongs to tenant context, and belongs to service_id
-    if service_id is provided.
-    If team does not belong to service_id, raises HTTP 400 with detail:
-    'El equipo seleccionado no pertenece al servicio indicado.'
+    Validates that:
+    1. If company_id is provided (or resolved from context), service, team, and agent belong to this company.
+       If mismatched, raises HTTP 400 Bad Request:
+       - 'El servicio seleccionado no pertenece a la empresa indicada.'
+       - 'El equipo seleccionado no pertenece a la empresa indicada.'
+       - 'El agente seleccionado no pertenece a la empresa indicada.'
+    2. If service_id is provided, checks permissions.
+    3. If team_id is provided, team exists, checks permissions, and if service_id is provided,
+       validates team.service_id == service_id (raising 400 if mismatched).
+    4. If hubspot_owner_id is provided and team_id is provided, validates agent belongs to team.
     """
-    # 1. Service permission check if service_id is provided
-    if service_id is not None and context and not context.is_super_admin:
-        if context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Acceso denegado: No tienes permisos para este servicio."
-            )
+    eff_company_id = company_id
+    if eff_company_id is None and context and not context.is_super_admin:
+        eff_company_id = context.company_id
+
+    # 1. Validate service if service_id is provided
+    if service_id is not None:
+        from app.models.services import Service
+        stmt_s = select(Service).where(Service.service_id == service_id)
+        res_s = await db.execute(stmt_s)
+        service = res_s.scalar_one_or_none()
+        if service is not None:
+            # Check company cascade
+            if eff_company_id is not None:
+                svc_comp = service.company_id
+                if eff_company_id == 1:
+                    is_match = (svc_comp == 1 or svc_comp is None)
+                else:
+                    is_match = (svc_comp == eff_company_id)
+                if not is_match:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="El servicio seleccionado no pertenece a la empresa indicada."
+                    )
+        # Service permission check
+        if context and not context.is_super_admin:
+            if context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: No tienes permisos para este servicio."
+                )
+
+    # 2. Validate agent if hubspot_owner_id is provided
+    if hubspot_owner_id is not None and str(hubspot_owner_id).strip():
+        clean_agent_id = str(hubspot_owner_id).strip()
+        from app.models.users import User
+        stmt_u = select(User).where(User.hubspot_owner_id == clean_agent_id)
+        res_u = await db.execute(stmt_u)
+        agent_user = res_u.scalars().first()
+        if agent_user is not None:
+            if eff_company_id is not None:
+                ag_comp = agent_user.company_id
+                if eff_company_id == 1:
+                    is_match = (ag_comp == 1 or ag_comp is None)
+                else:
+                    is_match = (ag_comp == eff_company_id)
+                if not is_match:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="El agente seleccionado no pertenece a la empresa indicada."
+                    )
 
     if team_id is None:
         return
@@ -49,6 +100,19 @@ async def validate_team_service_cascade(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Equipo no encontrado."
         )
+
+    # Validate team company cascade
+    if eff_company_id is not None:
+        tm_comp = team.company_id
+        if eff_company_id == 1:
+            is_match = (tm_comp == 1 or tm_comp is None)
+        else:
+            is_match = (tm_comp == eff_company_id)
+        if not is_match:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El equipo seleccionado no pertenece a la empresa indicada."
+            )
 
     # 2. Tenant check on team's company, team permission, and team's service permission
     if context and not context.is_super_admin:
@@ -74,6 +138,15 @@ async def validate_team_service_cascade(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="El equipo seleccionado no pertenece al servicio indicado."
         )
+
+    # Cascade check: Agent must belong to the specified team_id
+    if hubspot_owner_id is not None and str(hubspot_owner_id).strip():
+        team_agents = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=eff_company_id)
+        if str(hubspot_owner_id).strip() not in team_agents:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El agente seleccionado no pertenece al equipo indicado."
+            )
 
 
 async def get_team_assigned_owner_ids(

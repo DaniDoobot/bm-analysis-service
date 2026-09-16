@@ -439,9 +439,9 @@ async def get_analytics_items(
         service_param=service,
         company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
     )
-    if team_id is not None or eff_service_id is not None:
+    if team_id is not None or eff_service_id is not None or eff_company_id is not None:
         from app.utils.team_resolvers import validate_team_service_cascade
-        await validate_team_service_cascade(db, service_id=eff_service_id, team_id=team_id, context=context)
+        await validate_team_service_cascade(db, service_id=eff_service_id, team_id=team_id, context=context, company_id=eff_company_id)
 
     if eff_service_id is not None and context and not context.is_super_admin:
         if context.allowed_service_ids is not None and eff_service_id not in context.allowed_service_ids:
@@ -527,9 +527,9 @@ async def get_agents_comparison(
             company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
         )
 
-        if team_id is not None or eff_service_id is not None:
+        if team_id is not None or eff_service_id is not None or eff_company_id is not None:
             from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
-            await validate_team_service_cascade(db, service_id=eff_service_id, team_id=team_id, context=context)
+            await validate_team_service_cascade(db, service_id=eff_service_id, team_id=team_id, context=context, company_id=eff_company_id)
             team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=eff_company_id) if team_id is not None else None
         else:
             team_owner_ids = None
@@ -1158,9 +1158,9 @@ async def get_items_evolution(
             company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
         )
 
-        if team_id is not None or eff_service_id is not None:
+        if team_id is not None or eff_service_id is not None or eff_company_id is not None:
             from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
-            await validate_team_service_cascade(db, service_id=eff_service_id, team_id=team_id, context=context)
+            await validate_team_service_cascade(db, service_id=eff_service_id, team_id=team_id, context=context, company_id=eff_company_id)
             team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=eff_company_id) if team_id is not None else None
         else:
             team_owner_ids = None
@@ -1489,10 +1489,15 @@ async def get_available_agents(
     agents_list: list[AgentInfo] = []
     for oid in sorted(target_owner_ids):
         # 1. Canonical bm_users name
-        disp_name = resolved_names.get((company_id, oid)) or resolved_names.get(("*", oid))
-        u_obj = assigned_users.get(oid)
-        if not disp_name and u_obj:
-            disp_name = getattr(u_obj, "display_name", None) or (u_obj.name and u_obj.name.strip()) or (u_obj.username and u_obj.username.strip())
+        disp_name = resolved_names.get((effective_company_id, oid)) or resolved_names.get(("*", oid))
+        from app.utils.agent_resolvers import get_demo_agent_index
+        d_idx = get_demo_agent_index(hubspot_owner_id=oid)
+        if (effective_company_id == 6 or "demo_owner_" in str(oid).lower()) and d_idx is not None:
+            disp_name = f"Agente Demo {d_idx:02d}"
+        else:
+            u_obj = assigned_users.get(oid)
+            if not disp_name and u_obj:
+                disp_name = getattr(u_obj, "display_name", None) or (u_obj.name and u_obj.name.strip()) or (u_obj.username and u_obj.username.strip())
 
         # 2. Legacy fallback mapping
         if not disp_name:
@@ -1591,17 +1596,106 @@ async def get_filter_options(
             company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
         )
 
-        if team_id is not None or eff_service_id is not None:
+        if team_id is not None or eff_service_id is not None or eff_company_id is not None:
             from app.utils.team_resolvers import validate_team_service_cascade
-            await validate_team_service_cascade(db, service_id=eff_service_id, team_id=team_id, context=context)
+            await validate_team_service_cascade(
+                db,
+                service_id=eff_service_id,
+                team_id=team_id,
+                context=context,
+                company_id=eff_company_id,
+            )
 
-        # 1. Fetch available agents list for current scope
+        # 1. Fetch available companies list for current user
+        from app.models.companies import Company
+        stmt_comp = select(Company).where(Company.is_active == True)
+        if not context.is_super_admin:
+            if context.allowed_company_ids:
+                stmt_comp = stmt_comp.where(Company.company_id.in_(context.allowed_company_ids))
+            else:
+                stmt_comp = stmt_comp.where(Company.company_id == -1)
+        stmt_comp = stmt_comp.order_by(Company.company_name)
+        res_comp = await db.execute(stmt_comp)
+        companies_list = [
+            {
+                "company_id": c.company_id,
+                "id": c.company_id,
+                "company_name": c.company_name,
+                "name": c.company_name,
+                "company_key": c.company_key,
+                "is_demo": bool(getattr(c, "is_demo", False)),
+            }
+            for c in res_comp.scalars().all()
+        ]
+
+        # 2. Fetch available services list for current scope
+        from app.models.services import Service
+        stmt_s = select(Service).where(Service.is_active == True)
+        if eff_company_id is not None:
+            if eff_company_id == 1:
+                stmt_s = stmt_s.where(or_(Service.company_id == 1, Service.company_id.is_(None)))
+            else:
+                stmt_s = stmt_s.where(Service.company_id == eff_company_id)
+        elif not context.is_super_admin:
+            if context.allowed_company_ids:
+                stmt_s = stmt_s.where(or_(Service.company_id.in_(context.allowed_company_ids), Service.company_id.is_(None)))
+        if context and not context.is_super_admin and context.allowed_service_ids is not None:
+            stmt_s = stmt_s.where(Service.service_id.in_(context.allowed_service_ids))
+        stmt_s = stmt_s.order_by(Service.service_name)
+        res_s = await db.execute(stmt_s)
+        services_list = [
+            {
+                "service_id": s.service_id,
+                "id": s.service_id,
+                "service_name": s.service_name,
+                "name": s.service_name,
+                "service_key": s.service_key,
+                "company_id": s.company_id,
+            }
+            for s in res_s.scalars().all()
+        ]
+
+        # 3. Fetch available teams list for current scope
+        from app.models.teams import Team as TeamModel
+        stmt_t = select(TeamModel).where(TeamModel.is_active == True)
+        if eff_company_id is not None:
+            if eff_company_id == 1:
+                stmt_t = stmt_t.where(or_(TeamModel.company_id == 1, TeamModel.company_id.is_(None)))
+            else:
+                stmt_t = stmt_t.where(TeamModel.company_id == eff_company_id)
+        elif not context.is_super_admin:
+            if context.allowed_company_ids:
+                stmt_t = stmt_t.where(or_(TeamModel.company_id.in_(context.allowed_company_ids), TeamModel.company_id.is_(None)))
+        if eff_service_id is not None:
+            stmt_t = stmt_t.where(TeamModel.service_id == eff_service_id)
+        elif context and not context.is_super_admin and context.allowed_service_ids is not None:
+            stmt_t = stmt_t.where(TeamModel.service_id.in_(context.allowed_service_ids))
+        if context and not context.is_super_admin and context.allowed_team_ids is not None:
+            stmt_t = stmt_t.where(TeamModel.team_id.in_(context.allowed_team_ids))
+        stmt_t = stmt_t.order_by(TeamModel.team_name)
+        res_t = await db.execute(stmt_t)
+        teams_list = [
+            {
+                "team_id": t.team_id,
+                "id": t.team_id,
+                "team_name": t.team_name,
+                "name": t.team_name,
+                "service_id": t.service_id,
+                "company_id": t.company_id,
+            }
+            for t in res_t.scalars().all()
+        ]
+
+        # 4. Fetch available agents list for current scope
         available_agents = await get_available_agents(db, context=context, service_id=eff_service_id, team_id=team_id, company_id=eff_company_id)
 
-        # 2. Fetch active typologies per service
+        # 5. Fetch active typologies per service
         comps_list = [eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
         if comps_list is not None:
-            typo_query = f"SELECT t.typology_id, t.typology_key, t.typology_name, t.service_id, s.service_key FROM bm_typologies t JOIN bm_services s ON t.service_id = s.service_id WHERE t.is_active = true AND s.company_id IN {_format_int_list(comps_list)}"
+            if 1 in comps_list:
+                typo_query = f"SELECT t.typology_id, t.typology_key, t.typology_name, t.service_id, s.service_key FROM bm_typologies t JOIN bm_services s ON t.service_id = s.service_id WHERE t.is_active = true AND (s.company_id IN {_format_int_list(comps_list)} OR s.company_id IS NULL)"
+            else:
+                typo_query = f"SELECT t.typology_id, t.typology_key, t.typology_name, t.service_id, s.service_key FROM bm_typologies t JOIN bm_services s ON t.service_id = s.service_id WHERE t.is_active = true AND s.company_id IN {_format_int_list(comps_list)}"
         else:
             typo_query = "SELECT t.typology_id, t.typology_key, t.typology_name, t.service_id, s.service_key FROM bm_typologies t JOIN bm_services s ON t.service_id = s.service_id WHERE t.is_active = true"
         params = {}
@@ -1628,7 +1722,7 @@ async def get_filter_options(
                 "service_key": row[4]
             })
 
-        # 3. Fetch min and max call duration
+        # 6. Fetch min and max call duration
         if eff_company_id is not None:
             if eff_company_id == 1:
                 dur_comp_clause = "(company_id = 1 OR company_id IS NULL)"
@@ -1655,6 +1749,9 @@ async def get_filter_options(
                 max_seconds = int(dur_row[1])
 
         return {
+            "companies": companies_list,
+            "services": services_list,
+            "teams": teams_list,
             "agents": available_agents,
             "typologies": typologies_list,
             "duration": {

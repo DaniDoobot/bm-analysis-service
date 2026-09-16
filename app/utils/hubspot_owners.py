@@ -122,6 +122,15 @@ async def resolve_agent_name_canonical(
     clean_oid = str(hubspot_owner_id).strip() if hubspot_owner_id is not None else None
 
     if clean_oid:
+        # Canonical demo agent enforcement (company_id=6 or demo_owner_*) -> always 'Agente Demo XX'
+        from app.utils.agent_resolvers import get_demo_agent_index
+        d_idx = get_demo_agent_index(hubspot_owner_id=clean_oid, agent_name=raw_agent)
+        if (company_id == 6 or "demo_owner_" in clean_oid.lower()) and d_idx is not None:
+            demo_canonical = f"Agente Demo {d_idx:02d}"
+            if cache is not None:
+                cache[(company_id, clean_oid)] = demo_canonical
+            return demo_canonical
+
         # Check cache if provided
         if cache is not None:
             if (company_id, clean_oid) in cache:
@@ -188,6 +197,7 @@ async def batch_resolve_agent_names(
         return {}
 
     from app.models.users import User
+    from app.utils.agent_resolvers import get_demo_agent_index
     from sqlalchemy import select, or_
 
     stmt = select(User.company_id, User.hubspot_owner_id, User.name, User.username).where(
@@ -202,17 +212,24 @@ async def batch_resolve_agent_names(
     resolved_map: dict[tuple[int | None, str], str] = {}
     for cid, oid, name, username in rows:
         clean_oid = str(oid).strip() if oid else ""
-        disp_name = (name and name.strip()) or (username and username.strip())
+        d_idx = get_demo_agent_index(hubspot_owner_id=clean_oid)
+        if (cid == 6 or "demo_owner_" in clean_oid.lower()) and d_idx is not None:
+            disp_name = f"Agente Demo {d_idx:02d}"
+        else:
+            disp_name = (name and name.strip()) or (username and username.strip())
         if disp_name:
             resolved_map[(cid, clean_oid)] = disp_name
             if cid is None:
                 resolved_map[("*", clean_oid)] = disp_name
 
-    # Fallback to OWNER_TO_NAME for any pair not resolved in bm_users
+    # Fallback to demo canonical or OWNER_TO_NAME for any pair not resolved in bm_users
     for cid, oid in owner_company_pairs:
         clean_oid = str(oid).strip() if oid else ""
         if clean_oid and (cid, clean_oid) not in resolved_map and ("*", clean_oid) not in resolved_map:
-            if clean_oid in OWNER_TO_NAME:
+            d_idx = get_demo_agent_index(hubspot_owner_id=clean_oid)
+            if (cid == 6 or "demo_owner_" in clean_oid.lower()) and d_idx is not None:
+                resolved_map[(cid, clean_oid)] = f"Agente Demo {d_idx:02d}"
+            elif clean_oid in OWNER_TO_NAME:
                 resolved_map[(cid, clean_oid)] = OWNER_TO_NAME[clean_oid]
 
     return resolved_map

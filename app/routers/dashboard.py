@@ -423,6 +423,18 @@ async def agent_evolution(
             status_code=403,
             detail="No tienes permiso para consultar la evolución de este agente."
         )
+
+    eff_company_id = company_id if company_id is not None else (None if context.is_super_admin else context.company_id)
+    if service_id is not None or eff_company_id is not None or eff_owner_id is not None:
+        from app.utils.team_resolvers import validate_team_service_cascade
+        await validate_team_service_cascade(
+            db,
+            service_id=service_id,
+            team_id=None,
+            context=context,
+            company_id=eff_company_id,
+            hubspot_owner_id=eff_owner_id,
+        )
             
     try:
         typo_ids = None
@@ -772,6 +784,7 @@ async def get_evaluation_items_filter_options(
     service_key: Annotated[str | None, Query(description="Filter criteria by service key")] = None,
     service: Annotated[str | None, Query(description="Filter criteria by service key, slug, or ID")] = None,
     team_id: Annotated[int | None, Query(description="Filter criteria by team ID")] = None,
+    company_id: Annotated[int | None, Query(description="Filter criteria by company ID")] = None,
 ):
     """
     Retrieve available evaluation criteria item filter options dynamically for frontend UI.
@@ -779,23 +792,35 @@ async def get_evaluation_items_filter_options(
     from app.utils.item_score_filters import get_evaluation_item_filter_options
     from app.utils.service_resolvers import resolve_service_id
 
+    if company_id is not None and not context.is_super_admin:
+        if company_id not in context.allowed_company_ids:
+            raise HTTPException(status_code=403, detail="Acceso denegado a otra empresa.")
+
+    eff_company_id = company_id if company_id is not None else (None if context.is_super_admin else context.company_id)
+
     eff_service_id, _ = await resolve_service_id(
         db,
         service_id=service_id,
         service_key=service_key,
         service_param=service,
-        company_ids=None if context.is_super_admin else context.allowed_company_ids
+        company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
     )
 
-    if team_id is not None or eff_service_id is not None:
+    if team_id is not None or eff_service_id is not None or eff_company_id is not None:
         from app.utils.team_resolvers import validate_team_service_cascade
-        await validate_team_service_cascade(db, service_id=eff_service_id, team_id=team_id, context=context)
+        await validate_team_service_cascade(
+            db,
+            service_id=eff_service_id,
+            team_id=team_id,
+            context=context,
+            company_id=eff_company_id,
+        )
 
     eff_service_ids = [eff_service_id] if eff_service_id is not None else context.allowed_service_ids
 
     options = await get_evaluation_item_filter_options(
         db,
-        company_ids=context.allowed_company_ids,
+        company_ids=[eff_company_id] if eff_company_id is not None else context.allowed_company_ids,
         service_ids=eff_service_ids
     )
     return {"items": options}
