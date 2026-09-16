@@ -4,6 +4,7 @@ from typing import Any
 
 
 class ServiceEvolutionFilters(BaseModel):
+    company_id: int | None = None
     service_id: int | None = None
     service_key: str | None = None
     service_name: str | None = None

@@ -100,15 +100,20 @@ class ServiceEvolutionService:
         date_to: str | None = None,
         status: str | None = None,
         context: TenantContext | None = None,
+        company_id: int | None = None,
     ) -> list[ServiceListItem]:
         """
         GET /bm/service-evolution/services
         Returns all active services with calls count and analysis date ranges.
         """
+        effective_company_id = company_id
+        if effective_company_id is None and context and not context.is_super_admin:
+            effective_company_id = context.company_id
+
         parsed_date_from, parsed_date_to = parse_date_bounds(date_from, date_to)
         logger.info(
-            "Fetching services list: date_from=%s (parsed: %s), date_to=%s (parsed: %s), status=%s",
-            date_from, parsed_date_from, date_to, parsed_date_to, status
+            "Fetching services list: date_from=%s (parsed: %s), date_to=%s (parsed: %s), status=%s, company_id=%s",
+            date_from, parsed_date_from, date_to, parsed_date_to, status, effective_company_id
         )
 
         r_status_cond = "AND r.status = 'completed'"
@@ -122,10 +127,18 @@ class ServiceEvolutionService:
             "date_from": parsed_date_from,
             "date_to": parsed_date_to,
         }
-        if context:
+        if effective_company_id is not None:
+            where_clause += f" AND s.company_id = {int(effective_company_id)}"
+            if effective_company_id == 1:
+                r_status_cond += " AND (r.company_id = 1 OR r.company_id IS NULL)"
+            else:
+                r_status_cond += f" AND r.company_id = {int(effective_company_id)}"
+        elif context and not context.is_super_admin:
             where_clause += f" AND s.company_id IN {_format_int_list(context.allowed_company_ids)}"
-            if context.allowed_service_ids is not None:
-                where_clause += f" AND s.service_id IN {_format_int_list(context.allowed_service_ids)}"
+            r_status_cond += f" AND (r.company_id IN {_format_int_list(context.allowed_company_ids)} OR r.company_id IS NULL)"
+
+        if context and context.allowed_service_ids is not None:
+            where_clause += f" AND s.service_id IN {_format_int_list(context.allowed_service_ids)}"
 
         raw_sql = f"""
             SELECT 
@@ -170,15 +183,20 @@ class ServiceEvolutionService:
         status: str | None = None,
         context: TenantContext | None = None,
         team_id: int | None = None,
+        company_id: int | None = None,
     ) -> list[CriterionListItem]:
         """
         GET /bm/service-evolution/criteria
         Returns all criteria key details.
         """
+        effective_company_id = company_id
+        if effective_company_id is None and context and not context.is_super_admin:
+            effective_company_id = context.company_id
+
         parsed_date_from, parsed_date_to = parse_date_bounds(date_from, date_to)
         logger.info(
-            "Fetching criteria list: service_id=%s, date_from=%s (parsed: %s), date_to=%s (parsed: %s), status=%s, team_id=%s",
-            service_id, date_from, parsed_date_from, date_to, parsed_date_to, status, team_id
+            "Fetching criteria list: service_id=%s, date_from=%s (parsed: %s), date_to=%s (parsed: %s), status=%s, team_id=%s, company_id=%s",
+            service_id, date_from, parsed_date_from, date_to, parsed_date_to, status, team_id, effective_company_id
         )
 
         if status == "failed":
@@ -192,7 +210,7 @@ class ServiceEvolutionService:
             from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
             await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context)
             if team_id is not None:
-                team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context)
+                team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=effective_company_id)
                 where_clause += f" AND r.hubspot_owner_id IN {_format_str_list(team_owner_ids)}"
 
         params = {
@@ -200,8 +218,15 @@ class ServiceEvolutionService:
             "date_from": parsed_date_from,
             "date_to": parsed_date_to,
         }
-        if context and not context.is_super_admin:
+        if effective_company_id is not None:
+            if effective_company_id == 1:
+                where_clause += " AND (r.company_id = 1 OR r.company_id IS NULL)"
+            else:
+                where_clause += f" AND r.company_id = {int(effective_company_id)}"
+        elif context and not context.is_super_admin:
             where_clause += f" AND (r.company_id IN {_format_int_list(context.allowed_company_ids)} OR r.company_id IS NULL)"
+
+        if context and not context.is_super_admin:
             if context.allowed_service_ids is not None:
                 where_clause += f" AND r.service_id IN {_format_int_list(context.allowed_service_ids)}"
             if context.allowed_agent_ids is not None:
@@ -265,19 +290,24 @@ class ServiceEvolutionService:
         context: TenantContext | None = None,
         item_filters: list[dict[str, Any]] | str | None = None,
         team_id: int | None = None,
+        company_id: int | None = None,
     ) -> ServiceEvolutionResponse:
         """
         GET /bm/service-evolution
         Retrieves complete service evolution details with series, typologies, agents, and criteria ranking.
         """
+        effective_company_id = company_id
+        if effective_company_id is None and context and not context.is_super_admin:
+            effective_company_id = context.company_id
+
         t_start = time.perf_counter()
         _EG_EXPR = "CASE WHEN (r.is_evaluable IS NOT FALSE) THEN COALESCE(r.evaluacion_global, NULLIF((r.result_json->>'evaluacion_global')::numeric, 0)) ELSE NULL END"
         parsed_date_from, parsed_date_to = parse_date_bounds(date_from, date_to)
         logger.info(
             "Service evolution query: service_id=%s, service_key=%s, granularity=%s, typology=%s, agent=%s, "
-            "date_from_raw=%s (parsed: %s), date_to_raw=%s (parsed: %s), status=%s, team_id=%s",
+            "date_from_raw=%s (parsed: %s), date_to_raw=%s (parsed: %s), status=%s, team_id=%s, company_id=%s",
             service_id, service_key, granularity, typology_key, agent_owner_id,
-            date_from, parsed_date_from, date_to, parsed_date_to, status, team_id
+            date_from, parsed_date_from, date_to, parsed_date_to, status, team_id, effective_company_id
         )
 
         if status == "failed":
@@ -322,6 +352,7 @@ class ServiceEvolutionService:
             eff_granularity = resolve_granularity(span, eff_granularity)
 
         filters = ServiceEvolutionFilters(
+            company_id=effective_company_id,
             service_id=service_id,
             service_key=service_key,
             service_name=service_name,
@@ -351,10 +382,20 @@ class ServiceEvolutionService:
         extra_sql_left_join = ""
         typo_extra_where = ""
 
-        if context and not context.is_super_admin:
+        if effective_company_id is not None:
+            if effective_company_id == 1:
+                comp_cond = "(r.company_id = 1 OR r.company_id IS NULL)"
+            else:
+                comp_cond = f"r.company_id = {int(effective_company_id)}"
+            extra_sql += f" AND {comp_cond}"
+            extra_sql_left_join += f" AND {comp_cond}"
+            typo_extra_where += f" AND t.service_id IN (SELECT service_id FROM bm_services WHERE company_id = {int(effective_company_id)})"
+        elif context and not context.is_super_admin:
             extra_sql += f" AND (r.company_id IN {_format_int_list(context.allowed_company_ids)} OR r.company_id IS NULL)"
             extra_sql_left_join += f" AND (r.company_id IN {_format_int_list(context.allowed_company_ids)} OR r.company_id IS NULL)"
-            
+            typo_extra_where += f" AND t.service_id IN (SELECT service_id FROM bm_services WHERE company_id IN {_format_int_list(context.allowed_company_ids)})"
+
+        if context and not context.is_super_admin:
             if context.allowed_service_ids is not None:
                 extra_sql += f" AND r.service_id IN {_format_int_list(context.allowed_service_ids)}"
                 extra_sql_left_join += f" AND r.service_id IN {_format_int_list(context.allowed_service_ids)}"
@@ -368,16 +409,11 @@ class ServiceEvolutionService:
                     extra_sql += f" AND r.hubspot_owner_id IN {_format_str_list(context.allowed_agent_ids)}"
                     extra_sql_left_join += f" AND r.hubspot_owner_id IN {_format_str_list(context.allowed_agent_ids)}"
 
-            typo_extra_where += f" AND t.service_id IN (SELECT service_id FROM bm_services WHERE company_id IN {_format_int_list(context.allowed_company_ids)}"
-            if context.allowed_service_ids is not None:
-                typo_extra_where += f" AND service_id IN {_format_int_list(context.allowed_service_ids)}"
-            typo_extra_where += ")"
-
         if team_id is not None or service_id is not None:
             from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
             await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context)
             if team_id is not None:
-                team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context)
+                team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=effective_company_id)
                 if agent_owner_id:
                     if agent_owner_id not in team_owner_ids:
                         extra_sql += " AND r.hubspot_owner_id = '-1'"

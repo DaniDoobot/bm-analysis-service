@@ -73,6 +73,7 @@ async def dashboard_summary(
     team_id: Annotated[int | None, Query(description="Filter by team ID")] = None,
     granularity: Annotated[str, Query(description="auto | hour | day | week | month")] = "auto",
     bucket: Annotated[str | None, Query(description="Alias for granularity")] = None,
+    company_id: Annotated[int | None, Query(description="Filter by company ID")] = None,
 ):
     """
     Get dashboard summary metrics including KPIs, evolution charts,
@@ -84,7 +85,11 @@ async def dashboard_summary(
 
     if service and not service_id and not service_key:
         from app.utils.service_resolvers import resolve_service_id
-        resolved_id, resolved_key = await resolve_service_id(db, service_param=service)
+        resolved_id, resolved_key = await resolve_service_id(
+            db,
+            service_param=service,
+            company_ids=[company_id] if company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
+        )
         service_id = resolved_id or service_id
         service_key = resolved_key or service_key
 
@@ -150,6 +155,7 @@ async def dashboard_summary(
                 context=context,
                 team_id=team_id,
                 granularity=effective_granularity,
+                company_id=company_id,
             )
             return data
     except HTTPException:
@@ -194,6 +200,7 @@ async def agents_comparison(
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     team_id: Annotated[int | None, Query(description="Filter by team ID")] = None,
+    company_id: Annotated[int | None, Query(description="Filter by company ID")] = None,
 ):
     """
     Get multi-agent comparison analytics for dashboard reporting.
@@ -239,6 +246,7 @@ async def agents_comparison(
             status=norm_status,
             context=context,
             team_id=team_id,
+            company_id=company_id,
         )
         return data
     except HTTPException:
@@ -286,6 +294,7 @@ async def list_agents(
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     team_id: Annotated[int | None, Query(description="Filter by team ID")] = None,
+    company_id: Annotated[int | None, Query(description="Filter by company ID")] = None,
 ):
     """
     Get all active call center agents with their accumulated real metrics.
@@ -333,6 +342,7 @@ async def list_agents(
             status=norm_status,
             context=context,
             team_id=team_id,
+            company_id=company_id,
         )
         return data
     except HTTPException:
@@ -389,6 +399,7 @@ async def agent_evolution(
     criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    company_id: Annotated[int | None, Query(description="Filter by company ID")] = None,
 ):
     """
     Get chronological performance, trends, strengths, weaknesses,
@@ -448,6 +459,7 @@ async def agent_evolution(
             item_filters=effective_item_filters,
             status=norm_status,
             context=context,
+            company_id=company_id,
         )
         return data
     except HTTPException:
@@ -489,6 +501,7 @@ async def objections_breakdown(
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     team_id: Annotated[int | None, Query(description="Filter by team ID")] = None,
+    company_id: Annotated[int | None, Query(description="Filter by company ID")] = None,
 ):
     """
     Get categorized objection lists, agent-specific counts,
@@ -534,6 +547,7 @@ async def objections_breakdown(
             status=norm_status,
             context=context,
             team_id=team_id,
+            company_id=company_id,
         )
         return data
     except HTTPException:
@@ -581,6 +595,7 @@ async def get_my_evolution(
     criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    company_id: Annotated[int | None, Query(description="Filter by company ID")] = None,
 ):
     """
     Get chronological performance evolution metrics specifically for the logged-in agent.
@@ -663,6 +678,7 @@ async def get_my_evolution(
             item_filters=effective_item_filters,
             status=norm_status,
             context=context,
+            company_id=company_id,
         )
         return data
     except Exception as e:

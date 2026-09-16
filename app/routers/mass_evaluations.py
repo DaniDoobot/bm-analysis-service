@@ -975,6 +975,7 @@ async def list_results(
     service_key: str | None = Query(None, description="Filter by service key"),
     service: str | None = Query(None, description="Filter by service ID, key or slug"),
     team_id: int | None = Query(None, description="Filter by team ID"),
+    company_id: int | None = Query(None, description="Filter by company ID"),
     typology_key: str | None = Query(None, description="Filter by typology key"),
     typology: str | None = Query(None, description="Alias for typology_key"),
     tipo_llamada: str | None = Query(None, description="Alias for typology_key"),
@@ -1005,6 +1006,14 @@ async def list_results(
     db: AsyncSession = Depends(get_db)
 ):
     """List detailed mass analysis call results with advanced filtering and full pagination metadata."""
+    if company_id is not None and not context.is_super_admin:
+        if company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado a otra empresa."
+            )
+    eff_company_id = company_id if company_id is not None else (None if context.is_super_admin else context.company_id)
+
     effective_item_filters = item_filters or criterion_filters or score_filters or item_score_filters
     raw_sort_by = sort_by or order_by
     raw_sort_order = sort_order or order or sort_direction
@@ -1018,7 +1027,11 @@ async def list_results(
 
     if service and not service_id and not service_key:
         from app.utils.service_resolvers import resolve_service_id
-        resolved_id, resolved_key = await resolve_service_id(db, service_param=service)
+        resolved_id, resolved_key = await resolve_service_id(
+            db,
+            service_param=service,
+            company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
+        )
         service_id = resolved_id or service_id
         service_key = resolved_key or service_key
 
@@ -1073,7 +1086,7 @@ async def list_results(
     if team_id is not None or service_id is not None:
         from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
         await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context)
-        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context) if team_id is not None else None
+        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=eff_company_id) if team_id is not None else None
         if effective_owner_id and team_owner_ids is not None:
             if effective_owner_id not in team_owner_ids:
                 effective_owner_id = "-1"
@@ -1084,6 +1097,8 @@ async def list_results(
     typo_ids = None
     if typology_ids and typology_ids.strip():
         typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
+
+    target_company_ids = [eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
 
     t_db_start = time.perf_counter()
     total = await MassEvaluationService.count_results(
@@ -1106,7 +1121,7 @@ async def list_results(
         duration_min_seconds=eff_dur_min,
         duration_max_seconds=eff_dur_max,
         direction=norm_d,
-        company_ids=None if context.is_super_admin else context.allowed_company_ids,
+        company_ids=target_company_ids,
         service_ids=context.allowed_service_ids,
         allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None,
         status=eff_status,
@@ -1136,7 +1151,7 @@ async def list_results(
         duration_min_seconds=eff_dur_min,
         duration_max_seconds=eff_dur_max,
         direction=norm_d,
-        company_ids=None if context.is_super_admin else context.allowed_company_ids,
+        company_ids=target_company_ids,
         service_ids=context.allowed_service_ids,
         allowed_agent_ids=context.allowed_agent_ids if not effective_owner_id else None,
         status=eff_status,

@@ -115,9 +115,13 @@ async def get_all_metrics(
     db: AsyncSession,
     context: TenantContext | None = None,
     service_id: int | None = None,
+    company_id: int | None = None,
 ) -> list[dict]:
     metrics = list(BASE_METRICS)
     existing_keys = {m["key"] for m in metrics}
+    effective_company_id = company_id
+    if effective_company_id is None and context:
+        effective_company_id = context.company_id
     
     try:
         stmt1 = select(
@@ -131,13 +135,24 @@ async def get_all_metrics(
         )
         if service_id is not None:
             stmt1 = stmt1.where(MassEvaluationResult.service_id == service_id)
-        if context and not context.is_super_admin:
+        if effective_company_id is not None:
+            if effective_company_id == 1:
+                stmt1 = stmt1.where(
+                    or_(
+                        MassEvaluationResult.company_id == 1,
+                        MassEvaluationResult.company_id.is_(None)
+                    )
+                )
+            else:
+                stmt1 = stmt1.where(MassEvaluationResult.company_id == effective_company_id)
+        elif context and not context.is_super_admin:
             stmt1 = stmt1.where(
                 or_(
                     MassEvaluationResult.company_id.in_(context.allowed_company_ids),
                     MassEvaluationResult.company_id.is_(None)
                 )
             )
+        if context and not context.is_super_admin:
             if context.allowed_service_ids is not None:
                 stmt1 = stmt1.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
         stmt1 = stmt1.group_by(MassEvaluationCriterionResult.criterion_key)
@@ -159,13 +174,24 @@ async def get_all_metrics(
         )
         if service_id is not None:
             stmt2 = stmt2.where(Analysis.service_id == service_id)
-        if context and not context.is_super_admin:
+        if effective_company_id is not None:
+            if effective_company_id == 1:
+                stmt2 = stmt2.where(
+                    or_(
+                        Analysis.company_id == 1,
+                        Analysis.company_id.is_(None)
+                    )
+                )
+            else:
+                stmt2 = stmt2.where(Analysis.company_id == effective_company_id)
+        elif context and not context.is_super_admin:
             stmt2 = stmt2.where(
                 or_(
                     Analysis.company_id.in_(context.allowed_company_ids),
                     Analysis.company_id.is_(None)
                 )
             )
+        if context and not context.is_super_admin:
             if context.allowed_service_ids is not None:
                 stmt2 = stmt2.where(Analysis.service_id.in_(context.allowed_service_ids))
         stmt2 = stmt2.group_by(AnalysisCriterionResult.criterion_key)
@@ -189,9 +215,17 @@ async def get_all_metrics(
         )
         if service_id is not None:
             stmt3 = stmt3.where(Prompt.service_id == service_id)
-        if context and not context.is_super_admin:
-            if context.allowed_service_ids is not None:
-                stmt3 = stmt3.where(Prompt.service_id.in_(context.allowed_service_ids))
+        if effective_company_id is not None:
+            if effective_company_id == 1:
+                stmt3 = stmt3.where(
+                    or_(
+                        Prompt.company_id == 1,
+                        Prompt.company_id.is_(None)
+                    )
+                )
+            else:
+                stmt3 = stmt3.where(Prompt.company_id == effective_company_id)
+        elif context and not context.is_super_admin:
             if context.allowed_company_ids is not None:
                 stmt3 = stmt3.where(
                     or_(
@@ -199,6 +233,9 @@ async def get_all_metrics(
                         Prompt.company_id.is_(None)
                     )
                 )
+        if context and not context.is_super_admin:
+            if context.allowed_service_ids is not None:
+                stmt3 = stmt3.where(Prompt.service_id.in_(context.allowed_service_ids))
         stmt3 = stmt3.group_by(PromptCriterion.criterion_key)
         res3 = await db.execute(stmt3)
         rows3 = res3.all()
@@ -377,6 +414,7 @@ async def get_analytics_items(
     service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
     service: Annotated[str | None, Query(description="Filter by service key, slug, or ID")] = None,
     team_id: Annotated[int | None, Query(description="Filter by team ID")] = None,
+    company_id: Annotated[int | None, Query(description="Filter by company ID")] = None,
 ):
     """Retrieve the catalogue of compared metrics available in Analytics v2."""
     if context.normalized_role == InternalRole.AGENT:
@@ -384,12 +422,22 @@ async def get_analytics_items(
             status_code=http_status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: Se requiere rol de nivel superior."
         )
+
+    if company_id is not None and not context.is_super_admin:
+        if company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=http_status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado a otra empresa."
+            )
+
+    eff_company_id = company_id if company_id is not None else (None if context.is_super_admin else context.company_id)
+
     eff_service_id, _ = await resolve_service_id(
         db,
         service_id=service_id,
         service_key=service_key,
         service_param=service,
-        company_ids=None if context.is_super_admin else context.allowed_company_ids
+        company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
     )
     if team_id is not None or eff_service_id is not None:
         from app.utils.team_resolvers import validate_team_service_cascade
@@ -401,7 +449,7 @@ async def get_analytics_items(
                 status_code=http_status.HTTP_403_FORBIDDEN,
                 detail="Acceso denegado: No tiene permisos para este servicio."
             )
-    return await get_all_metrics(db, context=context, service_id=eff_service_id)
+    return await get_all_metrics(db, context=context, service_id=eff_service_id, company_id=eff_company_id)
 
 
 @router.get(
@@ -447,6 +495,7 @@ async def get_agents_comparison(
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     team_id: Annotated[int | None, Query(description="Filter by team ID")] = None,
+    company_id: Annotated[int | None, Query(description="Filter by company ID")] = None,
     refresh: Annotated[bool, Query(description="Bypass cached results and fetch fresh data")] = False,
 ):
     """
@@ -458,6 +507,16 @@ async def get_agents_comparison(
             status_code=http_status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: Se requiere rol de nivel superior."
         )
+
+    if company_id is not None and not context.is_super_admin:
+        if company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=http_status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado a otra empresa."
+            )
+
+    eff_company_id = company_id if company_id is not None else (None if context.is_super_admin else context.company_id)
+
     t_start = time.perf_counter()
     try:
         eff_service_id, eff_service_key = await resolve_service_id(
@@ -465,13 +524,13 @@ async def get_agents_comparison(
             service_id=service_id,
             service_key=service_key,
             service_param=service,
-            company_ids=None if context.is_super_admin else context.allowed_company_ids
+            company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
         )
 
         if team_id is not None or eff_service_id is not None:
             from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
             await validate_team_service_cascade(db, service_id=eff_service_id, team_id=team_id, context=context)
-            team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context) if team_id is not None else None
+            team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=eff_company_id) if team_id is not None else None
         else:
             team_owner_ids = None
 
@@ -499,14 +558,14 @@ async def get_agents_comparison(
         owner_ids = parse_list_param(agent_owner_ids) + parse_list_param(agent_owner_ids_bracket)
         item_req_keys = parse_list_param(item_keys) + parse_list_param(item_keys_bracket)
         cache_key = (
-            f"agents_comp:{context.company_id}:{context.normalized_role}:{eff_service_id}:{eff_service_key}:{team_id}:"
+            f"agents_comp:{eff_company_id}:{context.normalized_role}:{eff_service_id}:{eff_service_key}:{team_id}:"
             f"{date_from}:{date_to}:{sorted(owner_ids)}:{sorted(item_req_keys)}:{stable_item_filters_key}:{norm_t}:{norm_d}:"
             f"{duration_min_seconds}:{duration_max_seconds}:{avg_score_min}:{avg_score_max}:{norm_status}"
         )
 
         async def _compute():
             # 1. Resolve items to compare
-            all_metrics = await get_all_metrics(db, context=context, service_id=eff_service_id)
+            all_metrics = await get_all_metrics(db, context=context, service_id=eff_service_id, company_id=eff_company_id)
             if item_req_keys:
                 effective_keys = item_req_keys[:50] if len(item_req_keys) > 50 else item_req_keys
                 items_to_use = [item for item in all_metrics if item["key"] in effective_keys]
@@ -529,7 +588,17 @@ async def get_agents_comparison(
             else:
                 base_filters.append(MassEvaluationResult.status == "completed")
 
-            if not context.is_super_admin:
+            if eff_company_id is not None:
+                if eff_company_id == 1:
+                    base_filters.append(
+                        or_(
+                            MassEvaluationResult.company_id == 1,
+                            MassEvaluationResult.company_id.is_(None)
+                        )
+                    )
+                else:
+                    base_filters.append(MassEvaluationResult.company_id == eff_company_id)
+            elif not context.is_super_admin:
                 base_filters.append(
                     or_(
                         MassEvaluationResult.company_id.in_(context.allowed_company_ids),
@@ -868,7 +937,7 @@ async def get_agents_comparison(
                                     if val is not None:
                                         legacy_vals_by_agent_item.setdefault((oid, k), []).append(float(val))
 
-            available_catalog = await get_available_agents(db, context=context, service_id=eff_service_id, team_id=team_id)
+            available_catalog = await get_available_agents(db, context=context, service_id=eff_service_id, team_id=team_id, company_id=eff_company_id)
             cat_by_oid = {a.hubspot_owner_id: a for a in available_catalog}
             db_ms = (time.perf_counter() - t_db_start) * 1000.0
 
@@ -1052,6 +1121,7 @@ async def get_items_evolution(
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     team_id: Annotated[int | None, Query(description="Filter by team ID")] = None,
+    company_id: Annotated[int | None, Query(description="Filter by company ID")] = None,
     refresh: Annotated[bool, Query(description="Bypass cached results and fetch fresh data")] = False,
 ):
     """
@@ -1063,6 +1133,16 @@ async def get_items_evolution(
             status_code=http_status.HTTP_403_FORBIDDEN,
             detail="Acceso denegado: Se requiere rol de nivel superior."
         )
+
+    if company_id is not None and not context.is_super_admin:
+        if company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=http_status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado a otra empresa."
+            )
+
+    eff_company_id = company_id if company_id is not None else (None if context.is_super_admin else context.company_id)
+
     t_start = time.perf_counter()
     try:
         eff_service_id, eff_service_key = await resolve_service_id(
@@ -1070,13 +1150,13 @@ async def get_items_evolution(
             service_id=service_id,
             service_key=service_key,
             service_param=service,
-            company_ids=None if context.is_super_admin else context.allowed_company_ids
+            company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
         )
 
         if team_id is not None or eff_service_id is not None:
             from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
             await validate_team_service_cascade(db, service_id=eff_service_id, team_id=team_id, context=context)
-            team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context) if team_id is not None else None
+            team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=eff_company_id) if team_id is not None else None
         else:
             team_owner_ids = None
 
@@ -1108,7 +1188,7 @@ async def get_items_evolution(
         owner_ids = parse_list_param(agent_owner_ids) + parse_list_param(agent_owner_ids_bracket)
         item_req_keys = parse_list_param(item_keys) + parse_list_param(item_keys_bracket)
         cache_key = (
-            f"items_evo:{context.company_id}:{context.normalized_role}:{eff_service_id}:{eff_service_key}:{team_id}:"
+            f"items_evo:{eff_company_id}:{context.normalized_role}:{eff_service_id}:{eff_service_key}:{team_id}:"
             f"{date_from}:{date_to}:{sorted(owner_ids)}:{sorted(item_req_keys)}:{bucket_interval}:{stable_item_filters_key}:{norm_t}:{norm_d}:"
             f"{duration_min_seconds}:{duration_max_seconds}:{avg_score_min}:{avg_score_max}:{norm_status}"
         )
@@ -1131,7 +1211,17 @@ async def get_items_evolution(
             else:
                 stmt = stmt.where(MassEvaluationResult.status == "completed")
 
-            if not context.is_super_admin:
+            if eff_company_id is not None:
+                if eff_company_id == 1:
+                    stmt = stmt.where(
+                        or_(
+                            MassEvaluationResult.company_id == 1,
+                            MassEvaluationResult.company_id.is_(None)
+                        )
+                    )
+                else:
+                    stmt = stmt.where(MassEvaluationResult.company_id == eff_company_id)
+            elif not context.is_super_admin:
                 stmt = stmt.where(
                     or_(
                         MassEvaluationResult.company_id.in_(context.allowed_company_ids),
@@ -1253,7 +1343,7 @@ async def get_items_evolution(
                 b_key = format_bucket_key(ts, bucket_interval)
                 buckets_map.setdefault(b_key, []).append(r)
 
-            all_metrics = await get_all_metrics(db, context=context, service_id=eff_service_id)
+            all_metrics = await get_all_metrics(db, context=context, service_id=eff_service_id, company_id=eff_company_id)
             if item_req_keys:
                 effective_keys = item_req_keys[:50] if len(item_req_keys) > 50 else item_req_keys
                 items_to_use = [item for item in all_metrics if item["key"] in effective_keys]
@@ -1318,6 +1408,7 @@ async def get_available_agents(
     context: TenantContext | None = None,
     service_id: int | None = None,
     team_id: int | None = None,
+    company_id: int | None = None,
 ) -> list[AgentInfo]:
     """
     Retrieve all available call center agents for the current scope/service,
@@ -1331,9 +1422,13 @@ async def get_available_agents(
     from app.utils.hubspot_owners import batch_resolve_agent_names, is_placeholder_agent_name, OWNER_TO_NAME
     from app.utils.agent_resolvers import build_user_initials_maps, resolve_agent_initials
 
+    effective_company_id = company_id
+    if effective_company_id is None and context and not context.is_super_admin:
+        effective_company_id = context.company_id
+
     # 1. Team isolation
     if team_id is not None:
-        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context)
+        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=effective_company_id)
         if not team_owner_ids:
             return []
         team_owner_ids = set(team_owner_ids)
@@ -1341,7 +1436,7 @@ async def get_available_agents(
         team_owner_ids = None
 
     # 2. Service assigned users
-    assigned_users = await get_service_assigned_users(db, service_id=service_id, context=context)
+    assigned_users = await get_service_assigned_users(db, service_id=service_id, context=context, company_id=effective_company_id)
     if team_id is not None:
         assigned_users = {oid: u for oid, u in assigned_users.items() if oid in team_owner_ids}
 
@@ -1353,21 +1448,38 @@ async def get_available_agents(
         return []
 
     # 3. Batch resolve names canonically from bm_users
-    company_id = context.company_id if context and not context.is_super_admin else None
     resolved_names = await batch_resolve_agent_names(
         db,
-        [(company_id, oid) for oid in target_owner_ids]
+        [(effective_company_id, oid) for oid in target_owner_ids]
     )
 
-    by_owner, by_name, users_list = await build_user_initials_maps(db, company_id=company_id)
+    by_owner, by_name, users_list = await build_user_initials_maps(db, company_id=effective_company_id)
 
     service_names_map: dict[int, str] = {}
     if service_id is not None:
         from app.models.services import Service
         stmt_s = select(Service.service_id, Service.service_name).where(Service.service_id == service_id)
+        if effective_company_id is not None:
+            stmt_s = stmt_s.where(Service.company_id == effective_company_id)
         res_s = await db.execute(stmt_s)
         for row in res_s.fetchall():
             service_names_map[row[0]] = row[1]
+
+    # Pre-load team names for all relevant teams to avoid N+1 queries
+    from app.models.teams import Team as TeamModel
+    team_ids_needed = {
+        getattr(u, "primary_team_id", None)
+        for u in assigned_users.values()
+        if getattr(u, "primary_team_id", None) is not None
+    }
+    team_names_map: dict[int, str] = {}
+    if team_ids_needed:
+        team_stmt = select(TeamModel.team_id, TeamModel.team_name).where(
+            TeamModel.team_id.in_(list(team_ids_needed))
+        )
+        team_res = await db.execute(team_stmt)
+        for tid, tname in team_res.fetchall():
+            team_names_map[tid] = tname
 
     agents_list: list[AgentInfo] = []
     for oid in sorted(target_owner_ids):
@@ -1392,13 +1504,25 @@ async def get_available_agents(
             by_name=by_name,
             users_list=users_list,
         )
-        label = f"{initials} · {disp_name}" if initials else disp_name
 
         svc_id = service_id or (getattr(u_obj, "primary_service_id", None) if u_obj else None)
         svc_name = service_names_map.get(svc_id) if svc_id else None
 
+        # Resolve team info from user object
+        u_team_id = getattr(u_obj, "primary_team_id", None) if u_obj else None
+        u_user_id = getattr(u_obj, "user_id", None) if u_obj else None
+        u_team_name = team_names_map.get(u_team_id) if u_team_id is not None else None
+
+        # Build descriptive label: "Nombre · Equipo" if team is known, else just "Nombre"
+        if u_team_name:
+            label = f"{disp_name} · {u_team_name}"
+        else:
+            label = disp_name
+
         agents_list.append(
             AgentInfo(
+                user_id=u_user_id,
+                id=u_user_id,
                 hubspot_owner_id=oid,
                 agent_name=disp_name,
                 name=disp_name,
@@ -1407,6 +1531,8 @@ async def get_available_agents(
                 label=label,
                 service_id=svc_id,
                 service_name=svc_name,
+                team_id=u_team_id,
+                team_name=u_team_name,
             )
         )
 
@@ -1422,18 +1548,28 @@ async def get_filter_options(
     service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
     service: Annotated[str | None, Query(description="Filter by service key, slug, or ID")] = None,
     team_id: Annotated[int | None, Query(description="Filter by team ID")] = None,
+    company_id: Annotated[int | None, Query(description="Filter by company ID")] = None,
     db: Annotated[AsyncSession, Depends(get_db)] = None,
 ):
     """
     Retrieve filter configuration options: active typologies, agents, duration range, and score bounds.
     """
+    if company_id is not None and not context.is_super_admin:
+        if company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=http_status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado a otra empresa."
+            )
+
+    eff_company_id = company_id if company_id is not None else (None if context.is_super_admin else context.company_id)
+
     try:
         eff_service_id, _ = await resolve_service_id(
             db,
             service_id=service_id,
             service_key=service_key,
             service_param=service,
-            company_ids=None if context.is_super_admin else context.allowed_company_ids
+            company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
         )
 
         if team_id is not None or eff_service_id is not None:
@@ -1441,10 +1577,14 @@ async def get_filter_options(
             await validate_team_service_cascade(db, service_id=eff_service_id, team_id=team_id, context=context)
 
         # 1. Fetch available agents list for current scope
-        available_agents = await get_available_agents(db, context=context, service_id=eff_service_id, team_id=team_id)
+        available_agents = await get_available_agents(db, context=context, service_id=eff_service_id, team_id=team_id, company_id=eff_company_id)
 
         # 2. Fetch active typologies per service
-        typo_query = f"SELECT t.typology_id, t.typology_key, t.typology_name, t.service_id, s.service_key FROM bm_typologies t JOIN bm_services s ON t.service_id = s.service_id WHERE t.is_active = true AND s.company_id IN {_format_int_list(context.allowed_company_ids)}"
+        comps_list = [eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
+        if comps_list is not None:
+            typo_query = f"SELECT t.typology_id, t.typology_key, t.typology_name, t.service_id, s.service_key FROM bm_typologies t JOIN bm_services s ON t.service_id = s.service_id WHERE t.is_active = true AND s.company_id IN {_format_int_list(comps_list)}"
+        else:
+            typo_query = "SELECT t.typology_id, t.typology_key, t.typology_name, t.service_id, s.service_key FROM bm_typologies t JOIN bm_services s ON t.service_id = s.service_id WHERE t.is_active = true"
         params = {}
         if context.allowed_service_ids is not None:
             typo_query += f" AND t.service_id IN {_format_int_list(context.allowed_service_ids)}"
@@ -1470,7 +1610,14 @@ async def get_filter_options(
             })
 
         # 3. Fetch min and max call duration
-        dur_query = f"SELECT MIN(call_duration_seconds), MAX(call_duration_seconds) FROM bm_mass_evaluation_results WHERE status = 'completed' AND (company_id IN {_format_int_list(context.allowed_company_ids)} OR company_id IS NULL)"
+        if eff_company_id is not None:
+            if eff_company_id == 1:
+                dur_comp_clause = "(company_id = 1 OR company_id IS NULL)"
+            else:
+                dur_comp_clause = f"company_id = {int(eff_company_id)}"
+        else:
+            dur_comp_clause = f"(company_id IN {_format_int_list(context.allowed_company_ids)} OR company_id IS NULL)" if not context.is_super_admin else "1=1"
+        dur_query = f"SELECT MIN(call_duration_seconds), MAX(call_duration_seconds) FROM bm_mass_evaluation_results WHERE status = 'completed' AND {dur_comp_clause}"
         dur_params = {}
         if context.allowed_service_ids is not None:
             dur_query += f" AND service_id IN {_format_int_list(context.allowed_service_ids)}"

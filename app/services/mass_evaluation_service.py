@@ -2397,11 +2397,14 @@ class MassEvaluationService:
             filters.append(MassEvaluationResult.hubspot_owner_id.in_(allowed_agent_ids))
         if service_ids is not None:
             filters.append(MassEvaluationResult.service_id.in_(service_ids))
-        elif company_ids:
-            filters.append(or_(
-                MassEvaluationResult.company_id.in_(company_ids),
-                MassEvaluationResult.company_id.is_(None)
-            ))
+        if company_ids:
+            if 1 in company_ids:
+                filters.append(or_(
+                    MassEvaluationResult.company_id.in_(company_ids),
+                    MassEvaluationResult.company_id.is_(None)
+                ))
+            else:
+                filters.append(MassEvaluationResult.company_id.in_(company_ids))
 
         if filters:
             stmt = stmt.where(and_(*filters))
@@ -2541,11 +2544,14 @@ class MassEvaluationService:
             filters.append(MassEvaluationResult.hubspot_owner_id.in_(allowed_agent_ids))
         if service_ids is not None:
             filters.append(MassEvaluationResult.service_id.in_(service_ids))
-        elif company_ids:
-            filters.append(or_(
-                MassEvaluationResult.company_id.in_(company_ids),
-                MassEvaluationResult.company_id.is_(None)
-            ))
+        if company_ids:
+            if 1 in company_ids:
+                filters.append(or_(
+                    MassEvaluationResult.company_id.in_(company_ids),
+                    MassEvaluationResult.company_id.is_(None)
+                ))
+            else:
+                filters.append(MassEvaluationResult.company_id.in_(company_ids))
 
         if filters:
             stmt = stmt.where(and_(*filters))

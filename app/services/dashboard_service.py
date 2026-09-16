@@ -466,15 +466,25 @@ async def get_dashboard_summary(
     context: TenantContext | None = None,
     team_id: int | None = None,
     granularity: str = "auto",
+    company_id: int | None = None,
 ) -> dict[str, Any]:
     from app.utils.item_score_filters import parse_item_score_filters_detailed, apply_item_score_filters_sql_or_python
     t_start = time.perf_counter()
     now = datetime.now(timezone.utc)
 
+    # Multitenant company resolution
+    effective_company_id = company_id
+    if effective_company_id is None and context:
+        effective_company_id = context.company_id
+
+    if company_id is not None and context and not context.is_super_admin:
+        if company_id not in context.allowed_company_ids:
+            raise HTTPException(status_code=403, detail="Acceso denegado a otra empresa.")
+
     if team_id is not None or service_id is not None:
         from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
         await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context)
-        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context) if team_id is not None else None
+        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=effective_company_id) if team_id is not None else None
     else:
         team_owner_ids = None
 
@@ -533,13 +543,24 @@ async def get_dashboard_summary(
         pass
     else:
         stmt = stmt.where(MassEvaluationResult.status == "completed")
-    if context and not context.is_super_admin:
+    if effective_company_id is not None:
+        if effective_company_id == 1:
+            stmt = stmt.where(
+                or_(
+                    MassEvaluationResult.company_id == 1,
+                    MassEvaluationResult.company_id.is_(None)
+                )
+            )
+        else:
+            stmt = stmt.where(MassEvaluationResult.company_id == effective_company_id)
+    elif context and not context.is_super_admin:
         stmt = stmt.where(
             or_(
                 MassEvaluationResult.company_id.in_(context.allowed_company_ids),
                 MassEvaluationResult.company_id.is_(None)
             )
         )
+    if context and not context.is_super_admin:
         if context.allowed_service_ids is not None:
             stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
         if context.allowed_agent_ids is not None:
@@ -757,8 +778,11 @@ async def get_dashboard_summary(
         Typology.is_active == True,
         Service.is_active == True
     )
-    if context:
+    if effective_company_id is not None:
+        typo_stmt = typo_stmt.where(Service.company_id == effective_company_id)
+    elif context:
         typo_stmt = typo_stmt.where(Service.company_id.in_(context.allowed_company_ids))
+    if context and not context.is_super_admin:
         if context.allowed_service_ids is not None:
             typo_stmt = typo_stmt.where(Service.service_id.in_(context.allowed_service_ids))
 
@@ -890,7 +914,7 @@ async def get_dashboard_summary(
     # ── Agent ranking & initials resolution ──
     from app.utils.agent_resolvers import build_user_initials_maps, resolve_agent_initials
 
-    by_owner, by_name, users_list = await build_user_initials_maps(db, company_id=None)
+    by_owner, by_name, users_list = await build_user_initials_maps(db, company_id=effective_company_id)
 
     ranking = []
     for bucket_key, data in agent_data.items():
@@ -1025,23 +1049,33 @@ async def get_agents_list(
     status: str | None = None,
     context: TenantContext | None = None,
     team_id: int | None = None,
+    company_id: int | None = None,
 ) -> list[dict[str, Any]]:
     """Return agents list with metrics calculated from bm_mass_evaluation_results only."""
     from app.models.mass_evaluations import MassEvaluationResult
     from app.utils.service_resolvers import resolve_service_id
+
+    # Multitenant company resolution
+    effective_company_id = company_id
+    if effective_company_id is None and context:
+        effective_company_id = context.company_id
+
+    if company_id is not None and context and not context.is_super_admin:
+        if company_id not in context.allowed_company_ids:
+            raise HTTPException(status_code=403, detail="Acceso denegado a otra empresa.")
 
     eff_service_id, eff_service_key = await resolve_service_id(
         db,
         service_id=service_id,
         service_key=service_key,
         service_param=service,
-        company_ids=None if (context and context.is_super_admin) else (context.allowed_company_ids if context else None)
+        company_ids=[effective_company_id] if effective_company_id is not None else (None if (context and context.is_super_admin) else (context.allowed_company_ids if context else None))
     )
 
     if team_id is not None or eff_service_id is not None:
         from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
         await validate_team_service_cascade(db, service_id=eff_service_id, team_id=team_id, context=context)
-        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context) if team_id is not None else None
+        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=effective_company_id) if team_id is not None else None
     else:
         team_owner_ids = None
 
@@ -1074,13 +1108,24 @@ async def get_agents_list(
         pass
     else:
         agg_stmt = agg_stmt.where(MassEvaluationResult.status == "completed")
-    if context and not context.is_super_admin:
+    if effective_company_id is not None:
+        if effective_company_id == 1:
+            agg_stmt = agg_stmt.where(
+                or_(
+                    MassEvaluationResult.company_id == 1,
+                    MassEvaluationResult.company_id.is_(None)
+                )
+            )
+        else:
+            agg_stmt = agg_stmt.where(MassEvaluationResult.company_id == effective_company_id)
+    elif context and not context.is_super_admin:
         agg_stmt = agg_stmt.where(
             or_(
                 MassEvaluationResult.company_id.in_(context.allowed_company_ids),
                 MassEvaluationResult.company_id.is_(None)
             )
         )
+    if context and not context.is_super_admin:
         if context.allowed_service_ids is not None:
             agg_stmt = agg_stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
         if context.allowed_agent_ids is not None:
@@ -1170,9 +1215,34 @@ async def get_agents_list(
             db_stats[oid] = r
 
     from app.utils.agent_resolvers import build_user_initials_maps, resolve_agent_initials
-    by_owner, by_name, users_list = await build_user_initials_maps(db, company_id=None)
+    by_owner, by_name, users_list = await build_user_initials_maps(db, company_id=effective_company_id)
 
-    def _fmt(stats: Any, oid: str, name: str) -> dict:
+    # Fetch active users assigned to service
+    assigned_users = await get_service_assigned_users(db, service_id=eff_service_id, context=context, company_id=effective_company_id)
+    if team_id is not None:
+        assigned_users = {oid: u for oid, u in assigned_users.items() if oid in team_owner_ids}
+
+    target_owner_ids: set[str] = set(assigned_users.keys())
+    if context and context.allowed_agent_ids is not None:
+        target_owner_ids = {oid for oid in target_owner_ids if oid in context.allowed_agent_ids}
+
+    # Pre-load team names for all relevant teams (avoid N+1 queries)
+    from app.models.teams import Team as TeamModel
+    team_ids_needed = {
+        getattr(u, "primary_team_id", None)
+        for u in assigned_users.values()
+        if getattr(u, "primary_team_id", None) is not None
+    }
+    team_names_map: dict[int, str] = {}
+    if team_ids_needed:
+        _team_stmt = select(TeamModel.team_id, TeamModel.team_name).where(
+            TeamModel.team_id.in_(list(team_ids_needed))
+        )
+        _team_res = await db.execute(_team_stmt)
+        for tid, tname in _team_res.fetchall():
+            team_names_map[tid] = tname
+
+    def _fmt(stats: Any, oid: str, name: str, u_obj: Any = None) -> dict:
         avg_eval = to_float(round(stats.avg_eval, 1)) if (stats and stats.avg_eval is not None) else None
         last_at = None
         if stats and stats.last_analysis_at:
@@ -1188,9 +1258,20 @@ async def get_agents_list(
             by_name=by_name,
             users_list=users_list,
         )
-        label = f"{initials} · {name}" if initials else name
+
+        u_team_id = getattr(u_obj, "primary_team_id", None) if u_obj else None
+        u_user_id = getattr(u_obj, "user_id", None) if u_obj else None
+        u_team_name = team_names_map.get(u_team_id) if u_team_id is not None else None
+
+        # Build descriptive label: "Nombre · Equipo" if team name is known, else just "Nombre"
+        if u_team_name:
+            label = f"{name} · {u_team_name}"
+        else:
+            label = name
 
         return {
+            "user_id": u_user_id,
+            "id": u_user_id,
             "hubspot_owner_id": oid,
             "name": name,
             "agent_name": name,
@@ -1199,21 +1280,14 @@ async def get_agents_list(
             "label": label,
             "service_id": eff_service_id,
             "service_name": None,
+            "team_id": u_team_id,
+            "team_name": u_team_name,
             "total_analyses": to_float(stats.total_analyses) if stats else 0.0,
             "last_analysis_at": last_at,
             "avg_evaluacion_global": avg_eval,
             "total_analyses_scope": "filtered" if (period or date_from or date_to) else "historical",
             "total_analyses_period": period or "custom",
         }
-
-    # Fetch active users assigned to service
-    assigned_users = await get_service_assigned_users(db, service_id=eff_service_id, context=context)
-    if team_id is not None:
-        assigned_users = {oid: u for oid, u in assigned_users.items() if oid in team_owner_ids}
-
-    target_owner_ids: set[str] = set(assigned_users.keys())
-    if context and context.allowed_agent_ids is not None:
-        target_owner_ids = {oid for oid in target_owner_ids if oid in context.allowed_agent_ids}
 
     results = []
     for oid in sorted(target_owner_ids):
@@ -1223,14 +1297,16 @@ async def get_agents_list(
         elif oid in db_stats:
             row = db_stats[oid]
             disp_name = resolve_owner_name(oid) or row.agent_name or oid
+            u_obj = None
         else:
             disp_name = resolve_owner_name(oid) or oid
+            u_obj = None
 
         # Exclude unidentified numeric agents unless they have evaluations or are explicitly assigned
         if (disp_name.startswith("Agente no identificado") or disp_name.isdigit()) and oid not in db_stats:
             continue
 
-        results.append(_fmt(db_stats.get(oid), oid, disp_name))
+        results.append(_fmt(db_stats.get(oid), oid, disp_name, u_obj=assigned_users.get(oid)))
 
     results.sort(key=lambda x: x["name"])
 
@@ -1267,17 +1343,27 @@ async def get_agent_evolution(
     status: str | None = None,
     context: TenantContext | None = None,
     granularity: str = "auto",
+    company_id: int | None = None,
 ) -> dict[str, Any]:
     """Evolution metrics from bm_mass_evaluation_results only."""
     from app.models.mass_evaluations import MassEvaluationResult
     from app.utils.service_resolvers import resolve_service_id
+
+    # Multitenant company resolution
+    effective_company_id = company_id
+    if effective_company_id is None and context:
+        effective_company_id = context.company_id
+
+    if company_id is not None and context and not context.is_super_admin:
+        if company_id not in context.allowed_company_ids:
+            raise HTTPException(status_code=403, detail="Acceso denegado a otra empresa.")
 
     eff_service_id, eff_service_key = await resolve_service_id(
         db,
         service_id=service_id,
         service_key=service_key,
         service_param=service,
-        company_ids=None if (context and context.is_super_admin) else (context.allowed_company_ids if context else None)
+        company_ids=[effective_company_id] if effective_company_id is not None else (None if (context and context.is_super_admin) else (context.allowed_company_ids if context else None))
     )
 
     now = datetime.now(timezone.utc)
@@ -1302,13 +1388,24 @@ async def get_agent_evolution(
         pass
     else:
         stmt = stmt.where(MassEvaluationResult.status == "completed")
-    if context and not context.is_super_admin:
+    if effective_company_id is not None:
+        if effective_company_id == 1:
+            stmt = stmt.where(
+                or_(
+                    MassEvaluationResult.company_id == 1,
+                    MassEvaluationResult.company_id.is_(None)
+                )
+            )
+        else:
+            stmt = stmt.where(MassEvaluationResult.company_id == effective_company_id)
+    elif context and not context.is_super_admin:
         stmt = stmt.where(
             or_(
                 MassEvaluationResult.company_id.in_(context.allowed_company_ids),
                 MassEvaluationResult.company_id.is_(None)
             )
         )
+    if context and not context.is_super_admin:
         if context.allowed_service_ids is not None:
             stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
         if context.allowed_agent_ids is not None and hubspot_owner_id not in context.allowed_agent_ids:
@@ -1647,15 +1744,25 @@ async def get_objections_breakdown(
     status: str | None = None,
     context: TenantContext | None = None,
     team_id: int | None = None,
+    company_id: int | None = None,
 ) -> dict[str, Any]:
     norm_t = normalize_typology(typology_key or tipo_llamada)
     norm_d = normalize_direction(direction)
     now = datetime.now(timezone.utc)
     
+    # Multitenant company resolution
+    effective_company_id = company_id
+    if effective_company_id is None and context:
+        effective_company_id = context.company_id
+
+    if company_id is not None and context and not context.is_super_admin:
+        if company_id not in context.allowed_company_ids:
+            raise HTTPException(status_code=403, detail="Acceso denegado a otra empresa.")
+
     if team_id is not None or service_id is not None:
         from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
         await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context)
-        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context) if team_id is not None else None
+        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=effective_company_id) if team_id is not None else None
     else:
         team_owner_ids = None
 
@@ -1669,14 +1776,26 @@ async def get_objections_breakdown(
     else:
         stmt = stmt.where(MassEvaluationResult.status == "completed")
 
-    if team_id is not None:
-        if context and not context.is_super_admin:
+    if effective_company_id is not None:
+        if effective_company_id == 1:
             stmt = stmt.where(
                 or_(
-                    MassEvaluationResult.company_id.in_(context.allowed_company_ids),
+                    MassEvaluationResult.company_id == 1,
                     MassEvaluationResult.company_id.is_(None)
                 )
             )
+        else:
+            stmt = stmt.where(MassEvaluationResult.company_id == effective_company_id)
+    elif context and not context.is_super_admin:
+        stmt = stmt.where(
+            or_(
+                MassEvaluationResult.company_id.in_(context.allowed_company_ids),
+                MassEvaluationResult.company_id.is_(None)
+            )
+        )
+
+    if team_id is not None:
+        if context and not context.is_super_admin:
             if context.allowed_service_ids is not None:
                 stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
         if agent_id:
@@ -1690,12 +1809,6 @@ async def get_objections_breakdown(
                 allowed_team_owners = {oid for oid in team_owner_ids if oid in context.allowed_agent_ids}
             stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(allowed_team_owners if allowed_team_owners else ["-1"]))
     elif context and not context.is_super_admin:
-        stmt = stmt.where(
-            or_(
-                MassEvaluationResult.company_id.in_(context.allowed_company_ids),
-                MassEvaluationResult.company_id.is_(None)
-            )
-        )
         if context.allowed_service_ids is not None:
             stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
         if context.allowed_agent_ids is not None:
@@ -2059,6 +2172,7 @@ async def get_agents_comparison(
     context: TenantContext | None = None,
     team_id: int | None = None,
     granularity: str = "auto",
+    company_id: int | None = None,
 ) -> dict[str, Any]:
     """Retrieve multi-agent comparison analytics using MassEvaluationResult."""
     t_start = time.perf_counter()
@@ -2066,10 +2180,19 @@ async def get_agents_comparison(
     norm_d = normalize_direction(direction)
     now = datetime.now(timezone.utc)
 
+    # Multitenant company resolution
+    effective_company_id = company_id
+    if effective_company_id is None and context:
+        effective_company_id = context.company_id
+
+    if company_id is not None and context and not context.is_super_admin:
+        if company_id not in context.allowed_company_ids:
+            raise HTTPException(status_code=403, detail="Acceso denegado a otra empresa.")
+
     if team_id is not None or service_id is not None:
         from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
         await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context)
-        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context) if team_id is not None else None
+        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=effective_company_id) if team_id is not None else None
     else:
         team_owner_ids = None
     
@@ -2128,14 +2251,26 @@ async def get_agents_comparison(
     else:
         stmt = stmt.where(MassEvaluationResult.status == "completed")
 
-    if team_id is not None:
-        if context and not context.is_super_admin:
+    if effective_company_id is not None:
+        if effective_company_id == 1:
             stmt = stmt.where(
                 or_(
-                    MassEvaluationResult.company_id.in_(context.allowed_company_ids),
+                    MassEvaluationResult.company_id == 1,
                     MassEvaluationResult.company_id.is_(None)
                 )
             )
+        else:
+            stmt = stmt.where(MassEvaluationResult.company_id == effective_company_id)
+    elif context and not context.is_super_admin:
+        stmt = stmt.where(
+            or_(
+                MassEvaluationResult.company_id.in_(context.allowed_company_ids),
+                MassEvaluationResult.company_id.is_(None)
+            )
+        )
+
+    if team_id is not None:
+        if context and not context.is_super_admin:
             if context.allowed_service_ids is not None:
                 stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
         if hubspot_owner_ids:
@@ -2149,12 +2284,6 @@ async def get_agents_comparison(
                 allowed_team_owners = {oid for oid in team_owner_ids if oid in context.allowed_agent_ids}
             stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(allowed_team_owners if allowed_team_owners else ["-1"]))
     elif context and not context.is_super_admin:
-        stmt = stmt.where(
-            or_(
-                MassEvaluationResult.company_id.in_(context.allowed_company_ids),
-                MassEvaluationResult.company_id.is_(None)
-            )
-        )
         if context.allowed_service_ids is not None:
             stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
         if context.allowed_agent_ids is not None:

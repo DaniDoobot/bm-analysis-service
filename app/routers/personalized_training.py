@@ -191,6 +191,7 @@ async def verify_report_write_scope(
 @router.get("/admin/settings", response_model=List[TrainingAgentSettingOut])
 async def list_agent_settings(
     context: Annotated[TenantContext, Depends(get_tenant_context)],
+    company_id: Annotated[Optional[int], Query(description="Filter by company ID")] = None,
     db: AsyncSession = Depends(get_db)
 ):
     """List all personalized training settings for agents (Admin/Company Admin/Service Manager/Team Coordinator)."""
@@ -200,7 +201,15 @@ async def list_agent_settings(
             detail="Acceso denegado: Se requiere rol de administración."
         )
 
-    company_ids = context.allowed_company_ids if not context.is_super_admin else None
+    if company_id is not None and not context.is_super_admin:
+        if company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado a otra empresa."
+            )
+    eff_company_id = company_id if company_id is not None else (None if context.is_super_admin else context.company_id)
+    company_ids = [eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
+
     allowed_agent_ids = None
     if context.normalized_role == InternalRole.SERVICE_MANAGER:
         allowed_agent_ids = await get_service_manager_agent_ids(db, context)
@@ -296,6 +305,7 @@ async def _resolve_training_agent_scope(
     context: TenantContext,
     service_id: Optional[int] = None,
     team_id: Optional[int] = None,
+    company_id: Optional[int] = None,
 ) -> Optional[List[str]]:
     """
     Validates cascade and resolves the allowed hubspot_owner_ids based on role, service_id, and team_id.
@@ -322,9 +332,9 @@ async def _resolve_training_agent_scope(
 
     target_filter_set: Optional[set[str]] = None
     if team_id is not None:
-        target_filter_set = await get_team_assigned_owner_ids(db, team_id=team_id, context=context)
+        target_filter_set = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=company_id)
     elif service_id is not None:
-        target_filter_set = await get_service_assigned_owner_ids(db, service_id=service_id, context=context)
+        target_filter_set = await get_service_assigned_owner_ids(db, service_id=service_id, context=context, company_id=company_id)
 
     if base_role_set is not None and target_filter_set is not None:
         return list(base_role_set.intersection(target_filter_set))
@@ -340,6 +350,7 @@ async def list_agents_overview(
     context: Annotated[TenantContext, Depends(get_tenant_context)],
     service_id: Annotated[Optional[int], Query(description="Filter by service ID")] = None,
     team_id: Annotated[Optional[int], Query(description="Filter by team ID")] = None,
+    company_id: Annotated[Optional[int], Query(description="Filter by company ID")] = None,
     db: AsyncSession = Depends(get_db)
 ):
     """Overview list of all active agents and their current training statuses."""
@@ -349,9 +360,17 @@ async def list_agents_overview(
             detail="Acceso denegado: Se requiere rol de administración."
         )
 
-    company_ids = context.allowed_company_ids if not context.is_super_admin else None
+    if company_id is not None and not context.is_super_admin:
+        if company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado a otra empresa."
+            )
+    eff_company_id = company_id if company_id is not None else (None if context.is_super_admin else context.company_id)
+    company_ids = [eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
+
     allowed_agent_ids = await _resolve_training_agent_scope(
-        db, context=context, service_id=service_id, team_id=team_id
+        db, context=context, service_id=service_id, team_id=team_id, company_id=eff_company_id
     )
 
     return await PersonalizedTrainingService.get_agent_overview(
@@ -366,6 +385,7 @@ async def get_team_cycles_summary(
     context: Annotated[TenantContext, Depends(get_tenant_context)],
     service_id: Annotated[Optional[int], Query(description="Filter by service ID")] = None,
     team_id: Annotated[Optional[int], Query(description="Filter by team ID")] = None,
+    company_id: Annotated[Optional[int], Query(description="Filter by company ID")] = None,
     db: AsyncSession = Depends(get_db)
 ):
     """Get team-wide training metrics, aggregates and priority targets."""
@@ -375,9 +395,17 @@ async def get_team_cycles_summary(
             detail="Acceso denegado: Se requiere rol de administración."
         )
 
-    company_ids = context.allowed_company_ids if not context.is_super_admin else None
+    if company_id is not None and not context.is_super_admin:
+        if company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado a otra empresa."
+            )
+    eff_company_id = company_id if company_id is not None else (None if context.is_super_admin else context.company_id)
+    company_ids = [eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
+
     allowed_agent_ids = await _resolve_training_agent_scope(
-        db, context=context, service_id=service_id, team_id=team_id
+        db, context=context, service_id=service_id, team_id=team_id, company_id=eff_company_id
     )
 
     return await PersonalizedTrainingService.get_cycles_team_summary(

@@ -247,12 +247,87 @@ async def seed_demo_structure(db: AsyncSession) -> Dict[str, Any]:
         await save_user_team_associations(db, coord_user.user_id, [t_id], role="team_coordinator")
         created_users.append(coord_user)
 
-    # 8. Create 60 Agents
+    # 8. Create 60 Agents with realistic, unique Spanish names
     # Distribution:
     # 01..10 -> Front Atención (10)
     # 11..30 -> Backoffice Atención (20)
     # 31..40 -> Equipo Comercial (10)
     # 41..60 -> Equipo Retención (20)
+    DEMO_AGENT_NAMES: List[tuple] = [
+        # (full_name, initials) — Front Atención (01..10)
+        ("Ana García López", "AG"),
+        ("Carlos López Martínez", "CL"),
+        ("Laura Martínez Sánchez", "LM"),
+        ("Javier Rodríguez Fernández", "JR"),
+        ("Sofía Sánchez Gómez", "SS"),
+        ("Alejandro Fernández Díaz", "AF"),
+        ("Lucía Gómez Ruiz", "LG"),
+        ("Daniel Martín Torres", "DM"),
+        ("Elena Díaz Moreno", "ED"),
+        ("David Ruiz Jiménez", "DR"),
+        # Backoffice Atención (11..30)
+        ("María Moreno Álvarez", "MM"),
+        ("Pablo Jiménez Romero", "PJ"),
+        ("Carmen Álvarez Alonso", "CA"),
+        ("Manuel Romero Gutiérrez", "MR"),
+        ("Marta Alonso Navarro", "MA"),
+        ("Adrián Gutiérrez Torres", "AG2"),
+        ("Sara Navarro Domínguez", "SN"),
+        ("Álvaro Torres Vázquez", "AT"),
+        ("Paula Domínguez Ramos", "PD"),
+        ("Mario Vázquez Gil", "MV"),
+        ("Irene Ramos Ramírez", "IR"),
+        ("Diego Gil Serrano", "DG"),
+        ("Natalia Ramírez Blanco", "NR"),
+        ("Hugo Serrano Molina", "HS"),
+        ("Claudia Blanco Morales", "CB"),
+        ("Gonzalo Molina Suárez", "GM"),
+        ("Silvia Morales Ortega", "SM"),
+        ("Marcos Suárez Delgado", "MS"),
+        ("Patricia Ortega Castro", "PO"),
+        ("Sergio Delgado Ortiz", "SD"),
+        # Equipo Comercial (31..40)
+        ("Raquel Castro Rubio", "RC"),
+        ("Fernando Ortiz Marín", "FO"),
+        ("Alicia Rubio Sanz", "AR"),
+        ("Jorge Marín Núñez", "JM"),
+        ("Cristina Sanz Iglesias", "CS"),
+        ("Andrés Núñez Medina", "AN"),
+        ("Marina Iglesias Garrido", "MI"),
+        ("Rubén Medina Cortés", "RM"),
+        ("Andrea Garrido Castillo", "AG3"),
+        ("Víctor Cortés Santos", "VC"),
+        # Equipo Retención (41..60)
+        ("Noelia Castillo Lozano", "NC"),
+        ("Iván Santos Guerrero", "IS"),
+        ("Lorena Lozano Cano", "LL"),
+        ("Raúl Guerrero Prieto", "RG"),
+        ("Miriam Cano Méndez", "MC"),
+        ("Óscar Prieto Cruz", "OP"),
+        ("Celia Méndez Calvo", "CM"),
+        ("Guillermo Cruz Gallego", "GC"),
+        ("Alba Calvo Vidal", "AV"),
+        ("Héctor Gallego León", "HG"),
+        ("Rocío Vidal Herrera", "RV"),
+        ("Gabriel León Márquez", "GL"),
+        ("Teresa Herrera Peña", "TH"),
+        ("Samuel Márquez Flores", "SM2"),
+        ("Clara Peña Cabrera", "CP"),
+        ("Roberto Flores Campos", "RF"),
+        ("Inés Cabrera Vega", "IC"),
+        ("Tomás Campos Fuentes", "TC"),
+        ("Julia Vega Medina", "JV"),
+        ("Lucas Fuentes García", "LF"),
+    ]
+    # Fix duplicate initials to ensure uniqueness (AG2, AG3, SM2 → strip digits → AG, AG, SM)
+    import unicodedata
+
+    def _slug(s: str) -> str:
+        """Normalize a string to lowercase ASCII, used for username generation."""
+        nfkd = unicodedata.normalize("NFKD", s)
+        ascii_s = "".join(c for c in nfkd if not unicodedata.combining(c))
+        return ascii_s.lower().replace(" ", ".")
+
     agents_created: List[User] = []
     for i in range(1, 61):
         idx_str = f"{i:02d}"
@@ -269,16 +344,25 @@ async def seed_demo_structure(db: AsyncSession) -> Dict[str, Any]:
             target_svc = svc_ventas
             target_team = team_retencion
 
+        full_name, raw_initials = DEMO_AGENT_NAMES[i - 1]
+        # Strip synthetic numeric suffixes (AG2, AG3, SM2 → AG, AG, SM)
+        clean_initials = raw_initials.rstrip("0123456789")
+
+        # Derive username from name (e.g. "Ana García López" → "ana.lopez.demo")
+        name_parts = full_name.split()
+        username_base = f"{_slug(name_parts[0])}.{_slug(name_parts[-1])}"
+        username = f"{username_base}.demo"
+
         agent_user = User(
-            username=f"agente.demo.{idx_str}",
+            username=username,
             email=f"agente.demo.{idx_str}@doobot.ai",
-            name=f"Agente Demo {idx_str}",
+            name=full_name,
             role="agent",
             company_id=company_id,
             primary_service_id=target_svc.service_id,
             primary_team_id=target_team.team_id,
             hubspot_owner_id=f"demo_owner_{idx_str}",
-            agent_initials=f"D{idx_str}",
+            agent_initials=clean_initials,
             password_hash=pass_hash,
             is_active=True,
             must_reset_password=False,

@@ -39,7 +39,7 @@ async def list_teams(
             service_id=service_id,
             service_key=service_key,
             service_param=service,
-            company_ids=None if context.is_super_admin else context.allowed_company_ids
+            company_ids=[company_id] if company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
         )
         if resolved_id is not None:
             service_id = resolved_id

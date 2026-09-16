@@ -10,14 +10,18 @@ class AnalyticsItem(BaseModel):
 
 
 class AgentInfo(BaseModel):
+    user_id: int | None = Field(None, description="Internal unique user ID")
+    id: int | None = Field(None, description="Alias for user_id for UI selector components")
     hubspot_owner_id: str = Field(..., description="HubSpot Owner ID of the agent as a string")
     agent_name: str = Field(..., description="Full display name of the agent")
     name: str | None = Field(None, description="Full display name alias")
-    agent_initials: str | None = Field(None, description="Agent initials e.g. LD")
+    agent_initials: str | None = Field(None, description="Agent initials e.g. AG")
     initials: str | None = Field(None, description="Agent initials alias")
-    label: str | None = Field(None, description="Formatted label e.g. LD · Luci Dos Santos")
+    label: str | None = Field(None, description="Formatted label e.g. Ana García · Front Atención")
     service_id: int | None = Field(None, description="Service ID if applicable")
     service_name: str | None = Field(None, description="Service name if applicable")
+    team_id: int | None = Field(None, description="Team ID if applicable")
+    team_name: str | None = Field(None, description="Team name if applicable")
     has_data: bool | None = Field(None, description="Whether the agent has evaluation data in the selected period")
     analysis_count: int | None = Field(None, description="Total number of analyses/evaluations in the period")
 

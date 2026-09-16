@@ -27,15 +27,24 @@ async def get_services(
     date_to: str | None = Query(None, description="Fecha de fin (ISO 8601 o YYYY-MM-DD) para filtrar recuento de llamadas"),
     status: str | None = Query(None, description="Filter by evaluation status: completed | failed | all"),
     result_status: str | None = Query(None, description="Alias for status"),
+    company_id: int | None = Query(None, description="Filtrar por empresa"),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Retrieve all active services with unique evaluated calls counts and date bounds.
     Useful for populating service selectors.
     """
+    if company_id is not None and not context.is_super_admin:
+        if company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=403,
+                detail="Acceso denegado a otra empresa."
+            )
+    eff_company_id = company_id if company_id is not None else (None if context.is_super_admin else context.company_id)
+
     norm_status = normalize_status(status or result_status)
     try:
-        return await ServiceEvolutionService.get_services(db, date_from=date_from, date_to=date_to, status=norm_status, context=context)
+        return await ServiceEvolutionService.get_services(db, date_from=date_from, date_to=date_to, status=norm_status, context=context, company_id=eff_company_id)
     except HTTPException:
         raise
     except Exception as e:
@@ -55,15 +64,24 @@ async def get_criteria(
     status: str | None = Query(None, description="Filter by evaluation status: completed | failed | all"),
     result_status: str | None = Query(None, description="Alias for status"),
     team_id: int | None = Query(None, description="Filtrar por equipo"),
+    company_id: int | None = Query(None, description="Filtrar por empresa"),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Retrieve available criteria keys with counts of applicable entries.
     Useful for selecting criteria to graph/analyze.
     """
+    if company_id is not None and not context.is_super_admin:
+        if company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=403,
+                detail="Acceso denegado a otra empresa."
+            )
+    eff_company_id = company_id if company_id is not None else (None if context.is_super_admin else context.company_id)
+
     norm_status = normalize_status(status or result_status)
     try:
-        return await ServiceEvolutionService.get_criteria(db, service_id=service_id, date_from=date_from, date_to=date_to, status=norm_status, context=context, team_id=team_id)
+        return await ServiceEvolutionService.get_criteria(db, service_id=service_id, date_from=date_from, date_to=date_to, status=norm_status, context=context, team_id=team_id, company_id=eff_company_id)
     except HTTPException:
         raise
     except Exception as e:
@@ -106,6 +124,7 @@ async def get_evolution(
     score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     team_id: int | None = Query(None, description="Filtrar por equipo"),
+    company_id: int | None = Query(None, description="Filtrar por empresa"),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -158,7 +177,14 @@ async def get_evolution(
         or _extract_val(call_direction)
         or _extract_val(inbound_outbound)
     )
-    norm_direction = normalize_direction(raw_direction)
+    c_id = _extract_val(company_id)
+    if c_id is not None and not context.is_super_admin:
+        if c_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=403,
+                detail="Acceso denegado a otra empresa."
+            )
+    eff_company_id = c_id if c_id is not None else (None if context.is_super_admin else context.company_id)
 
     if s_id is not None and not context.is_super_admin:
         if context.allowed_service_ids is not None and s_id not in context.allowed_service_ids:
@@ -209,6 +235,7 @@ async def get_evolution(
             context=context,
             item_filters=active_item_filters,
             team_id=team_id,
+            company_id=eff_company_id,
         )
     except HTTPException:
         raise

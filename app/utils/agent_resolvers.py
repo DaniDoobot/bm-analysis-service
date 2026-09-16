@@ -72,6 +72,9 @@ async def build_user_initials_maps(
         u_dict = {
             "user_id": u.user_id,
             "hubspot_owner_id": str(u.hubspot_owner_id).strip() if u.hubspot_owner_id else None,
+            "primary_team_id": u.primary_team_id,
+            "primary_service_id": u.primary_service_id,
+            "company_id": u.company_id,
             "name": u.name,
             "username": u.username,
             "email": u.email,
@@ -175,3 +178,70 @@ async def resolve_agent_initials_async(
         users_list=users_list,
         persisted_initials=persisted_initials,
     )
+
+
+async def resolve_agent_identifiers_to_owner_ids(
+    db: AsyncSession,
+    identifiers: Optional[List[Any]],
+    company_id: Optional[int] = None,
+) -> List[str]:
+    """
+    Given a list of agent identifiers which may contain numeric user_ids (int or numeric str)
+    or hubspot_owner_ids (str), resolves any user_ids to their canonical hubspot_owner_ids.
+    Returns a deduplicated list of hubspot_owner_id strings.
+    """
+    if not identifiers:
+        return []
+
+    from app.models.users import User
+
+    resolved_owner_ids: List[str] = []
+    numeric_ids_to_lookup: List[int] = []
+
+    for raw in identifiers:
+        if raw is None:
+            continue
+        s_val = str(raw).strip()
+        if not s_val:
+            continue
+        if s_val.isdigit():
+            numeric_ids_to_lookup.append(int(s_val))
+        else:
+            resolved_owner_ids.append(s_val)
+
+    if numeric_ids_to_lookup:
+        stmt = select(User.user_id, User.hubspot_owner_id).where(
+            or_(
+                User.user_id.in_(numeric_ids_to_lookup),
+                User.hubspot_owner_id.in_([str(n) for n in numeric_ids_to_lookup]),
+            )
+        )
+        if company_id is not None:
+            stmt = stmt.where(or_(User.company_id == company_id, User.company_id.is_(None)))
+        res = await db.execute(stmt)
+        found_rows = res.all()
+        found_map: Dict[Any, str] = {}
+        for uid, h_oid in found_rows:
+            if h_oid:
+                clean_h = str(h_oid).strip()
+                found_map[uid] = clean_h
+                found_map[str(uid)] = clean_h
+                found_map[clean_h] = clean_h
+
+        for num_id in numeric_ids_to_lookup:
+            if num_id in found_map:
+                resolved_owner_ids.append(found_map[num_id])
+            elif str(num_id) in found_map:
+                resolved_owner_ids.append(found_map[str(num_id)])
+            else:
+                resolved_owner_ids.append(str(num_id))
+
+    # Deduplicate preserving order
+    seen = set()
+    deduped = []
+    for oid in resolved_owner_ids:
+        if oid not in seen:
+            seen.add(oid)
+            deduped.append(oid)
+    return deduped
+

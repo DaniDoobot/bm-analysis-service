@@ -1,7 +1,7 @@
 import re
 from datetime import datetime
 from typing import List, Optional
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, computed_field, field_validator, model_validator
 from app.core.roles import InternalRole
 
 _SLUG_REGEX = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
@@ -74,6 +74,16 @@ class CompanyResponse(CompanyBase):
 
     model_config = ConfigDict(from_attributes=True)
 
+    @computed_field
+    @property
+    def id(self) -> int:
+        return self.company_id
+
+    @computed_field
+    @property
+    def name(self) -> str:
+        return self.company_name
+
 class AdminCompanyResponse(BaseModel):
     """Enriched company response for admin views with resource counts."""
     company_id: int
@@ -88,6 +98,16 @@ class AdminCompanyResponse(BaseModel):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+    @computed_field
+    @property
+    def id(self) -> int:
+        return self.company_id
+
+    @computed_field
+    @property
+    def name(self) -> str:
+        return self.company_name
 
 
 
