@@ -1,4 +1,4 @@
-﻿"""
+"""
 test_agent_selectors_and_unique_names.py
 =========================================
 Unit tests for agent selector improvements & unique agent_code generation:
@@ -236,5 +236,125 @@ class TestPersonalizedTrainingSchemas(unittest.TestCase):
         self.assertEqual(item.team_name, "Backoffice Atención")
 
 
+class TestServiceEvolutionAgentItemSchema(unittest.TestCase):
+    """Verify ServiceEvolutionAgentItem exposes user_id, id, agent_code, and label."""
+
+    def test_service_evolution_agent_item_fields(self):
+        from app.schemas.service_evolution import ServiceEvolutionAgentItem
+        item = ServiceEvolutionAgentItem(
+            user_id=1,
+            id=1,
+            agent_owner_id="demo_owner_01",
+            agent_name="Agente Demo 01",
+            agent_code="AC-F01",
+            label="AC-F01 · Agente Demo 01",
+            total_calls=25,
+            avg_evaluacion_global=8.4,
+            avg_claridad=9.0,
+            cierre_cita_rate=75.0,
+        )
+        self.assertEqual(item.user_id, 1)
+        self.assertEqual(item.id, 1)
+        self.assertEqual(item.agent_code, "AC-F01")
+        self.assertEqual(item.label, "AC-F01 · Agente Demo 01")
+        self.assertEqual(item.agent_name, "Agente Demo 01")
+
+
+class TestDashboardServiceUserImportAndEvolution(unittest.TestCase):
+    """Verify User is imported in dashboard_service and get_agent_evolution resolves properly."""
+
+    def test_user_imported_in_dashboard_service(self):
+        import app.services.dashboard_service as ds
+        self.assertTrue(hasattr(ds, "User"), "User model must be imported in dashboard_service")
+
+    def test_get_agent_evolution_resolves_numeric_and_owner_id(self):
+        from app.services.dashboard_service import get_agent_evolution
+        from app.core.tenant_context import TenantContext
+        from app.core.roles import InternalRole
+
+        context = TenantContext(
+            user_id=1,
+            user_email="admin@test.com",
+            raw_role="superadmin",
+            normalized_role=InternalRole.SUPER_ADMIN,
+            company_id=6,
+            allowed_company_ids=[6],
+            is_super_admin=True,
+        )
+
+        mock_db = AsyncMock()
+        # First query: resolve_agent_identifiers_to_owner_ids
+        mock_res_uid = MagicMock()
+        mock_res_uid.all.return_value = [(42, "demo_owner_42")]
+
+        # Second query: MassEvaluationResult
+        mock_res_mass = MagicMock()
+        mock_res_mass.scalars.return_value.all.return_value = []
+
+        # Third query: User lookup
+        mock_user = MagicMock()
+        mock_user.user_id = 42
+        mock_user.hubspot_owner_id = "demo_owner_42"
+        mock_user.name = "Agente Demo 42"
+        mock_user.agent_initials = "VT-R02"
+        mock_user.primary_team_id = None
+        mock_res_user = MagicMock()
+        mock_res_user.scalars.return_value.first.return_value = mock_user
+
+        mock_db.execute.side_effect = [mock_res_uid, mock_res_mass, mock_res_user]
+
+        data = _run(get_agent_evolution(
+            mock_db,
+            hubspot_owner_id="42",
+            context=context,
+            company_id=6,
+        ))
+
+        self.assertIn("agent", data)
+        agent = data["agent"]
+        self.assertEqual(agent["user_id"], 42)
+        self.assertEqual(agent["hubspot_owner_id"], "demo_owner_42")
+        self.assertEqual(agent["agent_code"], "VT-R02")
+        self.assertIn("VT-R02", agent["label"])
+
+
+class TestServiceEvolutionRouterNoStatusShadowing(unittest.TestCase):
+    """Verify service_evolution router does not crash on exception handling due to status shadowing."""
+
+    def test_status_import_not_shadowed(self):
+        import app.routers.service_evolution as se
+        self.assertTrue(hasattr(se, "http_status"), "service_evolution must import status as http_status")
+
+
+class TestFixDemoAgentNamesScript(unittest.TestCase):
+    """Verify fix_demo_agent_names strictly targets company_id=6 and sets proper demo names."""
+
+    def test_fix_demo_agent_names_only_targets_company_6(self):
+        from scripts.fix_demo_agent_names import fix_demo_agent_names, DEMO_COMPANY_ID
+        self.assertEqual(DEMO_COMPANY_ID, 6, "Demo company ID must be 6")
+
+        mock_db = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.rowcount = 1
+        mock_db.execute.return_value = mock_result
+
+        summary = _run(fix_demo_agent_names(mock_db, dry_run=True))
+        self.assertTrue(summary["dry_run"])
+        self.assertEqual(summary["updated_users"], 60)
+        self.assertEqual(summary["updated_settings"], 60)
+        self.assertEqual(summary["updated_evals"], 60)
+        self.assertEqual(summary["updated_reports"], 60)
+
+        # Inspect all executed statements: none should touch company_id != 6
+        for call_args in mock_db.execute.call_args_list:
+            stmt = call_args[0][0]
+            compiled = str(stmt.compile())
+            self.assertIn("company_id = :company_id_1", compiled)
+            params = stmt.compile().params
+            self.assertEqual(params.get("company_id_1"), 6)
+            self.assertNotEqual(params.get("company_id_1"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
+

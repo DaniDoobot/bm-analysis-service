@@ -14,6 +14,7 @@ from app.models.analyses import Analysis
 from app.models.mass_evaluations import MassEvaluationResult, MassEvaluationCriterionResult
 from app.models.services import Service
 from app.models.typologies import Typology
+from app.models.users import User
 from app.utils.hubspot_owners import resolve_agent_display, resolve_owner_name, OWNER_TO_NAME
 from app.core.tenant_context import TenantContext
 from app.utils.normalizers import normalize_typology, normalize_direction
@@ -934,10 +935,17 @@ async def get_dashboard_summary(
             agent_name=name,
             company_id=effective_company_id,
         )
+        from app.utils.agent_resolvers import is_demo_agent_code
+        u_info = next((u for u in users_list if str(u.get("hubspot_owner_id")) == str(owner_id)), None)
+        u_uid = u_info.get("user_id") if u_info else None
+        label = f"{agent_code} · {name}" if is_demo_agent_code(agent_code) else name
         ranking.append({
+            "user_id": u_uid,
+            "id": u_uid,
             "agente_telefonico": name,
             "name": name,
             "agent_code": agent_code,
+            "label": label,
             "hubspot_owner_id": owner_id,
             "initials": initials,
             "agent_initials": initials,
@@ -1400,8 +1408,21 @@ async def get_agent_evolution(
         span = (dt_to - dt_from) if (dt_from and dt_to) else timedelta(days=30)
         bucket_interval = resolve_granularity(span, eff_granularity)
 
+    from app.utils.agent_resolvers import resolve_agent_identifiers_to_owner_ids
+    eff_owner_id = str(hubspot_owner_id).strip()
+    if eff_owner_id.isdigit():
+        resolved = await resolve_agent_identifiers_to_owner_ids(
+            db, [eff_owner_id], company_id=effective_company_id
+        )
+        if resolved:
+            eff_owner_id = resolved[0]
+
+    owner_match_conds = [MassEvaluationResult.hubspot_owner_id == eff_owner_id]
+    if str(hubspot_owner_id).strip() != eff_owner_id:
+        owner_match_conds.append(MassEvaluationResult.hubspot_owner_id == str(hubspot_owner_id).strip())
+
     stmt = select(MassEvaluationResult).options(defer(MassEvaluationResult.prompt_snapshot)).where(
-        MassEvaluationResult.hubspot_owner_id == hubspot_owner_id,
+        or_(*owner_match_conds)
     )
     if status == "failed":
         stmt = stmt.where(MassEvaluationResult.status == "failed")
@@ -1429,7 +1450,7 @@ async def get_agent_evolution(
     if context and not context.is_super_admin:
         if context.allowed_service_ids is not None:
             stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
-        if context.allowed_agent_ids is not None and hubspot_owner_id not in context.allowed_agent_ids:
+        if context.allowed_agent_ids is not None and eff_owner_id not in context.allowed_agent_ids and str(hubspot_owner_id).strip() not in context.allowed_agent_ids:
             # Force empty result if agent is not allowed
             stmt = stmt.where(MassEvaluationResult.hubspot_owner_id == "-1")
 
@@ -1509,14 +1530,14 @@ async def get_agent_evolution(
         if parsed_item_filters:
             rows = apply_item_score_filters_sql_or_python(rows, parsed_item_filters)
 
-    agent_name = resolve_owner_name(hubspot_owner_id)
+    agent_name = resolve_owner_name(eff_owner_id) or resolve_owner_name(str(hubspot_owner_id).strip())
     if not agent_name and rows:
         for r in reversed(rows):
             if r.agent_name and not r.agent_name.isdigit():
                 agent_name = r.agent_name
                 break
     if not agent_name:
-        agent_name = hubspot_owner_id
+        agent_name = eff_owner_id or str(hubspot_owner_id).strip()
 
     total_analyses = len(rows)
     first_ts = _effective_ts(rows[0]) if rows else None
@@ -1705,13 +1726,23 @@ async def get_agent_evolution(
         })
 
     # Resolve agent user details
-    stmt_u = select(User).where(User.hubspot_owner_id == hubspot_owner_id)
+    u_conds = [
+        User.hubspot_owner_id == eff_owner_id,
+        User.hubspot_owner_id == str(hubspot_owner_id).strip(),
+    ]
+    if str(hubspot_owner_id).strip().isdigit():
+        u_conds.append(User.user_id == int(str(hubspot_owner_id).strip()))
+    stmt_u = select(User).where(or_(*u_conds))
     if effective_company_id is not None:
         stmt_u = stmt_u.where(or_(User.company_id == effective_company_id, User.company_id.is_(None)))
     res_u = await db.execute(stmt_u)
     u_obj = res_u.scalars().first()
 
-    u_user_id = getattr(u_obj, "user_id", None) if u_obj else None
+    u_user_id = getattr(u_obj, "user_id", None) if u_obj else (int(str(hubspot_owner_id).strip()) if str(hubspot_owner_id).strip().isdigit() else None)
+    if u_obj and (not agent_name or agent_name == eff_owner_id or agent_name == str(hubspot_owner_id).strip()):
+        if u_obj.name and u_obj.name.strip():
+            agent_name = u_obj.name.strip()
+
     u_team_id = getattr(u_obj, "primary_team_id", None) if u_obj else None
     u_team_name = None
     if u_team_id is not None:
@@ -1723,13 +1754,13 @@ async def get_agent_evolution(
     from app.utils.agent_resolvers import resolve_agent_code, resolve_agent_initials, is_demo_agent_code
     u_persisted = getattr(u_obj, "agent_initials", None) if u_obj else None
     agent_code = resolve_agent_code(
-        hubspot_owner_id=hubspot_owner_id,
+        hubspot_owner_id=eff_owner_id,
         agent_name=agent_name,
         company_id=effective_company_id,
         persisted_initials=u_persisted,
     )
     initials = resolve_agent_initials(
-        hubspot_owner_id=hubspot_owner_id,
+        hubspot_owner_id=eff_owner_id,
         agent_name=agent_name,
         persisted_initials=u_persisted,
     )
@@ -1744,7 +1775,7 @@ async def get_agent_evolution(
         "agent": {
             "user_id": u_user_id,
             "id": u_user_id,
-            "hubspot_owner_id": hubspot_owner_id,
+            "hubspot_owner_id": eff_owner_id,
             "agent_name": agent_name,
             "name": agent_name,
             "agent_code": agent_code,

@@ -52,8 +52,12 @@ class ServiceEvolutionTypologyItem(BaseModel):
 
 
 class ServiceEvolutionAgentItem(BaseModel):
+    user_id: int | None = None
+    id: int | None = None
     agent_owner_id: str | None = None
     agent_name: str | None = None
+    agent_code: str | None = None
+    label: str | None = None
     total_calls: int
     avg_evaluacion_global: float | None = None
     avg_claridad: float | None = None

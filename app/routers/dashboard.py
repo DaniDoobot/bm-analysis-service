@@ -409,7 +409,16 @@ async def agent_evolution(
     raw_status = status or result_status
     norm_status = normalize_status(raw_status)
     effective_granularity = bucket or granularity or "auto"
-    if context.allowed_agent_ids is not None and hubspot_owner_id not in context.allowed_agent_ids:
+    eff_owner_id = str(hubspot_owner_id).strip()
+    if eff_owner_id.isdigit():
+        from app.utils.agent_resolvers import resolve_agent_identifiers_to_owner_ids
+        resolved = await resolve_agent_identifiers_to_owner_ids(
+            db, [eff_owner_id], company_id=company_id or context.company_id
+        )
+        if resolved:
+            eff_owner_id = resolved[0]
+
+    if context.allowed_agent_ids is not None and eff_owner_id not in context.allowed_agent_ids and str(hubspot_owner_id).strip() not in context.allowed_agent_ids:
         raise HTTPException(
             status_code=403,
             detail="No tienes permiso para consultar la evolución de este agente."
@@ -438,7 +447,7 @@ async def agent_evolution(
 
         data = await get_agent_evolution(
             db,
-            hubspot_owner_id=hubspot_owner_id,
+            hubspot_owner_id=eff_owner_id,
             analysis_type=analysis_type,
             period=period,
             bucket_param=effective_granularity,

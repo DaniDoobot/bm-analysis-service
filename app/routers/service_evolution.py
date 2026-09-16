@@ -1,7 +1,7 @@
 """FastAPI router for Service Evolution dashboard."""
 import logging
 from typing import Annotated
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_db, get_tenant_context
@@ -50,7 +50,7 @@ async def get_services(
     except Exception as e:
         logger.error("Error fetching services for evolution dashboard: %s", e, exc_info=True)
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR if hasattr(status, "HTTP_500_INTERNAL_SERVER_ERROR") else 500,
+            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error interno del servidor al recuperar servicios."
         )
 
@@ -93,6 +93,7 @@ async def get_criteria(
 
 
 @router.get("", response_model=ServiceEvolutionResponse)
+@router.get("/", response_model=ServiceEvolutionResponse, include_in_schema=False)
 async def get_evolution(
     context: Annotated[TenantContext, Depends(get_tenant_context)],
     service_id: int | None = Query(None, description="Filtrar por ID del servicio"),
@@ -138,7 +139,7 @@ async def get_evolution(
     valid_granularities = {"auto", "hour", "day", "week", "month"}
     if granularity_str not in valid_granularities:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=http_status.HTTP_400_BAD_REQUEST,
             detail=f"La granularidad '{granularity_val}' no es válida. Use: auto | hour | day | week | month"
         )
 
@@ -193,9 +194,15 @@ async def get_evolution(
                 detail="Acceso denegado: No tienes permisos para este servicio."
             )
 
+    if ag_owner and str(ag_owner).strip().isdigit():
+        from app.utils.agent_resolvers import resolve_agent_identifiers_to_owner_ids
+        resolved = await resolve_agent_identifiers_to_owner_ids(db, [ag_owner], company_id=eff_company_id)
+        if resolved:
+            ag_owner = resolved[0]
+
     if context.allowed_agent_ids is not None:
         if ag_owner:
-            if ag_owner not in context.allowed_agent_ids:
+            if ag_owner not in context.allowed_agent_ids and str(_extract_val(agent_owner_id)).strip() not in context.allowed_agent_ids:
                 raise HTTPException(
                     status_code=403,
                     detail="No tienes permiso para consultar la evolución de este agente."
@@ -242,6 +249,6 @@ async def get_evolution(
     except Exception as e:
         logger.error("Error generating service evolution: %s", e, exc_info=True)
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error interno del servidor al generar la evolución del servicio."
         )

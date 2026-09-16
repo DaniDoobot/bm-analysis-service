@@ -1701,6 +1701,13 @@ async def init_db():
             except Exception as e_mig:
                 logger.error("Failed to migrate base structure typology associations: %s", e_mig)
 
+            # Fix demo agent names for company_id=6
+            try:
+                from scripts.fix_demo_agent_names import fix_demo_agent_names
+                await fix_demo_agent_names(db, dry_run=False)
+            except Exception as e_demo:
+                logger.error("Error fixing demo agent names during startup: %s", e_demo)
+
             await db.commit()
             logger.info("db_init_service initialization completed successfully.")
             

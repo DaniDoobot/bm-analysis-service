@@ -364,6 +364,12 @@ class ServiceEvolutionService:
         norm_t = normalize_typology(typology_key)
         norm_d = normalize_direction(direction)
 
+        if agent_owner_id and str(agent_owner_id).strip().isdigit():
+            from app.utils.agent_resolvers import resolve_agent_identifiers_to_owner_ids
+            resolved = await resolve_agent_identifiers_to_owner_ids(db, [agent_owner_id], company_id=effective_company_id)
+            if resolved:
+                agent_owner_id = resolved[0]
+
         params = {
             "service_id": service_id,
             "service_key": service_key,
@@ -385,11 +391,14 @@ class ServiceEvolutionService:
         if effective_company_id is not None:
             if effective_company_id == 1:
                 comp_cond = "(r.company_id = 1 OR r.company_id IS NULL)"
+                extra_sql += f" AND {comp_cond}"
+                extra_sql_left_join += f" AND {comp_cond}"
+                typo_extra_where += " AND t.service_id IN (SELECT service_id FROM bm_services WHERE company_id = 1 OR company_id IS NULL)"
             else:
                 comp_cond = f"r.company_id = {int(effective_company_id)}"
-            extra_sql += f" AND {comp_cond}"
-            extra_sql_left_join += f" AND {comp_cond}"
-            typo_extra_where += f" AND t.service_id IN (SELECT service_id FROM bm_services WHERE company_id = {int(effective_company_id)})"
+                extra_sql += f" AND {comp_cond}"
+                extra_sql_left_join += f" AND {comp_cond}"
+                typo_extra_where += f" AND t.service_id IN (SELECT service_id FROM bm_services WHERE company_id = {int(effective_company_id)})"
         elif context and not context.is_super_admin:
             extra_sql += f" AND (r.company_id IN {_format_int_list(context.allowed_company_ids)} OR r.company_id IS NULL)"
             extra_sql_left_join += f" AND (r.company_id IN {_format_int_list(context.allowed_company_ids)} OR r.company_id IS NULL)"
@@ -719,11 +728,28 @@ class ServiceEvolutionService:
         """
         agent_res = await db.execute(text(clean_sql(raw_agent_sql, dialect_name)), params)
         agent_rows = agent_res.fetchall()
+        from app.utils.agent_resolvers import build_user_initials_maps, resolve_agent_code, is_demo_agent_code
+        by_owner, by_name, users_list = await build_user_initials_maps(db, company_id=effective_company_id)
         by_agent = []
         for row in agent_rows:
+            a_oid = str(row[0]).strip() if row[0] is not None else None
+            a_name = row[1]
+            u_info = next((u for u in users_list if str(u.get("hubspot_owner_id")) == str(a_oid)), None) if a_oid else None
+            u_uid = u_info.get("user_id") if u_info else None
+            a_code = resolve_agent_code(
+                hubspot_owner_id=a_oid,
+                agent_name=a_name,
+                company_id=effective_company_id,
+                persisted_initials=u_info.get("agent_initials") if u_info else None,
+            )
+            a_label = f"{a_code} · {a_name}" if is_demo_agent_code(a_code) else a_name
             by_agent.append(ServiceEvolutionAgentItem(
+                user_id=u_uid,
+                id=u_uid,
                 agent_owner_id=row[0],
-                agent_name=row[1],
+                agent_name=a_name,
+                agent_code=a_code,
+                label=a_label,
                 total_calls=row[2],
                 avg_evaluacion_global=float(row[3]) if row[3] is not None else None,
                 avg_claridad=float(row[4]) if row[4] is not None else None,
