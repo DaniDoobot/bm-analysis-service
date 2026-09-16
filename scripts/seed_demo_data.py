@@ -409,6 +409,23 @@ async def ensure_evaluation_structures(
     svc_at = services["atencion-al-cliente"]
     svc_vn = services["ventas"]
 
+    # Admin user for prompt ownership (strictly scoped to demo company)
+    admin_res = await db.execute(
+        select(User)
+        .where(User.company_id == cid, User.role == "company_admin")
+        .order_by(User.user_id.asc())
+    )
+    admin_user = admin_res.scalars().first()
+    if not admin_user:
+        fallback_res = await db.execute(
+            select(User).where(User.company_id == cid).order_by(User.user_id.asc())
+        )
+        admin_user = fallback_res.scalars().first()
+        if not admin_user:
+            raise DemoDataSeedError(
+                f"No user found for company_id={cid}. Run scripts/seed_demo_company.py first."
+            )
+
     # 1. Prompts
     async def _get_or_create_prompt(svc: Service, name: str, desc: str) -> Prompt:
         p_res = await db.execute(
@@ -427,8 +444,18 @@ async def ensure_evaluation_structures(
                 prompt_type="audio",
                 description=desc,
                 is_active=True,
+                owner_user_id=admin_user.user_id,
+                created_by=admin_user.name,
+                created_by_email=admin_user.email,
             )
             db.add(p)
+            await db.flush()
+        elif p.owner_user_id is None:
+            p.owner_user_id = admin_user.user_id
+            if not p.created_by:
+                p.created_by = admin_user.name
+            if not p.created_by_email:
+                p.created_by_email = admin_user.email
             await db.flush()
         return p
 
@@ -444,6 +471,9 @@ async def ensure_evaluation_structures(
                 prompt=f"System metaprompt para la evaluación automatizada de llamadas en {prompt.prompt_name}.",
                 version_label="v1.0",
                 version_name="Versión Inicial Demo",
+                is_current=True,
+                updated_by=admin_user.name,
+                updated_by_email=admin_user.email,
             )
             db.add(v)
             await db.flush()
@@ -569,6 +599,7 @@ async def ensure_evaluation_structures(
             **typo_map_at,
             **typo_map_vn,
         },
+        "admin_user": admin_user,
     }
 
 
@@ -961,6 +992,10 @@ async def seed_analytics_data(db: AsyncSession, company: Company) -> Dict[str, A
     teams_map = {t.team_id: t for t in teams_res.scalars().all()}
 
     # 3. Create Jobs (1 per service)
+    admin_user = struct_reg.get("admin_user")
+    job_created_by = admin_user.name if admin_user else "Administrador Empresa Demo"
+    job_created_by_email = admin_user.email if admin_user else "administradordeempresa.demo@doobot.ai"
+
     async def _get_or_create_job(svc: Service, prompt: Prompt, job_name: str) -> MassEvaluationJob:
         j_res = await db.execute(
             select(MassEvaluationJob).where(MassEvaluationJob.company_id == cid, MassEvaluationJob.service_id == svc.service_id)
@@ -975,6 +1010,8 @@ async def seed_analytics_data(db: AsyncSession, company: Company) -> Dict[str, A
                 job_mode="standard",
                 selection_mode="filter",
                 is_active=True,
+                created_by=job_created_by,
+                created_by_email=job_created_by_email,
             )
             db.add(job)
             await db.flush()

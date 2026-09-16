@@ -151,6 +151,9 @@ class TestSeedDemoData(unittest.IsolatedAsyncioTestCase):
             )
             jobs = list(jobs_res.scalars().all())
             self.assertEqual(len(jobs), 2)
+            for j in jobs:
+                self.assertIsNotNone(j.created_by)
+                self.assertIsNotNone(j.created_by_email)
 
             runs_res = await session.execute(
                 select(MassEvaluationRun).where(MassEvaluationRun.company_id == cid)
@@ -312,7 +315,9 @@ class TestSeedDemoData(unittest.IsolatedAsyncioTestCase):
         """Verify that at least 2 active evaluation structures exist per service and map cleanly."""
         async with AsyncSession(self.engine) as session:
             async with session.begin():
-                await seed_demo_data(session)
+                summary = await seed_demo_data(session)
+
+        cid = summary["company"]["id"]
 
         async with AsyncSession(self.engine) as session:
             # Check 4 prompts
@@ -331,10 +336,33 @@ class TestSeedDemoData(unittest.IsolatedAsyncioTestCase):
             }
             self.assertEqual(p_names, expected_names)
 
-            # Check 4 prompt versions
+            # Check prompt owner and creator belong strictly to demo company admin
+            admin_res = await session.execute(
+                select(User).where(User.company_id == cid, User.role == "company_admin")
+            )
+            admin_user = admin_res.scalars().first()
+            self.assertIsNotNone(admin_user, "Expected company_admin to exist in demo company")
+
+            for p in prompts:
+                self.assertIsNotNone(p.owner_user_id, f"Prompt '{p.prompt_name}' owner_user_id must not be None")
+                self.assertEqual(p.owner_user_id, admin_user.user_id)
+                self.assertEqual(p.created_by, admin_user.name)
+                self.assertEqual(p.created_by_email, admin_user.email)
+                # Strict multi-tenant isolation check: owner must belong to the demo company
+                owner_check = await session.execute(
+                    select(User).where(User.user_id == p.owner_user_id)
+                )
+                owner = owner_check.scalars().first()
+                self.assertIsNotNone(owner)
+                self.assertEqual(owner.company_id, cid)
+
+            # Check 4 prompt versions and their audit fields
             v_res = await session.execute(select(PromptVersion))
             versions = list(v_res.scalars().all())
             self.assertEqual(len(versions), 4)
+            for v in versions:
+                self.assertEqual(v.updated_by, admin_user.name)
+                self.assertEqual(v.updated_by_email, admin_user.email)
 
             # Check criteria count per prompt (exactly 6 each)
             for p in prompts:
