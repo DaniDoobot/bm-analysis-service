@@ -47,6 +47,7 @@ from scripts.purge_company import (
     CompanyNotFoundError,
     CompanyPurgeError,
 )
+from scripts.seed_demo_company import seed_demo_structure, DEMO_COMPANY_KEY
 
 
 class TestPurgeCompany(unittest.IsolatedAsyncioTestCase):
@@ -267,6 +268,52 @@ class TestPurgeCompany(unittest.IsolatedAsyncioTestCase):
         async with AsyncSession(self.engine) as session:
             c3_check = await session.execute(select(Company).where(Company.company_id == 3))
             self.assertIsNotNone(c3_check.scalars().first())
+
+    async def test_purge_demo_company_with_seed_structure(self):
+        """Purge a demo company created with seed_demo_structure (services, users, teams, trainer credentials)."""
+        # 1. Seed demo company structure
+        async with AsyncSession(self.engine) as session:
+            async with session.begin():
+                summary = await seed_demo_structure(session)
+
+        demo_cid = summary["company"]["company_id"]
+        self.assertEqual(len(summary["services"]), 2)
+        self.assertEqual(len(summary["teams"]), 4)
+        self.assertEqual(summary["users"]["agents"], 60)
+        self.assertEqual(summary["users"]["total"], 67)
+        self.assertEqual(summary["trainer_settings_count"], 60)
+
+        # 2. Verify existence before purge
+        async with AsyncSession(self.engine) as session:
+            c_check = await session.execute(select(Company).where(Company.company_id == demo_cid))
+            self.assertIsNotNone(c_check.scalars().first())
+            svcs = (await session.execute(select(Service).where(Service.company_id == demo_cid))).scalars().all()
+            self.assertEqual(len(list(svcs)), 2)
+            teams = (await session.execute(select(Team).where(Team.company_id == demo_cid))).scalars().all()
+            self.assertEqual(len(list(teams)), 4)
+            users = (await session.execute(select(User).where(User.company_id == demo_cid))).scalars().all()
+            self.assertEqual(len(list(users)), 67)
+            t_creds = (await session.execute(select(TrainingAgentSetting).where(TrainingAgentSetting.company_id == demo_cid))).scalars().all()
+            self.assertEqual(len(list(t_creds)), 60)
+
+        # 3. Purge company with apply=True and force_non_demo=True
+        async with AsyncSession(self.engine) as session:
+            async with session.begin():
+                result = await purge_company(session, company_id=demo_cid, apply=True, force_non_demo=True)
+                self.assertEqual(result["status"], "applied")
+                self.assertTrue(result["applied"])
+                self.assertEqual(result["counts"]["services"], 2)
+                self.assertEqual(result["counts"]["teams"], 4)
+                self.assertEqual(result["counts"]["users"], 67)
+                self.assertEqual(result["counts"]["training_agent_settings"], 60)
+
+        # 4. Verify 100% complete deletion
+        async with AsyncSession(self.engine) as session:
+            self.assertIsNone((await session.execute(select(Company).where(Company.company_id == demo_cid))).scalars().first())
+            self.assertEqual(len(list((await session.execute(select(Service).where(Service.company_id == demo_cid))).scalars().all())), 0)
+            self.assertEqual(len(list((await session.execute(select(Team).where(Team.company_id == demo_cid))).scalars().all())), 0)
+            self.assertEqual(len(list((await session.execute(select(User).where(User.company_id == demo_cid))).scalars().all())), 0)
+            self.assertEqual(len(list((await session.execute(select(TrainingAgentSetting).where(TrainingAgentSetting.company_id == demo_cid))).scalars().all())), 0)
 
 
 if __name__ == "__main__":
