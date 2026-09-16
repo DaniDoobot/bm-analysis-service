@@ -133,6 +133,10 @@ class TestSeedDemoData(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(sample_eval.evaluacion_global)
             self.assertIsInstance(sample_eval.result_json, dict)
             self.assertIsInstance(sample_eval.items_json, list)
+            for it in sample_eval.items_json:
+                if it.get("criterion_key") != "alarma":
+                    self.assertIsNotNone(it.get("output_key"))
+                    self.assertEqual(it["output_key"], f"{it['criterion_key']}_score")
 
             # Check that alarms exist in dataset
             alarm_calls = [e for e in evals if e.alarma is True]
@@ -414,6 +418,76 @@ class TestSeedDemoData(unittest.IsolatedAsyncioTestCase):
             # Ensure complete disjunction (no criteria key overlap between the services)
             overlap = crit_at.intersection(crit_vn)
             self.assertEqual(len(overlap), 0, f"Expected no criteria overlap between Atención and Ventas, found {overlap}")
+
+    async def test_prompt_criteria_output_key_integrity_and_isolation(self):
+        """Verify that all 24 PromptCriterion have non-null output_key, unique keys, and strict service isolation."""
+        async with AsyncSession(self.engine) as session:
+            async with session.begin():
+                summary = await seed_demo_data(session)
+
+        cid = summary["company"]["id"]
+        async with AsyncSession(self.engine) as session:
+            # 1. Fetch all prompts for demo company
+            svc_res = await session.execute(select(Service).where(Service.company_id == cid))
+            services = {s.service_key: s for s in svc_res.scalars().all()}
+            self.assertIn("atencion-al-cliente", services)
+            self.assertIn("ventas", services)
+
+            prompts_res = await session.execute(
+                select(Prompt).where(Prompt.is_active.is_(True)).order_by(Prompt.prompt_id.asc())
+            )
+            prompts = list(prompts_res.scalars().all())
+            self.assertEqual(len(prompts), 4, "Expected 4 active prompts (2 per service)")
+
+            # Verify prompt service isolation: 2 for Atención, 2 for Ventas
+            prompts_at = [p for p in prompts if p.service_id == services["atencion-al-cliente"].service_id]
+            prompts_vn = [p for p in prompts if p.service_id == services["ventas"].service_id]
+            self.assertEqual(len(prompts_at), 2, "Expected exactly 2 prompts for Atención al Cliente")
+            self.assertEqual(len(prompts_vn), 2, "Expected exactly 2 prompts for Ventas")
+
+            # 2. Fetch all criteria across the 4 prompts
+            crit_res = await session.execute(
+                select(PromptCriterion)
+                .where(PromptCriterion.prompt_id.in_([p.prompt_id for p in prompts]))
+                .order_by(PromptCriterion.criterion_id.asc())
+            )
+            all_criteria = list(crit_res.scalars().all())
+            self.assertEqual(len(all_criteria), 24, "Expected exactly 24 PromptCriterion rows across the 4 structures")
+
+            all_crit_keys = set()
+            all_output_keys = set()
+
+            for c in all_criteria:
+                # Criterion must have non-null, non-empty fields
+                self.assertIsNotNone(c.criterion_key, f"criterion_key cannot be None for id={c.criterion_id}")
+                self.assertIsNotNone(c.criterion_name, f"criterion_name cannot be None for key={c.criterion_key}")
+                self.assertIsNotNone(c.criterion_type, f"criterion_type cannot be None for key={c.criterion_key}")
+                self.assertEqual(c.criterion_type, "score_1_10")
+                self.assertIsNotNone(c.output_key, f"output_key cannot be None for key={c.criterion_key}")
+                self.assertTrue(len(c.output_key) > 0, f"output_key cannot be empty for key={c.criterion_key}")
+                self.assertEqual(c.output_key, f"{c.criterion_key}_score", f"output_key '{c.output_key}' must follow '{c.criterion_key}_score'")
+                self.assertIsNotNone(c.feed_key, f"feed_key cannot be None for key={c.criterion_key}")
+                self.assertEqual(c.feed_key, f"{c.criterion_key}_feedback")
+
+                all_crit_keys.add(c.criterion_key)
+                all_output_keys.add(c.output_key)
+
+            # 3. All 24 criteria must have unique keys
+            self.assertEqual(len(all_crit_keys), 24, "Expected all 24 criteria to have unique criterion_keys")
+            self.assertEqual(len(all_output_keys), 24, "Expected all 24 criteria to have unique output_keys")
+
+            # 4. Service containment check on PromptCriterion
+            crit_at_keys = {
+                c.criterion_key for c in all_criteria
+                if c.prompt_id in [p.prompt_id for p in prompts_at]
+            }
+            crit_vn_keys = {
+                c.criterion_key for c in all_criteria
+                if c.prompt_id in [p.prompt_id for p in prompts_vn]
+            }
+            self.assertEqual(len(crit_at_keys), 12)
+            self.assertEqual(len(crit_vn_keys), 12)
+            self.assertTrue(crit_at_keys.isdisjoint(crit_vn_keys), "Prompt criteria between Atención and Ventas must be disjoint")
 
     async def test_agent_profiles_and_divergent_trends(self):
         """Verify that agent archetypes exhibit realistic, differentiated temporal trajectories."""

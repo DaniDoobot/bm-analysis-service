@@ -119,6 +119,8 @@ class DemoDataAlreadyExistsError(DemoDataSeedError):
 CRITERIA_ATENCION_GENERAL = [
     {
         "criterion_key": "saludo_identificacion",
+        "output_key": "saludo_identificacion_score",
+        "feed_key": "saludo_identificacion_feedback",
         "criterion_name": "Saludo e Identificación",
         "criterion_type": "score_1_10",
         "weight": Decimal("0.10"),
@@ -128,6 +130,8 @@ CRITERIA_ATENCION_GENERAL = [
     },
     {
         "criterion_key": "escucha_activa",
+        "output_key": "escucha_activa_score",
+        "feed_key": "escucha_activa_feedback",
         "criterion_name": "Escucha Activa y Comprensión",
         "criterion_type": "score_1_10",
         "weight": Decimal("0.20"),
@@ -137,6 +141,8 @@ CRITERIA_ATENCION_GENERAL = [
     },
     {
         "criterion_key": "resolucion_consulta",
+        "output_key": "resolucion_consulta_score",
+        "feed_key": "resolucion_consulta_feedback",
         "criterion_name": "Resolución de Consulta",
         "criterion_type": "score_1_10",
         "weight": Decimal("0.25"),
@@ -146,6 +152,8 @@ CRITERIA_ATENCION_GENERAL = [
     },
     {
         "criterion_key": "conocimiento_catalogo",
+        "output_key": "conocimiento_catalogo_score",
+        "feed_key": "conocimiento_catalogo_feedback",
         "criterion_name": "Conocimiento del Catálogo",
         "criterion_type": "score_1_10",
         "weight": Decimal("0.20"),
@@ -155,6 +163,8 @@ CRITERIA_ATENCION_GENERAL = [
     },
     {
         "criterion_key": "cordialidad_empatia",
+        "output_key": "cordialidad_empatia_score",
+        "feed_key": "cordialidad_empatia_feedback",
         "criterion_name": "Cordialidad y Empatía",
         "criterion_type": "score_1_10",
         "weight": Decimal("0.15"),
@@ -164,6 +174,8 @@ CRITERIA_ATENCION_GENERAL = [
     },
     {
         "criterion_key": "despedida_protocolo",
+        "output_key": "despedida_protocolo_score",
+        "feed_key": "despedida_protocolo_feedback",
         "criterion_name": "Cierre y Despedida",
         "criterion_type": "score_1_10",
         "weight": Decimal("0.10"),
@@ -177,6 +189,8 @@ CRITERIA_ATENCION_GENERAL = [
 CRITERIA_GESTION_RECLAMACIONES = [
     {
         "criterion_key": "acogida_emocional",
+        "output_key": "acogida_emocional_score",
+        "feed_key": "acogida_emocional_feedback",
         "criterion_name": "Acogida y Contención Emocional",
         "criterion_type": "score_1_10",
         "weight": Decimal("0.15"),
@@ -186,6 +200,8 @@ CRITERIA_GESTION_RECLAMACIONES = [
     },
     {
         "criterion_key": "analisis_conflicto",
+        "output_key": "analisis_conflicto_score",
+        "feed_key": "analisis_conflicto_feedback",
         "criterion_name": "Análisis y Diagnóstico de la Queja",
         "criterion_type": "score_1_10",
         "weight": Decimal("0.20"),
@@ -195,6 +211,8 @@ CRITERIA_GESTION_RECLAMACIONES = [
     },
     {
         "criterion_key": "gestion_frustracion",
+        "output_key": "gestion_frustracion_score",
+        "feed_key": "gestion_frustracion_feedback",
         "criterion_name": "Gestión de Frustración y Calma",
         "criterion_type": "score_1_10",
         "weight": Decimal("0.25"),
@@ -204,6 +222,8 @@ CRITERIA_GESTION_RECLAMACIONES = [
     },
     {
         "criterion_key": "propuesta_solucion",
+        "output_key": "propuesta_solucion_score",
+        "feed_key": "propuesta_solucion_feedback",
         "criterion_name": "Propuesta Resolutiva o Compensación",
         "criterion_type": "score_1_10",
         "weight": Decimal("0.20"),
@@ -213,6 +233,8 @@ CRITERIA_GESTION_RECLAMACIONES = [
     },
     {
         "criterion_key": "compromiso_tiempos",
+        "output_key": "compromiso_tiempos_score",
+        "feed_key": "compromiso_tiempos_feedback",
         "criterion_name": "Compromiso de Tiempos y Trazabilidad",
         "criterion_type": "score_1_10",
         "weight": Decimal("0.10"),
@@ -222,6 +244,8 @@ CRITERIA_GESTION_RECLAMACIONES = [
     },
     {
         "criterion_key": "cierre_reclamacion",
+        "output_key": "cierre_reclamacion_score",
+        "feed_key": "cierre_reclamacion_feedback",
         "criterion_name": "Verificación de Conformidad Final",
         "criterion_type": "score_1_10",
         "weight": Decimal("0.10"),
@@ -244,6 +268,8 @@ TYPOLOGIES_ATENCION = [
 CRITERIA_VENTA_CONSULTIVA = [
     {
         "criterion_key": "sondeo_necesidades",
+        "output_key": "sondeo_necesidades_score",
+        "feed_key": "sondeo_necesidades_feedback",
         "criterion_name": "Sondeo y Detección de Necesidades",
         "criterion_type": "score_1_10",
         "weight": Decimal("0.20"),
@@ -253,6 +279,8 @@ CRITERIA_VENTA_CONSULTIVA = [
     },
     {
         "criterion_key": "argumentacion_valor",
+        "output_key": "argumentacion_valor_score",
+        "feed_key": "argumentacion_valor_feedback",
         "criterion_name": "Argumentación de la Propuesta de Valor",
         "criterion_type": "score_1_10",
         "weight": Decimal("0.25"),
@@ -262,6 +290,8 @@ CRITERIA_VENTA_CONSULTIVA = [
     },
     {
         "criterion_key": "manejo_objeciones",
+        "output_key": "manejo_objeciones_score",
+        "feed_key": "manejo_objeciones_feedback",
         "criterion_name": "Tratamiento de Objeciones Comerciales",
         "criterion_type": "score_1_10",
         "weight": Decimal("0.20"),
@@ -271,6 +301,8 @@ CRITERIA_VENTA_CONSULTIVA = [
     },
     {
         "criterion_key": "tecnicas_cierre",
+        "output_key": "tecnicas_cierre_score",
+        "feed_key": "tecnicas_cierre_feedback",
         "criterion_name": "Técnicas de Cierre y Compromiso",
         "criterion_type": "score_1_10",
         "weight": Decimal("0.15"),
@@ -280,6 +312,8 @@ CRITERIA_VENTA_CONSULTIVA = [
     },
     {
         "criterion_key": "transparencia_condiciones",
+        "output_key": "transparencia_condiciones_score",
+        "feed_key": "transparencia_condiciones_feedback",
         "criterion_name": "Transparencia en Condiciones y Contratación",
         "criterion_type": "score_1_10",
         "weight": Decimal("0.10"),
@@ -289,6 +323,8 @@ CRITERIA_VENTA_CONSULTIVA = [
     },
     {
         "criterion_key": "energia_comercial",
+        "output_key": "energia_comercial_score",
+        "feed_key": "energia_comercial_feedback",
         "criterion_name": "Energía Comercial y Actitud Proactiva",
         "criterion_type": "score_1_10",
         "weight": Decimal("0.10"),
@@ -302,6 +338,8 @@ CRITERIA_VENTA_CONSULTIVA = [
 CRITERIA_RETENCION_RENOVACION = [
     {
         "criterion_key": "diagnostico_motivo",
+        "output_key": "diagnostico_motivo_score",
+        "feed_key": "diagnostico_motivo_feedback",
         "criterion_name": "Diagnóstico del Motivo de Cancelación",
         "criterion_type": "score_1_10",
         "weight": Decimal("0.25"),
@@ -311,6 +349,8 @@ CRITERIA_RETENCION_RENOVACION = [
     },
     {
         "criterion_key": "valoracion_historial",
+        "output_key": "valoracion_historial_score",
+        "feed_key": "valoracion_historial_feedback",
         "criterion_name": "Puesta en Valor del Historial",
         "criterion_type": "score_1_10",
         "weight": Decimal("0.15"),
@@ -320,6 +360,8 @@ CRITERIA_RETENCION_RENOVACION = [
     },
     {
         "criterion_key": "negociacion_oferta",
+        "output_key": "negociacion_oferta_score",
+        "feed_key": "negociacion_oferta_feedback",
         "criterion_name": "Negociación y Oferta de Fidelización",
         "criterion_type": "score_1_10",
         "weight": Decimal("0.25"),
@@ -329,6 +371,8 @@ CRITERIA_RETENCION_RENOVACION = [
     },
     {
         "criterion_key": "refuerzo_confianza",
+        "output_key": "refuerzo_confianza_score",
+        "feed_key": "refuerzo_confianza_feedback",
         "criterion_name": "Refuerzo de Confianza en la Compañía",
         "criterion_type": "score_1_10",
         "weight": Decimal("0.15"),
@@ -338,6 +382,8 @@ CRITERIA_RETENCION_RENOVACION = [
     },
     {
         "criterion_key": "agilidad_tramitacion",
+        "output_key": "agilidad_tramitacion_score",
+        "feed_key": "agilidad_tramitacion_feedback",
         "criterion_name": "Agilidad y Facilidad en la Gestión",
         "criterion_type": "score_1_10",
         "weight": Decimal("0.10"),
@@ -347,6 +393,8 @@ CRITERIA_RETENCION_RENOVACION = [
     },
     {
         "criterion_key": "cierre_fidelizador",
+        "output_key": "cierre_fidelizador_score",
+        "feed_key": "cierre_fidelizador_feedback",
         "criterion_name": "Cierre y Despedida de Fidelización",
         "criterion_type": "score_1_10",
         "weight": Decimal("0.10"),
@@ -487,17 +535,34 @@ async def ensure_evaluation_structures(
         existing = {c.criterion_key: c for c in c_res.scalars().all()}
         for idx, cdef in enumerate(criteria_defs):
             ck = cdef["criterion_key"]
+            out_k = cdef.get("output_key") or f"{ck}_score"
+            feed_k = cdef.get("feed_key") or f"{ck}_feedback"
+            c_type = cdef.get("criterion_type", "score_1_10")
+            c_desc = cdef.get("criterion_description", cdef["criterion_name"])
             if ck not in existing:
                 c = PromptCriterion(
                     prompt_id=prompt.prompt_id,
                     criterion_key=ck,
                     criterion_name=cdef["criterion_name"],
-                    criterion_type=cdef.get("criterion_type", "score_1_10"),
+                    criterion_description=c_desc,
+                    criterion_type=c_type,
+                    output_key=out_k,
+                    feed_key=feed_k,
                     order_index=(idx + 1) * 10,
+                    is_required=cdef.get("is_required", False),
                     is_active=True,
                 )
                 db.add(c)
                 existing[ck] = c
+            else:
+                if not existing[ck].output_key:
+                    existing[ck].output_key = out_k
+                if not existing[ck].feed_key:
+                    existing[ck].feed_key = feed_k
+                if not existing[ck].criterion_type:
+                    existing[ck].criterion_type = c_type
+                if not existing[ck].criterion_description:
+                    existing[ck].criterion_description = c_desc
         await db.flush()
         return existing
 
@@ -773,10 +838,11 @@ def compute_call_evaluation(
         }
         for cdef in crit_defs:
             ck = cdef["criterion_key"]
+            out_k = cdef.get("output_key") or f"{ck}_score"
             result_json_dict[ck] = {"score": 0.0, "feedback": f"No evaluable: {reason}."}
             items_json_list.append({
                 "criterion_key": ck,
-                "output_key": ck,
+                "output_key": out_k,
                 "name": cdef["criterion_name"],
                 "type": "score_1_10",
                 "value": 0.0,
@@ -877,9 +943,10 @@ def compute_call_evaluation(
             "weight": weight,
             "feedback": feed,
         }
+        out_k = cdef.get("output_key") or f"{ck}_score"
         items_json_list.append({
             "criterion_key": ck,
-            "output_key": ck,
+            "output_key": out_k,
             "name": cdef["criterion_name"],
             "type": "score_1_10",
             "value": score,
@@ -1229,7 +1296,7 @@ async def seed_analytics_data(db: AsyncSession, company: Company) -> Dict[str, A
                 "percentage_value": c_score * Decimal("10.0") if is_eval else Decimal("0.0"),
                 "boolean_value": c_score >= Decimal("5.0") if is_eval else False,
                 "feedback": c_feed,
-                "feed_key": ckey,
+                "feed_key": crit_obj.feed_key or f"{ckey}_feedback",
                 "is_applicable": is_eval,
                 "not_applicable": not is_eval,
                 "service_id": call_data["service_id"],
