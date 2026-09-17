@@ -70,8 +70,8 @@ def _make_audit(
     }
 
 
-AUDIT_GESALUX = _make_audit(2, "Gesalux", "gesalux", is_demo=True)
-AUDIT_DEMO1 = _make_audit(3, "Empresa Demo1", "empresa-demo1", is_demo=True)
+AUDIT_GESALUX = _make_audit(2, "Gesalux", "g", is_demo=True)
+AUDIT_DEMO1 = _make_audit(3, "Empresa Demo1", "e", is_demo=True)
 AUDIT_BM = _make_audit(1, "Boston Medical", "boston_medical", is_demo=False)
 AUDIT_DEMO = _make_audit(7, "Empresa Demo", "empresa_demo", is_demo=True)
 
@@ -145,33 +145,47 @@ def test_absolute_guard_allows_id_3():
 
 
 # ===========================================================================
-# TEST 5: Identity verification — name mismatch for company_id=2
+# TEST 5: Identity verification — wrong name for company_id=2
 # ===========================================================================
-def test_identity_verification_name_mismatch_id_2():
+def test_identity_verification_wrong_name_id_2():
+    """Any name other than exactly 'Gesalux' must be rejected for ID 2."""
     bad_meta = {
         "company_id": 2,
-        "company_name": "Boston Medical",  # wrong name
-        "company_key": "gesalux",
+        "company_name": "Otra Empresa",  # wrong name
+        "company_key": "g",              # real production key — irrelevant
     }
     with pytest.raises(CompanyProtectedError) as exc_info:
         _verify_company_identity(bad_meta, 2)
     assert "IDENTITY MISMATCH" in str(exc_info.value)
-    assert "name" in str(exc_info.value).lower()
+    assert "Gesalux" in str(exc_info.value)
 
 
 # ===========================================================================
-# TEST 6: Identity verification — key mismatch for company_id=3
+# TEST 6: Identity verification — wrong name for company_id=3
 # ===========================================================================
-def test_identity_verification_key_mismatch_id_3():
+def test_identity_verification_wrong_name_id_3():
+    """Any name other than exactly 'Empresa Demo1' must be rejected for ID 3."""
     bad_meta = {
         "company_id": 3,
-        "company_name": "Empresa Demo1",   # correct name
-        "company_key": "boston_medical",   # wrong key
+        "company_name": "Empresa Demo",  # wrong — this is company_id=7
+        "company_key": "e",              # real production key — irrelevant
     }
     with pytest.raises(CompanyProtectedError) as exc_info:
         _verify_company_identity(bad_meta, 3)
     assert "IDENTITY MISMATCH" in str(exc_info.value)
-    assert "key" in str(exc_info.value).lower()
+    assert "Empresa Demo1" in str(exc_info.value)
+
+
+# ===========================================================================
+# TEST 6b: Real production keys ("g", "e") do NOT trigger any guard
+# ===========================================================================
+def test_identity_verification_real_production_keys_pass():
+    """Real key values 'g' and 'e' must NOT cause any guard to fire."""
+    meta_2 = {"company_id": 2, "company_name": "Gesalux",      "company_key": "g"}
+    meta_3 = {"company_id": 3, "company_name": "Empresa Demo1", "company_key": "e"}
+    # Neither should raise
+    _verify_company_identity(meta_2, 2)
+    _verify_company_identity(meta_3, 3)
 
 
 # ===========================================================================

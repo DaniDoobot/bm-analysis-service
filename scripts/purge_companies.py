@@ -60,11 +60,14 @@ ABSOLUTELY_PROTECTED_NAMES: Dict[int, str] = {
 }
 
 # ---------------------------------------------------------------------------
-# Expected identity map for known targets — verified before any action
+# Expected identity map for known targets — verified before any action.
+# Verification uses EXACT company_name only.
+# company_key is intentionally NOT checked: real production values are "g" and
+# "e" — too short and generic to be reliable identity signals.
 # ---------------------------------------------------------------------------
-EXPECTED_IDENTITY: Dict[int, Dict[str, str]] = {
-    2: {"name_fragment": "gesalux",  "key_fragment": "gesalux"},
-    3: {"name_fragment": "demo1",    "key_fragment": "demo1"},
+EXPECTED_IDENTITY: Dict[int, str] = {
+    2: "Gesalux",
+    3: "Empresa Demo1",
 }
 
 
@@ -119,30 +122,25 @@ def _check_absolute_protection(company_id: int) -> None:
 
 def _verify_company_identity(comp_meta: Dict[str, Any], company_id: int) -> None:
     """
-    For known target IDs (2, 3), verify that name and key match expectations
-    before allowing any purge action. Prevents accidental deletion if IDs shift.
+    For known target IDs (2, 3), verify that the company_name EXACTLY matches
+    the expected value before allowing any purge action.
+
+    This prevents accidental deletion if company IDs have been reassigned.
+    company_key is intentionally NOT checked because real production keys ("g",
+    "e") are single-character values that carry no reliable identity signal.
     """
     if company_id not in EXPECTED_IDENTITY:
         return
 
-    expected = EXPECTED_IDENTITY[company_id]
-    actual_name = (comp_meta.get("company_name") or "").lower()
-    actual_key = (comp_meta.get("company_key") or "").lower()
+    expected_name: str = EXPECTED_IDENTITY[company_id]
+    actual_name: str = comp_meta.get("company_name") or ""
 
-    if expected["name_fragment"] not in actual_name:
+    if actual_name != expected_name:
         raise CompanyProtectedError(
             f"IDENTITY MISMATCH for company_id={company_id}: "
-            f"expected name containing '{expected['name_fragment']}', "
-            f"but got '{comp_meta.get('company_name')}'. "
-            f"Aborting to prevent accidental deletion."
-        )
-
-    if expected["key_fragment"] not in actual_key:
-        raise CompanyProtectedError(
-            f"IDENTITY MISMATCH for company_id={company_id}: "
-            f"expected key containing '{expected['key_fragment']}', "
-            f"but got '{comp_meta.get('company_key')}'. "
-            f"Aborting to prevent accidental deletion."
+            f"expected company_name='{expected_name}' (exact), "
+            f"but got '{actual_name}'. "
+            f"Aborting to prevent accidental deletion of the wrong company."
         )
 
 
