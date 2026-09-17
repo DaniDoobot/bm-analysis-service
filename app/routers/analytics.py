@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
-from sqlalchemy import select, func, text, or_, case, cast, Float, exists, distinct, literal, false
+from sqlalchemy import select, func, text, or_, and_, case, cast, Float, exists, distinct, literal, false, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_db, get_tenant_context
@@ -729,17 +729,17 @@ async def get_agents_comparison(
 
             if dt_from:
                 base_filters.append(
-                    func.coalesce(
-                        MassEvaluationResult.call_timestamp,
-                        MassEvaluationResult.analysis_timestamp,
-                    ) >= dt_from
+                    or_(
+                        and_(MassEvaluationResult.call_timestamp.is_not(None), MassEvaluationResult.call_timestamp >= dt_from),
+                        and_(MassEvaluationResult.call_timestamp.is_(None), MassEvaluationResult.analysis_timestamp >= dt_from),
+                    )
                 )
             if dt_to:
                 base_filters.append(
-                    func.coalesce(
-                        MassEvaluationResult.call_timestamp,
-                        MassEvaluationResult.analysis_timestamp,
-                    ) <= dt_to
+                    or_(
+                        and_(MassEvaluationResult.call_timestamp.is_not(None), MassEvaluationResult.call_timestamp <= dt_to),
+                        and_(MassEvaluationResult.call_timestamp.is_(None), MassEvaluationResult.analysis_timestamp <= dt_to),
+                    )
                 )
             if eff_service_id is not None:
                 if context.allowed_service_ids is not None and eff_service_id not in context.allowed_service_ids:
@@ -935,7 +935,10 @@ async def get_agents_comparison(
                             MassEvaluationCriterionResult.is_applicable == True,
                             MassEvaluationCriterionResult.is_applicable.is_(None)
                         ),
-                        func.lower(MassEvaluationCriterionResult.criterion_key).in_(list(raw_keys_to_match))
+                        or_(
+                            MassEvaluationCriterionResult.criterion_key.in_(list(raw_keys_to_match)),
+                            func.lower(MassEvaluationCriterionResult.criterion_key).in_(list(raw_keys_to_match))
+                        )
                     )
                 ).subquery()
 
@@ -973,16 +976,15 @@ async def get_agents_comparison(
             legacy_vals_by_agent_item = {}
             total_scanned_calls = sum(r.total_calls for r in results_a)
             if total_scanned_calls > 0:
-                crit_count_subq = (
-                    select(func.count(distinct(mapped_criterion_key)))
+                crit_exists_subq = (
+                    select(literal(1))
                     .where(
-                        MassEvaluationCriterionResult.mass_analysis_id == MassEvaluationResult.mass_analysis_id,
-                        func.lower(MassEvaluationCriterionResult.criterion_key).in_(list(raw_keys_to_match))
+                        MassEvaluationCriterionResult.mass_analysis_id == MassEvaluationResult.mass_analysis_id
                     )
-                    .scalar_subquery()
-                ) if (compared_criterion_keys and mapped_criterion_key is not None) else literal(0)
+                    .exists()
+                ) if compared_criterion_keys else true()
 
-                cond_missing_crit = (crit_count_subq < len(compared_criterion_keys)) if compared_criterion_keys else false()
+                cond_missing_crit = (~crit_exists_subq) if compared_criterion_keys else false()
                 cond_missing_global = MassEvaluationResult.evaluacion_global.is_(None) if "evaluacion_global" in [it["key"] for it in items_to_use] else false()
 
                 stmt_has_legacy_candidates = (

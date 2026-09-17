@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, and_
 from sqlalchemy.orm import defer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -561,8 +561,14 @@ async def get_dashboard_summary(
 
     bucket_interval = resolve_granularity(span, granularity)
 
-    # Query from MassEvaluationResult exclusively (defer large prompt_snapshot to minimize memory footprint)
-    stmt = select(MassEvaluationResult).options(defer(MassEvaluationResult.prompt_snapshot))
+    # Query from MassEvaluationResult exclusively (defer large columns to minimize memory footprint)
+    if parsed_item_filters:
+        stmt = select(MassEvaluationResult).options(defer(MassEvaluationResult.prompt_snapshot))
+    else:
+        stmt = select(MassEvaluationResult).options(
+            defer(MassEvaluationResult.prompt_snapshot),
+            defer(MassEvaluationResult.items_json),
+        )
     if status == "failed":
         stmt = stmt.where(MassEvaluationResult.status == "failed")
     elif status == "all":
@@ -594,17 +600,17 @@ async def get_dashboard_summary(
 
     if start_anterior:
         stmt = stmt.where(
-            func.coalesce(
-                MassEvaluationResult.call_timestamp,
-                MassEvaluationResult.analysis_timestamp,
-            ) >= start_anterior
+            or_(
+                and_(MassEvaluationResult.call_timestamp.is_not(None), MassEvaluationResult.call_timestamp >= start_anterior),
+                and_(MassEvaluationResult.call_timestamp.is_(None), MassEvaluationResult.analysis_timestamp >= start_anterior),
+            )
         )
     if end_actual:
         stmt = stmt.where(
-            func.coalesce(
-                MassEvaluationResult.call_timestamp,
-                MassEvaluationResult.analysis_timestamp,
-            ) <= end_actual
+            or_(
+                and_(MassEvaluationResult.call_timestamp.is_not(None), MassEvaluationResult.call_timestamp <= end_actual),
+                and_(MassEvaluationResult.call_timestamp.is_(None), MassEvaluationResult.analysis_timestamp <= end_actual),
+            )
         )
     if service_id is not None:
         # Check service_id permissions if context is present
@@ -716,9 +722,12 @@ async def get_dashboard_summary(
     total_analyses = to_float(len(actual_rows))
     evals = []
     for r in actual_rows:
-        v = extract_score_from_mass(r.result_json, r.items_json, "evaluacion_global")
-        if v is not None:
-            evals.append(to_float(v))
+        if r.evaluacion_global is not None:
+            evals.append(to_float(r.evaluacion_global))
+        else:
+            v = extract_score_from_mass(r.result_json, getattr(r, "items_json", None), "evaluacion_global")
+            if v is not None:
+                evals.append(to_float(v))
     avg_eval = to_float(round(sum(evals) / len(evals), 1)) if evals else None
     
     citas = sum(1 for r in actual_rows if r.result_json and isinstance(r.result_json, dict) and r.result_json.get("tipo_llamada") == "cita")
@@ -737,9 +746,12 @@ async def get_dashboard_summary(
     total_analyses_ant = to_float(len(anterior_rows))
     evals_ant = []
     for r in anterior_rows:
-        v = extract_score_from_mass(r.result_json, r.items_json, "evaluacion_global")
-        if v is not None:
-            evals_ant.append(to_float(v))
+        if r.evaluacion_global is not None:
+            evals_ant.append(to_float(r.evaluacion_global))
+        else:
+            v = extract_score_from_mass(r.result_json, getattr(r, "items_json", None), "evaluacion_global")
+            if v is not None:
+                evals_ant.append(to_float(v))
     avg_eval_ant = to_float(sum(evals_ant) / len(evals_ant)) if evals_ant else None
     
     citas_ant = sum(1 for r in anterior_rows if r.result_json and isinstance(r.result_json, dict) and r.result_json.get("tipo_llamada") == "cita")
@@ -927,9 +939,12 @@ async def get_dashboard_summary(
                 "total_analyses": 0,
             }
         agent_data[bucket_key]["total_analyses"] += 1
-        v = extract_score_from_mass(r.result_json, r.items_json, "evaluacion_global")
-        if v is not None:
-            agent_data[bucket_key]["evals"].append(to_float(v))
+        if r.evaluacion_global is not None:
+            agent_data[bucket_key]["evals"].append(to_float(r.evaluacion_global))
+        else:
+            v = extract_score_from_mass(r.result_json, getattr(r, "items_json", None), "evaluacion_global")
+            if v is not None:
+                agent_data[bucket_key]["evals"].append(to_float(v))
 
         tipo = r.result_json.get("tipo_llamada") if r.result_json else None
         if tipo is not None:
@@ -986,7 +1001,11 @@ async def get_dashboard_summary(
     latest_analyses = []
     for r in sorted_actual[:8]:
         resolved_agent = resolve_agent_display(r.agent_name, r.hubspot_owner_id)
-        eg = extract_score_from_mass(r.result_json, r.items_json, "evaluacion_global")
+        if r.evaluacion_global is not None:
+            eg = to_float(r.evaluacion_global)
+        else:
+            eg_raw = extract_score_from_mass(r.result_json, getattr(r, "items_json", None), "evaluacion_global")
+            eg = to_float(eg_raw) if eg_raw is not None else None
         tipo = r.result_json.get("tipo_llamada") if r.result_json else None
         agent_inits = resolve_agent_initials(
             hubspot_owner_id=r.hubspot_owner_id,

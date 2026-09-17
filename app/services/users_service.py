@@ -127,7 +127,8 @@ async def save_user_service_associations(
 
 async def get_user_services_info(
     db: AsyncSession,
-    user_ids: List[int]
+    user_ids: List[int],
+    users: Optional[List[User]] = None
 ) -> Tuple[Dict[int, List[int]], Dict[int, List[Dict[str, Any]]], Dict[int, Tuple[Optional[int], Optional[str]]]]:
     """
     Fetch user service information for a list of user IDs.
@@ -139,8 +140,9 @@ async def get_user_services_info(
     if not user_ids:
         return {}, {}, {}
 
-    users_res = await db.execute(select(User).where(User.user_id.in_(user_ids)))
-    users = users_res.scalars().all()
+    if users is None:
+        users_res = await db.execute(select(User).where(User.user_id.in_(user_ids)))
+        users = list(users_res.scalars().all())
 
     primary_service_ids = {u.primary_service_id for u in users if u.primary_service_id is not None}
     
@@ -363,7 +365,8 @@ async def save_user_team_associations(
 
 async def get_user_teams_info(
     db: AsyncSession,
-    user_ids: List[int]
+    user_ids: List[int],
+    users: Optional[List[User]] = None
 ) -> Tuple[Dict[int, List[int]], Dict[int, List[Dict[str, Any]]], Dict[int, Tuple[Optional[int], Optional[str]]]]:
     """
     Fetch user team information for a list of user IDs.
@@ -375,8 +378,9 @@ async def get_user_teams_info(
     if not user_ids:
         return {}, {}, {}
 
-    users_res = await db.execute(select(User).where(User.user_id.in_(user_ids)))
-    users = users_res.scalars().all()
+    if users is None:
+        users_res = await db.execute(select(User).where(User.user_id.in_(user_ids)))
+        users = list(users_res.scalars().all())
 
     primary_team_ids = {u.primary_team_id for u in users if u.primary_team_id is not None}
 

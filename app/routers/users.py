@@ -299,10 +299,13 @@ async def list_users(
     context: Annotated[TenantContext, Depends(get_tenant_context)],
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    company_id: Annotated[int | None, Query(description="Filter by company ID")] = None,
+    role: Annotated[str | None, Query(description="Filter by user role")] = None,
+    is_active: Annotated[bool | None, Query(description="Filter by active status")] = None,
 ):
     """
     List users enforcing multi-tenant scoping:
-    - super_admin: sees all users.
+    - super_admin: sees all users (or filtered by company_id).
     - company_admin: sees users of their company_id, excluding super_admins or global NULL company users.
     - service_manager: sees company_admin, service_managers, and coordinators/agents of allowed services.
     - team_coordinator: sees self, agents of allowed teams, and immediate service managers of allowed services.
@@ -310,8 +313,14 @@ async def list_users(
     stmt = select(User).order_by(User.user_id.asc())
 
     if context.is_super_admin:
-        pass
+        if company_id is not None:
+            stmt = stmt.where(User.company_id == company_id)
     elif context.normalized_role == InternalRole.COMPANY_ADMIN:
+        if company_id is not None and company_id != context.company_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado a otra empresa."
+            )
         stmt = stmt.where(
             (User.company_id == context.company_id) &
             (User.company_id.is_not(None))
@@ -319,6 +328,11 @@ async def list_users(
         super_admin_roles = ["admin", "administrador", "superadmin", "super_admin"]
         stmt = stmt.where(~User.role.in_(super_admin_roles))
     elif context.normalized_role == InternalRole.SERVICE_MANAGER:
+        if company_id is not None and company_id != context.company_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado a otra empresa."
+            )
         stmt = stmt.where(
             (User.company_id == context.company_id) &
             (User.company_id.is_not(None))
@@ -354,6 +368,11 @@ async def list_users(
             (User.user_id == context.user_id)
         )
     elif context.normalized_role == InternalRole.TEAM_COORDINATOR:
+        if company_id is not None and company_id != context.company_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado a otra empresa."
+            )
         stmt = stmt.where(
             (User.company_id == context.company_id) &
             (User.company_id.is_not(None))
@@ -381,8 +400,18 @@ async def list_users(
         if context.company_id:
             stmt = stmt.where(User.company_id == context.company_id)
 
+    if role is not None and role.strip():
+        norm_r = role.strip().lower()
+        if norm_r in ("agent", "agente"):
+            stmt = stmt.where(func.lower(User.role).in_(["agent", "agente"]))
+        else:
+            stmt = stmt.where(func.lower(User.role) == norm_r)
+
+    if is_active is not None:
+        stmt = stmt.where(User.is_active == is_active)
+
     res = await db.execute(stmt)
-    users = res.scalars().all()
+    users = list(res.scalars().all())
 
     user_ids = [u.user_id for u in users]
     comp_ids = list({u.company_id for u in users if u.company_id is not None})
@@ -391,8 +420,8 @@ async def list_users(
         c_res = await db.execute(select(Company).where(Company.company_id.in_(comp_ids)))
         comp_map = {c.company_id: c.company_name for c in c_res.scalars().all()}
 
-    allowed_service_ids_map, allowed_services_map, primary_service_map = await get_user_services_info(db, user_ids)
-    allowed_team_ids_map, allowed_teams_map, primary_team_map = await get_user_teams_info(db, user_ids)
+    allowed_service_ids_map, allowed_services_map, primary_service_map = await get_user_services_info(db, user_ids, users=users)
+    allowed_team_ids_map, allowed_teams_map, primary_team_map = await get_user_teams_info(db, user_ids, users=users)
 
     is_admin_user = context.is_super_admin or context.normalized_role in (
         InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR
