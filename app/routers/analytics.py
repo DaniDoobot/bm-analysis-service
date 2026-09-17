@@ -527,14 +527,37 @@ async def get_agents_comparison(
             company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
         )
 
-        if team_id is not None or eff_service_id is not None or eff_company_id is not None:
-            from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
-            await validate_team_service_cascade(db, service_id=eff_service_id, team_id=team_id, context=context, company_id=eff_company_id)
-            team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=eff_company_id) if team_id is not None else None
-        else:
-            team_owner_ids = None
-
+        owner_ids = parse_list_param(agent_owner_ids) + parse_list_param(agent_owner_ids_bracket)
         raw_typology = typology or typology_key or tipo_llamada or call_type or selected_typology or typologies
+        first_typology_id = None
+        if typology_ids and typology_ids.strip():
+            first_tid = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
+            if first_tid:
+                first_typology_id = first_tid[0]
+
+        from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
+        for oid in owner_ids:
+            await validate_team_service_cascade(
+                db,
+                service_id=eff_service_id,
+                team_id=team_id,
+                context=context,
+                company_id=eff_company_id,
+                hubspot_owner_id=oid,
+                typology_id=first_typology_id,
+                typology_key=raw_typology,
+            )
+        if not owner_ids:
+            await validate_team_service_cascade(
+                db,
+                service_id=eff_service_id,
+                team_id=team_id,
+                context=context,
+                company_id=eff_company_id,
+                typology_id=first_typology_id,
+                typology_key=raw_typology,
+            )
+        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=eff_company_id) if team_id is not None else None
         norm_t = normalize_typology(raw_typology)
         raw_direction = direction or call_direction or inbound_outbound
         norm_d = normalize_direction(raw_direction)
@@ -1158,14 +1181,24 @@ async def get_items_evolution(
             company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
         )
 
-        if team_id is not None or eff_service_id is not None or eff_company_id is not None:
-            from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
-            await validate_team_service_cascade(db, service_id=eff_service_id, team_id=team_id, context=context, company_id=eff_company_id)
-            team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=eff_company_id) if team_id is not None else None
-        else:
-            team_owner_ids = None
-
         raw_typology = typology or typology_key or tipo_llamada or call_type or selected_typology or typologies
+        first_typology_id = None
+        if typology_ids and typology_ids.strip():
+            first_tid = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
+            if first_tid:
+                first_typology_id = first_tid[0]
+
+        from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
+        await validate_team_service_cascade(
+            db,
+            service_id=eff_service_id,
+            team_id=team_id,
+            context=context,
+            company_id=eff_company_id,
+            typology_id=first_typology_id,
+            typology_key=raw_typology,
+        )
+        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=eff_company_id) if team_id is not None else None
         norm_t = normalize_typology(raw_typology)
         raw_direction = direction or call_direction or inbound_outbound
         norm_d = normalize_direction(raw_direction)
@@ -1488,6 +1521,8 @@ async def get_available_agents(
 
     agents_list: list[AgentInfo] = []
     for oid in sorted(target_owner_ids):
+        u_obj = assigned_users.get(oid)
+
         # 1. Canonical bm_users name
         disp_name = resolved_names.get((effective_company_id, oid)) or resolved_names.get(("*", oid))
         from app.utils.agent_resolvers import get_demo_agent_index
@@ -1495,7 +1530,6 @@ async def get_available_agents(
         if ("demo_owner_" in str(oid).lower() or (effective_company_id in (6, 7))) and d_idx is not None:
             disp_name = f"Agente Demo {d_idx:02d}"
         else:
-            u_obj = assigned_users.get(oid)
             if not disp_name and u_obj:
                 disp_name = getattr(u_obj, "display_name", None) or (u_obj.name and u_obj.name.strip()) or (u_obj.username and u_obj.username.strip())
 
@@ -1572,11 +1606,14 @@ async def get_filter_options(
     service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
     service: Annotated[str | None, Query(description="Filter by service key, slug, or ID")] = None,
     team_id: Annotated[int | None, Query(description="Filter by team ID")] = None,
+    agent_id: Annotated[str | None, Query(description="Filter by agent ID")] = None,
+    hubspot_owner_id: Annotated[str | None, Query(description="Filter by agent hubspot_owner_id")] = None,
+    typology_id: Annotated[int | None, Query(description="Filter by typology ID")] = None,
     company_id: Annotated[int | None, Query(description="Filter by company ID")] = None,
     db: Annotated[AsyncSession, Depends(get_db)] = None,
 ):
     """
-    Retrieve filter configuration options: active typologies, agents, duration range, and score bounds.
+    Retrieve filter configuration options: active typologies, agents, duration range, score bounds, and items.
     """
     if company_id is not None and not context.is_super_admin:
         if company_id not in context.allowed_company_ids:
@@ -1586,6 +1623,8 @@ async def get_filter_options(
             )
 
     eff_company_id = company_id if company_id is not None else (None if context.is_super_admin else context.company_id)
+    eff_agent_id = hubspot_owner_id or agent_id
+    clean_agent_id = str(eff_agent_id).strip() if eff_agent_id else None
 
     try:
         eff_service_id, _ = await resolve_service_id(
@@ -1596,15 +1635,16 @@ async def get_filter_options(
             company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
         )
 
-        if team_id is not None or eff_service_id is not None or eff_company_id is not None:
-            from app.utils.team_resolvers import validate_team_service_cascade
-            await validate_team_service_cascade(
-                db,
-                service_id=eff_service_id,
-                team_id=team_id,
-                context=context,
-                company_id=eff_company_id,
-            )
+        from app.utils.team_resolvers import validate_team_service_cascade
+        await validate_team_service_cascade(
+            db,
+            service_id=eff_service_id,
+            team_id=team_id,
+            context=context,
+            company_id=eff_company_id,
+            hubspot_owner_id=clean_agent_id,
+            typology_id=typology_id,
+        )
 
         # 1. Fetch available companies list for current user
         from app.models.companies import Company
@@ -1672,6 +1712,27 @@ async def get_filter_options(
             stmt_t = stmt_t.where(TeamModel.service_id.in_(context.allowed_service_ids))
         if context and not context.is_super_admin and context.allowed_team_ids is not None:
             stmt_t = stmt_t.where(TeamModel.team_id.in_(context.allowed_team_ids))
+
+        # Restrict teams to agent's teams if agent is specified
+        if clean_agent_id is not None:
+            from app.models.users import User
+            from app.models.teams import UserTeamAssociation, AgentTeamAssociation
+            stmt_u = select(User).where(User.hubspot_owner_id == clean_agent_id)
+            res_u = await db.execute(stmt_u)
+            user_obj = res_u.scalars().first()
+            if user_obj:
+                agent_team_ids = set()
+                if user_obj.primary_team_id:
+                    agent_team_ids.add(user_obj.primary_team_id)
+                res_ut = await db.execute(select(UserTeamAssociation.team_id).where(UserTeamAssociation.user_id == user_obj.user_id))
+                agent_team_ids.update(res_ut.scalars().all())
+                res_at = await db.execute(select(AgentTeamAssociation.team_id).where(AgentTeamAssociation.user_id == user_obj.user_id))
+                agent_team_ids.update(res_at.scalars().all())
+                if agent_team_ids:
+                    stmt_t = stmt_t.where(TeamModel.team_id.in_(list(agent_team_ids)))
+                else:
+                    stmt_t = stmt_t.where(TeamModel.team_id == -1)
+
         stmt_t = stmt_t.order_by(TeamModel.team_name)
         res_t = await db.execute(stmt_t)
         teams_list = [
@@ -1701,17 +1762,43 @@ async def get_filter_options(
         params = {}
         if context.allowed_service_ids is not None:
             typo_query += f" AND t.service_id IN {_format_int_list(context.allowed_service_ids)}"
-            
+
         if eff_service_id is not None:
             if context.allowed_service_ids is not None and eff_service_id not in context.allowed_service_ids:
                 typo_query += " AND t.service_id = -1"
             else:
                 typo_query += " AND t.service_id = :service_id"
                 params["service_id"] = eff_service_id
+        elif team_id is not None:
+            # Cascade from team to team's service
+            stmt_tm = select(TeamModel.service_id).where(TeamModel.team_id == team_id)
+            res_tm = await db.execute(stmt_tm)
+            tm_svc_id = res_tm.scalar_one_or_none()
+            if tm_svc_id is not None:
+                typo_query += " AND t.service_id = :service_id"
+                params["service_id"] = tm_svc_id
+        elif clean_agent_id is not None:
+            # Cascade from agent to agent's services
+            from app.models.users import User
+            stmt_ua = select(User).where(User.hubspot_owner_id == clean_agent_id)
+            res_ua = await db.execute(stmt_ua)
+            ua_obj = res_ua.scalars().first()
+            if ua_obj:
+                ag_svc_ids = set()
+                if ua_obj.primary_service_id:
+                    ag_svc_ids.add(ua_obj.primary_service_id)
+                from app.models.teams import UserServiceAssociation
+                res_usa = await db.execute(select(UserServiceAssociation.service_id).where(UserServiceAssociation.user_id == ua_obj.user_id))
+                ag_svc_ids.update(res_usa.scalars().all())
+                if ag_svc_ids:
+                    typo_query += f" AND t.service_id IN {_format_int_list(list(ag_svc_ids))}"
 
+        if typology_id is not None:
+            typo_query += " AND t.typology_id = :typology_id"
+            params["typology_id"] = typology_id
 
         typo_res = await db.execute(text(typo_query), params)
-            
+
         typologies_list = []
         for row in typo_res.fetchall():
             typologies_list.append({
@@ -1736,10 +1823,10 @@ async def get_filter_options(
             dur_query += f" AND service_id IN {_format_int_list(context.allowed_service_ids)}"
         if context.allowed_agent_ids is not None:
             dur_query += f" AND hubspot_owner_id IN {_format_str_list(context.allowed_agent_ids)}"
-            
+
         dur_res = await db.execute(text(dur_query), dur_params)
         dur_row = dur_res.fetchone()
-        
+
         min_seconds = 0
         max_seconds = 1800
         if dur_row:
@@ -1748,12 +1835,23 @@ async def get_filter_options(
             if dur_row[1] is not None:
                 max_seconds = int(dur_row[1])
 
+        # 7. Fetch dynamic evaluation items
+        from app.utils.item_score_filters import get_evaluation_item_filter_options
+        eff_svc_ids = [eff_service_id] if eff_service_id is not None else context.allowed_service_ids
+        items_list = await get_evaluation_item_filter_options(
+            db,
+            company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids),
+            service_ids=eff_svc_ids,
+            typology_id=typology_id,
+        )
+
         return {
             "companies": companies_list,
             "services": services_list,
             "teams": teams_list,
             "agents": available_agents,
             "typologies": typologies_list,
+            "items": items_list,
             "duration": {
                 "min_seconds": min_seconds,
                 "max_seconds": max_seconds

@@ -785,6 +785,9 @@ async def get_evaluation_items_filter_options(
     service: Annotated[str | None, Query(description="Filter criteria by service key, slug, or ID")] = None,
     team_id: Annotated[int | None, Query(description="Filter criteria by team ID")] = None,
     company_id: Annotated[int | None, Query(description="Filter criteria by company ID")] = None,
+    agent_id: Annotated[str | None, Query(description="Filter criteria by agent ID")] = None,
+    hubspot_owner_id: Annotated[str | None, Query(description="Filter criteria by agent hubspot_owner_id")] = None,
+    typology_id: Annotated[int | None, Query(description="Filter criteria by typology ID")] = None,
 ):
     """
     Retrieve available evaluation criteria item filter options dynamically for frontend UI.
@@ -797,6 +800,8 @@ async def get_evaluation_items_filter_options(
             raise HTTPException(status_code=403, detail="Acceso denegado a otra empresa.")
 
     eff_company_id = company_id if company_id is not None else (None if context.is_super_admin else context.company_id)
+    eff_agent_id = hubspot_owner_id or agent_id
+    clean_agent_id = str(eff_agent_id).strip() if eff_agent_id else None
 
     eff_service_id, _ = await resolve_service_id(
         db,
@@ -806,22 +811,24 @@ async def get_evaluation_items_filter_options(
         company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
     )
 
-    if team_id is not None or eff_service_id is not None or eff_company_id is not None:
-        from app.utils.team_resolvers import validate_team_service_cascade
-        await validate_team_service_cascade(
-            db,
-            service_id=eff_service_id,
-            team_id=team_id,
-            context=context,
-            company_id=eff_company_id,
-        )
+    from app.utils.team_resolvers import validate_team_service_cascade
+    await validate_team_service_cascade(
+        db,
+        service_id=eff_service_id,
+        team_id=team_id,
+        context=context,
+        company_id=eff_company_id,
+        hubspot_owner_id=clean_agent_id,
+        typology_id=typology_id,
+    )
 
     eff_service_ids = [eff_service_id] if eff_service_id is not None else context.allowed_service_ids
 
     options = await get_evaluation_item_filter_options(
         db,
-        company_ids=[eff_company_id] if eff_company_id is not None else context.allowed_company_ids,
-        service_ids=eff_service_ids
+        company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids),
+        service_ids=eff_service_ids,
+        typology_id=typology_id,
     )
     return {"items": options}
 

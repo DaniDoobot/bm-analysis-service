@@ -460,6 +460,7 @@ async def get_evaluation_item_filter_options(
     company_ids: list[int] | None = None,
     service_ids: list[int] | None = None,
     prompt_type: str = "audio",
+    typology_id: int | None = None,
 ) -> list[dict[str, Any]]:
     """
     Returns available evaluative criteria item filter options dynamically with types,
@@ -487,9 +488,12 @@ async def get_evaluation_item_filter_options(
         if service_ids is not None:
             prompt_stmt = prompt_stmt.where(Prompt.service_id.in_(service_ids))
         if company_ids:
-            prompt_stmt = prompt_stmt.where(
-                or_(Prompt.company_id.in_(company_ids), Prompt.company_id.is_(None))
-            )
+            if 1 in company_ids:
+                prompt_stmt = prompt_stmt.where(
+                    or_(Prompt.company_id.in_(company_ids), Prompt.company_id.is_(None))
+                )
+            else:
+                prompt_stmt = prompt_stmt.where(Prompt.company_id.in_(company_ids))
         # Order by service_id, company_id (tenant-specific first if non-null), prompt_id desc
         prompt_stmt = prompt_stmt.order_by(
             Prompt.service_id.asc().nullslast(),
@@ -520,7 +524,24 @@ async def get_evaluation_item_filter_options(
                 PromptCriterion.is_active == True,  # noqa: E712
                 PromptCriterion.deleted_at.is_(None),
                 PromptCriterion.criterion_type.in_(["score_1_10", "score", "number", "boolean", "percentage"])
-            ).order_by(
+            )
+
+            if typology_id is not None:
+                from app.models.criteria import PromptCriterionTypology
+                has_typology_assoc = exists(
+                    select(1).where(
+                        PromptCriterionTypology.criterion_id == PromptCriterion.criterion_id,
+                        PromptCriterionTypology.typology_id == typology_id
+                    )
+                )
+                has_no_typology_assocs = ~exists(
+                    select(1).where(
+                        PromptCriterionTypology.criterion_id == PromptCriterion.criterion_id
+                    )
+                )
+                crit_stmt = crit_stmt.where(or_(has_typology_assoc, has_no_typology_assocs))
+
+            crit_stmt = crit_stmt.order_by(
                 Prompt.service_id.asc().nullslast(),
                 PromptCriterion.order_index.asc().nullslast(),
                 PromptCriterion.criterion_id.asc()
@@ -579,6 +600,19 @@ async def get_evaluation_item_filter_options(
         )
         if service_ids is not None:
             hist_stmt = hist_stmt.where(MassEvaluationCriterionResult.service_id.in_(service_ids))
+        if typology_id is not None:
+            hist_stmt = hist_stmt.where(MassEvaluationCriterionResult.typology_id == typology_id)
+        if company_ids is not None:
+            from app.models.mass_evaluations import MassEvaluationResult
+            hist_stmt = hist_stmt.join(
+                MassEvaluationResult,
+                MassEvaluationCriterionResult.mass_analysis_id == MassEvaluationResult.mass_analysis_id
+            )
+            if 1 in company_ids:
+                hist_stmt = hist_stmt.where(or_(MassEvaluationResult.company_id.in_(company_ids), MassEvaluationResult.company_id.is_(None)))
+            else:
+                hist_stmt = hist_stmt.where(MassEvaluationResult.company_id.in_(company_ids))
+
         hist_stmt = hist_stmt.group_by(
             MassEvaluationCriterionResult.criterion_key,
             MassEvaluationCriterionResult.criterion_name,
@@ -625,12 +659,15 @@ async def get_evaluation_item_filter_options(
         logger.warning("Error fetching dynamic criterion filter options from history: %s", e)
 
     # 4. Tertiary Phase: Combine with hardcoded fallbacks if any standard item is still missing
-    for fb in EVALUATION_ITEMS_FALLBACK:
-        if fb["key"] not in seen:
-            seen.add(fb["key"])
-            fb_copy = dict(fb)
-            fb_copy["sort_order"] = len(options) + 1
-            options.append(fb_copy)
+    # Fallback catalog is ONLY used for Boston Medical (company 1 or unrestricted context) without a specific typology filter.
+    is_boston_or_unrestricted = (company_ids is None or 1 in company_ids)
+    if is_boston_or_unrestricted and typology_id is None:
+        for fb in EVALUATION_ITEMS_FALLBACK:
+            if fb["key"] not in seen:
+                seen.add(fb["key"])
+                fb_copy = dict(fb)
+                fb_copy["sort_order"] = len(options) + 1
+                options.append(fb_copy)
 
     # Ensure contiguous sort_order
     for idx, opt in enumerate(options):

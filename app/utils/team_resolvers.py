@@ -22,18 +22,21 @@ async def validate_team_service_cascade(
     context: Optional[TenantContext] = None,
     company_id: Optional[int] = None,
     hubspot_owner_id: Optional[str] = None,
+    typology_id: Optional[int] = None,
+    typology_key: Optional[str] = None,
 ) -> None:
     """
     Validates that:
-    1. If company_id is provided (or resolved from context), service, team, and agent belong to this company.
+    1. If company_id is provided (or resolved from context), service, team, agent, and typology belong to this company.
        If mismatched, raises HTTP 400 Bad Request:
        - 'El servicio seleccionado no pertenece a la empresa indicada.'
        - 'El equipo seleccionado no pertenece a la empresa indicada.'
        - 'El agente seleccionado no pertenece a la empresa indicada.'
-    2. If service_id is provided, checks permissions.
-    3. If team_id is provided, team exists, checks permissions, and if service_id is provided,
-       validates team.service_id == service_id (raising 400 if mismatched).
-    4. If hubspot_owner_id is provided and team_id is provided, validates agent belongs to team.
+       - 'La tipología seleccionada no pertenece a la empresa indicada.'
+    2. If service_id is provided, checks permissions and verifies agent/team/typology belong to service.
+    3. If team_id is provided, team exists, checks permissions, and validates team.service_id == service_id.
+    4. If hubspot_owner_id is provided, validates agent belongs to service and/or team.
+    5. If typology_id or typology_key is provided, validates typology belongs to company, service, team, and agent.
     """
     eff_company_id = company_id
     if eff_company_id is None and context and not context.is_super_admin:
@@ -67,8 +70,8 @@ async def validate_team_service_cascade(
                 )
 
     # 2. Validate agent if hubspot_owner_id is provided
-    if hubspot_owner_id is not None and str(hubspot_owner_id).strip():
-        clean_agent_id = str(hubspot_owner_id).strip()
+    clean_agent_id = str(hubspot_owner_id).strip() if hubspot_owner_id is not None and str(hubspot_owner_id).strip() else None
+    if clean_agent_id is not None:
         from app.models.users import User
         stmt_u = select(User).where(User.hubspot_owner_id == clean_agent_id)
         res_u = await db.execute(stmt_u)
@@ -85,110 +88,141 @@ async def validate_team_service_cascade(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="El agente seleccionado no pertenece a la empresa indicada."
                     )
+        # Validate agent belongs to service_id if service_id is provided
+        if service_id is not None:
+            svc_agents = await get_service_assigned_owner_ids(db, service_id=service_id, context=context, company_id=eff_company_id)
+            if clean_agent_id not in svc_agents:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="El agente seleccionado no pertenece al servicio indicado."
+                )
 
-    if team_id is None:
-        return
+    # 3. Validate team if team_id is provided
+    team = None
+    if team_id is not None:
+        from app.models.teams import Team
 
-    from app.models.teams import Team
+        stmt = select(Team).where(Team.team_id == team_id)
+        res = await db.execute(stmt)
+        team = res.scalar_one_or_none()
 
-    stmt = select(Team).where(Team.team_id == team_id)
-    res = await db.execute(stmt)
-    team = res.scalar_one_or_none()
+        if not team:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Equipo no encontrado."
+            )
 
-    if not team:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Equipo no encontrado."
-        )
+        # Validate team company cascade
+        if eff_company_id is not None:
+            tm_comp = team.company_id
+            if eff_company_id == 1:
+                is_match = (tm_comp == 1 or tm_comp is None)
+            else:
+                is_match = (tm_comp == eff_company_id)
+            if not is_match:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="El equipo seleccionado no pertenece a la empresa indicada."
+                )
 
-    # Validate team company cascade
-    if eff_company_id is not None:
-        tm_comp = team.company_id
-        if eff_company_id == 1:
-            is_match = (tm_comp == 1 or tm_comp is None)
-        else:
-            is_match = (tm_comp == eff_company_id)
-        if not is_match:
+        # Tenant check on team's company, team permission, and team's service permission
+        if context and not context.is_super_admin:
+            if team.company_id != context.company_id and (context.allowed_company_ids is None or team.company_id not in context.allowed_company_ids):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado a equipos de otra empresa."
+                )
+            if context.allowed_team_ids is not None and team_id not in context.allowed_team_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: No tienes permisos para acceder a este equipo."
+                )
+            if context.allowed_service_ids is not None and team.service_id not in context.allowed_service_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: No tienes permisos para acceder a este servicio."
+                )
+
+        # Cascade check: Team must belong to the specified service_id
+        if service_id is not None and team.service_id != service_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="El equipo seleccionado no pertenece a la empresa indicada."
+                detail="El equipo seleccionado no pertenece al servicio indicado."
             )
 
-    # 2. Tenant check on team's company, team permission, and team's service permission
-    if context and not context.is_super_admin:
-        if team.company_id != context.company_id and (context.allowed_company_ids is None or team.company_id not in context.allowed_company_ids):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Acceso denegado a equipos de otra empresa."
-            )
-        if context.allowed_team_ids is not None and team_id not in context.allowed_team_ids:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Acceso denegado: No tienes permisos para acceder a este equipo."
-            )
-        if context.allowed_service_ids is not None and team.service_id not in context.allowed_service_ids:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Acceso denegado: No tienes permisos para acceder a este servicio."
-            )
+        # Cascade check: Agent must belong to the specified team_id
+        if clean_agent_id is not None:
+            team_agents = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=eff_company_id)
+            if clean_agent_id not in team_agents:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="El agente seleccionado no pertenece al equipo indicado."
+                )
 
-    # Cascade check: Team must belong to the specified service_id
-    if service_id is not None and team.service_id != service_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="El equipo seleccionado no pertenece al servicio indicado."
-        )
+    # 4. Validate typology if typology_id or typology_key is provided
+    if typology_id is not None or (typology_key is not None and str(typology_key).strip()):
+        from app.models.typologies import Typology
+        typology = None
+        if typology_id is not None:
+            stmt_typ = select(Typology).where(Typology.typology_id == typology_id)
+            res_typ = await db.execute(stmt_typ)
+            typology = res_typ.scalar_one_or_none()
+            if not typology:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Tipología no encontrada."
+                )
+        elif typology_key is not None:
+            clean_key = str(typology_key).strip()
+            if clean_key and clean_key.lower() not in ("all", "todas", "total", "*"):
+                stmt_typ = select(Typology).where(Typology.typology_key == clean_key, Typology.is_active == True)
+                if service_id is not None:
+                    stmt_typ = stmt_typ.where(Typology.service_id == service_id)
+                elif team is not None and team.service_id is not None:
+                    stmt_typ = stmt_typ.where(Typology.service_id == team.service_id)
+                res_typ = await db.execute(stmt_typ)
+                typology = res_typ.scalars().first()
 
-    # Cascade check: Agent must belong to the specified team_id
-    if hubspot_owner_id is not None and str(hubspot_owner_id).strip():
-        team_agents = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=eff_company_id)
-        if str(hubspot_owner_id).strip() not in team_agents:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="El agente seleccionado no pertenece al equipo indicado."
-            )
+        if typology is not None:
+            # 4a. Typology company check
+            if eff_company_id is not None:
+                typ_comp = typology.company_id
+                if typ_comp is None and typology.service_id is not None:
+                    from app.models.services import Service
+                    res_s_comp = await db.execute(select(Service.company_id).where(Service.service_id == typology.service_id))
+                    typ_comp = res_s_comp.scalar_one_or_none()
+                if eff_company_id == 1:
+                    is_match = (typ_comp == 1 or typ_comp is None)
+                else:
+                    is_match = (typ_comp == eff_company_id)
+                if not is_match:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="La tipología seleccionada no pertenece a la empresa indicada."
+                    )
 
+            # 4b. Typology service check
+            if service_id is not None and typology.service_id != service_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="La tipología seleccionada no pertenece al servicio indicado."
+                )
 
-async def get_team_assigned_owner_ids(
-    db: AsyncSession,
-    team_id: int,
-    context: Optional[TenantContext] = None,
-) -> Set[str]:
-    """
-    Returns the set of active hubspot_owner_ids assigned to team_id via:
-    - User.primary_team_id == team_id
-    - UserTeamAssociation (bm_user_teams) -> team_id
-    - AgentTeamAssociation (bm_agent_teams) -> team_id
-    Filters by User.is_active == True and User.hubspot_owner_id is not None.
-    Applies tenant scoping if context is provided.
-    """
-    from app.models.users import User
-    from app.models.teams import UserTeamAssociation, AgentTeamAssociation
+            # 4c. Typology team check
+            if team is not None and team.service_id is not None and typology.service_id != team.service_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="La tipología seleccionada no pertenece al servicio del equipo indicado."
+                )
 
-    user_conds = [
-        User.primary_team_id == team_id,
-        User.user_id.in_(select(UserTeamAssociation.user_id).where(UserTeamAssociation.team_id == team_id)),
-        User.user_id.in_(select(AgentTeamAssociation.user_id).where(AgentTeamAssociation.team_id == team_id)),
-    ]
-
-    stmt = select(User.hubspot_owner_id).where(
-        User.is_active == True,
-        User.hubspot_owner_id.is_not(None),
-        or_(*user_conds)
-    )
-
-    if context and not context.is_super_admin:
-        stmt = stmt.where(
-            or_(
-                User.company_id.in_(context.allowed_company_ids),
-                User.company_id.is_(None)
-            )
-        )
-        if context.allowed_agent_ids is not None:
-            stmt = stmt.where(User.hubspot_owner_id.in_(context.allowed_agent_ids))
-
-    res = await db.execute(stmt)
-    return {str(oid).strip() for oid in res.scalars().all() if oid}
+            # 4d. Typology agent check
+            if clean_agent_id is not None and typology.service_id is not None:
+                typ_svc_agents = await get_service_assigned_owner_ids(db, service_id=typology.service_id, context=context, company_id=eff_company_id)
+                if clean_agent_id not in typ_svc_agents:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="La tipología seleccionada no es compatible con el agente indicado."
+                    )
 
 
 async def get_team_assigned_users(
@@ -216,7 +250,10 @@ async def get_team_assigned_users(
     )
 
     if company_id is not None:
-        stmt = stmt.where(User.company_id == company_id)
+        if company_id == 1:
+            stmt = stmt.where(or_(User.company_id == 1, User.company_id.is_(None)))
+        else:
+            stmt = stmt.where(User.company_id == company_id)
         if context and not context.is_super_admin and company_id not in context.allowed_company_ids:
             return {}
         if context and context.allowed_agent_ids is not None:
@@ -270,7 +307,10 @@ async def get_service_assigned_users(
     if service_id is None:
         stmt = select(User).where(User.is_active == True, User.hubspot_owner_id.is_not(None))
         if company_id is not None:
-            stmt = stmt.where(User.company_id == company_id)
+            if company_id == 1:
+                stmt = stmt.where(or_(User.company_id == 1, User.company_id.is_(None)))
+            else:
+                stmt = stmt.where(User.company_id == company_id)
             if context and not context.is_super_admin and company_id not in context.allowed_company_ids:
                 return {}
             if context and context.allowed_agent_ids is not None:
@@ -311,7 +351,10 @@ async def get_service_assigned_users(
         or_(*user_conds)
     )
     if company_id is not None:
-        stmt = stmt.where(User.company_id == company_id)
+        if company_id == 1:
+            stmt = stmt.where(or_(User.company_id == 1, User.company_id.is_(None)))
+        else:
+            stmt = stmt.where(User.company_id == company_id)
         if context and not context.is_super_admin and company_id not in context.allowed_company_ids:
             return {}
         if context and context.allowed_agent_ids is not None:

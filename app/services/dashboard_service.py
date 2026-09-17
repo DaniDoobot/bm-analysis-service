@@ -482,12 +482,37 @@ async def get_dashboard_summary(
         if company_id not in context.allowed_company_ids:
             raise HTTPException(status_code=403, detail="Acceso denegado a otra empresa.")
 
-    if team_id is not None or service_id is not None or effective_company_id is not None:
-        from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
-        await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context, company_id=effective_company_id)
-        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=effective_company_id) if team_id is not None else None
-    else:
-        team_owner_ids = None
+    target_agents = []
+    if hubspot_owner_id and str(hubspot_owner_id).strip():
+        target_agents.append(str(hubspot_owner_id).strip())
+    if hubspot_owner_ids:
+        target_agents.extend([str(x).strip() for x in hubspot_owner_ids if str(x).strip()])
+
+    first_typology_id = typology_ids[0] if typology_ids else None
+
+    from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
+    for ag in target_agents:
+        await validate_team_service_cascade(
+            db,
+            service_id=service_id,
+            team_id=team_id,
+            context=context,
+            company_id=effective_company_id,
+            hubspot_owner_id=ag,
+            typology_id=first_typology_id,
+            typology_key=typology_key,
+        )
+    if not target_agents:
+        await validate_team_service_cascade(
+            db,
+            service_id=service_id,
+            team_id=team_id,
+            context=context,
+            company_id=effective_company_id,
+            typology_id=first_typology_id,
+            typology_key=typology_key,
+        )
+    team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=effective_company_id) if team_id is not None else None
 
     item_filter_info = parse_item_score_filters_detailed(item_filters)
     parsed_item_filters = item_filter_info["active_filters"]
@@ -1087,12 +1112,16 @@ async def get_agents_list(
         company_ids=[effective_company_id] if effective_company_id is not None else (None if (context and context.is_super_admin) else (context.allowed_company_ids if context else None))
     )
 
-    if team_id is not None or eff_service_id is not None or effective_company_id is not None:
-        from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
-        await validate_team_service_cascade(db, service_id=eff_service_id, team_id=team_id, context=context, company_id=effective_company_id)
-        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=effective_company_id) if team_id is not None else None
-    else:
-        team_owner_ids = None
+    from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
+    await validate_team_service_cascade(
+        db,
+        service_id=eff_service_id,
+        team_id=team_id,
+        context=context,
+        company_id=effective_company_id,
+        typology_key=typology_key,
+    )
+    team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=effective_company_id) if team_id is not None else None
 
     norm_t = normalize_typology(typology_key)
     norm_d = normalize_direction(direction)
@@ -1860,12 +1889,16 @@ async def get_objections_breakdown(
         if company_id not in context.allowed_company_ids:
             raise HTTPException(status_code=403, detail="Acceso denegado a otra empresa.")
 
-    if team_id is not None or service_id is not None or effective_company_id is not None:
-        from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
-        await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context, company_id=effective_company_id)
-        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=effective_company_id) if team_id is not None else None
-    else:
-        team_owner_ids = None
+    from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
+    await validate_team_service_cascade(
+        db,
+        service_id=service_id,
+        team_id=team_id,
+        context=context,
+        company_id=effective_company_id,
+        typology_key=typology_key,
+    )
+    team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=effective_company_id) if team_id is not None else None
 
     dt_from, dt_to, _ = resolve_date_range(date_from, date_to, period, default_period="7d")
         
@@ -2290,12 +2323,16 @@ async def get_agents_comparison(
         if company_id not in context.allowed_company_ids:
             raise HTTPException(status_code=403, detail="Acceso denegado a otra empresa.")
 
-    if team_id is not None or service_id is not None or effective_company_id is not None:
-        from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
-        await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context, company_id=effective_company_id)
-        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=effective_company_id) if team_id is not None else None
-    else:
-        team_owner_ids = None
+    from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
+    await validate_team_service_cascade(
+        db,
+        service_id=service_id,
+        team_id=team_id,
+        context=context,
+        company_id=effective_company_id,
+        typology_key=typology_key,
+    )
+    team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=effective_company_id) if team_id is not None else None
     
     if not metric_key:
         metric_key = "evaluacion_global"

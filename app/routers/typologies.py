@@ -31,6 +31,7 @@ async def list_typologies(
     context: Annotated[TenantContext, Depends(get_tenant_context)],
     service_id: int | None = None,
     is_active: bool | None = None,
+    company_id: int | None = None,
     db: AsyncSession = Depends(get_db)
 ):
     role = context.normalized_role
@@ -40,39 +41,42 @@ async def list_typologies(
             detail="Acceso denegado: rol no autorizado para ver tipologías."
         )
 
+    if company_id is not None and not context.is_super_admin:
+        if company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado a otra empresa."
+            )
+
+    eff_company_id = company_id if company_id is not None else (None if context.is_super_admin else context.company_id)
+
+    if eff_company_id is not None or service_id is not None:
+        from app.utils.team_resolvers import validate_team_service_cascade
+        await validate_team_service_cascade(
+            db,
+            service_id=service_id,
+            team_id=None,
+            context=context,
+            company_id=eff_company_id,
+        )
+
     stmt = select(Typology)
 
-    if context.is_super_admin:
-        if service_id is not None:
-            stmt = stmt.where(Typology.service_id == service_id)
-    elif role == InternalRole.COMPANY_ADMIN:
-        stmt = stmt.where(Typology.company_id == context.company_id)
-        if service_id is not None:
-            # Verify the service belongs to their company
-            s_res = await db.execute(
-                select(Service).where(
-                    Service.service_id == service_id,
-                    Service.company_id == context.company_id
-                )
-            )
-            if not s_res.scalar():
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="El servicio especificado no pertenece a tu empresa."
-                )
-            stmt = stmt.where(Typology.service_id == service_id)
-    elif role in (InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR):
-        if service_id is not None:
-            if context.allowed_service_ids is None or service_id not in context.allowed_service_ids:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="No tienes permisos para ver las tipologías de este servicio."
-                )
-            stmt = stmt.where(Typology.service_id == service_id)
+    if eff_company_id is not None:
+        if eff_company_id == 1:
+            stmt = stmt.where(or_(Typology.company_id == 1, Typology.company_id.is_(None)))
         else:
-            if not context.allowed_service_ids:
-                return []
-            stmt = stmt.where(Typology.service_id.in_(context.allowed_service_ids))
+            stmt = stmt.where(Typology.company_id == eff_company_id)
+    elif not context.is_super_admin:
+        if context.allowed_company_ids:
+            stmt = stmt.where(or_(Typology.company_id.in_(context.allowed_company_ids), Typology.company_id.is_(None)))
+
+    if service_id is not None:
+        stmt = stmt.where(Typology.service_id == service_id)
+    elif role in (InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR):
+        if not context.allowed_service_ids:
+            return []
+        stmt = stmt.where(Typology.service_id.in_(context.allowed_service_ids))
 
     if is_active is not None:
         stmt = stmt.where(Typology.is_active == is_active)
