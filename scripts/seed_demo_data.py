@@ -1587,10 +1587,10 @@ async def seed_trainer_data(db: AsyncSession, company: Company) -> Dict[str, Any
 
     # 2. Simulations
     sims_def = [
-        (svc_at.service_id, cfg_at.config_id, "Gestión de Reclamación de Facturación Compleja", "SIM-DEMO-AT01", "Simula un cliente que ha recibido una factura con cobros no reconocidos y exige devolución inmediata."),
-        (svc_at.service_id, cfg_at.config_id, "Protocolo de Desescalada con Cliente Furioso", "SIM-DEMO-AT02", "Simula un cliente muy molesto que eleva el tono de voz; el objetivo es desescalar sin perder la compostura."),
-        (svc_vn.service_id, cfg_vn.config_id, "Prospección Comercial y Detección de Interés", "SIM-DEMO-VN01", "Simula una llamada saliente para captar a un cliente potencial y despertar interés en los nuevos planes."),
-        (svc_vn.service_id, cfg_vn.config_id, "Superación de Objeción de Precio y Cierre", "SIM-DEMO-VN02", "Simula una negociación donde el cliente presiona por descuentos adicionales antes de firmar."),
+        (svc_at.service_id, cfg_at.config_id, "Gestión de Reclamación de Facturación Compleja", "ATEN01", "Simula un cliente que ha recibido una factura con cobros no reconocidos y exige devolución inmediata."),
+        (svc_at.service_id, cfg_at.config_id, "Protocolo de Desescalada con Cliente Furioso", "ATEN02", "Simula un cliente muy molesto que eleva el tono de voz; el objetivo es desescalar sin perder la compostura."),
+        (svc_vn.service_id, cfg_vn.config_id, "Prospección Comercial y Detección de Interés", "VENT01", "Simula una llamada saliente para captar a un cliente potencial y despertar interés en los nuevos planes."),
+        (svc_vn.service_id, cfg_vn.config_id, "Superación de Objeción de Precio y Cierre", "VENT02", "Simula una negociación donde el cliente presiona por descuentos adicionales antes de firmar."),
     ]
 
     sim_objects = []

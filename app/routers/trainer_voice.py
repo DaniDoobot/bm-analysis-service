@@ -278,18 +278,10 @@ async def verify_simulation_numeric_code(
         return Response(content=twiml, media_type="application/xml")
 
     # Clean code: if digits matches a simulation code (numeric or string)
-    # We will search by code. E.g. SIM + digits, or direct digits. Let's look up directly first, or as code prefix.
-    stmt = select(TrainerSimulation).where(
-        and_(
-            or_(
-                func.upper(TrainerSimulation.code) == digits,
-                func.upper(TrainerSimulation.code) == f"SIM{digits}"
-            ),
-            TrainerSimulation.status == "published"
-        )
-    )
-    res = await db.execute(stmt)
-    sim = res.scalars().first()
+    # Use canonical TrainerService.validate_simulation_code with optional SIM prefix fallback
+    sim = await TrainerService.validate_simulation_code(db, digits)
+    if not sim and digits.isdigit():
+        sim = await TrainerService.validate_simulation_code(db, f"SIM{digits}")
 
     if not sim:
         twiml = """<?xml version="1.0" encoding="UTF-8"?>

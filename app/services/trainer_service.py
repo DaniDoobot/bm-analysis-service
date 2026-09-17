@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, List, Optional
@@ -153,18 +154,86 @@ class TrainerService:
         return list(res.scalars().all())
 
 
+    # ── Demo Company Simulation Code Helpers ─────────────────────────────────────
+
+    @staticmethod
+    def normalize_simulation_code(code: Optional[str]) -> str:
+        """Strip whitespace, hyphens, underscores and convert to uppercase."""
+        if not code:
+            return ""
+        return code.strip().upper().replace(" ", "").replace("-", "").replace("_", "")
+
+    @staticmethod
+    def is_valid_demo_simulation_code(code: str) -> bool:
+        """
+        Convention for Empresa Demo simulations:
+        - 6 to 8 characters
+        - Alphanumeric uppercase [A-Z0-9]
+        - No spaces, hyphens, or underscores
+        """
+        return bool(re.match(r"^[A-Z0-9]{6,8}$", code))
+
+    @staticmethod
+    async def is_demo_company(db: AsyncSession, company_id: Optional[int]) -> bool:
+        """Check if company_id belongs to Empresa Demo (is_demo=True or company_key='empresa-demo')."""
+        if not company_id:
+            return False
+        from app.models.companies import Company
+        stmt = select(Company).where(Company.company_id == company_id)
+        res = await db.execute(stmt)
+        comp = res.scalars().first()
+        if not comp:
+            return False
+        return bool(comp.is_demo or comp.company_key == "empresa-demo")
+
+    @staticmethod
+    async def generate_demo_simulation_code(db: AsyncSession, service_id: int) -> str:
+        """
+        Generate a compliant 6-character code (e.g. ATEN01, VENT01) for Empresa Demo
+        based on the service name mnemonic and sequential counter.
+        """
+        from app.models.services import Service
+        stmt_svc = select(Service).where(Service.service_id == service_id)
+        res_svc = await db.execute(stmt_svc)
+        svc = res_svc.scalars().first()
+        svc_name = (svc.service_name if svc else "").upper()
+
+        if "VENT" in svc_name:
+            prefix = "VENT"
+        elif "ATEN" in svc_name or "CLIENT" in svc_name:
+            prefix = "ATEN"
+        elif "RECL" in svc_name:
+            prefix = "RECL"
+        elif "SOPO" in svc_name:
+            prefix = "SOPO"
+        else:
+            clean_name = re.sub(r"[^A-Z0-9]", "", svc_name)
+            prefix = clean_name[:4] if len(clean_name) >= 4 else clean_name.ljust(4, "X")
+
+        stmt_sims = select(TrainerSimulation.code).where(
+            TrainerSimulation.code.like(f"{prefix}%")
+        )
+        res_sims = await db.execute(stmt_sims)
+        existing_codes = set(res_sims.scalars().all())
+
+        for idx in range(1, 100):
+            candidate = f"{prefix}{idx:02d}"
+            if candidate not in existing_codes:
+                return candidate
+
+        for idx in range(100, 1000):
+            candidate = f"{prefix[:5]}{idx:03d}"
+            if candidate not in existing_codes:
+                return candidate
+
+        raise RuntimeError("No se pudo generar un código único para la simulación de Empresa Demo.")
+
     # ── Simulations ───────────────────────────────────────────────────────────────
 
     @staticmethod
     async def create_simulation(
         db: AsyncSession, payload: TrainerSimulationCreate, created_by: Optional[str] = None
     ) -> TrainerSimulation:
-        # Check code uniqueness
-        stmt_check = select(TrainerSimulation).where(TrainerSimulation.code == payload.code.strip())
-        res_check = await db.execute(stmt_check)
-        if res_check.scalars().first():
-            raise ValueError(f"El código de simulación '{payload.code}' ya existe de manera global.")
-
         if payload.evaluation_config_id:
             # Validate config
             cfg = await TrainerService.get_evaluation_config(db, payload.evaluation_config_id)
@@ -179,9 +248,30 @@ class TrainerService:
         res_svc = await db.execute(stmt_svc)
         company_id = res_svc.scalar()
 
+        is_demo = await TrainerService.is_demo_company(db, company_id)
+        code_input = payload.code.strip() if payload.code else ""
+        if is_demo:
+            norm_code = TrainerService.normalize_simulation_code(code_input)
+            if not norm_code or norm_code.startswith("SIMDEMO") or norm_code.startswith("SIM"):
+                norm_code = await TrainerService.generate_demo_simulation_code(db, payload.service_id)
+            elif not TrainerService.is_valid_demo_simulation_code(norm_code):
+                raise ValueError(
+                    f"El código de simulación '{payload.code}' no es válido para la Empresa Demo. "
+                    "Debe tener entre 6 y 8 caracteres alfanuméricos sin espacios ni guiones (ej. ATEN01, VENT01)."
+                )
+            code_final = norm_code
+        else:
+            code_final = code_input
+
+        # Check code uniqueness
+        stmt_check = select(TrainerSimulation).where(TrainerSimulation.code == code_final)
+        res_check = await db.execute(stmt_check)
+        if res_check.scalars().first():
+            raise ValueError(f"El código de simulación '{code_final}' ya existe de manera global.")
+
         sim = TrainerSimulation(
             name=payload.name,
-            code=payload.code.strip(),
+            code=code_final,
             service_id=payload.service_id,
             company_id=company_id,
             evaluation_config_id=payload.evaluation_config_id,
@@ -208,12 +298,23 @@ class TrainerService:
 
         # If code changed, check uniqueness
         if payload.code is not None and payload.code.strip() != sim.code:
-            code_clean = payload.code.strip()
-            stmt_check = select(TrainerSimulation).where(TrainerSimulation.code == code_clean)
-            res_check = await db.execute(stmt_check)
-            if res_check.scalars().first():
-                raise ValueError(f"El código de simulación '{payload.code}' ya existe de manera global.")
-            sim.code = code_clean
+            is_demo = await TrainerService.is_demo_company(db, sim.company_id)
+            if is_demo:
+                code_clean = TrainerService.normalize_simulation_code(payload.code)
+                if not TrainerService.is_valid_demo_simulation_code(code_clean):
+                    raise ValueError(
+                        f"El código de simulación '{payload.code}' no es válido para la Empresa Demo. "
+                        "Debe tener entre 6 y 8 caracteres alfanuméricos sin espacios ni guiones (ej. ATEN01, VENT01)."
+                    )
+            else:
+                code_clean = payload.code.strip()
+
+            if code_clean != sim.code:
+                stmt_check = select(TrainerSimulation).where(TrainerSimulation.code == code_clean)
+                res_check = await db.execute(stmt_check)
+                if res_check.scalars().first():
+                    raise ValueError(f"El código de simulación '{payload.code}' ya existe de manera global.")
+                sim.code = code_clean
 
         if payload.evaluation_config_id is not None:
             if payload.evaluation_config_id:
@@ -355,15 +456,37 @@ class TrainerService:
             raise ValueError("La simulación original no existe.")
 
         # Find unique code for duplicated simulation
-        suffix = 1
-        new_code = f"{sim.code}_COPY"
-        while True:
-            stmt_dup = select(TrainerSimulation).where(TrainerSimulation.code == new_code)
-            res_dup = await db.execute(stmt_dup)
-            if not res_dup.scalars().first():
-                break
-            suffix += 1
-            new_code = f"{sim.code}_COPY{suffix}"
+        is_demo = await TrainerService.is_demo_company(db, sim.company_id)
+        if is_demo or TrainerService.is_valid_demo_simulation_code(sim.code):
+            m = re.match(r"^([A-Z0-9]{2,6}?)(\d{2})$", sim.code)
+            if m:
+                prefix = m.group(1)
+                curr_num = int(m.group(2))
+            else:
+                prefix = sim.code[:4] if len(sim.code) >= 4 else sim.code.ljust(4, "X")
+                curr_num = 1
+
+            next_num = curr_num + 1
+            while True:
+                candidate = f"{prefix}{next_num:02d}"
+                if len(candidate) > 8:
+                    candidate = f"{prefix[:5]}{next_num:03d}"[:8]
+                stmt_dup = select(TrainerSimulation).where(TrainerSimulation.code == candidate)
+                res_dup = await db.execute(stmt_dup)
+                if not res_dup.scalars().first():
+                    new_code = candidate
+                    break
+                next_num += 1
+        else:
+            suffix = 1
+            new_code = f"{sim.code}_COPY"
+            while True:
+                stmt_dup = select(TrainerSimulation).where(TrainerSimulation.code == new_code)
+                res_dup = await db.execute(stmt_dup)
+                if not res_dup.scalars().first():
+                    break
+                suffix += 1
+                new_code = f"{sim.code}_COPY{suffix}"
 
         new_sim = TrainerSimulation(
             name=f"{sim.name} (Copia)",
@@ -566,10 +689,25 @@ class TrainerService:
 
     @staticmethod
     async def validate_simulation_code(db: AsyncSession, simulation_code: str) -> Optional[TrainerSimulation]:
-        cleaned = simulation_code.replace(" ", "").upper()
+        if not simulation_code:
+            return None
+        raw_clean = simulation_code.replace(" ", "").strip().upper()
+        stripped_clean = raw_clean.replace("-", "").replace("_", "")
+
+        candidates = [raw_clean, stripped_clean]
+        # Support spoken single digit like 'ATEN1' -> 'ATEN01'
+        m = re.match(r"^([A-Z]{3,6})(\d)$", stripped_clean)
+        if m:
+            candidates.append(f"{m.group(1)}0{m.group(2)}")
+
+        unique_candidates = list(dict.fromkeys(c for c in candidates if c))
+
         stmt = select(TrainerSimulation).where(
             and_(
-                func.upper(TrainerSimulation.code) == cleaned,
+                or_(
+                    func.upper(TrainerSimulation.code).in_(unique_candidates),
+                    func.replace(func.replace(func.upper(TrainerSimulation.code), "-", ""), "_", "").in_(unique_candidates),
+                ),
                 TrainerSimulation.status == "published",
             )
         )
