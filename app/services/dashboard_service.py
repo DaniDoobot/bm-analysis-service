@@ -432,10 +432,52 @@ def _get_objection_metrics(rows: list[Any]) -> tuple[int, int]:
     return calls, items
 
 
+def _get_call_type_val(r: Any) -> str | None:
+    t = getattr(r, "tipo_llamada", None)
+    if t is not None:
+        return t
+    res = getattr(r, "result_json", None)
+    if res and isinstance(res, dict):
+        return res.get("tipo_llamada")
+    return None
+
+
+def _get_sentiment_val(r: Any) -> float | None:
+    for attr in ("sentimiento", "sentiment", "evaluacion_sentimiento"):
+        val = getattr(r, attr, None)
+        if val is not None:
+            return to_float(val)
+    res = getattr(r, "result_json", None)
+    if res and isinstance(res, dict):
+        return _get_sentiment(res)
+    return None
+
+
 def _get_objection_metrics_mass(rows: list[Any]) -> tuple[int, int]:
     calls = 0
     items = 0
     for r in rows:
+        objs = getattr(r, "objeciones", None)
+        obj1 = getattr(r, "objecion_1", None)
+        obj2 = getattr(r, "objecion_2", None)
+        obj3 = getattr(r, "objecion_3", None)
+        has_legacy = any(
+            x and isinstance(x, str) and x.strip().lower() not in ["", "null", "none"]
+            for x in [obj1, obj2, obj3]
+        )
+        has_objs = bool(objs) or has_legacy
+        if has_objs:
+            calls += 1
+            if isinstance(objs, list):
+                items += len(objs)
+            elif isinstance(objs, str) and objs.strip():
+                items += 1
+            elif has_legacy:
+                items += sum(1 for x in [obj1, obj2, obj3] if x and str(x).strip().lower() not in ["", "null", "none"])
+            else:
+                items += 1
+            continue
+
         res = getattr(r, "result_json", None) or getattr(r, "result", None)
         if _has_objections(res):
             calls += 1
@@ -561,8 +603,43 @@ async def get_dashboard_summary(
 
     bucket_interval = resolve_granularity(span, granularity)
 
-    # Query from MassEvaluationResult exclusively (defer large columns to minimize memory footprint)
-    if parsed_item_filters:
+    # Query from MassEvaluationResult:
+    # Detect dialect: on PostgreSQL without item filters (99%+ of dashboard requests),
+    # project only necessary scalar columns and extracted JSON keys to eliminate transferring tens of MBs of full result_json.
+    bind = db.get_bind() if hasattr(db, "get_bind") else getattr(db, "bind", None)
+    dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
+    is_postgresql = (dialect_name == "postgresql")
+    fast_columnar = is_postgresql and not parsed_item_filters
+
+    if fast_columnar:
+        stmt = select(
+            MassEvaluationResult.mass_analysis_id,
+            MassEvaluationResult.call_id,
+            MassEvaluationResult.company_id,
+            MassEvaluationResult.service_id,
+            MassEvaluationResult.service_key,
+            MassEvaluationResult.typology_id,
+            MassEvaluationResult.typology_key,
+            MassEvaluationResult.typology_name,
+            MassEvaluationResult.hubspot_owner_id,
+            MassEvaluationResult.agent_name,
+            MassEvaluationResult.direction,
+            MassEvaluationResult.call_timestamp,
+            MassEvaluationResult.analysis_timestamp,
+            MassEvaluationResult.call_duration_seconds,
+            MassEvaluationResult.evaluacion_global,
+            MassEvaluationResult.status,
+            MassEvaluationResult.execution_source,
+            MassEvaluationResult.result_json["tipo_llamada"].astext.label("tipo_llamada"),
+            MassEvaluationResult.result_json["sentimiento"].astext.label("sentimiento"),
+            MassEvaluationResult.result_json["sentiment"].astext.label("sentiment"),
+            MassEvaluationResult.result_json["evaluacion_sentimiento"].astext.label("evaluacion_sentimiento"),
+            MassEvaluationResult.result_json["objeciones"].label("objeciones"),
+            MassEvaluationResult.result_json["objecion_1"].astext.label("objecion_1"),
+            MassEvaluationResult.result_json["objecion_2"].astext.label("objecion_2"),
+            MassEvaluationResult.result_json["objecion_3"].astext.label("objecion_3"),
+        )
+    elif parsed_item_filters:
         stmt = select(MassEvaluationResult).options(defer(MassEvaluationResult.prompt_snapshot))
     else:
         stmt = select(MassEvaluationResult).options(
@@ -691,14 +768,20 @@ async def get_dashboard_summary(
 
     t_db_start = time.perf_counter()
     result = await db.execute(stmt)
-    rows = list(result.scalars().all())
+    if fast_columnar:
+        rows = list(result.all())
+    else:
+        rows = list(result.scalars().all())
     t_db_end = time.perf_counter()
     db_query_ms = (t_db_end - t_db_start) * 1000.0
 
-    t_filter_start = time.perf_counter()
-    rows = apply_item_score_filters_sql_or_python(rows, parsed_item_filters)
-    t_filter_end = time.perf_counter()
-    item_filter_ms = (t_filter_end - t_filter_start) * 1000.0
+    if parsed_item_filters:
+        t_filter_start = time.perf_counter()
+        rows = apply_item_score_filters_sql_or_python(rows, parsed_item_filters)
+        t_filter_end = time.perf_counter()
+        item_filter_ms = (t_filter_end - t_filter_start) * 1000.0
+    else:
+        item_filter_ms = 0.0
 
     logger.info(
         "[dashboard_summary] query returned %d total rows after item score filtering. "
@@ -724,14 +807,14 @@ async def get_dashboard_summary(
     for r in actual_rows:
         if r.evaluacion_global is not None:
             evals.append(to_float(r.evaluacion_global))
-        else:
+        elif hasattr(r, "result_json") and r.result_json:
             v = extract_score_from_mass(r.result_json, getattr(r, "items_json", None), "evaluacion_global")
             if v is not None:
                 evals.append(to_float(v))
     avg_eval = to_float(round(sum(evals) / len(evals), 1)) if evals else None
     
-    citas = sum(1 for r in actual_rows if r.result_json and isinstance(r.result_json, dict) and r.result_json.get("tipo_llamada") == "cita")
-    total_tipo = sum(1 for r in actual_rows if r.result_json and isinstance(r.result_json, dict) and r.result_json.get("tipo_llamada") is not None)
+    citas = sum(1 for r in actual_rows if _get_call_type_val(r) == "cita")
+    total_tipo = sum(1 for r in actual_rows if _get_call_type_val(r) is not None)
     cita_rate = to_float(round((citas / total_tipo) * 100)) if total_tipo > 0 else None
 
     durs = [_get_duration_sec_mass(r) for r in actual_rows]
@@ -748,14 +831,14 @@ async def get_dashboard_summary(
     for r in anterior_rows:
         if r.evaluacion_global is not None:
             evals_ant.append(to_float(r.evaluacion_global))
-        else:
+        elif hasattr(r, "result_json") and r.result_json:
             v = extract_score_from_mass(r.result_json, getattr(r, "items_json", None), "evaluacion_global")
             if v is not None:
                 evals_ant.append(to_float(v))
     avg_eval_ant = to_float(sum(evals_ant) / len(evals_ant)) if evals_ant else None
     
-    citas_ant = sum(1 for r in anterior_rows if r.result_json and isinstance(r.result_json, dict) and r.result_json.get("tipo_llamada") == "cita")
-    total_tipo_ant = sum(1 for r in anterior_rows if r.result_json and isinstance(r.result_json, dict) and r.result_json.get("tipo_llamada") is not None)
+    citas_ant = sum(1 for r in anterior_rows if _get_call_type_val(r) == "cita")
+    total_tipo_ant = sum(1 for r in anterior_rows if _get_call_type_val(r) is not None)
     cita_rate_ant = to_float((citas_ant / total_tipo_ant) * 100) if total_tipo_ant > 0 else None
 
     durs_ant = [_get_duration_sec_mass(r) for r in anterior_rows]
@@ -793,7 +876,7 @@ async def get_dashboard_summary(
         if b not in grouped_evolution:
             grouped_evolution[b] = {"total": 0, "citas": 0, "sin_cita": 0}
         grouped_evolution[b]["total"] += 1
-        tipo = r.result_json.get("tipo_llamada") if r.result_json else None
+        tipo = _get_call_type_val(r)
         if tipo == "cita":
             grouped_evolution[b]["citas"] += 1
         else:
@@ -905,7 +988,7 @@ async def get_dashboard_summary(
         if not fe:
             continue
         b = _round_dt(fe, bucket_interval)
-        sent = _get_sentiment(r.result_json)
+        sent = _get_sentiment_val(r)
         if sent is not None:
             if b not in sentiment_grouped:
                 sentiment_grouped[b] = []
@@ -941,12 +1024,12 @@ async def get_dashboard_summary(
         agent_data[bucket_key]["total_analyses"] += 1
         if r.evaluacion_global is not None:
             agent_data[bucket_key]["evals"].append(to_float(r.evaluacion_global))
-        else:
+        elif hasattr(r, "result_json") and r.result_json:
             v = extract_score_from_mass(r.result_json, getattr(r, "items_json", None), "evaluacion_global")
             if v is not None:
                 agent_data[bucket_key]["evals"].append(to_float(v))
 
-        tipo = r.result_json.get("tipo_llamada") if r.result_json else None
+        tipo = _get_call_type_val(r)
         if tipo is not None:
             agent_data[bucket_key]["total_tipo"] += 1
             if tipo == "cita":
@@ -1003,10 +1086,12 @@ async def get_dashboard_summary(
         resolved_agent = resolve_agent_display(r.agent_name, r.hubspot_owner_id)
         if r.evaluacion_global is not None:
             eg = to_float(r.evaluacion_global)
-        else:
+        elif hasattr(r, "result_json") and r.result_json:
             eg_raw = extract_score_from_mass(r.result_json, getattr(r, "items_json", None), "evaluacion_global")
             eg = to_float(eg_raw) if eg_raw is not None else None
-        tipo = r.result_json.get("tipo_llamada") if r.result_json else None
+        else:
+            eg = None
+        tipo = _get_call_type_val(r)
         agent_inits = resolve_agent_initials(
             hubspot_owner_id=r.hubspot_owner_id,
             agent_name=resolved_agent or r.agent_name,
