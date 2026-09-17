@@ -976,6 +976,8 @@ async def list_results(
     service: str | None = Query(None, description="Filter by service ID, key or slug"),
     team_id: int | None = Query(None, description="Filter by team ID"),
     company_id: int | None = Query(None, description="Filter by company ID"),
+    company_key: str | None = Query(None, description="Filter by company key"),
+    company: str | None = Query(None, description="Filter by company key, name, or slug"),
     typology_key: str | None = Query(None, description="Filter by typology key"),
     typology: str | None = Query(None, description="Alias for typology_key"),
     tipo_llamada: str | None = Query(None, description="Alias for typology_key"),
@@ -1006,13 +1008,16 @@ async def list_results(
     db: AsyncSession = Depends(get_db)
 ):
     """List detailed mass analysis call results with advanced filtering and full pagination metadata."""
-    if company_id is not None and not context.is_super_admin:
-        if company_id not in context.allowed_company_ids:
+    from app.utils.service_resolvers import resolve_company_id
+    eff_company_id = await resolve_company_id(db, company_id=company_id, company_key=company_key, company_param=company)
+    if eff_company_id is not None and not context.is_super_admin:
+        if eff_company_id not in context.allowed_company_ids:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Acceso denegado a otra empresa."
             )
-    eff_company_id = company_id if company_id is not None else (None if context.is_super_admin else context.company_id)
+    if eff_company_id is None and not context.is_super_admin:
+        eff_company_id = context.company_id
 
     effective_item_filters = item_filters or criterion_filters or score_filters or item_score_filters
     raw_sort_by = sort_by or order_by
@@ -1083,20 +1088,41 @@ async def list_results(
                 detail="global_score_min cannot be greater than global_score_max",
             )
 
-    if team_id is not None or service_id is not None:
-        from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
-        await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context)
-        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=eff_company_id) if team_id is not None else None
-        if effective_owner_id and team_owner_ids is not None:
-            if effective_owner_id not in team_owner_ids:
-                effective_owner_id = "-1"
-    else:
-        team_owner_ids = None
-
     from app.utils.visual_formatters import build_items_visual
     typo_ids = None
     if typology_ids and typology_ids.strip():
         typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
+
+    from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
+    if team_id is not None or service_id is not None:
+        await validate_team_service_cascade(
+            db,
+            service_id=service_id,
+            team_id=team_id,
+            context=context,
+            company_id=eff_company_id,
+            hubspot_owner_id=effective_owner_id,
+            typology_id=typo_ids[0] if typo_ids else None,
+            typology_key=norm_typology_key,
+        )
+        team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=eff_company_id) if team_id is not None else None
+        if effective_owner_id and team_owner_ids is not None:
+            if effective_owner_id not in team_owner_ids:
+                effective_owner_id = "-1"
+    elif eff_company_id is not None and (effective_owner_id or norm_typology_key or typo_ids):
+        await validate_team_service_cascade(
+            db,
+            service_id=None,
+            team_id=None,
+            context=context,
+            company_id=eff_company_id,
+            hubspot_owner_id=effective_owner_id,
+            typology_id=typo_ids[0] if typo_ids else None,
+            typology_key=norm_typology_key,
+        )
+        team_owner_ids = None
+    else:
+        team_owner_ids = None
 
     target_company_ids = [eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
 

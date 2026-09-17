@@ -152,14 +152,32 @@ def _get_duration_sec(payload: Any) -> float | None:
         return None
 
 
+def _get_loaded_attr(obj: Any, attr: str, default: Any = None) -> Any:
+    """
+    Safely retrieves an attribute from an ORM instance, Row, or dict without triggering
+    implicit SQLAlchemy lazy loading or MissingGreenlet on deferred columns.
+    """
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(attr, default)
+    if hasattr(obj, "__dict__"):
+        # ORM model instance: read only already loaded attributes from state dict
+        return obj.__dict__.get(attr, default)
+    # Row, namedtuple, or non-ORM object: direct getattr is safe (no lazy descriptors)
+    return getattr(obj, attr, default)
+
+
 def _get_duration_sec_mass(r: Any) -> float | None:
-    if r.call_duration_seconds is not None:
-        return to_float(r.call_duration_seconds)
-    if r.hubspot_metadata and isinstance(r.hubspot_metadata, dict):
-        dur = r.hubspot_metadata.get("call_duration")
-        if dur is not None:
+    dur = _get_loaded_attr(r, "call_duration_seconds")
+    if dur is not None:
+        return to_float(dur)
+    hs_meta = _get_loaded_attr(r, "hubspot_metadata")
+    if hs_meta and isinstance(hs_meta, dict):
+        call_dur = hs_meta.get("call_duration")
+        if call_dur is not None:
             try:
-                return to_float(dur) / 1000.0
+                return to_float(call_dur) / 1000.0
             except:
                 pass
     return None
@@ -361,14 +379,17 @@ def extract_score_from_mass(result_json: Any, items_json: Any, key: str, is_fall
 
 
 def extract_score_from_mass_row(row: Any, key: str, is_fallback_call: bool = False) -> "float | None":
-    """Extract numeric score from MassEvaluationResult row object."""
-    if getattr(row, "is_evaluable", None) is False:
+    """Extract numeric score from MassEvaluationResult row object without triggering lazy loading."""
+    if _get_loaded_attr(row, "is_evaluable") is False:
         return None
-    val = extract_score_from_mass(row.result_json, row.items_json, key, is_fallback_call=is_fallback_call)
-    if val is None and key == "evaluacion_global" and hasattr(row, "evaluacion_global"):
-        eg = getattr(row, "evaluacion_global", None)
-        if eg is not None:
-            return to_float(eg)
+    eg = _get_loaded_attr(row, "evaluacion_global")
+    if key == "evaluacion_global" and eg is not None:
+        return to_float(eg)
+    result_json = _get_loaded_attr(row, "result_json")
+    items_json = _get_loaded_attr(row, "items_json")
+    val = extract_score_from_mass(result_json, items_json, key, is_fallback_call=is_fallback_call)
+    if val is None and key == "evaluacion_global" and eg is not None:
+        return to_float(eg)
     return val
 
 
@@ -436,7 +457,7 @@ def _get_call_type_val(r: Any) -> str | None:
     t = getattr(r, "tipo_llamada", None)
     if t is not None:
         return t
-    res = getattr(r, "result_json", None)
+    res = _get_loaded_attr(r, "result_json")
     if res and isinstance(res, dict):
         return res.get("tipo_llamada")
     return None
@@ -447,7 +468,7 @@ def _get_sentiment_val(r: Any) -> float | None:
         val = getattr(r, attr, None)
         if val is not None:
             return to_float(val)
-    res = getattr(r, "result_json", None)
+    res = _get_loaded_attr(r, "result_json")
     if res and isinstance(res, dict):
         return _get_sentiment(res)
     return None
@@ -478,7 +499,7 @@ def _get_objection_metrics_mass(rows: list[Any]) -> tuple[int, int]:
                 items += 1
             continue
 
-        res = getattr(r, "result_json", None) or getattr(r, "result", None)
+        res = _get_loaded_attr(r, "result_json") or _get_loaded_attr(r, "result")
         if _has_objections(res):
             calls += 1
             texts = extract_objection_items(res)
@@ -805,12 +826,16 @@ async def get_dashboard_summary(
     total_analyses = to_float(len(actual_rows))
     evals = []
     for r in actual_rows:
-        if r.evaluacion_global is not None:
-            evals.append(to_float(r.evaluacion_global))
-        elif hasattr(r, "result_json") and r.result_json:
-            v = extract_score_from_mass(r.result_json, getattr(r, "items_json", None), "evaluacion_global")
-            if v is not None:
-                evals.append(to_float(v))
+        eg = _get_loaded_attr(r, "evaluacion_global")
+        if eg is not None:
+            evals.append(to_float(eg))
+        else:
+            rj = _get_loaded_attr(r, "result_json")
+            if rj:
+                ij = _get_loaded_attr(r, "items_json")
+                v = extract_score_from_mass(rj, ij, "evaluacion_global")
+                if v is not None:
+                    evals.append(to_float(v))
     avg_eval = to_float(round(sum(evals) / len(evals), 1)) if evals else None
     
     citas = sum(1 for r in actual_rows if _get_call_type_val(r) == "cita")
@@ -829,12 +854,16 @@ async def get_dashboard_summary(
     total_analyses_ant = to_float(len(anterior_rows))
     evals_ant = []
     for r in anterior_rows:
-        if r.evaluacion_global is not None:
-            evals_ant.append(to_float(r.evaluacion_global))
-        elif hasattr(r, "result_json") and r.result_json:
-            v = extract_score_from_mass(r.result_json, getattr(r, "items_json", None), "evaluacion_global")
-            if v is not None:
-                evals_ant.append(to_float(v))
+        eg = _get_loaded_attr(r, "evaluacion_global")
+        if eg is not None:
+            evals_ant.append(to_float(eg))
+        else:
+            rj = _get_loaded_attr(r, "result_json")
+            if rj:
+                ij = _get_loaded_attr(r, "items_json")
+                v = extract_score_from_mass(rj, ij, "evaluacion_global")
+                if v is not None:
+                    evals_ant.append(to_float(v))
     avg_eval_ant = to_float(sum(evals_ant) / len(evals_ant)) if evals_ant else None
     
     citas_ant = sum(1 for r in anterior_rows if _get_call_type_val(r) == "cita")
@@ -900,7 +929,15 @@ async def get_dashboard_summary(
         Service.is_active == True
     )
     if effective_company_id is not None:
-        typo_stmt = typo_stmt.where(Service.company_id == effective_company_id)
+        if effective_company_id == 1:
+            typo_stmt = typo_stmt.where(
+                or_(
+                    Service.company_id == 1,
+                    Service.company_id.is_(None)
+                )
+            )
+        else:
+            typo_stmt = typo_stmt.where(Service.company_id == effective_company_id)
     elif context:
         typo_stmt = typo_stmt.where(Service.company_id.in_(context.allowed_company_ids))
     if context and not context.is_super_admin:
@@ -1022,12 +1059,16 @@ async def get_dashboard_summary(
                 "total_analyses": 0,
             }
         agent_data[bucket_key]["total_analyses"] += 1
-        if r.evaluacion_global is not None:
-            agent_data[bucket_key]["evals"].append(to_float(r.evaluacion_global))
-        elif hasattr(r, "result_json") and r.result_json:
-            v = extract_score_from_mass(r.result_json, getattr(r, "items_json", None), "evaluacion_global")
-            if v is not None:
-                agent_data[bucket_key]["evals"].append(to_float(v))
+        eg = _get_loaded_attr(r, "evaluacion_global")
+        if eg is not None:
+            agent_data[bucket_key]["evals"].append(to_float(eg))
+        else:
+            rj = _get_loaded_attr(r, "result_json")
+            if rj:
+                ij = _get_loaded_attr(r, "items_json")
+                v = extract_score_from_mass(rj, ij, "evaluacion_global")
+                if v is not None:
+                    agent_data[bucket_key]["evals"].append(to_float(v))
 
         tipo = _get_call_type_val(r)
         if tipo is not None:
@@ -1084,13 +1125,17 @@ async def get_dashboard_summary(
     latest_analyses = []
     for r in sorted_actual[:8]:
         resolved_agent = resolve_agent_display(r.agent_name, r.hubspot_owner_id)
-        if r.evaluacion_global is not None:
-            eg = to_float(r.evaluacion_global)
-        elif hasattr(r, "result_json") and r.result_json:
-            eg_raw = extract_score_from_mass(r.result_json, getattr(r, "items_json", None), "evaluacion_global")
-            eg = to_float(eg_raw) if eg_raw is not None else None
+        eg = _get_loaded_attr(r, "evaluacion_global")
+        if eg is not None:
+            eg = to_float(eg)
         else:
-            eg = None
+            rj = _get_loaded_attr(r, "result_json")
+            if rj:
+                ij = _get_loaded_attr(r, "items_json")
+                eg_raw = extract_score_from_mass(rj, ij, "evaluacion_global")
+                eg = to_float(eg_raw) if eg_raw is not None else None
+            else:
+                eg = None
         tipo = _get_call_type_val(r)
         agent_inits = resolve_agent_initials(
             hubspot_owner_id=r.hubspot_owner_id,
@@ -1770,7 +1815,7 @@ async def get_agent_evolution(
             "avg_procedimiento": to_float(avg_pr) if avg_pr is not None else None,
             "avg_procedimiento_count": count_pr,
             "cita_rate": to_float(round((b_citas / b_tipo) * 100)) if b_tipo > 0 else 0.0,
-            "total_objeciones": to_float(sum(1 for r in br if _has_objections(r.result_json))),
+            "total_objeciones": to_float(sum(1 for r in br if _has_objections(_get_loaded_attr(r, "result_json")))),
         })
 
     # ── Criteria evolution ────────────────────────────────────────────────────
@@ -1805,25 +1850,27 @@ async def get_agent_evolution(
             criteria_scores.append({
                 "criterion_key": key,
                 "criterion_name": name,
-                "avg_score": to_float(av),
-                "analysis_count": av_count
+                "score": to_float(av),
+                "count": av_count,
+                "type": "strength" if av >= 7.0 else ("weakness" if av < 5.0 else "neutral"),
             })
 
-    strengths  = sorted(criteria_scores, key=lambda x: x["avg_score"], reverse=True)[:5]
-    weaknesses = sorted(criteria_scores, key=lambda x: x["avg_score"])[:5]
+    strengths  = sorted(criteria_scores, key=lambda x: x["score"], reverse=True)[:5]
+    weaknesses = sorted(criteria_scores, key=lambda x: x["score"])[:5]
 
     # ── Latest 10 analyses ────────────────────────────────────────────────────
     sorted_desc = sorted(rows, key=lambda r: _effective_ts(r) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
     latest_analyses = []
     for r in sorted_desc[:10]:
-        rj = r.result_json or {}
-        if r.evaluacion_global is not None:
+        rj = _get_loaded_attr(r, "result_json") or {}
+        eg_val = _get_loaded_attr(r, "evaluacion_global")
+        if eg_val is not None:
             try:
-                eg = to_float(r.evaluacion_global)
+                eg = to_float(eg_val)
             except (ValueError, TypeError):
                 eg = None
         else:
-            raw_eg = extract_score_from_mass(r.result_json, r.items_json, "evaluacion_global")
+            raw_eg = extract_score_from_mass(rj, _get_loaded_attr(r, "items_json"), "evaluacion_global")
             try:
                 eg = to_float(raw_eg) if raw_eg is not None else None
             except (ValueError, TypeError):
@@ -3105,7 +3152,7 @@ async def get_agents_comparison(
         for c_key, c_name in CRITERIA_NAMES.items():
             scores = []
             for r in agent_actual_rows:
-                s = extract_score_from_mass(r.result_json, r.items_json, c_key)
+                s = extract_score_from_mass(_get_loaded_attr(r, "result_json"), _get_loaded_attr(r, "items_json"), c_key)
                 if s is not None:
                     scores.append(to_float(s))
             if scores:
