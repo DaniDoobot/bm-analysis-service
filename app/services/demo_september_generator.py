@@ -511,12 +511,12 @@ class DemoSeptemberGenerator:
         struct_reg = await ensure_evaluation_structures(db, company)
         svc_at = struct_reg["services"]["atencion"]
         svc_vn = struct_reg["services"]["ventas"]
-        by_typo = struct_reg["by_typo"]
+        by_typo = struct_reg.get("by_typology") or struct_reg["by_typo"]
 
-        # Typology lookups
-        all_typos = {}
-        for tkey, st in by_typo.items():
-            all_typos[tkey] = st["typology"]
+        # Typology lookups: support both direct dict and nested structure mapping
+        all_typos = struct_reg.get("typologies") or {
+            tkey: st["typology"] for tkey, st in by_typo.items()
+        }
 
         front_typos = [all_typos["consulta_general"], all_typos["soporte_tecnico"], all_typos["reclamacion_incidencia"]]
         front_weights = [55, 35, 10]
@@ -530,37 +530,67 @@ class DemoSeptemberGenerator:
         retencion_typos = [all_typos["retencion_baja"], all_typos["renovacion"], all_typos["upselling_cross"], all_typos["captacion_nuevo"]]
         retencion_weights = [50, 35, 10, 5]
 
-        # Jobs
-        job_at_res = await db.execute(
-            select(MassEvaluationJob).where(
-                MassEvaluationJob.company_id == self.company_id,
-                MassEvaluationJob.service_id == svc_at.service_id,
+        # Ensure Jobs exist for both services
+        async def _ensure_job(svc: Service, prompt_obj: Any, name: str) -> MassEvaluationJob:
+            j_res = await db.execute(
+                select(MassEvaluationJob).where(
+                    MassEvaluationJob.company_id == self.company_id,
+                    MassEvaluationJob.service_id == svc.service_id,
+                )
             )
-        )
-        job_at = job_at_res.scalars().first()
-        job_vn_res = await db.execute(
-            select(MassEvaluationJob).where(
-                MassEvaluationJob.company_id == self.company_id,
-                MassEvaluationJob.service_id == svc_vn.service_id,
-            )
-        )
-        job_vn = job_vn_res.scalars().first()
+            job = j_res.scalars().first()
+            if not job:
+                admin_user = struct_reg.get("admin_user")
+                c_name = admin_user.name if admin_user else "Admin Empresa Demo"
+                c_email = admin_user.email if admin_user else "admin@demo.doobot.ai"
+                job = MassEvaluationJob(
+                    company_id=self.company_id,
+                    service_id=svc.service_id,
+                    prompt_id=prompt_obj.prompt_id,
+                    job_name=name,
+                    job_mode="standard",
+                    selection_mode="filter",
+                    is_active=True,
+                    created_by=c_name,
+                    created_by_email=c_email,
+                )
+                db.add(job)
+                await db.flush()
+            return job
 
-        # Runs for September: find or create monthly runs
-        run_at_res = await db.execute(
-            select(MassEvaluationRun).where(
-                MassEvaluationRun.company_id == self.company_id,
-                MassEvaluationRun.service_id == svc_at.service_id,
-            ).order_by(MassEvaluationRun.run_id.desc())
-        )
-        run_at = run_at_res.scalars().first()
-        run_vn_res = await db.execute(
-            select(MassEvaluationRun).where(
-                MassEvaluationRun.company_id == self.company_id,
-                MassEvaluationRun.service_id == svc_vn.service_id,
-            ).order_by(MassEvaluationRun.run_id.desc())
-        )
-        run_vn = run_vn_res.scalars().first()
+        prompt_at = struct_reg["structures"]["atencion_general"]["prompt"]
+        prompt_vn = struct_reg["structures"]["venta_consultiva"]["prompt"]
+        job_at = await _ensure_job(svc_at, prompt_at, "Auditoría Histórica - Atención al Cliente")
+        job_vn = await _ensure_job(svc_vn, prompt_vn, "Auditoría Histórica - Ventas y Retención")
+
+        # Ensure active Runs for September exist
+        async def _ensure_run(job: MassEvaluationJob, svc: Service) -> MassEvaluationRun:
+            r_res = await db.execute(
+                select(MassEvaluationRun).where(
+                    MassEvaluationRun.company_id == self.company_id,
+                    MassEvaluationRun.service_id == svc.service_id,
+                ).order_by(MassEvaluationRun.run_id.desc())
+            )
+            run_obj = r_res.scalars().first()
+            if not run_obj:
+                run_obj = MassEvaluationRun(
+                    job_id=job.job_id,
+                    company_id=self.company_id,
+                    service_id=svc.service_id,
+                    trigger_type="manual",
+                    status="completed",
+                    started_at=datetime(2026, 9, 24, 0, 0, 0, tzinfo=timezone.utc),
+                    finished_at=datetime(2026, 9, 24, 1, 0, 0, tzinfo=timezone.utc),
+                    calls_found=0,
+                    calls_selected=0,
+                    calls_analyzed=0,
+                )
+                db.add(run_obj)
+                await db.flush()
+            return run_obj
+
+        run_at = await _ensure_run(job_at, svc_at)
+        run_vn = await _ensure_run(job_vn, svc_vn)
 
         # Agents lookup for user_id / hubspot_owner_id / name
         users_res = await db.execute(

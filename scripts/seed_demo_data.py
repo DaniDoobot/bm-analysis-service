@@ -661,14 +661,14 @@ async def ensure_evaluation_structures(
     }
 
     by_typology = {
-        "consulta_general": struct_at_gen,
-        "soporte_tecnico": struct_at_gen,
-        "reclamacion_incidencia": struct_at_rec,
-        "facturacion_cobros": struct_at_rec,
-        "captacion_nuevo": struct_vn_con,
-        "upselling_cross": struct_vn_con,
-        "renovacion": struct_vn_ret,
-        "retencion_baja": struct_vn_ret,
+        "consulta_general": {**struct_at_gen, "typology": typo_map_at["consulta_general"]},
+        "soporte_tecnico": {**struct_at_gen, "typology": typo_map_at["soporte_tecnico"]},
+        "reclamacion_incidencia": {**struct_at_rec, "typology": typo_map_at["reclamacion_incidencia"]},
+        "facturacion_cobros": {**struct_at_rec, "typology": typo_map_at["facturacion_cobros"]},
+        "captacion_nuevo": {**struct_vn_con, "typology": typo_map_vn["captacion_nuevo"]},
+        "upselling_cross": {**struct_vn_con, "typology": typo_map_vn["upselling_cross"]},
+        "renovacion": {**struct_vn_ret, "typology": typo_map_vn["renovacion"]},
+        "retencion_baja": {**struct_vn_ret, "typology": typo_map_vn["retencion_baja"]},
     }
 
     return {
@@ -679,6 +679,7 @@ async def ensure_evaluation_structures(
             "retencion_renovacion": struct_vn_ret,
         },
         "by_typology": by_typology,
+        "by_typo": by_typology,
         "services": {
             "atencion": svc_at,
             "ventas": svc_vn,

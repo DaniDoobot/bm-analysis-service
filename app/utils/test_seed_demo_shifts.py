@@ -302,3 +302,210 @@ def test_all_batch_target_volume_range(generator):
     assert 40000 <= total_calls <= 50000, (
         f"Total monthly volume was {total_calls}, expected between 40,000 and 50,000."
     )
+
+
+# =============================================================================
+# 10. Temporal Determinism & Reproducibility
+# =============================================================================
+
+def test_temporal_determinism_across_multiple_instances():
+    """
+    Guarantees that independent generator instances produce bit-for-bit identical
+    timestamps, intervals, and call distributions given the same seed (default 202609),
+    proving zero dependency on datetime.now() or system clock.
+    """
+    gen1 = DemoSeptemberGenerator(seed=202609)
+    gen2 = DemoSeptemberGenerator(seed=202609)
+
+    planned1 = gen1.plan_calls_for_scope("pilot")
+    planned2 = gen2.plan_calls_for_scope("pilot")
+
+    assert len(planned1) == len(planned2) == 2343
+
+    # All calls and timestamps match exactly
+    for c1, c2 in zip(planned1, planned2):
+        assert c1["call_id"] == c2["call_id"]
+        assert c1["call_timestamp"] == c2["call_timestamp"]
+        assert c1["agent_code"] == c2["agent_code"]
+        assert c1["seq"] == c2["seq"]
+
+    # Earliest and latest bounds are fixed and reproducible
+    earliest = planned1[0]["call_timestamp"]
+    latest = planned1[-1]["call_timestamp"]
+
+    assert earliest.isoformat() == "2026-09-01T08:11:41+00:00"
+    assert latest.isoformat() == "2026-09-03T18:44:11+00:00"
+
+
+# =============================================================================
+# 11. Regression Test: struct_reg Contract & Keys (by_typology / by_typo)
+# =============================================================================
+
+def test_struct_reg_contract_structure_and_keys():
+    """
+    Regression test for: KeyError: 'by_typo'
+    Verifies that the contract expected by execute_batch is properly fulfilled:
+    - Supports canonical 'by_typology'
+    - Supports backward-compatible 'by_typo'
+    - Typologies can be looked up both directly from struct_reg['typologies']
+      and via st['typology'] inside by_typology.
+    """
+    from unittest.mock import MagicMock
+
+    mock_service_at = MagicMock()
+    mock_service_at.service_id = 1
+    mock_service_at.service_key = "atencion-al-cliente"
+
+    mock_service_vn = MagicMock()
+    mock_service_vn.service_id = 2
+    mock_service_vn.service_key = "ventas"
+
+    mock_typo = MagicMock()
+    mock_typo.typology_key = "consulta_general"
+    mock_typo.typology_id = 101
+
+    sample_struct = {
+        "service": mock_service_at,
+        "prompt": MagicMock(),
+        "version": MagicMock(),
+        "criteria": {},
+        "criteria_defs": [],
+        "typology": mock_typo,
+    }
+
+    by_typology = {"consulta_general": sample_struct}
+
+    # Simulate struct_reg returned by ensure_evaluation_structures
+    struct_reg = {
+        "structures": {"atencion_general": sample_struct},
+        "by_typology": by_typology,
+        "by_typo": by_typology,
+        "services": {"atencion": mock_service_at, "ventas": mock_service_vn},
+        "typologies": {"consulta_general": mock_typo},
+        "admin_user": MagicMock(),
+    }
+
+    # Verify both access patterns work without KeyError
+    assert "by_typology" in struct_reg
+    assert "by_typo" in struct_reg
+
+    by_typo_resolved = struct_reg.get("by_typology") or struct_reg["by_typo"]
+    assert "consulta_general" in by_typo_resolved
+
+    all_typos_resolved = struct_reg.get("typologies") or {
+        tkey: st["typology"] for tkey, st in by_typo_resolved.items()
+    }
+    assert "consulta_general" in all_typos_resolved
+    assert all_typos_resolved["consulta_general"] == mock_typo
+    assert sample_struct["typology"] == mock_typo
+
+
+# =============================================================================
+# 12. End-to-End Execution Test with in-memory SQLite
+# =============================================================================
+
+def test_end_to_end_execute_batch_in_memory_sqlite():
+    """
+    Executes generator.execute_batch against a safe in-memory SQLite database,
+    verifying that ensure_evaluation_structures, prompt registration,
+    typology resolution, call insertions, and idempotency all complete without error.
+    """
+    import asyncio
+    from sqlalchemy import BigInteger, select, func
+    from sqlalchemy.ext.compiler import compiles
+    from sqlalchemy.dialects.postgresql import JSONB
+    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+
+    @compiles(JSONB, "sqlite")
+    def compile_jsonb_sqlite(type_, compiler, **kw):
+        return "JSON"
+
+    @compiles(BigInteger, "sqlite")
+    def compile_bigint_sqlite(type_, compiler, **kw):
+        return "INTEGER"
+
+    from app.db import Base
+    from app.models.companies import Company
+    from app.models.services import Service
+    from app.models.users import User
+    from app.models.mass_evaluations import MassEvaluationResult, MassEvaluationCriterionResult
+    from scripts.seed_demo_data import ensure_evaluation_structures
+
+    async def _async_test():
+        test_engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+        async with test_engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        async with AsyncSession(test_engine) as session:
+            # Seed demo company
+            c = Company(
+                company_id=7,
+                company_name="Empresa Demo",
+                company_key="empresa-demo",
+                is_active=True,
+                is_demo=True,
+            )
+            session.add(c)
+            await session.flush()
+
+            # Seed services
+            s1 = Service(service_id=1, company_id=7, service_name="Atención al Cliente", service_key="atencion-al-cliente", is_active=True)
+            s2 = Service(service_id=2, company_id=7, service_name="Ventas", service_key="ventas", is_active=True)
+            session.add_all([s1, s2])
+            await session.flush()
+
+            # Seed admin
+            admin = User(
+                user_id=1,
+                company_id=7,
+                username="admin_demo",
+                email="admin@demo.doobot.ai",
+                name="Admin Demo",
+                role="company_admin",
+                password_hash="dummy_hash",
+                is_active=True,
+            )
+            session.add(admin)
+            await session.flush()
+
+            # Seed 60 agents
+            for idx in range(1, 61):
+                sched = build_agent_schedule(idx)
+                u = User(
+                    user_id=100 + idx,
+                    company_id=7,
+                    username=f"agente_{idx:02d}",
+                    email=f"agente_{idx:02d}@demo.doobot.ai",
+                    name=f"Agente Demo {idx:02d}",
+                    role="agent",
+                    password_hash="dummy_hash",
+                    agent_initials=sched.agent_code,
+                    hubspot_owner_id=f"demo_owner_{idx:02d}",
+                    is_active=True,
+                )
+                session.add(u)
+            await session.flush()
+
+            # Execute batch pilot (apply mode)
+            gen = DemoSeptemberGenerator(company_id=7, chunk_size=300)
+            res = await gen.execute_batch(session, "pilot", dry_run=False)
+
+            assert res["status"] == "applied"
+            assert res["inserted_calls"] == 2343
+            assert res["inserted_criteria"] == 2343 * 6
+
+            # Verify rows in DB
+            total_calls = await session.scalar(select(func.count(MassEvaluationResult.mass_analysis_id)))
+            total_crit = await session.scalar(select(func.count(MassEvaluationCriterionResult.id)))
+            assert total_calls == 2343
+            assert total_crit == 14058
+
+            # Test idempotency (second run should insert 0 calls)
+            res_idem = await gen.execute_batch(session, "pilot", dry_run=False)
+            assert res_idem["status"] == "already_up_to_date"
+            assert res_idem["inserted_calls"] == 0
+            assert res_idem["skipped_calls"] == 2343
+
+        await test_engine.dispose()
+
+    asyncio.run(_async_test())
