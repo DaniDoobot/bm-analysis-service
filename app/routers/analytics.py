@@ -1708,19 +1708,18 @@ async def get_filter_options(
     typology_key: Annotated[str | None, Query(description="Filter by typology key")] = None,
     typology: Annotated[str | None, Query(description="Filter by typology key or name")] = None,
     company_id: Annotated[int | None, Query(description="Filter by company ID")] = None,
+    company_key: Annotated[str | None, Query(description="Filter by company key")] = None,
+    company: Annotated[str | None, Query(description="Filter by company key or slug")] = None,
     db: Annotated[AsyncSession, Depends(get_db)] = None,
 ):
     """
     Retrieve filter configuration options: active typologies, agents, duration range, score bounds, and items.
     """
-    if company_id is not None and not context.is_super_admin:
-        if company_id not in context.allowed_company_ids:
-            raise HTTPException(
-                status_code=http_status.HTTP_403_FORBIDDEN,
-                detail="Acceso denegado a otra empresa."
-            )
+    from app.utils.service_resolvers import resolve_company_id, resolve_service_id
+    eff_company_id = await resolve_company_id(db, company_id=company_id, company_key=company_key, company_param=company)
+    if eff_company_id is None and not context.is_super_admin:
+        eff_company_id = context.company_id
 
-    eff_company_id = company_id if company_id is not None else (None if context.is_super_admin else context.company_id)
     eff_agent_id = hubspot_owner_id or agent_id
     clean_agent_id = str(eff_agent_id).strip() if eff_agent_id else None
 
@@ -1732,6 +1731,21 @@ async def get_filter_options(
             service_param=service,
             company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
         )
+
+        # Deduce company from service if not specified
+        if eff_company_id is None and eff_service_id is not None:
+            from app.models.services import Service
+            svc_row = await db.get(Service, eff_service_id)
+            if svc_row and svc_row.company_id:
+                eff_company_id = svc_row.company_id
+
+        if eff_company_id is not None and not context.is_super_admin:
+            if eff_company_id not in context.allowed_company_ids:
+                raise HTTPException(
+                    status_code=http_status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado a otra empresa."
+                )
+
 
         raw_typology = typology_key or typology
         eff_typology_id = typology_id

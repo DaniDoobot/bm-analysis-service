@@ -67,6 +67,16 @@ async def get_criteria(
     result_status: str | None = Query(None, description="Alias for status"),
     team_id: int | None = Query(None, description="Filtrar por equipo"),
     company_id: int | None = Query(None, description="Filtrar por empresa"),
+    company_key: str | None = Query(None, description="Filtrar por clave de empresa"),
+    company: str | None = Query(None, description="Filtrar por ID o slug de empresa"),
+    typology_id: int | None = Query(None, description="Filtrar por ID de tipología"),
+    typology_key: str | None = Query(None, description="Filtrar por clave de tipología"),
+    typology: str | None = Query(None, description="Filtrar por clave o nombre de tipología"),
+    tipo_llamada: str | None = Query(None, description="Alias para tipología"),
+    call_type: str | None = Query(None, description="Alias para tipología"),
+    agent_id: str | None = Query(None, description="Filtrar por agente"),
+    agent_owner_id: str | None = Query(None, description="Filtrar por ID de HubSpot del agente"),
+    hubspot_owner_id: str | None = Query(None, description="Filtrar por ID de HubSpot del agente"),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -79,6 +89,8 @@ async def get_criteria(
         return val
 
     c_id = _extract_val(company_id)
+    c_key = _extract_val(company_key)
+    raw_comp = _extract_val(company)
     t_id = _extract_val(team_id)
     s_id = _extract_val(service_id)
     s_key = _extract_val(service_key)
@@ -87,17 +99,13 @@ async def get_criteria(
     d_to = _extract_val(date_to)
     raw_st = _extract_val(status) or _extract_val(result_status)
 
-    if c_id is not None and not context.is_super_admin:
-        if c_id not in context.allowed_company_ids:
-            raise HTTPException(
-                status_code=403,
-                detail="Acceso denegado a otra empresa."
-            )
-    eff_company_id = c_id if c_id is not None else (None if context.is_super_admin else context.company_id)
+    from app.utils.service_resolvers import resolve_company_id, resolve_service_id
+    eff_company_id = await resolve_company_id(db, company_id=c_id, company_key=c_key, company_param=raw_comp)
+    if eff_company_id is None and not context.is_super_admin:
+        eff_company_id = context.company_id
 
     eff_service_id = s_id
     if eff_service_id is None and (raw_svc or s_key):
-        from app.utils.service_resolvers import resolve_service_id
         resolved_id, _ = await resolve_service_id(
             db,
             service_key=s_key,
@@ -107,9 +115,63 @@ async def get_criteria(
         if resolved_id is not None:
             eff_service_id = resolved_id
 
+    # Deduce company from service if not specified
+    if eff_company_id is None and eff_service_id is not None:
+        from app.models.services import Service
+        svc_row = await db.get(Service, eff_service_id)
+        if svc_row and svc_row.company_id:
+            eff_company_id = svc_row.company_id
+
+    if eff_company_id is not None and not context.is_super_admin:
+        if eff_company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=403,
+                detail="Acceso denegado a otra empresa."
+            )
+
+    raw_typo = _extract_val(typology_key) or _extract_val(typology) or _extract_val(tipo_llamada) or _extract_val(call_type)
+    eff_typology_id = _extract_val(typology_id)
+    eff_typology_key = str(raw_typo).strip() if raw_typo else None
+
+    if eff_typology_id is None and eff_typology_key and eff_typology_key.lower() not in ("all", "todas", "total", "*"):
+        from app.models.typologies import Typology
+        from sqlalchemy import select, or_
+        stmt_t = select(Typology).where(Typology.typology_key == eff_typology_key, Typology.is_active == True)
+        if eff_service_id is not None:
+            stmt_t = stmt_t.where(Typology.service_id == eff_service_id)
+        if eff_company_id is not None:
+            if eff_company_id == 1:
+                stmt_t = stmt_t.where(or_(Typology.company_id == 1, Typology.company_id.is_(None)))
+            else:
+                stmt_t = stmt_t.where(Typology.company_id == eff_company_id)
+        res_t = await db.execute(stmt_t)
+        t_match = res_t.scalars().first()
+        if t_match:
+            eff_typology_id = t_match.typology_id
+
+    if eff_typology_id is not None and not eff_typology_key:
+        from app.models.typologies import Typology
+        from sqlalchemy import select
+        res_tk = await db.execute(select(Typology.typology_key).where(Typology.typology_id == eff_typology_id))
+        eff_typology_key = res_tk.scalar_one_or_none()
+
+    clean_agent_id = str(_extract_val(hubspot_owner_id) or _extract_val(agent_owner_id) or _extract_val(agent_id)).strip() if (_extract_val(hubspot_owner_id) or _extract_val(agent_owner_id) or _extract_val(agent_id)) else None
     norm_status = normalize_status(raw_st)
+
     try:
-        return await ServiceEvolutionService.get_criteria(db, service_id=eff_service_id, date_from=d_from, date_to=d_to, status=norm_status, context=context, team_id=t_id, company_id=eff_company_id)
+        return await ServiceEvolutionService.get_criteria(
+            db,
+            service_id=eff_service_id,
+            date_from=d_from,
+            date_to=d_to,
+            status=norm_status,
+            context=context,
+            team_id=t_id,
+            company_id=eff_company_id,
+            agent_owner_id=clean_agent_id,
+            typology_id=eff_typology_id,
+            typology_key=eff_typology_key,
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -155,6 +217,8 @@ async def get_evolution(
     item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
     team_id: int | None = Query(None, description="Filtrar por equipo"),
     company_id: int | None = Query(None, description="Filtrar por empresa"),
+    company_key: str | None = Query(None, description="Filtrar por clave de empresa"),
+    company: str | None = Query(None, description="Filtrar por ID o slug de empresa"),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -191,17 +255,16 @@ async def get_evolution(
     sc_max = _extract_val(avg_score_max)
 
     c_id = _extract_val(company_id)
+    c_key = _extract_val(company_key)
+    raw_comp = _extract_val(company)
     t_id = _extract_val(team_id)
-    if c_id is not None and not context.is_super_admin:
-        if c_id not in context.allowed_company_ids:
-            raise HTTPException(
-                status_code=403,
-                detail="Acceso denegado a otra empresa."
-            )
-    eff_company_id = c_id if c_id is not None else (None if context.is_super_admin else context.company_id)
+
+    from app.utils.service_resolvers import resolve_company_id, resolve_service_id
+    eff_company_id = await resolve_company_id(db, company_id=c_id, company_key=c_key, company_param=raw_comp)
+    if eff_company_id is None and not context.is_super_admin:
+        eff_company_id = context.company_id
 
     if raw_svc is not None and s_id is None and s_key is None:
-        from app.utils.service_resolvers import resolve_service_id
         resolved_s_id, resolved_s_key = await resolve_service_id(
             db,
             service_param=str(raw_svc),
@@ -210,6 +273,21 @@ async def get_evolution(
         if resolved_s_id is not None:
             s_id = resolved_s_id
             s_key = resolved_s_key
+
+    # Deduce company from service if not yet known
+    if eff_company_id is None and s_id is not None:
+        from app.models.services import Service
+        svc_row = await db.get(Service, s_id)
+        if svc_row and svc_row.company_id:
+            eff_company_id = svc_row.company_id
+
+    if eff_company_id is not None and not context.is_super_admin:
+        if eff_company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=403,
+                detail="Acceso denegado a otra empresa."
+            )
+
 
     typo_ids = None
     if t_ids_raw and str(t_ids_raw).strip():

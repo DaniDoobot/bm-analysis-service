@@ -785,6 +785,8 @@ async def get_evaluation_items_filter_options(
     service: Annotated[str | None, Query(description="Filter criteria by service key, slug, or ID")] = None,
     team_id: Annotated[int | None, Query(description="Filter criteria by team ID")] = None,
     company_id: Annotated[int | None, Query(description="Filter criteria by company ID")] = None,
+    company_key: Annotated[str | None, Query(description="Filter criteria by company key")] = None,
+    company: Annotated[str | None, Query(description="Filter criteria by company key or slug")] = None,
     agent_id: Annotated[str | None, Query(description="Filter criteria by agent ID")] = None,
     hubspot_owner_id: Annotated[str | None, Query(description="Filter criteria by agent hubspot_owner_id")] = None,
     typology_id: Annotated[int | None, Query(description="Filter criteria by typology ID")] = None,
@@ -795,13 +797,12 @@ async def get_evaluation_items_filter_options(
     Retrieve available evaluation criteria item filter options dynamically for frontend UI.
     """
     from app.utils.item_score_filters import get_evaluation_item_filter_options
-    from app.utils.service_resolvers import resolve_service_id
+    from app.utils.service_resolvers import resolve_company_id, resolve_service_id
 
-    if company_id is not None and not context.is_super_admin:
-        if company_id not in context.allowed_company_ids:
-            raise HTTPException(status_code=403, detail="Acceso denegado a otra empresa.")
+    eff_company_id = await resolve_company_id(db, company_id=company_id, company_key=company_key, company_param=company)
+    if eff_company_id is None and not context.is_super_admin:
+        eff_company_id = context.company_id
 
-    eff_company_id = company_id if company_id is not None else (None if context.is_super_admin else context.company_id)
     eff_agent_id = hubspot_owner_id or agent_id
     clean_agent_id = str(eff_agent_id).strip() if eff_agent_id else None
 
@@ -812,6 +813,18 @@ async def get_evaluation_items_filter_options(
         service_param=service,
         company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
     )
+
+    # Deduce company from service if not explicitly provided
+    if eff_company_id is None and eff_service_id is not None:
+        from app.models.services import Service
+        svc_row = await db.get(Service, eff_service_id)
+        if svc_row and svc_row.company_id:
+            eff_company_id = svc_row.company_id
+
+    if eff_company_id is not None and not context.is_super_admin:
+        if eff_company_id not in context.allowed_company_ids:
+            raise HTTPException(status_code=403, detail="Acceso denegado a otra empresa.")
+
 
     raw_typology = typology_key or typology
     eff_typology_id = typology_id

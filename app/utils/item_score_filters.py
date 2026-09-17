@@ -498,6 +498,31 @@ async def get_evaluation_item_filter_options(
         t_res = await db.execute(select(Typology.typology_key).where(Typology.typology_id == eff_typology_id))
         eff_typology_key = t_res.scalar_one_or_none()
 
+    # Deduce service_ids / company_ids from typology if not provided
+    if eff_typology_id is not None and (not service_ids or not company_ids):
+        t_res = await db.execute(
+            select(Typology.service_id, Typology.company_id).where(Typology.typology_id == eff_typology_id)
+        )
+        t_row = t_res.first()
+        if t_row:
+            t_sid, t_cid = t_row
+            if t_sid is not None and not service_ids:
+                service_ids = [t_sid]
+            if t_cid is not None and not company_ids:
+                company_ids = [t_cid]
+
+    # Deduce company_ids from service_ids if not explicitly provided
+    if not company_ids and service_ids:
+        from app.models.services import Service
+        svc_stmt = select(Service.company_id).where(
+            Service.service_id.in_(service_ids),
+            Service.company_id.is_not(None)
+        ).distinct()
+        svc_res = await db.execute(svc_stmt)
+        inferred_companies = [cid for cid in svc_res.scalars().all() if cid is not None]
+        if inferred_companies:
+            company_ids = inferred_companies
+
     # 1. Primary Phase: Fetch active prompt(s) for the requested service_ids / company_ids
     try:
         prompt_stmt = select(Prompt).where(
@@ -680,81 +705,85 @@ async def get_evaluation_item_filter_options(
         logger.warning("Error fetching criteria from active prompt structures: %s", e)
 
     # 3. Secondary Phase: Fallback for historical criteria from MassEvaluationCriterionResult
-    try:
-        hist_stmt = select(
-            MassEvaluationCriterionResult.criterion_key,
-            MassEvaluationCriterionResult.criterion_name,
-            MassEvaluationCriterionResult.criterion_type,
-            MassEvaluationCriterionResult.service_id
-        ).where(
-            MassEvaluationCriterionResult.criterion_type.in_(["score_1_10", "score", "number", "boolean", "percentage"])
-        )
-        if service_ids is not None:
-            hist_stmt = hist_stmt.where(MassEvaluationCriterionResult.service_id.in_(service_ids))
-        if eff_typology_id is not None:
-            hist_stmt = hist_stmt.where(MassEvaluationCriterionResult.typology_id == eff_typology_id)
-        elif eff_typology_key is not None:
-            hist_stmt = hist_stmt.where(MassEvaluationCriterionResult.typology_key == eff_typology_key)
-
-        if company_ids is not None:
-            hist_stmt = hist_stmt.join(
-                MassEvaluationResult,
-                MassEvaluationCriterionResult.mass_analysis_id == MassEvaluationResult.mass_analysis_id
+    # Only run fallback if no active prompt criteria were found for the requested context,
+    # preventing residual/deleted criteria from polluting the valid service catalog.
+    if not options:
+        try:
+            hist_stmt = select(
+                MassEvaluationCriterionResult.criterion_key,
+                MassEvaluationCriterionResult.criterion_name,
+                MassEvaluationCriterionResult.criterion_type,
+                MassEvaluationCriterionResult.service_id
+            ).where(
+                MassEvaluationCriterionResult.criterion_type.in_(["score_1_10", "score", "number", "boolean", "percentage"])
             )
-            if 1 in company_ids:
-                hist_stmt = hist_stmt.where(or_(MassEvaluationResult.company_id.in_(company_ids), MassEvaluationResult.company_id.is_(None)))
-            else:
-                hist_stmt = hist_stmt.where(MassEvaluationResult.company_id.in_(company_ids))
+            if service_ids is not None:
+                hist_stmt = hist_stmt.where(MassEvaluationCriterionResult.service_id.in_(service_ids))
+            if eff_typology_id is not None:
+                hist_stmt = hist_stmt.where(MassEvaluationCriterionResult.typology_id == eff_typology_id)
+            elif eff_typology_key is not None:
+                hist_stmt = hist_stmt.where(MassEvaluationCriterionResult.typology_key == eff_typology_key)
 
-        hist_stmt = hist_stmt.group_by(
-            MassEvaluationCriterionResult.criterion_key,
-            MassEvaluationCriterionResult.criterion_name,
-            MassEvaluationCriterionResult.criterion_type,
-            MassEvaluationCriterionResult.service_id
-        )
-        hist_res = await db.execute(hist_stmt)
-        for r in hist_res.all():
-            ckey, cname, ctype, sid = r
-            if not ckey or ckey in seen:
-                continue
-            seen.add(ckey)
-            label = cname or ckey.replace("_", " ").capitalize()
-            norm_type = "score"
-            if ctype == "boolean":
-                norm_type = "boolean"
-            elif ctype == "percentage":
-                norm_type = "percentage"
-            elif ctype == "number":
-                norm_type = "number"
+            if company_ids is not None:
+                hist_stmt = hist_stmt.join(
+                    MassEvaluationResult,
+                    MassEvaluationCriterionResult.mass_analysis_id == MassEvaluationResult.mass_analysis_id
+                )
+                if 1 in company_ids:
+                    hist_stmt = hist_stmt.where(or_(MassEvaluationResult.company_id.in_(company_ids), MassEvaluationResult.company_id.is_(None)))
+                else:
+                    hist_stmt = hist_stmt.where(MassEvaluationResult.company_id.in_(company_ids))
 
-            item_dict = {
-                "key": ckey,
-                "label": label,
-                "type": norm_type,
-                "service_id": sid,
-                "active": True,
-                "sort_order": len(options) + 1
-            }
-            if norm_type == "boolean":
-                item_dict["options"] = [
-                    {"label": "Sí", "value": True},
-                    {"label": "No", "value": False}
-                ]
-            elif norm_type == "percentage":
-                item_dict["min_score"] = 0.0
-                item_dict["max_score"] = 100.0
-            else:
-                item_dict["min_score"] = 0.0
-                item_dict["max_score"] = 10.0
+            hist_stmt = hist_stmt.group_by(
+                MassEvaluationCriterionResult.criterion_key,
+                MassEvaluationCriterionResult.criterion_name,
+                MassEvaluationCriterionResult.criterion_type,
+                MassEvaluationCriterionResult.service_id
+            )
+            hist_res = await db.execute(hist_stmt)
+            for r in hist_res.all():
+                ckey, cname, ctype, sid = r
+                if not ckey or ckey in seen:
+                    continue
+                seen.add(ckey)
+                label = cname or ckey.replace("_", " ").capitalize()
+                norm_type = "score"
+                if ctype == "boolean":
+                    norm_type = "boolean"
+                elif ctype == "percentage":
+                    norm_type = "percentage"
+                elif ctype == "number":
+                    norm_type = "number"
 
-            options.append(item_dict)
-    except Exception as e:
-        logger.warning("Error fetching dynamic criterion filter options from history: %s", e)
+                item_dict = {
+                    "key": ckey,
+                    "label": label,
+                    "type": norm_type,
+                    "service_id": sid,
+                    "active": True,
+                    "sort_order": len(options) + 1
+                }
+                if norm_type == "boolean":
+                    item_dict["options"] = [
+                        {"label": "Sí", "value": True},
+                        {"label": "No", "value": False}
+                    ]
+                elif norm_type == "percentage":
+                    item_dict["min_score"] = 0.0
+                    item_dict["max_score"] = 100.0
+                else:
+                    item_dict["min_score"] = 0.0
+                    item_dict["max_score"] = 10.0
+
+                options.append(item_dict)
+        except Exception as e:
+            logger.warning("Error fetching dynamic criterion filter options from history: %s", e)
+
 
     # 4. Tertiary Phase: Combine with hardcoded fallbacks if any standard item is still missing
-    # Fallback catalog is ONLY used for Boston Medical (company 1 or unrestricted context) without a specific typology filter.
+    # Fallback catalog is ONLY used for Boston Medical (company 1 or unrestricted context) without a specific service or typology filter.
     is_boston_or_unrestricted = (company_ids is None or 1 in company_ids)
-    if is_boston_or_unrestricted and eff_typology_id is None and eff_typology_key is None:
+    if is_boston_or_unrestricted and eff_typology_id is None and eff_typology_key is None and service_ids is None:
         for fb in EVALUATION_ITEMS_FALLBACK:
             if fb["key"] not in seen:
                 seen.add(fb["key"])

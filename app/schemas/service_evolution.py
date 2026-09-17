@@ -93,4 +93,11 @@ class CriterionListItem(BaseModel):
     criterion_key: str
     criterion_name: str | None = None
     criterion_type: str | None = None
-    total_applicable: int
+    total_applicable: int = 0
+    key: str | None = None
+    label: str | None = None
+    name: str | None = None
+    type: str | None = None
+    service_id: int | None = None
+    active: bool = True
+    sort_order: int | None = None

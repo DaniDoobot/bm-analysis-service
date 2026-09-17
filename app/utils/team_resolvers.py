@@ -176,12 +176,26 @@ async def validate_team_service_cascade(
             clean_key = str(typology_key).strip()
             if clean_key and clean_key.lower() not in ("all", "todas", "total", "*"):
                 stmt_typ = select(Typology).where(Typology.typology_key == clean_key, Typology.is_active == True)
-                if service_id is not None:
-                    stmt_typ = stmt_typ.where(Typology.service_id == service_id)
-                elif team is not None and team.service_id is not None:
-                    stmt_typ = stmt_typ.where(Typology.service_id == team.service_id)
+                if eff_company_id is not None:
+                    if eff_company_id == 1:
+                        stmt_typ = stmt_typ.where(or_(Typology.company_id == 1, Typology.company_id.is_(None)))
+                    else:
+                        stmt_typ = stmt_typ.where(Typology.company_id == eff_company_id)
                 res_typ = await db.execute(stmt_typ)
-                typology = res_typ.scalars().first()
+                typos = res_typ.scalars().all()
+                if not typos:
+                    # Check if exists in another company to raise explicit 400
+                    res_any = await db.execute(select(Typology).where(Typology.typology_key == clean_key, Typology.is_active == True))
+                    if res_any.scalars().first() is not None:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="La tipología seleccionada no pertenece a la empresa indicada."
+                        )
+                else:
+                    target_sid = service_id if service_id is not None else (team.service_id if (team and team.service_id) else None)
+                    match_svc = next((t for t in typos if t.service_id == target_sid), None)
+                    typology = match_svc or typos[0]
+
 
         if typology is not None:
             # 4a. Typology company check

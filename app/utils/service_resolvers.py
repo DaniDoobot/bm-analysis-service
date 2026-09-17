@@ -109,3 +109,43 @@ async def resolve_service_id(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         detail=f"Service '{raw_str}' not found or invalid."
     )
+
+
+async def resolve_company_id(
+    db: AsyncSession,
+    company_id: int | None = None,
+    company_key: str | None = None,
+    company_param: str | int | None = None,
+) -> int | None:
+    """
+    Resolves company_id from integer ID, key string, or slug parameter.
+    """
+    if company_id is not None:
+        return company_id
+    raw = None
+    if isinstance(company_param, int):
+        return company_param
+    elif isinstance(company_param, str) and company_param.strip():
+        raw = company_param.strip()
+    elif company_key and company_key.strip():
+        raw = company_key.strip()
+
+    if not raw:
+        return None
+
+    if raw.isdigit():
+        return int(raw)
+
+    from app.models.companies import Company
+    raw_lower = raw.lower()
+    stmt = select(Company.company_id).where(
+        or_(
+            func.lower(Company.company_key) == raw_lower,
+            func.lower(Company.company_name) == raw_lower,
+            func.lower(func.replace(Company.company_key, "_", "-")) == raw_lower,
+            func.lower(func.replace(Company.company_key, "-", "_")) == raw_lower,
+        )
+    )
+    res = await db.execute(stmt)
+    cid = res.scalar_one_or_none()
+    return cid

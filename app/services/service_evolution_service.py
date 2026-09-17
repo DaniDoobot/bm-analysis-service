@@ -184,21 +184,58 @@ class ServiceEvolutionService:
         context: TenantContext | None = None,
         team_id: int | None = None,
         company_id: int | None = None,
+        agent_owner_id: str | None = None,
+        typology_id: int | None = None,
+        typology_key: str | None = None,
     ) -> list[CriterionListItem]:
         """
         GET /bm/service-evolution/criteria
-        Returns all criteria key details.
+        Returns all criteria key details strictly scoped to company, service, and typology.
         """
         effective_company_id = company_id
         if effective_company_id is None and context and not context.is_super_admin:
             effective_company_id = context.company_id
 
+        # Infer company from service if not provided
+        if effective_company_id is None and service_id is not None:
+            from app.models.services import Service
+            svc_row = await db.get(Service, service_id)
+            if svc_row and svc_row.company_id:
+                effective_company_id = svc_row.company_id
+
         parsed_date_from, parsed_date_to = parse_date_bounds(date_from, date_to)
         logger.info(
-            "Fetching criteria list: service_id=%s, date_from=%s (parsed: %s), date_to=%s (parsed: %s), status=%s, team_id=%s, company_id=%s",
-            service_id, date_from, parsed_date_from, date_to, parsed_date_to, status, team_id, effective_company_id
+            "Fetching criteria list: service_id=%s, date_from=%s (parsed: %s), date_to=%s (parsed: %s), status=%s, team_id=%s, company_id=%s, typology_id=%s, typology_key=%s",
+            service_id, date_from, parsed_date_from, date_to, parsed_date_to, status, team_id, effective_company_id, typology_id, typology_key
         )
 
+        if team_id is not None or service_id is not None or effective_company_id is not None or agent_owner_id is not None or typology_id is not None or typology_key is not None:
+            from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
+            await validate_team_service_cascade(
+                db,
+                service_id=service_id,
+                team_id=team_id,
+                context=context,
+                company_id=effective_company_id,
+                hubspot_owner_id=agent_owner_id,
+                typology_id=typology_id,
+                typology_key=typology_key,
+            )
+
+        # 1. Fetch dynamic criteria catalog from single source of truth (PromptCriterion / Typology)
+        from app.utils.item_score_filters import get_evaluation_item_filter_options
+        eff_svc_ids = [service_id] if service_id is not None else (context.allowed_service_ids if (context and not context.is_super_admin) else None)
+        eff_comp_ids = [effective_company_id] if effective_company_id is not None else (None if (context and context.is_super_admin) else (context.allowed_company_ids if context else None))
+
+        configured_items = await get_evaluation_item_filter_options(
+            db,
+            company_ids=eff_comp_ids,
+            service_ids=eff_svc_ids,
+            typology_id=typology_id,
+            typology_key=typology_key,
+        )
+
+        # 2. Query applicable counts from historical evaluations
         if status == "failed":
             where_clause = "WHERE r.status = 'failed'"
         elif status == "all":
@@ -206,12 +243,10 @@ class ServiceEvolutionService:
         else:
             where_clause = "WHERE r.status = 'completed'"
 
-        if team_id is not None or service_id is not None or effective_company_id is not None:
-            from app.utils.team_resolvers import validate_team_service_cascade, get_team_assigned_owner_ids
-            await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context, company_id=effective_company_id)
-            if team_id is not None:
-                team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=effective_company_id)
-                where_clause += f" AND r.hubspot_owner_id IN {_format_str_list(team_owner_ids)}"
+        if team_id is not None:
+            from app.utils.team_resolvers import get_team_assigned_owner_ids
+            team_owner_ids = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=effective_company_id)
+            where_clause += f" AND r.hubspot_owner_id IN {_format_str_list(team_owner_ids)}"
 
         params = {
             "service_id": service_id,
@@ -240,6 +275,17 @@ class ServiceEvolutionService:
         else:
             where_clause += " AND (CAST(:service_id AS integer) IS NULL OR r.service_id = CAST(:service_id AS integer))"
 
+        if typology_key is not None:
+            where_clause += " AND r.typology_key = :typology_key"
+            params["typology_key"] = typology_key
+        elif typology_id is not None:
+            where_clause += " AND r.typology_id = :typology_id"
+            params["typology_id"] = typology_id
+
+        if agent_owner_id is not None:
+            where_clause += " AND r.hubspot_owner_id = :agent_owner_id"
+            params["agent_owner_id"] = agent_owner_id
+
         raw_sql = f"""
             SELECT 
                 c.criterion_key,
@@ -258,7 +304,30 @@ class ServiceEvolutionService:
         dialect_name = db.get_bind().dialect.name
         result = await db.execute(text(clean_sql(raw_sql, dialect_name)), params)
         rows = result.fetchall()
-        
+        counts_by_key = {r[0]: (r[3] or 0) for r in rows}
+
+        if configured_items:
+            criteria_list = []
+            for item in configured_items:
+                ckey = item["key"]
+                cname = item.get("label") or ckey
+                ctype = item.get("type")
+                tot = counts_by_key.get(ckey, 0)
+                criteria_list.append(CriterionListItem(
+                    criterion_key=ckey,
+                    criterion_name=cname,
+                    criterion_type=ctype,
+                    total_applicable=tot,
+                    key=ckey,
+                    label=cname,
+                    name=cname,
+                    type=ctype,
+                    service_id=item.get("service_id"),
+                    active=item.get("active", True),
+                    sort_order=item.get("sort_order"),
+                ))
+            return criteria_list
+
         criteria_list = []
         for r in rows:
             criteria_list.append(CriterionListItem(
@@ -266,8 +335,14 @@ class ServiceEvolutionService:
                 criterion_name=r[1],
                 criterion_type=r[2],
                 total_applicable=r[3],
+                key=r[0],
+                label=r[1],
+                name=r[1],
+                type=r[2],
+                active=True,
             ))
         return criteria_list
+
 
     @staticmethod
     async def get_evolution(
