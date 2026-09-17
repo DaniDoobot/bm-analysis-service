@@ -59,6 +59,7 @@ from app.services.users_service import (
     save_user_service_associations,
     save_user_team_associations,
 )
+from app.utils.agent_resolvers import calculate_demo_agent_code
 from app.utils.security import hash_password
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -256,22 +257,19 @@ async def seed_demo_structure(db: AsyncSession) -> Dict[str, Any]:
     agents_created: List[User] = []
     for i in range(1, 61):
         idx_str = f"{i:02d}"
+        agent_code = calculate_demo_agent_code(i)
         if 1 <= i <= 10:
             target_svc = svc_atencion
             target_team = team_front
-            agent_code = f"AC-F{i:02d}"
         elif 11 <= i <= 30:
             target_svc = svc_atencion
             target_team = team_backoffice
-            agent_code = f"AC-B{(i - 10):02d}"
         elif 31 <= i <= 40:
             target_svc = svc_ventas
             target_team = team_comercial
-            agent_code = f"VT-C{(i - 30):02d}"
         else:
             target_svc = svc_ventas
             target_team = team_retencion
-            agent_code = f"VT-R{(i - 40):02d}"
 
         agent_user = User(
             username=f"agente.demo.{idx_str}",

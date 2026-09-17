@@ -60,6 +60,18 @@ class AdminUserResponse(BaseModel):
 
     @model_validator(mode="after")
     def compute_display_name(self) -> "AdminUserResponse":
+        # Guard for demo users: ensure canonical name and code
+        if self.hubspot_owner_id and str(self.hubspot_owner_id).strip().lower().startswith("demo_owner_"):
+            from app.utils.agent_resolvers import get_demo_agent_index, calculate_demo_agent_code
+            d_idx = get_demo_agent_index(hubspot_owner_id=self.hubspot_owner_id)
+            if d_idx is not None:
+                canonical_name = f"Agente Demo {d_idx:02d}"
+                self.name = canonical_name
+                self.display_name = canonical_name
+                if not self.agent_initials or not str(self.agent_initials).startswith(("AC-", "VT-")):
+                    self.agent_initials = calculate_demo_agent_code(d_idx)
+                return self
+
         if not self.display_name:
             if self.name and self.name.strip():
                 self.display_name = self.name.strip()

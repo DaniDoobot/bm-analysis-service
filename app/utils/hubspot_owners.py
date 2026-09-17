@@ -122,10 +122,10 @@ async def resolve_agent_name_canonical(
     clean_oid = str(hubspot_owner_id).strip() if hubspot_owner_id is not None else None
 
     if clean_oid:
-        # Canonical demo agent enforcement (company_id=6 or demo_owner_*) -> always 'Agente Demo XX'
+        # Canonical demo agent enforcement (demo company or demo_owner_*) -> always 'Agente Demo XX'
         from app.utils.agent_resolvers import get_demo_agent_index
         d_idx = get_demo_agent_index(hubspot_owner_id=clean_oid, agent_name=raw_agent)
-        if (company_id == 6 or "demo_owner_" in clean_oid.lower()) and d_idx is not None:
+        if ("demo_owner_" in clean_oid.lower() or (company_id in (6, 7))) and d_idx is not None:
             demo_canonical = f"Agente Demo {d_idx:02d}"
             if cache is not None:
                 cache[(company_id, clean_oid)] = demo_canonical

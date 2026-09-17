@@ -1492,7 +1492,7 @@ async def get_available_agents(
         disp_name = resolved_names.get((effective_company_id, oid)) or resolved_names.get(("*", oid))
         from app.utils.agent_resolvers import get_demo_agent_index
         d_idx = get_demo_agent_index(hubspot_owner_id=oid)
-        if (effective_company_id == 6 or "demo_owner_" in str(oid).lower()) and d_idx is not None:
+        if ("demo_owner_" in str(oid).lower() or (effective_company_id in (6, 7))) and d_idx is not None:
             disp_name = f"Agente Demo {d_idx:02d}"
         else:
             u_obj = assigned_users.get(oid)

@@ -327,32 +327,87 @@ class TestServiceEvolutionRouterNoStatusShadowing(unittest.TestCase):
 
 
 class TestFixDemoAgentNamesScript(unittest.TestCase):
-    """Verify fix_demo_agent_names strictly targets company_id=6 and sets proper demo names."""
+    """Verify fix_demo_agent_names dynamically discovers Empresa Demo and safely updates records."""
 
-    def test_fix_demo_agent_names_only_targets_company_6(self):
-        from scripts.fix_demo_agent_names import fix_demo_agent_names, DEMO_COMPANY_ID
-        self.assertEqual(DEMO_COMPANY_ID, 6, "Demo company ID must be 6")
+    def test_fix_demo_agent_names_targets_dynamic_demo_company(self):
+        from scripts.fix_demo_agent_names import fix_demo_agent_names
+        from app.models.companies import Company
 
         mock_db = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.rowcount = 1
-        mock_db.execute.return_value = mock_result
+        mock_demo_company = Company(
+            company_id=7,
+            company_name="Empresa Demo",
+            company_key="empresa-demo",
+            is_demo=True,
+        )
+
+        def mock_execute_side_effect(stmt):
+            mock_res = MagicMock()
+            compiled = str(stmt)
+            if "bm_companies" in compiled:
+                mock_res.scalars.return_value.all.return_value = [mock_demo_company]
+                mock_res.scalar_one_or_none.return_value = mock_demo_company
+            elif "SELECT bm_users" in compiled or "FROM bm_users" in compiled:
+                mock_res.scalars.return_value.all.return_value = []
+            else:
+                mock_res.rowcount = 1
+            return mock_res
+
+        mock_db.execute.side_effect = mock_execute_side_effect
 
         summary = _run(fix_demo_agent_names(mock_db, dry_run=True))
         self.assertTrue(summary["dry_run"])
+        self.assertEqual(summary["company_id"], 7)
+        self.assertEqual(summary["company_name"], "Empresa Demo")
         self.assertEqual(summary["updated_users"], 60)
         self.assertEqual(summary["updated_settings"], 60)
         self.assertEqual(summary["updated_evals"], 60)
         self.assertEqual(summary["updated_reports"], 60)
 
-        # Inspect all executed statements: none should touch company_id != 6
+        # Inspect all executed statements: none should touch company_id == 1 (Boston Medical)
         for call_args in mock_db.execute.call_args_list:
             stmt = call_args[0][0]
             compiled = str(stmt.compile())
-            self.assertIn("company_id = :company_id_1", compiled)
-            params = stmt.compile().params
-            self.assertEqual(params.get("company_id_1"), 6)
-            self.assertNotEqual(params.get("company_id_1"), 1)
+            if "company_id =" in compiled:
+                params = stmt.compile().params
+                self.assertEqual(params.get("company_id_1"), 7)
+                self.assertNotEqual(params.get("company_id_1"), 1)
+
+    def test_fix_demo_agent_names_safety_abort_on_non_demo(self):
+        """Must raise RuntimeError if any non-demo or unexpected company record is detected in user set."""
+        from scripts.fix_demo_agent_names import fix_demo_agent_names
+        from app.models.companies import Company
+        from app.models.users import User
+
+        mock_db = AsyncMock()
+        mock_demo_company = Company(
+            company_id=7,
+            company_name="Empresa Demo",
+            company_key="empresa-demo",
+            is_demo=True,
+        )
+        bad_user = User(
+            user_id=999,
+            company_id=1,  # Boston Medical!
+            hubspot_owner_id="demo_owner_01",
+            name="Infiltrated User",
+        )
+
+        def mock_execute_side_effect(stmt):
+            mock_res = MagicMock()
+            compiled = str(stmt)
+            if "bm_companies" in compiled:
+                mock_res.scalars.return_value.all.return_value = [mock_demo_company]
+                mock_res.scalar_one_or_none.return_value = mock_demo_company
+            else:
+                mock_res.scalars.return_value.all.return_value = [bad_user]
+            return mock_res
+
+        mock_db.execute.side_effect = mock_execute_side_effect
+
+        with self.assertRaises(RuntimeError) as ctx:
+            _run(fix_demo_agent_names(mock_db, dry_run=True))
+        self.assertIn("SAFETY ABORT", str(ctx.exception))
 
 
 if __name__ == "__main__":

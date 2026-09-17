@@ -738,6 +738,7 @@ async def update_user(
             )
 
     target_role = body.role if body.role is not None else user.role
+    target_role_norm = normalize_role(target_role)
     target_company_id = body.company_id if body.company_id is not None else user.company_id
     target_primary_id = body.primary_service_id if "primary_service_id" in body.model_fields_set else user.primary_service_id
     target_allowed_ids = body.allowed_service_ids if "allowed_service_ids" in body.model_fields_set else None

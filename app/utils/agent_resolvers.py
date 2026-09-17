@@ -131,7 +131,7 @@ def resolve_agent_code(
     """
     is_demo_agent = (
         is_demo
-        or company_id == 6
+        or (company_id is not None and company_id in (6, 7))
         or (hubspot_owner_id and "demo_owner_" in str(hubspot_owner_id).lower())
         or (agent_name and "agente demo" in str(agent_name).lower())
         or (persisted_initials and re.match(r"^(AC-[FB]|VT-[CR])\d{2}$", str(persisted_initials).strip().upper()))

@@ -984,7 +984,7 @@ class TestMultitenancyUsers(unittest.IsolatedAsyncioTestCase):
                 "name": "Victoria Arellano",
                 "role": "coordinador_equipo",
                 "company_id": 1,
-                "password": "Pass1234!"
+                "password": "Password123!"
             })
             self.assertEqual(res_create.status_code, 201, msg=res_create.text)
             created_data = res_create.json()["user"]
