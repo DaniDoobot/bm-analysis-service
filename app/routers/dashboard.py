@@ -788,6 +788,8 @@ async def get_evaluation_items_filter_options(
     agent_id: Annotated[str | None, Query(description="Filter criteria by agent ID")] = None,
     hubspot_owner_id: Annotated[str | None, Query(description="Filter criteria by agent hubspot_owner_id")] = None,
     typology_id: Annotated[int | None, Query(description="Filter criteria by typology ID")] = None,
+    typology_key: Annotated[str | None, Query(description="Filter criteria by typology key")] = None,
+    typology: Annotated[str | None, Query(description="Filter criteria by typology key or name")] = None,
 ):
     """
     Retrieve available evaluation criteria item filter options dynamically for frontend UI.
@@ -811,6 +813,32 @@ async def get_evaluation_items_filter_options(
         company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
     )
 
+    raw_typology = typology_key or typology
+    eff_typology_id = typology_id
+    eff_typology_key = str(raw_typology).strip() if raw_typology else None
+
+    if eff_typology_id is None and eff_typology_key and eff_typology_key.lower() not in ("all", "todas", "total", "*"):
+        from app.models.typologies import Typology
+        from sqlalchemy import select, or_
+        stmt_t = select(Typology).where(Typology.typology_key == eff_typology_key, Typology.is_active == True)
+        if eff_service_id is not None:
+            stmt_t = stmt_t.where(Typology.service_id == eff_service_id)
+        if eff_company_id is not None:
+            if eff_company_id == 1:
+                stmt_t = stmt_t.where(or_(Typology.company_id == 1, Typology.company_id.is_(None)))
+            else:
+                stmt_t = stmt_t.where(Typology.company_id == eff_company_id)
+        res_t = await db.execute(stmt_t)
+        t_match = res_t.scalars().first()
+        if t_match:
+            eff_typology_id = t_match.typology_id
+
+    if eff_typology_id is not None and not eff_typology_key:
+        from app.models.typologies import Typology
+        from sqlalchemy import select
+        res_tk = await db.execute(select(Typology.typology_key).where(Typology.typology_id == eff_typology_id))
+        eff_typology_key = res_tk.scalar_one_or_none()
+
     from app.utils.team_resolvers import validate_team_service_cascade
     await validate_team_service_cascade(
         db,
@@ -819,7 +847,8 @@ async def get_evaluation_items_filter_options(
         context=context,
         company_id=eff_company_id,
         hubspot_owner_id=clean_agent_id,
-        typology_id=typology_id,
+        typology_id=eff_typology_id,
+        typology_key=eff_typology_key,
     )
 
     eff_service_ids = [eff_service_id] if eff_service_id is not None else context.allowed_service_ids
@@ -828,7 +857,8 @@ async def get_evaluation_items_filter_options(
         db,
         company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids),
         service_ids=eff_service_ids,
-        typology_id=typology_id,
+        typology_id=eff_typology_id,
+        typology_key=eff_typology_key,
     )
     return {"items": options}
 

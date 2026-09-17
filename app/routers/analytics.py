@@ -116,12 +116,20 @@ async def get_all_metrics(
     context: TenantContext | None = None,
     service_id: int | None = None,
     company_id: int | None = None,
+    typology_id: int | None = None,
+    typology_key: str | None = None,
 ) -> list[dict]:
-    metrics = list(BASE_METRICS)
-    existing_keys = {m["key"] for m in metrics}
     effective_company_id = company_id
     if effective_company_id is None and context:
         effective_company_id = context.company_id
+
+    # Fallback/base metrics only apply to Boston Medical (company 1 or unrestricted context) when no specific typology is filtered
+    if (effective_company_id == 1 or (effective_company_id is None and context and context.is_super_admin)) and typology_id is None and typology_key is None:
+        metrics = list(BASE_METRICS)
+    else:
+        metrics = []
+
+    existing_keys = {m["key"] for m in metrics}
     
     try:
         stmt1 = select(
@@ -135,6 +143,11 @@ async def get_all_metrics(
         )
         if service_id is not None:
             stmt1 = stmt1.where(MassEvaluationResult.service_id == service_id)
+        if typology_id is not None:
+            stmt1 = stmt1.where(MassEvaluationCriterionResult.typology_id == typology_id)
+        elif typology_key is not None:
+            stmt1 = stmt1.where(MassEvaluationCriterionResult.typology_key == typology_key)
+
         if effective_company_id is not None:
             if effective_company_id == 1:
                 stmt1 = stmt1.where(
@@ -215,6 +228,46 @@ async def get_all_metrics(
         )
         if service_id is not None:
             stmt3 = stmt3.where(Prompt.service_id == service_id)
+
+        if typology_id is not None or typology_key is not None:
+            from app.models.criteria import PromptCriterionTypology
+            from app.models.prompts import BaseStructureTypology
+            from sqlalchemy import exists
+            typology_conditions = []
+            if typology_id is not None:
+                typology_conditions.append(
+                    exists(
+                        select(1).where(
+                            PromptCriterionTypology.criterion_id == PromptCriterion.criterion_id,
+                            PromptCriterionTypology.typology_id == typology_id
+                        )
+                    )
+                )
+                typology_conditions.append(
+                    exists(
+                        select(1).where(
+                            BaseStructureTypology.base_structure_id == Prompt.base_structure_id,
+                            BaseStructureTypology.typology_id == typology_id
+                        )
+                    )
+                )
+                typology_conditions.append(
+                    PromptCriterion.prompt_id.in_(
+                        select(MassEvaluationResult.prompt_id).where(
+                            MassEvaluationResult.typology_id == typology_id
+                        )
+                    )
+                )
+            if typology_key is not None:
+                typology_conditions.append(
+                    PromptCriterion.prompt_id.in_(
+                        select(MassEvaluationResult.prompt_id).where(
+                            MassEvaluationResult.typology_key == typology_key
+                        )
+                    )
+                )
+            stmt3 = stmt3.where(or_(*typology_conditions))
+
         if effective_company_id is not None:
             if effective_company_id == 1:
                 stmt3 = stmt3.where(
@@ -415,6 +468,9 @@ async def get_analytics_items(
     service: Annotated[str | None, Query(description="Filter by service key, slug, or ID")] = None,
     team_id: Annotated[int | None, Query(description="Filter by team ID")] = None,
     company_id: Annotated[int | None, Query(description="Filter by company ID")] = None,
+    typology_id: Annotated[int | None, Query(description="Filter by typology ID")] = None,
+    typology_key: Annotated[str | None, Query(description="Filter by typology key")] = None,
+    typology: Annotated[str | None, Query(description="Filter by typology key or name")] = None,
 ):
     """Retrieve the catalogue of compared metrics available in Analytics v2."""
     if context.normalized_role == InternalRole.AGENT:
@@ -439,9 +495,42 @@ async def get_analytics_items(
         service_param=service,
         company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
     )
-    if team_id is not None or eff_service_id is not None or eff_company_id is not None:
+
+    raw_typology = typology_key or typology
+    eff_typology_id = typology_id
+    eff_typology_key = str(raw_typology).strip() if raw_typology else None
+
+    if eff_typology_id is None and eff_typology_key and eff_typology_key.lower() not in ("all", "todas", "total", "*"):
+        from app.models.typologies import Typology
+        stmt_t = select(Typology).where(Typology.typology_key == eff_typology_key, Typology.is_active == True)
+        if eff_service_id is not None:
+            stmt_t = stmt_t.where(Typology.service_id == eff_service_id)
+        if eff_company_id is not None:
+            if eff_company_id == 1:
+                stmt_t = stmt_t.where(or_(Typology.company_id == 1, Typology.company_id.is_(None)))
+            else:
+                stmt_t = stmt_t.where(Typology.company_id == eff_company_id)
+        res_t = await db.execute(stmt_t)
+        t_match = res_t.scalars().first()
+        if t_match:
+            eff_typology_id = t_match.typology_id
+
+    if eff_typology_id is not None and not eff_typology_key:
+        from app.models.typologies import Typology
+        res_tk = await db.execute(select(Typology.typology_key).where(Typology.typology_id == eff_typology_id))
+        eff_typology_key = res_tk.scalar_one_or_none()
+
+    if team_id is not None or eff_service_id is not None or eff_company_id is not None or eff_typology_id is not None or eff_typology_key is not None:
         from app.utils.team_resolvers import validate_team_service_cascade
-        await validate_team_service_cascade(db, service_id=eff_service_id, team_id=team_id, context=context, company_id=eff_company_id)
+        await validate_team_service_cascade(
+            db,
+            service_id=eff_service_id,
+            team_id=team_id,
+            context=context,
+            company_id=eff_company_id,
+            typology_id=eff_typology_id,
+            typology_key=eff_typology_key,
+        )
 
     if eff_service_id is not None and context and not context.is_super_admin:
         if context.allowed_service_ids is not None and eff_service_id not in context.allowed_service_ids:
@@ -449,7 +538,14 @@ async def get_analytics_items(
                 status_code=http_status.HTTP_403_FORBIDDEN,
                 detail="Acceso denegado: No tiene permisos para este servicio."
             )
-    return await get_all_metrics(db, context=context, service_id=eff_service_id, company_id=eff_company_id)
+    return await get_all_metrics(
+        db,
+        context=context,
+        service_id=eff_service_id,
+        company_id=eff_company_id,
+        typology_id=eff_typology_id,
+        typology_key=eff_typology_key,
+    )
 
 
 @router.get(
@@ -1609,6 +1705,8 @@ async def get_filter_options(
     agent_id: Annotated[str | None, Query(description="Filter by agent ID")] = None,
     hubspot_owner_id: Annotated[str | None, Query(description="Filter by agent hubspot_owner_id")] = None,
     typology_id: Annotated[int | None, Query(description="Filter by typology ID")] = None,
+    typology_key: Annotated[str | None, Query(description="Filter by typology key")] = None,
+    typology: Annotated[str | None, Query(description="Filter by typology key or name")] = None,
     company_id: Annotated[int | None, Query(description="Filter by company ID")] = None,
     db: Annotated[AsyncSession, Depends(get_db)] = None,
 ):
@@ -1635,6 +1733,30 @@ async def get_filter_options(
             company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
         )
 
+        raw_typology = typology_key or typology
+        eff_typology_id = typology_id
+        eff_typology_key = str(raw_typology).strip() if raw_typology else None
+
+        if eff_typology_id is None and eff_typology_key and eff_typology_key.lower() not in ("all", "todas", "total", "*"):
+            from app.models.typologies import Typology
+            stmt_t = select(Typology).where(Typology.typology_key == eff_typology_key, Typology.is_active == True)
+            if eff_service_id is not None:
+                stmt_t = stmt_t.where(Typology.service_id == eff_service_id)
+            if eff_company_id is not None:
+                if eff_company_id == 1:
+                    stmt_t = stmt_t.where(or_(Typology.company_id == 1, Typology.company_id.is_(None)))
+                else:
+                    stmt_t = stmt_t.where(Typology.company_id == eff_company_id)
+            res_t = await db.execute(stmt_t)
+            t_match = res_t.scalars().first()
+            if t_match:
+                eff_typology_id = t_match.typology_id
+
+        if eff_typology_id is not None and not eff_typology_key:
+            from app.models.typologies import Typology
+            res_tk = await db.execute(select(Typology.typology_key).where(Typology.typology_id == eff_typology_id))
+            eff_typology_key = res_tk.scalar_one_or_none()
+
         from app.utils.team_resolvers import validate_team_service_cascade
         await validate_team_service_cascade(
             db,
@@ -1643,7 +1765,8 @@ async def get_filter_options(
             context=context,
             company_id=eff_company_id,
             hubspot_owner_id=clean_agent_id,
-            typology_id=typology_id,
+            typology_id=eff_typology_id,
+            typology_key=eff_typology_key,
         )
 
         # 1. Fetch available companies list for current user
@@ -1842,7 +1965,8 @@ async def get_filter_options(
             db,
             company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids),
             service_ids=eff_svc_ids,
-            typology_id=typology_id,
+            typology_id=eff_typology_id,
+            typology_key=eff_typology_key,
         )
 
         return {

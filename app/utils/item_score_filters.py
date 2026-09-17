@@ -461,21 +461,42 @@ async def get_evaluation_item_filter_options(
     service_ids: list[int] | None = None,
     prompt_type: str = "audio",
     typology_id: int | None = None,
+    typology_key: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     Returns available evaluative criteria item filter options dynamically with types,
     min/max boundaries, and boolean option values for Lovable frontend.
-    The primary ordering is derived from the active Specific Structure (bm_prompts + bm_prompt_criteria)
-    using PromptCriterion.order_index ASC. Historical evaluation criteria not present in the active
-    structure are appended afterwards as a fallback, ensuring full backward compatibility without duplicates.
+    When typology_id / typology_key is provided, strictly filters to criteria associated
+    with that typology, avoiding cross-contamination across typologies.
     """
-    from app.models.prompts import Prompt
-    from app.models.criteria import PromptCriterion
-    from app.models.mass_evaluations import MassEvaluationCriterionResult
-    from sqlalchemy import or_
+    from app.models.prompts import Prompt, BaseStructureTypology
+    from app.models.criteria import PromptCriterion, PromptCriterionTypology
+    from app.models.mass_evaluations import MassEvaluationResult, MassEvaluationCriterionResult
+    from app.models.typologies import Typology
+    from sqlalchemy import or_, and_, exists, select
 
     options: list[dict[str, Any]] = []
     seen: set[str] = set()
+
+    # Resolve typology_id and typology_key if one is provided
+    eff_typology_id = typology_id
+    eff_typology_key = str(typology_key).strip() if typology_key else None
+
+    if eff_typology_id is None and eff_typology_key and eff_typology_key.lower() not in ("all", "todas", "total", "*"):
+        t_stmt = select(Typology.typology_id).where(Typology.typology_key == eff_typology_key, Typology.is_active == True)
+        if service_ids:
+            t_stmt = t_stmt.where(Typology.service_id.in_(service_ids))
+        if company_ids:
+            if 1 in company_ids:
+                t_stmt = t_stmt.where(or_(Typology.company_id.in_(company_ids), Typology.company_id.is_(None)))
+            else:
+                t_stmt = t_stmt.where(Typology.company_id.in_(company_ids))
+        t_res = await db.execute(t_stmt)
+        eff_typology_id = t_res.scalars().first()
+
+    if eff_typology_id is not None and not eff_typology_key:
+        t_res = await db.execute(select(Typology.typology_key).where(Typology.typology_id == eff_typology_id))
+        eff_typology_key = t_res.scalar_one_or_none()
 
     # 1. Primary Phase: Fetch active prompt(s) for the requested service_ids / company_ids
     try:
@@ -494,7 +515,7 @@ async def get_evaluation_item_filter_options(
                 )
             else:
                 prompt_stmt = prompt_stmt.where(Prompt.company_id.in_(company_ids))
-        # Order by service_id, company_id (tenant-specific first if non-null), prompt_id desc
+
         prompt_stmt = prompt_stmt.order_by(
             Prompt.service_id.asc().nullslast(),
             Prompt.company_id.asc().nullslast(),
@@ -503,14 +524,7 @@ async def get_evaluation_item_filter_options(
         prompts_res = await db.execute(prompt_stmt)
         active_prompts = prompts_res.scalars().all()
 
-        # Group active prompts per service (pick the first / most specific active prompt per service)
-        service_prompt_map: dict[int | None, Prompt] = {}
-        for p in active_prompts:
-            sid = p.service_id
-            if sid not in service_prompt_map:
-                service_prompt_map[sid] = p
-
-        active_prompt_ids = [p.prompt_id for p in service_prompt_map.values()]
+        active_prompt_ids = [p.prompt_id for p in active_prompts]
 
         if active_prompt_ids:
             # 2. Fetch criteria for these active prompts ordered strictly by order_index
@@ -526,20 +540,97 @@ async def get_evaluation_item_filter_options(
                 PromptCriterion.criterion_type.in_(["score_1_10", "score", "number", "boolean", "percentage"])
             )
 
-            if typology_id is not None:
-                from app.models.criteria import PromptCriterionTypology
-                has_typology_assoc = exists(
-                    select(1).where(
-                        PromptCriterionTypology.criterion_id == PromptCriterion.criterion_id,
-                        PromptCriterionTypology.typology_id == typology_id
+            if eff_typology_id is not None or eff_typology_key is not None:
+                has_explicit_criterion_assoc = False
+                if eff_typology_id is not None:
+                    has_explicit_criterion_assoc = exists(
+                        select(1).where(
+                            PromptCriterionTypology.criterion_id == PromptCriterion.criterion_id,
+                            PromptCriterionTypology.typology_id == eff_typology_id
+                        )
                     )
-                )
-                has_no_typology_assocs = ~exists(
+
+                has_no_criterion_assocs = ~exists(
                     select(1).where(
                         PromptCriterionTypology.criterion_id == PromptCriterion.criterion_id
                     )
                 )
-                crit_stmt = crit_stmt.where(or_(has_typology_assoc, has_no_typology_assocs))
+
+                prompt_eligible_conds = []
+                if eff_typology_id is not None:
+                    # a) Evaluated in mass evaluations for this typology
+                    prompt_eligible_conds.append(
+                        Prompt.prompt_id.in_(
+                            select(MassEvaluationResult.prompt_id).where(
+                                MassEvaluationResult.typology_id == eff_typology_id
+                            )
+                        )
+                    )
+                    # b) BaseStructure linked to this typology
+                    prompt_eligible_conds.append(
+                        exists(
+                            select(1).where(
+                                BaseStructureTypology.base_structure_id == Prompt.base_structure_id,
+                                BaseStructureTypology.typology_id == eff_typology_id
+                            )
+                        )
+                    )
+                    # c) Has some criterion linked to this typology
+                    from app.models.criteria import PromptCriterion as PC
+                    prompt_eligible_conds.append(
+                        exists(
+                            select(1).where(
+                                PC.prompt_id == Prompt.prompt_id,
+                                PromptCriterionTypology.criterion_id == PC.criterion_id,
+                                PromptCriterionTypology.typology_id == eff_typology_id
+                            )
+                        )
+                    )
+                if eff_typology_key is not None:
+                    prompt_eligible_conds.append(
+                        Prompt.prompt_id.in_(
+                            select(MassEvaluationResult.prompt_id).where(
+                                MassEvaluationResult.typology_key == eff_typology_key
+                            )
+                        )
+                    )
+
+                # d) Prompt has NO evaluations for any typology and no typology associations at all (truly unassigned prompt)
+                from app.models.criteria import PromptCriterion as PC2
+                has_any_evaluations = exists(
+                    select(1).where(MassEvaluationResult.prompt_id == Prompt.prompt_id)
+                )
+                has_any_crit_typos = exists(
+                    select(1).where(
+                        PC2.prompt_id == Prompt.prompt_id,
+                        PromptCriterionTypology.criterion_id == PC2.criterion_id
+                    )
+                )
+                has_any_base_typos = exists(
+                    select(1).where(
+                        BaseStructureTypology.base_structure_id == Prompt.base_structure_id
+                    )
+                )
+                is_truly_generic_prompt = and_(
+                    ~has_any_evaluations,
+                    ~has_any_crit_typos,
+                    ~has_any_base_typos
+                )
+                prompt_eligible_conds.append(is_truly_generic_prompt)
+
+                prompt_is_eligible = or_(*prompt_eligible_conds)
+
+                if eff_typology_id is not None:
+                    crit_stmt = crit_stmt.where(
+                        or_(
+                            has_explicit_criterion_assoc,
+                            and_(has_no_criterion_assocs, prompt_is_eligible)
+                        )
+                    )
+                else:
+                    crit_stmt = crit_stmt.where(
+                        and_(has_no_criterion_assocs, prompt_is_eligible)
+                    )
 
             crit_stmt = crit_stmt.order_by(
                 Prompt.service_id.asc().nullslast(),
@@ -600,10 +691,12 @@ async def get_evaluation_item_filter_options(
         )
         if service_ids is not None:
             hist_stmt = hist_stmt.where(MassEvaluationCriterionResult.service_id.in_(service_ids))
-        if typology_id is not None:
-            hist_stmt = hist_stmt.where(MassEvaluationCriterionResult.typology_id == typology_id)
+        if eff_typology_id is not None:
+            hist_stmt = hist_stmt.where(MassEvaluationCriterionResult.typology_id == eff_typology_id)
+        elif eff_typology_key is not None:
+            hist_stmt = hist_stmt.where(MassEvaluationCriterionResult.typology_key == eff_typology_key)
+
         if company_ids is not None:
-            from app.models.mass_evaluations import MassEvaluationResult
             hist_stmt = hist_stmt.join(
                 MassEvaluationResult,
                 MassEvaluationCriterionResult.mass_analysis_id == MassEvaluationResult.mass_analysis_id
@@ -661,7 +754,7 @@ async def get_evaluation_item_filter_options(
     # 4. Tertiary Phase: Combine with hardcoded fallbacks if any standard item is still missing
     # Fallback catalog is ONLY used for Boston Medical (company 1 or unrestricted context) without a specific typology filter.
     is_boston_or_unrestricted = (company_ids is None or 1 in company_ids)
-    if is_boston_or_unrestricted and typology_id is None:
+    if is_boston_or_unrestricted and eff_typology_id is None and eff_typology_key is None:
         for fb in EVALUATION_ITEMS_FALLBACK:
             if fb["key"] not in seen:
                 seen.add(fb["key"])

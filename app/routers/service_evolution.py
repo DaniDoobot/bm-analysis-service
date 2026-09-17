@@ -59,6 +59,8 @@ async def get_services(
 async def get_criteria(
     context: Annotated[TenantContext, Depends(get_tenant_context)],
     service_id: int | None = Query(None, description="Filtrar criterios aplicados a un servicio específico"),
+    service_key: str | None = Query(None, description="Filtrar criterios por clave del servicio"),
+    service: str | None = Query(None, description="Filtrar criterios por ID o clave del servicio"),
     date_from: str | None = Query(None, description="Fecha de inicio (ISO 8601 o YYYY-MM-DD) para filtrar recuento de criterios"),
     date_to: str | None = Query(None, description="Fecha de fin (ISO 8601 o YYYY-MM-DD) para filtrar recuento de criterios"),
     status: str | None = Query(None, description="Filter by evaluation status: completed | failed | all"),
@@ -71,17 +73,43 @@ async def get_criteria(
     Retrieve available criteria keys with counts of applicable entries.
     Useful for selecting criteria to graph/analyze.
     """
-    if company_id is not None and not context.is_super_admin:
-        if company_id not in context.allowed_company_ids:
+    def _extract_val(val, default=None):
+        if val is None or hasattr(val, "default"):
+            return default if val is None else (getattr(val, "default", default) if getattr(val, "default", None) is not Ellipsis else default)
+        return val
+
+    c_id = _extract_val(company_id)
+    t_id = _extract_val(team_id)
+    s_id = _extract_val(service_id)
+    s_key = _extract_val(service_key)
+    raw_svc = _extract_val(service)
+    d_from = _extract_val(date_from)
+    d_to = _extract_val(date_to)
+    raw_st = _extract_val(status) or _extract_val(result_status)
+
+    if c_id is not None and not context.is_super_admin:
+        if c_id not in context.allowed_company_ids:
             raise HTTPException(
                 status_code=403,
                 detail="Acceso denegado a otra empresa."
             )
-    eff_company_id = company_id if company_id is not None else (None if context.is_super_admin else context.company_id)
+    eff_company_id = c_id if c_id is not None else (None if context.is_super_admin else context.company_id)
 
-    norm_status = normalize_status(status or result_status)
+    eff_service_id = s_id
+    if eff_service_id is None and (raw_svc or s_key):
+        from app.utils.service_resolvers import resolve_service_id
+        resolved_id, _ = await resolve_service_id(
+            db,
+            service_key=s_key,
+            service_param=raw_svc,
+            company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
+        )
+        if resolved_id is not None:
+            eff_service_id = resolved_id
+
+    norm_status = normalize_status(raw_st)
     try:
-        return await ServiceEvolutionService.get_criteria(db, service_id=service_id, date_from=date_from, date_to=date_to, status=norm_status, context=context, team_id=team_id, company_id=eff_company_id)
+        return await ServiceEvolutionService.get_criteria(db, service_id=eff_service_id, date_from=d_from, date_to=d_to, status=norm_status, context=context, team_id=t_id, company_id=eff_company_id)
     except HTTPException:
         raise
     except Exception as e:
@@ -98,6 +126,7 @@ async def get_evolution(
     context: Annotated[TenantContext, Depends(get_tenant_context)],
     service_id: int | None = Query(None, description="Filtrar por ID del servicio"),
     service_key: str | None = Query(None, description="Filtrar por clave del servicio"),
+    service: str | None = Query(None, description="Filtrar por ID o clave del servicio"),
     date_from: str | None = Query(None, description="Fecha de inicio (ISO 8601 o YYYY-MM-DD)"),
     date_to: str | None = Query(None, description="Fecha de fin (ISO 8601 o YYYY-MM-DD)"),
     granularity: Annotated[str, Query(description="Granularidad de agrupación: auto | hour | day | week | month")] = "auto",
@@ -150,6 +179,7 @@ async def get_evolution(
 
     s_id = _extract_val(service_id)
     s_key = _extract_val(service_key)
+    raw_svc = _extract_val(service)
     d_from = _extract_val(date_from)
     d_to = _extract_val(date_to)
     ag_owner = _extract_val(agent_owner_id)
@@ -159,6 +189,27 @@ async def get_evolution(
     dur_max = _extract_val(duration_max_seconds)
     sc_min = _extract_val(avg_score_min)
     sc_max = _extract_val(avg_score_max)
+
+    c_id = _extract_val(company_id)
+    t_id = _extract_val(team_id)
+    if c_id is not None and not context.is_super_admin:
+        if c_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=403,
+                detail="Acceso denegado a otra empresa."
+            )
+    eff_company_id = c_id if c_id is not None else (None if context.is_super_admin else context.company_id)
+
+    if raw_svc is not None and s_id is None and s_key is None:
+        from app.utils.service_resolvers import resolve_service_id
+        resolved_s_id, resolved_s_key = await resolve_service_id(
+            db,
+            service_param=str(raw_svc),
+            company_ids=[eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
+        )
+        if resolved_s_id is not None:
+            s_id = resolved_s_id
+            s_key = resolved_s_key
 
     typo_ids = None
     if t_ids_raw and str(t_ids_raw).strip():
@@ -178,14 +229,7 @@ async def get_evolution(
         or _extract_val(call_direction)
         or _extract_val(inbound_outbound)
     )
-    c_id = _extract_val(company_id)
-    if c_id is not None and not context.is_super_admin:
-        if c_id not in context.allowed_company_ids:
-            raise HTTPException(
-                status_code=403,
-                detail="Acceso denegado a otra empresa."
-            )
-    eff_company_id = c_id if c_id is not None else (None if context.is_super_admin else context.company_id)
+    norm_direction = normalize_direction(raw_direction)
 
     if s_id is not None and not context.is_super_admin:
         if context.allowed_service_ids is not None and s_id not in context.allowed_service_ids:
@@ -241,7 +285,7 @@ async def get_evolution(
             status=norm_status,
             context=context,
             item_filters=active_item_filters,
-            team_id=team_id,
+            team_id=t_id,
             company_id=eff_company_id,
         )
     except HTTPException:
