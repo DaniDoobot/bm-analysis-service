@@ -1,8 +1,8 @@
 # Handoff y Fuente de Verdad: Generador Analítico Septiembre 2026 para Empresa Demo
 
 > **ESTADO ACTUAL:**
-> **"FASE DE GENERACIÓN: PREPARADA, PERO SIN DATOS NUEVOS GENERADOS."**
-> **"El siguiente paso autorizado será ejecutar un BATCH PILOT después de validar el entorno."**
+> **FASES 1–4 COMPLETADAS. Datos PILOT y SCALE en producción.**
+> **El siguiente paso autorizado es ejecutar `BATCH FINAL` (`--batch final --apply`) desde el contenedor backend, previa confirmación explícita del usuario.**
 
 ---
 
@@ -36,9 +36,9 @@ Queremos que Empresa Demo parezca un contact center vivo y creíble, evitando lo
 
 | Componente | Ruta | Responsabilidad |
 |---|---|---|
-| **Motor de Turnos y Generación** | [`app/services/demo_september_generator.py`](file:///c:/Users/danim/Proyectos/bm-analysis-service/app/services/demo_september_generator.py) | - Calendario determinista de 17 días laborables de septiembre 2026.<br>- Asignación de patrones de turno, libranzas y arquetipos para los 60 agentes.<br>- Cálculo de llamadas diarias, duraciones, intervalos y timestamps naturales.<br>- Generador in-memory para dry-run con métricas estadísticas completas.<br>- Inserción idempotente en chunks masivos (`chunk_size=600`). |
-| **CLI y Orquestador Master** | [`scripts/seed_demo_data.py`](file:///c:/Users/danim/Proyectos/bm-analysis-service/scripts/seed_demo_data.py) | - Interfaz CLI con soporte para `--batch [pilot\|scale\|final\|all]`.<br>- Modo `--dry-run` por defecto (lectura en memoria, sin conexión requerida).<br>- Modo `--apply` para inserción controlada en base de datos.<br>- Mantiene retrocompatibilidad con el seeder legacy de 90 días si no se especifica `--batch`. |
-| **Suite de Pruebas Unitarias** | [`app/utils/test_seed_demo_shifts.py`](file:///c:/Users/danim/Proyectos/bm-analysis-service/app/utils/test_seed_demo_shifts.py) | - 12 tests unitarios que verifican límites temporales, turnos, ausencias, coherencia equipo/servicio, volumen del pilot, idempotencia y progresión entre batches. |
+| **Motor de Turnos y Generación** | [`app/services/demo_september_generator.py`](file:///c:/Users/Dani/proyectos/bm-analysis-service/app/services/demo_september_generator.py) | - Calendario determinista de 17 días laborables de septiembre 2026.<br>- Asignación de patrones de turno, libranzas y arquetipos para los 60 agentes.<br>- Cálculo de llamadas diarias, duraciones, intervalos y timestamps naturales.<br>- Generador in-memory para dry-run con métricas estadísticas completas.<br>- Inserción idempotente en chunks masivos (`chunk_size=600`). |
+| **CLI y Orquestador Master** | [`scripts/seed_demo_data.py`](file:///c:/Users/Dani/proyectos/bm-analysis-service/scripts/seed_demo_data.py) | - Interfaz CLI con soporte para `--batch [pilot\|scale\|final\|all]`.<br>- Modo `--dry-run` por defecto (lectura en memoria, sin conexión requerida).<br>- Modo `--apply` para inserción controlada en base de datos.<br>- Mantiene retrocompatibilidad con el seeder legacy de 90 días si no se especifica `--batch`. |
+| **Suite de Pruebas Unitarias** | [`app/utils/test_seed_demo_shifts.py`](file:///c:/Users/Dani/proyectos/bm-analysis-service/app/utils/test_seed_demo_shifts.py) | - 15 tests unitarios que verifican límites temporales, turnos, ausencias, coherencia equipo/servicio, volumen del pilot, idempotencia y progresión entre batches. |
 
 ---
 
@@ -53,26 +53,30 @@ graph LR
     S & F -->|Unión exacta| A["Batch ALL<br>(1-23 Sep, 60 agentes)<br>~46.475 llamadas"]
 ```
 
-1. **`--batch pilot`**:
+1. **`--batch pilot`** ✅ **EJECUTADO**:
    - **Periodo:** Primeros 3 días laborables (1, 2 y 3 de septiembre de 2026).
    - **Agentes:** 15 agentes representativos de los 4 equipos (4 Front, 5 Backoffice, 3 Comercial, 3 Retención).
-   - **Volumen:** **2.343 llamadas** (`MassEvaluationResult`) y **14.058 criterios** (`MassEvaluationCriterionResult`).
-   - **Propósito:** Validación funcional inmediata en frontend y backend con bajo volumen.
-2. **`--batch scale`**:
+   - **Volumen real en BD:** **2.343 `MassEvaluationResult`** y **14.058 `MassEvaluationCriterionResult`**.
+   - **Propósito:** Validación funcional inmediata en frontend y backend con bajo volumen. ✅ Validado.
+
+2. **`--batch scale`** ✅ **EJECUTADO**:
    - **Periodo:** Días 1 al 11 de septiembre (primeras dos semanas, 9 días laborables).
    - **Agentes:** Los 60 agentes de Empresa Demo.
-   - **Volumen:** **23.652 llamadas** y **141.912 criterios**.
-   - **Propósito:** Medición de latencias, rendimiento de queries SQL y memoria con ~50% del volumen.
-3. **`--batch final`**:
+   - **Volumen real en BD:** **~23.652 `MassEvaluationResult`** totales (incluye el pilot). ~141.912 criterios.
+   - **Propósito:** Medición de latencias, rendimiento de queries SQL y memoria con ~50% del volumen. ✅ Validado.
+
+3. **`--batch final`** ⏳ **PENDIENTE — SIGUIENTE PASO**:
    - **Periodo:** Días 14 al 23 de septiembre (semanas 3 y 4, 8 días laborables).
    - **Agentes:** Los 60 agentes de Empresa Demo.
-   - **Volumen:** **22.823 llamadas** y **136.938 criterios**.
+   - **Volumen previsto:** **~22.823 llamadas** adicionales y **~136.938 criterios**.
    - **Propósito:** Completar el histórico hasta la víspera de la demo sin solapar con `scale`.
-4. **`--batch all`**:
+   - **Restricción:** No ejecutar hasta confirmación explícita del usuario.
+
+4. **`--batch all`** ⏳ **PENDIENTE** (alternativa a scale+final):
    - **Periodo:** Todo el mes (1 al 23 de septiembre, 17 días laborables).
    - **Agentes:** Los 60 agentes de Empresa Demo.
-   - **Volumen:** **46.475 llamadas** y **278.850 criterios**.
-   - **Propósito:** Permite generar el mes completo en una única pasada determinista.
+   - **Volumen previsto:** **~46.475 llamadas** y **~278.850 criterios**.
+   - **Nota:** Dado que PILOT y SCALE ya están en BD, ejecutar `all` insertará solo las llamadas del periodo FINAL (días 14-23), omitiendo duplicados por idempotencia. El resultado neto sería equivalente a ejecutar `final`.
 
 > **Regla de progresión:** `pilot` es un subconjunto estricto de `scale`. `scale` y `final` son conjuntos disjuntos (0 solapamiento). La unión de `scale` y `final` es exactamente idéntica a `all`.
 
@@ -96,13 +100,16 @@ $$\mathbf{demo\_sep26\_\{agent\_code\}\_\{YYYYMMDD\}\_\{seq\}}$$
 
 ## 6. Datos Existentes en la Base de Datos
 
-En la base de datos existen actualmente aproximadamente **3.600 análisis antiguos** generados con el prefijo:
+### Datos sintéticos del generador septiembre 2026 (activos)
+- **Prefijo:** `demo_sep26_*`
+- **PILOT:** 2.343 registros (`2026-09-01` a `2026-09-03`).
+- **SCALE:** ~23.652 registros totales (`2026-09-01` a `2026-09-11`).
+- **FINAL:** Pendiente de ejecución (`2026-09-14` a `2026-09-23`).
 
-$$\mathbf{demo\_call\_YYYYMMDD\_XXXX}$$
-
+### Datos del seeder legacy (preexistentes, NO tocar)
+- **Prefijo:** `demo_call_YYYYMMDD_XXXX`
+- **Cantidad aproximada:** ~3.600 análisis.
 - **Directriz obligatoria:** **NO deben eliminarse ni sobreescribirse.**
-- El generador de septiembre convive con ellos gracias al prefijo diferenciado `demo_sep26_`.
-- En una fase posterior se decidirá si se conservan como histórico o si se reemplazan.
 
 ---
 
@@ -163,18 +170,12 @@ python scripts/seed_demo_data.py --batch all --dry-run
 ## 10. Comandos de Aplicación (Solo cuando esté autorizado)
 
 > [!CAUTION]
-> **NO EJECUTAR TODAVÍA.** Estos comandos insertarán registros en la base de datos y solo deben lanzarse cuando se apruebe la fase correspondiente.
+> **SOLO `BATCH FINAL` ESTÁ PENDIENTE.** Ejecutar únicamente previa confirmación explícita del usuario. PILOT y SCALE ya están en base de datos y son idempotentes (se pueden re-ejecutar sin duplicar registros).
 
 Deben ejecutarse preferentemente dentro del contenedor del backend (donde `DATABASE_URL` ya apunta a la red interna de PostgreSQL):
 
 ```bash
-# APLICAR BATCH PILOT (Fase 2):
-python scripts/seed_demo_data.py --batch pilot --apply
-
-# APLICAR BATCH SCALE (Fase 3):
-python scripts/seed_demo_data.py --batch scale --apply
-
-# APLICAR BATCH FINAL (Fase 5):
+# APLICAR BATCH FINAL (Fase 5 — PENDIENTE):
 python scripts/seed_demo_data.py --batch final --apply
 ```
 
@@ -182,19 +183,46 @@ python scripts/seed_demo_data.py --batch final --apply
 
 ## 11. Hoja de Ruta Acordada
 
-- [x] **FASE 1:** Arquitectura, motor de turnos determinista, soporte de batches, dry-run y tests unitarios. *(COMPLETADA en commit `499af55`)*.
-- [ ] **FASE 2:** Ejecutar `BATCH PILOT` (`--batch pilot --apply`) dentro del contenedor.
-  - Validar tablas `bm_mass_evaluation_results` y `bm_mass_evaluation_criterion_results`.
-  - Probar en frontend: Dashboard, Evolución de Servicios, Evolución de Agentes, Comparativa y Seguimiento.
-  - Verificar latencia (< 800ms) y ausencia de errores 500.
-- [ ] **FASE 3:** Si el pilot es satisfactorio, ejecutar `BATCH SCALE` (`--batch scale --apply`).
-- [ ] **FASE 4:** Medir rendimiento con ~25.000 llamadas y comprobar estabilidad visual de los filtros.
+- [x] **FASE 1:** Arquitectura, motor de turnos determinista, soporte de batches, dry-run y tests unitarios. *(Commit `499af55`)*.
+- [x] **FASE 2:** Ejecutar `BATCH PILOT` y validar funcional en frontend y backend.
+  - 2.343 `MassEvaluationResult` + 14.058 `MassEvaluationCriterionResult` insertados.
+  - Dashboard, Evolución de Servicios, Evolución de Agentes, Comparativa y Seguimiento verificados.
+  - Sin errores 500. Latencias correctas.
+- [x] **FASE 3:** Ejecutar `BATCH SCALE` y medir rendimiento con ~23.652 llamadas.
+  - Datos de días 1–11 de septiembre completos en producción para company_id=7.
+  - Boston Medical (company_id=1) intacta.
+- [x] **FASE 4:** Optimizaciones de rendimiento y correcciones críticas. *(Commits `f060f66`, `b5d9470`, `4d9d8a6`)*.
+  - Fast-path columnar en `dashboard_service.py` (evita transferir JSONB completo).
+  - Índice `idx_mass_eval_results_comp_call_ts` creado en producción.
+  - Corrección de error `greenlet_spawn` (MissingGreenlet) en Dashboard — tarjetas N/D resueltas.
+  - Soporte de `company_key`/`company` y aislamiento multitenant estricto en `GET /bm/mass-evaluation-results`.
+  - Filtro de empresa integrado en Lovable (frontend).
 - [ ] **FASE 5:** Ejecutar `BATCH FINAL` (`--batch final --apply`) para completar las ~46.000 llamadas de septiembre.
 - [ ] **FASE 6:** Implementar la segunda gran fase: Trainer, ciclos de entrenamiento, objetivos e informes.
 
 ---
 
-## 12. Segunda Gran Fase: Trainer, Ciclos e Informes (Pendiente)
+## 12. Optimizaciones de Rendimiento Aplicadas en Producción
+
+### Índice PostgreSQL
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_mass_eval_results_comp_call_ts
+ON bm_mass_evaluation_results (company_id, call_timestamp DESC);
+```
+Creado y activo en producción. El endpoint `GET /bm/dashboard/summary` con rango de fechas amplio ejecuta Seq Scan por seleccionar ~61% de la tabla, pero el índice acelera consultas de ventanas temporales cortas.
+
+### Fast-Path Columnar (`app/services/dashboard_service.py`)
+- En PostgreSQL, `get_dashboard_summary` proyecta únicamente columnas escalares y claves JSONB preextraídas vía `astext`, evitando cargar `result_json` completo (~1,1 KB/fila con transcripciones IA).
+- Latencias medidas post-optimización: de ~2.000 ms a valores más bajos en consultas típicas de rango corto.
+- En SQLite (tests), el código cae automáticamente al modo ORM completo sin errores.
+
+### Corrección `greenlet_spawn` (MissingGreenlet)
+- **Causa:** Acceso a columnas diferidas (`deferred`) como `items_json` sobre instancias ORM en sesión asíncrona `asyncpg` provocaba lazy-loading implícito y `MissingGreenlet`.
+- **Solución:** Helper `_get_loaded_attr(obj, attr, default=None)` que inspecciona `obj.__dict__.get(attr)` para instancias ORM sin invocar descriptores instrumentados. Para `Row`/namedtuples usa `getattr` seguro.
+
+---
+
+## 13. Segunda Gran Fase: Trainer, Ciclos e Informes (Pendiente)
 
 Una vez completada la analítica de llamadas, se abordará la capa de entrenamiento:
 
@@ -205,7 +233,7 @@ Una vez completada la analítica de llamadas, se abordará la capa de entrenamie
 
 ---
 
-## 13. Códigos de Simulación de Trainer
+## 14. Códigos de Simulación de Trainer
 
 En el commit `53db317` se simplificaron los códigos de simulación de Empresa Demo para que los agentes puedan pronunciarlos con naturalidad por teléfono:
 
@@ -218,37 +246,38 @@ En el commit `53db317` se simplificaron los códigos de simulación de Empresa D
 
 ---
 
-## 14. Restricciones y Salvaguardas Críticas
+## 15. Restricciones y Salvaguardas Críticas
 
-- **PROHIBIDO** modificar o consultar de forma destructiva `company_id=1` (Boston Medical).
+- **PROHIBIDO** modificar o consultar de forma destructiva `company_id=1` (Boston Medical). Debe permanecer intacta.
 - **PROHIBIDO** tocar empresas eliminadas o inactivas (`company_id=2` Gesalux, `company_id=3` Empresa Demo1).
 - **PROHIBIDO** generar registros fuera de `company_id=7`.
 - **PROHIBIDO** generar llamadas con fecha posterior al `2026-09-23 23:59:59`.
 - **PROHIBIDO** cruzar tipologías o criterios entre servicios distintos.
 - **PROHIBIDO** ejecutar `--apply` en producción sin confirmación y orden explícita del usuario.
+- **PROHIBIDO** ejecutar `BATCH FINAL` ni `BATCH ALL` hasta recibir la orden del usuario.
 
 ---
 
-## 15. Historial de Commits Relevantes
+## 16. Historial de Commits Relevantes
 
-- **`499af55`** — `feat(demo): add deterministic shift-based september 2026 generator with batches and dry-run`
-  *Implementa el motor de turnos para septiembre 2026, calendarización determinista, batches (pilot/scale/final/all), idempotencia y suite de tests.*
-- **`4bd6ae0`** — `fix(admin): validate purge targets by production company names`
-  *Ajusta la verificación de empresas a purgar mediante nombres exactos en lugar de keys.*
-- **`53db317`** — `fix(trainer): simplify demo simulation codes`
-  *Moderniza los códigos de roleplay telefónico a formatos cortos (ATEN01, VENT01).*
-- **`4fa3183`** — `fix(analytics): make service evolution item catalog dynamic`
-  *Garantiza que el catálogo de ítems de Evolución Servicios filtre dinámicamente por empresa/servicio.*
-- **`66dd373`** — `fix(analytics): fix typology item cascade and zero-call service evolution`
-  *Corrige el cálculo de evoluciones cuando un servicio tiene 0 llamadas y la cascada tipología -> ítems.*
-- **`3505b77`** — `fix(analytics): enforce cascading filters and fix demo agent catalog`
-  *Cascada de filtros Empresa -> Servicio -> Equipo -> Agente -> Tipología.*
-- **`78d0b1d`** — `fix(demo): dynamically resolve demo company for agent names and code mappings`
-  *Resolución dinámica de nombres y códigos de agentes demo.*
+| Commit | Mensaje | Contenido |
+|---|---|---|
+| `4d9d8a6` | `fix: prevent dashboard greenlet errors and enforce result tenancy` | Corrección arquitectónica de `MissingGreenlet`/`greenlet_spawn` en Dashboard. Soporte `company_key`/`company` y aislamiento multitenant en `GET /bm/mass-evaluation-results`. Suite de 9 tests. |
+| `f060f66` | `fix(performance): optimize dashboard summary column loading` | Fast-path columnar en `get_dashboard_summary`: proyección selectiva de columnas escalares y claves JSONB en PostgreSQL. |
+| `b5d9470` | `fix(performance): optimize demo analytics queries` | Optimizaciones en queries de analítica para Empresa Demo. |
+| `44e9fc4` | `fix(demo): reconcile struct_reg contract and verify generator temporal determinism` | Reconciliación del contrato `struct_reg` y verificación de determinismo temporal del generador. |
+| `ced6399` | `docs(demo): add comprehensive handoff document for september 2026 generator` | Primera versión de este documento (estado: FASE 1 completada). |
+| `499af55` | `feat(demo): add deterministic shift-based september 2026 generator with batches and dry-run` | Motor de turnos, calendarización determinista, batches (pilot/scale/final/all), idempotencia y suite de tests. |
+| `4bd6ae0` | `fix(admin): validate purge targets by production company names` | Verificación de empresas a purgar mediante nombres exactos. |
+| `53db317` | `fix(trainer): simplify demo simulation codes` | Moderniza los códigos de roleplay telefónico a formatos cortos (ATEN01, VENT01). |
+| `4fa3183` | `fix(analytics): make service evolution item catalog dynamic` | Catálogo de ítems de Evolución Servicios filtra dinámicamente por empresa/servicio. |
+| `66dd373` | `fix(analytics): fix typology item cascade and zero-call service evolution` | Corrige evoluciones cuando un servicio tiene 0 llamadas y la cascada tipología → ítems. |
+| `3505b77` | `fix(analytics): enforce cascading filters and fix demo agent catalog` | Cascada de filtros Empresa → Servicio → Equipo → Agente → Tipología. |
+| `78d0b1d` | `fix(demo): dynamically resolve demo company for agent names and code mappings` | Resolución dinámica de nombres y códigos de agentes demo. |
 
 ---
 
-## 16. Continuación desde Otro Ordenador
+## 17. Continuación desde Otro Ordenador
 
 Para continuar el trabajo desde una nueva máquina o sesión:
 
@@ -256,16 +285,31 @@ Para continuar el trabajo desde una nueva máquina o sesión:
 2. Verificar que el entorno local se encuentra exactamente en:
    ```bash
    git rev-parse HEAD
-   # Debe coincidir con origin/main
+   # Debe devolver: 4d9d8a6aafca5d715abf60715700001e3a9542f2
    ```
-3. **Leer este documento (`docs/DEMO_SEPTEMBER_GENERATOR_HANDOFF.md`) completo** antes de proponer o ejecutar cambios.
-4. Revisar [`scripts/seed_demo_data.py`](file:///c:/Users/danim/Proyectos/bm-analysis-service/scripts/seed_demo_data.py) y [`app/services/demo_september_generator.py`](file:///c:/Users/danim/Proyectos/bm-analysis-service/app/services/demo_september_generator.py).
-5. Ejecutar los tests unitarios para verificar la integridad del entorno:
+3. **Leer este documento completo** antes de proponer o ejecutar cambios.
+4. Ejecutar los tests para verificar la integridad del entorno:
    ```bash
-   python -m pytest app/utils/test_seed_demo_shifts.py -v
+   python -m pytest app/utils/test_seed_demo_shifts.py app/utils/test_dashboard_performance_contract.py tests/test_dashboard_greenlet_and_results_tenancy.py -v
+   # Resultado esperado: 30 passed (al menos)
    ```
-6. Ejecutar el dry-run del pilot para comprobar la salida:
+5. **El siguiente paso autorizado es `BATCH FINAL`.** Ejecutar dry-run primero:
    ```bash
-   python scripts/seed_demo_data.py --batch pilot --dry-run
+   python scripts/seed_demo_data.py --batch final --dry-run
    ```
-7. **NO ejecutar `--apply`** hasta recibir la orden expresa del usuario para arrancar la **FASE 2**.
+   Comprobar que el volumen esperado (~22.823 llamadas, días 14-23 de septiembre) es correcto y no se solapan con SCALE (días 1-11).
+6. **NO ejecutar `--apply`** hasta recibir la orden expresa del usuario.
+
+### Estado de producción en el momento del handoff:
+
+| Elemento | Estado |
+|---|---|
+| Boston Medical (`company_id=1`) | ✅ Intacta, sin modificaciones |
+| Empresa Demo PILOT (`company_id=7`, 1-3 Sep) | ✅ En BD: 2.343 resultados + 14.058 criterios |
+| Empresa Demo SCALE (`company_id=7`, 1-11 Sep) | ✅ En BD: ~23.652 resultados totales |
+| Empresa Demo FINAL (`company_id=7`, 14-23 Sep) | ⏳ Pendiente |
+| Índice `idx_mass_eval_results_comp_call_ts` | ✅ Creado en producción |
+| Corrección `greenlet_spawn` Dashboard | ✅ En producción (commit `4d9d8a6`) |
+| Tenancy `GET /bm/mass-evaluation-results` | ✅ En producción (commit `4d9d8a6`) |
+| Filtro de empresa en Lovable (frontend) | ✅ Integrado |
+| Deploy | ✅ Último deploy incluye commit `4d9d8a6` |
