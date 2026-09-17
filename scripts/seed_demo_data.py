@@ -36,12 +36,35 @@ Populates:
    - 4 Published TrainerSimulation records with versions
    - 50 TrainerSession and TrainerEvaluation records with score & structured feedback
 
-Usage:
+Usage (Legacy 90-day base seed):
   python scripts/seed_demo_data.py --help
   python scripts/seed_demo_data.py --dry-run
   python scripts/seed_demo_data.py --apply
   python scripts/seed_demo_data.py --apply --validate
   python scripts/seed_demo_data.py --apply --only analytics
+
+Usage (September 2026 Realistic Shift-Based Batches):
+  # 1. Pilot Batch (Sep 1-3, 15 agents, ~2,000-3,000 calls):
+  python scripts/seed_demo_data.py --batch pilot --dry-run
+  python scripts/seed_demo_data.py --batch pilot --apply
+
+  # 2. Scale Batch (Sep 1-11, all agents, ~20,000-24,000 calls):
+  python scripts/seed_demo_data.py --batch scale --dry-run
+  python scripts/seed_demo_data.py --batch scale --apply
+
+  # 3. Final Batch (Sep 14-23, all agents, ~20,000-24,000 calls):
+  python scripts/seed_demo_data.py --batch final --dry-run
+  python scripts/seed_demo_data.py --batch final --apply
+
+  # 4. All September (Sep 1-23, full month, ~42,000-48,000 calls):
+  python scripts/seed_demo_data.py --batch all --dry-run
+  python scripts/seed_demo_data.py --batch all --apply
+
+Idempotency & Safety:
+  - All calls generated with deterministic keys: demo_sep26_{code}_{YYYYMMDD}_{seq}
+  - Existing calls are automatically skipped without duplication.
+  - Re-running any batch only inserts missing calls.
+  - --dry-run is strictly read-only and displays full shift/volume metrics.
 """
 import argparse
 import asyncio
@@ -1754,23 +1777,147 @@ def parse_args():
         description="Generate realistic synthetic demo data for Empresa Demo."
     )
     parser.add_argument("--company-id", type=int, default=None, help="Target demo company ID (defaults to finding 'empresa-demo')")
-    parser.add_argument("--dry-run", action="store_true", default=False, help="Roll back transaction without committing changes")
+    parser.add_argument("--dry-run", action="store_true", default=False, help="Roll back transaction without committing changes (default for --batch)")
     parser.add_argument("--apply", action="store_true", default=False, help="Commit generated data to database")
-    parser.add_argument("--only", choices=["analytics", "training", "trainer", "all"], default="all", help="Subset of demo data to seed")
-    parser.add_argument("--validate", action="store_true", default=False, help="Run validation assertions after seeding")
+    parser.add_argument("--batch", choices=["pilot", "scale", "final", "all"], default=None, help="Execute September 2026 shift-based batch: pilot, scale, final, all")
+    parser.add_argument("--chunk-size", type=int, default=600, help="Batch chunk size for bulk database inserts (default: 600)")
+    parser.add_argument("--only", choices=["analytics", "training", "trainer", "all"], default="all", help="Subset of demo data to seed (legacy mode)")
+    parser.add_argument("--validate", action="store_true", default=False, help="Run validation assertions after seeding (legacy mode)")
     parser.add_argument("--db-url", type=str, default=None, help="Optional custom database URL")
     return parser.parse_args()
+
+
+def print_batch_dry_run_report(summary: Dict[str, Any]):
+    """Format and display detailed statistical dry-run report for September 2026 batches."""
+    print("\n" + "=" * 80)
+    print(f"SEPTEMBER 2026 BATCH DRY RUN: '{summary['batch'].upper()}'")
+    print(f"Target Company ID: {summary['company_id']} (Empresa Demo)")
+    print("=" * 80)
+    dr = summary.get("date_range", {})
+    print(f"Date Range: {dr.get('start')} -> {dr.get('end')}")
+    print(f"Target Working Days : {summary['target_days_count']} days")
+    print(f"Target Agents Pool  : {summary['target_agents_count']} agents")
+    print(f"Total Evaluations   : {summary['total_mass_evaluations']:,} MassEvaluationResult rows")
+    print(f"Total Criteria Rows : {summary['total_criterion_results_estimated']:,} MassEvaluationCriterionResult rows (x6 per call)")
+    print("-" * 80)
+    print("DAILY PLANNED ACTIVITY (Shifts & Working Days):")
+    print(f"  {'Date':12} | {'Calls':>7} | {'Active Agents':>14} | {'Inactive / Off':>15}")
+    print("  " + "-" * 56)
+    for d, c_count in summary["calls_by_day"].items():
+        act = summary["active_agents_by_day"].get(d, 0)
+        inact = summary["inactive_agents_by_day"].get(d, 0)
+        print(f"  {d:12} | {c_count:7,d} | {act:14d} | {inact:15d}")
+
+    print("-" * 80)
+    print("VOLUME BY SERVICE:")
+    for svc, count in summary["calls_by_service"].items():
+        print(f"  - {svc:25}: {count:7,d} calls")
+
+    print("-" * 80)
+    print("VOLUME BY TEAM:")
+    for tm, count in summary["calls_by_team"].items():
+        print(f"  - {tm:25}: {count:7,d} calls")
+
+    print("-" * 80)
+    print("AGENT CALL DISTRIBUTION IN BATCH:")
+    dist = summary["agent_distribution"]
+    print(f"  - Min calls per agent : {dist['min_calls_per_agent']}")
+    print(f"  - Max calls per agent : {dist['max_calls_per_agent']}")
+    print(f"  - Avg calls per agent : {dist['avg_calls_per_agent']}")
+
+    print("-" * 80)
+    print("EXPECTED INBOUND / OUTBOUND RATIOS:")
+    for svc, ratio in summary["inbound_outbound_ratio_expected"].items():
+        print(f"  - {svc:25}: {ratio}")
+
+    print("-" * 80)
+    print("EXPECTED CALL DURATIONS BY TEAM:")
+    for tm, dur in summary["call_duration_expected_seconds"].items():
+        print(f"  - {tm:25}: {dur}")
+
+    print("=" * 80)
+    print("DRY RUN COMPLETE: Pure in-memory calculation. No records were written to DB.")
+    print("To execute this batch and commit to database, run with --apply.")
+    print("=" * 80 + "\n")
 
 
 async def async_main():
     args = parse_args()
     apply_mode = bool(args.apply)
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # Branch 1: September 2026 Batch Generator
+    # ─────────────────────────────────────────────────────────────────────────
+    if args.batch:
+        from app.services.demo_september_generator import (
+            DemoSeptemberGenerator,
+            DEMO_COMPANY_ID,
+        )
+
+        cid = args.company_id or DEMO_COMPANY_ID
+        generator = DemoSeptemberGenerator(
+            company_id=cid,
+            chunk_size=args.chunk_size,
+        )
+
+        # In dry-run mode (default unless --apply is passed), do not connect to DB
+        if not apply_mode or args.dry_run:
+            summary = generator.dry_run_summary(args.batch)
+            print_batch_dry_run_report(summary)
+            return
+
+        # Apply mode: connect to database and apply batch
+        settings = get_settings()
+        db_url = args.db_url or os.environ.get("DATABASE_URL") or settings.database_url
+        if not db_url:
+            print("ERROR: DATABASE_URL is not set.")
+            sys.exit(1)
+
+        # Normalize postgresql:// to postgresql+asyncpg:// if needed
+        if db_url.startswith("postgresql://"):
+            db_url = "postgresql+asyncpg://" + db_url[len("postgresql://"):]
+        elif db_url.startswith("postgres://"):
+            db_url = "postgresql+asyncpg://" + db_url[len("postgres://"):]
+
+        engine = create_async_engine(db_url, echo=False)
+        print("=" * 80)
+        print(f"DEMO SEPTEMBER 2026 GENERATOR - Batch: {args.batch.upper()} [APPLY MODE]")
+        print(f"Target Company ID: {cid}")
+        print("=" * 80)
+
+        try:
+            async with AsyncSession(engine) as session:
+                async with session.begin():
+                    result = await generator.execute_batch(
+                        db=session,
+                        batch_name=args.batch,
+                        dry_run=False,
+                    )
+
+            print("\n" + "=" * 80)
+            print(f"SUCCESS: Batch '{args.batch}' committed to database!")
+            print(f"  - Newly inserted calls   : {result['inserted_calls']:,}")
+            print(f"  - Newly inserted criteria: {result.get('inserted_criteria', 0):,}")
+            print(f"  - Skipped (already existed): {result.get('skipped_calls', 0):,}")
+            print("=" * 80 + "\n")
+        except Exception as e:
+            logger.exception("Batch execution failed: %s", e)
+            sys.exit(1)
+        return
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Branch 2: Legacy 90-Day Base Seeder
+    # ─────────────────────────────────────────────────────────────────────────
     settings = get_settings()
     db_url = args.db_url or os.environ.get("DATABASE_URL") or settings.database_url
     if not db_url:
         print("ERROR: DATABASE_URL is not set.")
         sys.exit(1)
+
+    if db_url.startswith("postgresql://"):
+        db_url = "postgresql+asyncpg://" + db_url[len("postgresql://"):]
+    elif db_url.startswith("postgres://"):
+        db_url = "postgresql+asyncpg://" + db_url[len("postgres://"):]
 
     engine = create_async_engine(db_url, echo=False)
 
@@ -1819,6 +1966,7 @@ async def async_main():
     except Exception as e:
         logger.exception("Demo data seeding failed: %s", e)
         sys.exit(1)
+
 
 
 if __name__ == "__main__":
