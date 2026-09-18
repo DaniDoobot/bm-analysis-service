@@ -996,6 +996,11 @@ class PersonalizedTrainingService:
 
         # Defensive JSONB lists normalizations
         strengths = r.strengths_json
+        if isinstance(strengths, dict):
+            for k in ["fortalezas", "strengths", "items", "puntos_fuertes"]:
+                if isinstance(strengths.get(k), list):
+                    strengths = strengths[k]
+                    break
         normalized_strengths = []
         if isinstance(strengths, list):
             for item in strengths:
@@ -1011,8 +1016,32 @@ class PersonalizedTrainingService:
                         "description": str(item),
                         "evidence": ""
                     })
+
+        if not normalized_strengths and isinstance(final_report, dict):
+            for k in ["strengths", "fortalezas", "puntos_fuertes"]:
+                f_str = final_report.get(k)
+                if isinstance(f_str, list) and f_str:
+                    for item in f_str:
+                        if isinstance(item, dict):
+                            normalized_strengths.append({
+                                "title": str(item.get("title") or item.get("titulo") or "Punto Fuerte"),
+                                "description": str(item.get("description") or item.get("descripcion") or ""),
+                                "evidence": str(item.get("evidence") or item.get("evidencia") or "")
+                            })
+                        else:
+                            normalized_strengths.append({
+                                "title": "Punto Fuerte",
+                                "description": str(item),
+                                "evidence": ""
+                            })
+                    break
         
         weaknesses = r.weaknesses_json
+        if isinstance(weaknesses, dict):
+            for k in ["areas_mejora", "weaknesses", "items", "puntos_mejora"]:
+                if isinstance(weaknesses.get(k), list):
+                    weaknesses = weaknesses[k]
+                    break
         normalized_weaknesses = []
         if isinstance(weaknesses, list):
             for item in weaknesses:
@@ -1029,7 +1058,31 @@ class PersonalizedTrainingService:
                         "evidence": ""
                     })
 
+        if not normalized_weaknesses and isinstance(final_report, dict):
+            for k in ["weaknesses", "areas_mejora", "puntos_mejora"]:
+                f_wk = final_report.get(k)
+                if isinstance(f_wk, list) and f_wk:
+                    for item in f_wk:
+                        if isinstance(item, dict):
+                            normalized_weaknesses.append({
+                                "title": str(item.get("title") or item.get("titulo") or "Área de Mejora"),
+                                "description": str(item.get("description") or item.get("descripcion") or ""),
+                                "evidence": str(item.get("evidence") or item.get("evidencia") or "")
+                            })
+                        else:
+                            normalized_weaknesses.append({
+                                "title": "Área de Mejora",
+                                "description": str(item),
+                                "evidence": ""
+                            })
+                    break
+
         notable = r.notable_data_json
+        if isinstance(notable, dict):
+            for k in ["notable_data", "datos_notables", "items"]:
+                if isinstance(notable.get(k), list):
+                    notable = notable[k]
+                    break
         normalized_notable = []
         if isinstance(notable, list):
             for item in notable:
@@ -1048,6 +1101,11 @@ class PersonalizedTrainingService:
 
         # Process general objectives using match helper
         gen_objectives = r.general_objectives_json
+        if isinstance(gen_objectives, dict):
+            for k in ["general_objectives", "objectives", "items"]:
+                if isinstance(gen_objectives.get(k), list):
+                    gen_objectives = gen_objectives[k]
+                    break
         normalized_gen = []
         if isinstance(gen_objectives, list):
             matched_evals = PersonalizedTrainingService._match_objectives_list(gen_objectives, obj_evals, "general")
@@ -1092,6 +1150,11 @@ class PersonalizedTrainingService:
 
         # Process specific objectives using match helper
         spec_objectives = r.specific_objectives_json
+        if isinstance(spec_objectives, dict):
+            for k in ["specific_objectives", "objectives", "items"]:
+                if isinstance(spec_objectives.get(k), list):
+                    spec_objectives = spec_objectives[k]
+                    break
         normalized_spec = []
         if isinstance(spec_objectives, list):
             matched_evals = PersonalizedTrainingService._match_objectives_list(spec_objectives, obj_evals, "specific")

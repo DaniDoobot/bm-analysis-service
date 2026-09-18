@@ -407,6 +407,26 @@ _SW_POOL = {
                     "description": "Mejorar el hábito de documentar la información clave en tiempo real en lugar de hacerlo en post-llamada.",
                     "evidence": "En el 15% de las interacciones el registro se completa más de 3 minutos después del cierre."
                 },
+                {
+                    "title": "Proactividad en Información Preventiva",
+                    "description": "Anticipar posibles dudas futuras del cliente antes de que finalice la interacción para reducir contactos posteriores.",
+                    "evidence": "Solo el 20% de las llamadas incluyen recomendaciones preventivas proactivas."
+                },
+                {
+                    "title": "Agilidad en Navegación Multitarea",
+                    "description": "Mejorar la velocidad de consulta en herramientas internas mientras se mantiene la conversación fluida.",
+                    "evidence": "Pausas de silencio superiores a 8 segundos en el 15% de las llamadas mientras consulta el aplicativo."
+                },
+                {
+                    "title": "Derivación con Contexto Estructurado",
+                    "description": "Asegurar que cuando se requiere derivar una consulta compleja, el resumen transferido sea exhaustivo.",
+                    "evidence": "En el 12% de las derivaciones falta registrar un dato clave recogido en la llamada."
+                },
+                {
+                    "title": "Exploración de Necesidades Complementarias",
+                    "description": "Aprovechar llamadas de servicio resueltas satisfactoriamente para indagar si el cliente requiere asistencia en otros canales.",
+                    "evidence": "Sondeo de necesidades adicionales realizado en solo el 10% de interacciones con alta satisfacción."
+                },
             ],
         },
         "solid": {
@@ -431,6 +451,16 @@ _SW_POOL = {
                     "description": "Mantiene una actitud cordial y orientada a la solución incluso en interacciones de mayor duración.",
                     "evidence": "Valoración de trato de 8.1/10 de media en encuestas de satisfacción del periodo."
                 },
+                {
+                    "title": "Eficacia en el Uso de la Base de Conocimiento",
+                    "description": "Localiza y aplica los procedimientos documentados con rapidez para dar respuestas precisas.",
+                    "evidence": "Uso correcto de la documentación técnica en el 90% de las auditorías."
+                },
+                {
+                    "title": "Capacidad de Desescalada Inicial",
+                    "description": "Mantiene la calma y reconduce al cliente ante objeciones leves sobre el servicio.",
+                    "evidence": "Índice de retención en llamadas con discrepancias iniciales del 82%."
+                },
             ],
             "weaknesses": [
                 {
@@ -442,6 +472,26 @@ _SW_POOL = {
                     "title": "Uso más Consistente de Preguntas Abiertas de Exploración",
                     "description": "Utilizar preguntas abiertas con mayor frecuencia para que el cliente pueda expresar su situación con sus propias palabras.",
                     "evidence": "Solo el 45% de las llamadas incluyen al menos dos preguntas abiertas antes de la fase de resolución."
+                },
+                {
+                    "title": "Confirmación Explícita de Comprensión del Cliente",
+                    "description": "Verificar activamente que el usuario ha asimilado las instrucciones complejas antes de cerrar.",
+                    "evidence": "Pregunta de verificación ausente en el 40% de las consultas de tramitación."
+                },
+                {
+                    "title": "Manejo Estructurado de Tiempos de Espera",
+                    "description": "Informar adecuadamente al cliente antes de poner la llamada en espera y retomar con agradecimiento.",
+                    "evidence": "En 1 de cada 4 llamadas con espera no se informa del tiempo estimado al cliente."
+                },
+                {
+                    "title": "Cierre Asertivo con Plazos Comprometidos",
+                    "description": "Concluir cada llamada especificando con exactitud quién y cuándo contactará de nuevo.",
+                    "evidence": "Compromiso de fecha concreta ausente en el 30% de las incidencias abiertas."
+                },
+                {
+                    "title": "Documentación Detallada en el Sistema",
+                    "description": "Completar los campos de categorización e incidencias en la ficha del cliente con mayor detalle.",
+                    "evidence": "Falta de detalle en observaciones en el 22% de los tickets gestionados."
                 },
             ],
         },
@@ -456,6 +506,26 @@ _SW_POOL = {
                     "title": "Capacidad para Resolver Consultas Simples con Eficacia",
                     "description": "Gestiona las consultas de tipología sencilla con fluidez y sin necesidad de apoyo adicional.",
                     "evidence": "FCR del 68% en consultas básicas, por encima del objetivo inicial para este nivel de experiencia."
+                },
+                {
+                    "title": "Puntualidad y Adherencia al Horario de Atención",
+                    "description": "Mantiene una alta adherencia a los turnos y disponibilidad en cola de llamadas.",
+                    "evidence": "Adherencia al turno del 95% durante las últimas cuatro semanas."
+                },
+                {
+                    "title": "Trato Respetuoso y Amabilidad Constante",
+                    "description": "Dirige la conversación con educación y amabilidad constante hacia el interlocutor.",
+                    "evidence": "Cero quejas de trato en las llamadas auditadas del mes."
+                },
+                {
+                    "title": "Asimilación Rápida de Nuevas Políticas del Servicio",
+                    "description": "Incorpora con agilidad las modificaciones de protocolos comunicadas por supervisión.",
+                    "evidence": "100% de acierto en el test de actualización normativa del servicio."
+                },
+                {
+                    "title": "Compromiso con los Objetivos del Equipo",
+                    "description": "Muestra implicación activa en las dinámicas formativas y sesiones de calibración grupales.",
+                    "evidence": "Participación activa en el 100% de las sesiones formativas del ciclo."
                 },
             ],
             "weaknesses": [
@@ -473,6 +543,21 @@ _SW_POOL = {
                     "title": "Escucha Completa sin Adelantar la Solución",
                     "description": "Evitar ofrecer la respuesta antes de que el cliente haya terminado de exponer su situación.",
                     "evidence": "Se registran interrupciones prematuras en el 30% de las llamadas auditadas."
+                },
+                {
+                    "title": "Seguridad en la Argumentación ante Dudas Complejas",
+                    "description": "Transmitir firmeza y tranquilidad cuando la consulta del cliente requiere una explicación detallada.",
+                    "evidence": "Uso de muletillas de inseguridad en 4 de cada 10 llamadas de dificultad media."
+                },
+                {
+                    "title": "Gestión del Silencio Operativo",
+                    "description": "Evitar silencios prolongados mientras busca información en el sistema, manteniendo al cliente informado.",
+                    "evidence": "Silencios superiores a 12 segundos detectados en el 35% de sus llamadas."
+                },
+                {
+                    "title": "Aplicación Rigurosa del Flujo de Identificación",
+                    "description": "Seguir el orden establecido para la validación de identidad del titular al inicio del contacto.",
+                    "evidence": "Omisión de uno de los datos de validación en el 25% de las llamadas auditadas."
                 },
             ],
         },
@@ -505,6 +590,11 @@ _SW_POOL = {
                     "description": "Establece una conexión genuina con el cliente en los primeros instantes que facilita la apertura a la conversación comercial.",
                     "evidence": "Valoración de naturalidad y cercanía de 9.0/10 en auditorías del mes."
                 },
+                {
+                    "title": "Capacidad de Negociación sin Concesiones Prematuras",
+                    "description": "Mantiene el valor de la oferta defendiendo el paquete completo antes de flexibilizar condiciones.",
+                    "evidence": "Retención del margen comercial en el 85% de las operaciones cerradas."
+                },
             ],
             "weaknesses": [
                 {
@@ -516,6 +606,26 @@ _SW_POOL = {
                     "title": "Documentación Inmediata del Compromiso en CRM",
                     "description": "Registrar el siguiente paso acordado durante la llamada, no en el momento de post-procesado.",
                     "evidence": "En el 18% de las llamadas el compromiso de seguimiento se anota más de 10 minutos después del cierre."
+                },
+                {
+                    "title": "Planificación de Llamadas de Recontacto",
+                    "description": "Agendar el recontacto en las franjas de mayor receptividad del decisor comercial.",
+                    "evidence": "El 25% de los recontactos se programan en horas de baja tasa de contacto."
+                },
+                {
+                    "title": "Adaptación del Discurso al Nivel del Cliente",
+                    "description": "Modular la densidad de características técnicas según el perfil del comprador.",
+                    "evidence": "Exceso de especificaciones técnicas detectado en el 15% de llamadas con perfil no técnico."
+                },
+                {
+                    "title": "Cualificación del Presupuesto en Fase Temprana",
+                    "description": "Validar la horquilla presupuestaria del cliente antes de profundizar en opciones superiores.",
+                    "evidence": "Pregunta de validación presupuestaria omitida en el 20% de propuestas elaboradas."
+                },
+                {
+                    "title": "Seguimiento Sistemático de Propuestas Enviadas",
+                    "description": "Establecer una cadencia de seguimiento estructurada tras el envío de la propuesta formal.",
+                    "evidence": "El 18% de las propuestas enviadas no reciben seguimiento en las primeras 48 horas."
                 },
             ],
         },
@@ -541,6 +651,16 @@ _SW_POOL = {
                     "description": "Explica las características y ventajas del servicio de forma ordenada y comprensible.",
                     "evidence": "Claridad de propuesta valorada con 7.8/10 de media en auditorías del periodo."
                 },
+                {
+                    "title": "Detección de Señales de Compra",
+                    "description": "Identifica con rapidez el interés del interlocutor para acelerar el avance hacia el cierre.",
+                    "evidence": "Intento de cierre inmediato tras señal de compra en el 70% de las interacciones."
+                },
+                {
+                    "title": "Constancia en la Prospección Comercial",
+                    "description": "Mantiene un ritmo sostenido de contactos efectivos a lo largo de toda la jornada.",
+                    "evidence": "Cumplimiento del 100% de los objetivos diarios de actividad comercial."
+                },
             ],
             "weaknesses": [
                 {
@@ -552,6 +672,26 @@ _SW_POOL = {
                     "title": "Mejor Respuesta ante la Objeción de Postergación",
                     "description": "Ante aplazamientos del tipo 'ya llamaré', explorar la duda concreta en lugar de aceptar la respuesta y cerrar la llamada.",
                     "evidence": "El 55% de los aplazamientos se cierran sin exploración de la causa real del retraso."
+                },
+                {
+                    "title": "Resistencia a Conceder Descuentos Prematuros",
+                    "description": "Defender el precio de tarifa con argumentos de retorno de inversión antes de ofrecer promociones.",
+                    "evidence": "Descuento aplicado en el primer intento de negociación en el 38% de las ventas."
+                },
+                {
+                    "title": "Preguntas de Cualificación de Decisión",
+                    "description": "Asegurar que se está dialogando con la persona que tiene la capacidad real de contratación.",
+                    "evidence": "En el 30% de las llamadas no se verifica si el interlocutor es el decisor final."
+                },
+                {
+                    "title": "Estructuración de Llamadas de Seguimiento",
+                    "description": "Iniciar las llamadas de recontacto recordando el dolor acordado en lugar de preguntas genéricas.",
+                    "evidence": "Apertura débil en el 45% de las llamadas de seguimiento comercial."
+                },
+                {
+                    "title": "Manejo de Competencia con Enfoque Diferencial",
+                    "description": "Resaltar las fortalezas propias sin desacreditar a competidores mencionados por el cliente.",
+                    "evidence": "Argumentación poco diferenciada ante mención de la competencia en el 28% de los casos."
                 },
             ],
         },
@@ -566,6 +706,26 @@ _SW_POOL = {
                     "title": "Claridad en la Presentación Básica del Servicio",
                     "description": "Explica los elementos principales de la propuesta de forma comprensible para el cliente.",
                     "evidence": "Valoración de claridad de propuesta de 7.0/10, dentro del rango esperado para el nivel de experiencia."
+                },
+                {
+                    "title": "Alta Resiliencia ante Respuestas Negativas",
+                    "description": "Mantiene la motivación y el tono positivo a pesar de recibir negativas consecutivas.",
+                    "evidence": "Recuperación del ritmo de llamadas inmediata tras rechazos comerciales."
+                },
+                {
+                    "title": "Cumplimiento de Fórmulas de Cortesía Comercial",
+                    "description": "Respeta las pautas corporativas de presentación y despedida en todas las interacciones.",
+                    "evidence": "100% de cumplimiento en fórmulas de cortesía comercial en auditorías."
+                },
+                {
+                    "title": "Curva de Aprendizaje Acelerada en Producto",
+                    "description": "Demuestra dominio creciente de las características y ventajas del catálogo comercial.",
+                    "evidence": "Aprobación del test de producto comercial con nota superior a 8.5."
+                },
+                {
+                    "title": "Disciplina en el Registro de Estados de Llamada",
+                    "description": "Tipifica correctamente el resultado de cada llamada en el CRM comercial.",
+                    "evidence": "98% de llamadas tipificadas adecuadamente en el sistema de ventas."
                 },
             ],
             "weaknesses": [
@@ -583,6 +743,21 @@ _SW_POOL = {
                     "title": "Cierre con Alternativa Concreta en lugar de Pregunta Abierta",
                     "description": "Sustituir cierres abiertos del tipo '¿le interesa?' por técnicas de doble alternativa que faciliten la toma de decisión.",
                     "evidence": "Técnica de doble alternativa presente solo en el 18% de los intentos de cierre."
+                },
+                {
+                    "title": "Superación de la Barrera Inicial del Interlocutor",
+                    "description": "Generar suficiente intriga en los primeros 20 segundos para evitar cortes rápidos.",
+                    "evidence": "Abandono en los primeros 30 segundos en el 42% de los contactos fríos."
+                },
+                {
+                    "title": "Manejo de Preguntas Incisivas del Cliente",
+                    "description": "Responder con serenidad y datos contrastados ante preguntas imprevistas sobre el servicio.",
+                    "evidence": "Vacilación o pausas prolongadas en 3 de cada 10 objeciones técnicas."
+                },
+                {
+                    "title": "Solicitud Activa del Compromiso Comercial",
+                    "description": "No dar por finalizada una llamada de ventas sin haber solicitado una acción concreta al cliente.",
+                    "evidence": "Llamada finalizada sin petición de cita o contratación en el 35% de los contactos."
                 },
             ],
         },
@@ -1230,8 +1405,8 @@ def generate_enhanced_training_cycle_data(
     sw_pool_tier = _SW_POOL[cat_key][tier]
     str_pool = sw_pool_tier["strengths"]
     wk_pool = sw_pool_tier["weaknesses"]
-    str_count = 3 if tier == "top" else (3 if tier == "solid" else 2)
-    wk_count = 2 if tier == "top" else (2 if tier == "solid" else 3)
+    str_count = 4 if (agent_num % 2 == 0) else 3
+    wk_count = 4 if ((agent_num + 1) % 2 == 0) else 3
     strengths_list = [str_pool[(agent_num + i) % len(str_pool)] for i in range(str_count)]
     weaknesses_list = [wk_pool[(agent_num + i) % len(wk_pool)] for i in range(wk_count)]
 
@@ -1290,6 +1465,7 @@ def generate_enhanced_training_cycle_data(
             obj_status = "SUPERADO" if is_sup else "NO SUPERADO"
             objs_status.append({
                 "title": obj["title"],
+                "type": "general",
                 "status": obj_status,
                 "base_score": base_s,
                 "score": final_s,
@@ -1306,6 +1482,7 @@ def generate_enhanced_training_cycle_data(
             obj_status = "SUPERADO" if is_sup else "NO SUPERADO"
             objs_status.append({
                 "title": obj["title"],
+                "type": "specific",
                 "status": obj_status,
                 "base_score": base_s,
                 "score": final_s,
@@ -1318,6 +1495,8 @@ def generate_enhanced_training_cycle_data(
         final_report = {
             "summary_final": summary_general,
             "evolution_assessment": evolution_summary,
+            "strengths": strengths_list,
+            "weaknesses": weaknesses_list,
             "next_steps": (
                 f"Mantener la frecuencia de calibración quincenal y avanzar hacia los objetivos del siguiente "
                 f"bloque de formación en {service_label}, con foco en los aspectos de mayor impacto en la "
