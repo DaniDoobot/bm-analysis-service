@@ -400,6 +400,7 @@ async def init_db():
                 ("training_numeric_code", "TEXT", "NULL"),
                 ("training_code_enabled", "BOOLEAN", "DEFAULT TRUE NOT NULL"),
                 ("training_code_updated_at", "TIMESTAMPTZ", "DEFAULT CURRENT_TIMESTAMP NOT NULL"),
+                ("include_in_scheduler", "BOOLEAN", "DEFAULT TRUE NOT NULL"),
             ]:
                 if not await check_column_exists_safely(conn, "bm_training_agent_settings", col_name):
                     logger.info("Early adding column '%s' to 'bm_training_agent_settings' table...", col_name)
@@ -573,6 +574,7 @@ async def init_db():
                 ("training_numeric_code", "TEXT", "NULL"),
                 ("training_code_enabled", "BOOLEAN", "DEFAULT TRUE NOT NULL"),
                 ("training_code_updated_at", "TIMESTAMPTZ", "DEFAULT CURRENT_TIMESTAMP NOT NULL"),
+                ("include_in_scheduler", "BOOLEAN", "DEFAULT TRUE NOT NULL"),
             ]:
                 if not await check_column_exists_safely(conn, "bm_training_agent_settings", col_name):
                     logger.info("Adding column '%s' to 'bm_training_agent_settings' table...", col_name)

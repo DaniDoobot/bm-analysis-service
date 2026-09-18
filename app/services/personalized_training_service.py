@@ -16,6 +16,8 @@ from app.models.personalized_training import (
     TrainingSimulationPrompt,
     TrainingCompletionStatus,
     TrainingSchedulerSetting,
+    TrainingScheduler,
+    TrainingSchedulerAgent,
     TrainingCallSession,
     TrainingCallEvaluation,
     TrainingEvaluationPrompt,
@@ -49,7 +51,9 @@ class PersonalizedTrainingService:
     async def get_agent_settings(
         db: AsyncSession,
         company_ids: Optional[List[int]] = None,
-        allowed_agent_ids: Optional[List[str]] = None
+        allowed_agent_ids: Optional[List[str]] = None,
+        is_enabled: Optional[bool] = None,
+        include_in_scheduler: Optional[bool] = None,
     ) -> List[TrainingAgentSetting]:
         """List all agent settings, ordered by agent name, filtered by multitenant scope. Auto-creates settings for real active agents."""
         # 1. Fetch active real agents from User model in scope
@@ -92,6 +96,7 @@ class PersonalizedTrainingService:
                     agent_name=disp_name,
                     agent_initials=initials,
                     is_enabled=False,
+                    include_in_scheduler=True,
                     company_id=u.company_id
                 )
                 db.add(new_setting)
@@ -112,15 +117,60 @@ class PersonalizedTrainingService:
             stmt_all = stmt_all.where(TrainingAgentSetting.company_id.in_(company_ids))
         if allowed_agent_ids is not None:
             stmt_all = stmt_all.where(TrainingAgentSetting.hubspot_owner_id.in_(allowed_agent_ids))
+        if is_enabled is not None:
+            stmt_all = stmt_all.where(TrainingAgentSetting.is_enabled == is_enabled)
+        if include_in_scheduler is not None:
+            stmt_all = stmt_all.where(TrainingAgentSetting.include_in_scheduler == include_in_scheduler)
         stmt_all = stmt_all.order_by(TrainingAgentSetting.agent_name.asc())
         res_all = await db.execute(stmt_all)
-        return list(res_all.scalars().all())
+        settings_list = list(res_all.scalars().all())
+
+        # 5. Enrich settings with User organizational context (service, team, company)
+        all_hs_ids = [s.hubspot_owner_id for s in settings_list if s.hubspot_owner_id]
+        if all_hs_ids:
+            from sqlalchemy.orm import joinedload
+            from app.models.teams import Team
+            stmt_u = (
+                select(User)
+                .options(
+                    joinedload(User.primary_service),
+                    joinedload(User.primary_team).joinedload(Team.service),
+                    joinedload(User.company),
+                )
+                .where(User.hubspot_owner_id.in_(all_hs_ids))
+            )
+            res_u = await db.execute(stmt_u)
+            users_map = {u.hubspot_owner_id: u for u in res_u.scalars().all()}
+            for s in settings_list:
+                u = users_map.get(s.hubspot_owner_id)
+                if u:
+                    svc = u.primary_service or (u.primary_team.service if u.primary_team else None)
+                    s.service_id = svc.service_id if svc else u.primary_service_id
+                    s.service_name = svc.service_name if svc else None
+                    s.team_id = u.primary_team_id
+                    s.team_name = u.primary_team.team_name if u.primary_team else None
+                    s.company_name = (u.company.company_name if u.company else None) or (s.company.company_name if s.company else None)
+                    s.name = u.name or s.agent_name
+                    s.agent_code = u.username
+                    if not s.company_id and u.company_id:
+                        s.company_id = u.company_id
+                else:
+                    s.service_id = None
+                    s.service_name = None
+                    s.team_id = None
+                    s.team_name = None
+                    s.company_name = s.company.company_name if s.company else None
+                    s.name = s.agent_name
+                    s.agent_code = None
+
+        return settings_list
 
     @staticmethod
     async def update_agent_setting(
         db: AsyncSession,
         hubspot_owner_id: str,
         is_enabled: Optional[bool] = None,
+        include_in_scheduler: Optional[bool] = None,
         agent_name: Optional[str] = None,
         agent_initials: Optional[str] = None,
         training_code: Optional[str] = None,
@@ -142,12 +192,15 @@ class PersonalizedTrainingService:
                 agent_name=agent_name,
                 agent_initials=agent_initials,
                 is_enabled=is_enabled if is_enabled is not None else True,
+                include_in_scheduler=include_in_scheduler if include_in_scheduler is not None else True,
                 company_id=company_id
             )
             db.add(setting)
         else:
             if is_enabled is not None:
                 setting.is_enabled = is_enabled
+            if include_in_scheduler is not None:
+                setting.include_in_scheduler = include_in_scheduler
             if agent_name is not None:
                 setting.agent_name = agent_name
             if agent_initials is not None:
@@ -230,7 +283,70 @@ class PersonalizedTrainingService:
 
         await db.commit()
         await db.refresh(setting)
+
+        # Enrich organizational fields for response schema
+        from sqlalchemy.orm import joinedload
+        from app.models.teams import Team
+        stmt_u = (
+            select(User)
+            .options(
+                joinedload(User.primary_service),
+                joinedload(User.primary_team).joinedload(Team.service),
+                joinedload(User.company),
+            )
+            .where(User.hubspot_owner_id == setting.hubspot_owner_id)
+        )
+        res_u = await db.execute(stmt_u)
+        u = res_u.scalars().first()
+        if u:
+            svc = u.primary_service or (u.primary_team.service if u.primary_team else None)
+            setting.service_id = svc.service_id if svc else u.primary_service_id
+            setting.service_name = svc.service_name if svc else None
+            setting.team_id = u.primary_team_id
+            setting.team_name = u.primary_team.team_name if u.primary_team else None
+            setting.company_name = (u.company.company_name if u.company else None) or (setting.company.company_name if setting.company else None)
+            setting.name = u.name or setting.agent_name
+            setting.agent_code = u.username
+            if not setting.company_id and u.company_id:
+                setting.company_id = u.company_id
+        else:
+            setting.service_id = None
+            setting.service_name = None
+            setting.team_id = None
+            setting.team_name = None
+            setting.company_name = setting.company.company_name if setting.company else None
+            setting.name = setting.agent_name
+            setting.agent_code = None
+
         return setting
+
+    @staticmethod
+    async def bulk_update_scheduler_settings(
+        db: AsyncSession,
+        hubspot_owner_ids: List[str],
+        include_in_scheduler: bool,
+        company_ids: Optional[List[int]] = None,
+        allowed_agent_ids: Optional[List[str]] = None,
+    ) -> int:
+        """Bulk updates include_in_scheduler for multiple agents within multitenant scope."""
+        if not hubspot_owner_ids:
+            return 0
+        from sqlalchemy import update
+        stmt = (
+            update(TrainingAgentSetting)
+            .where(TrainingAgentSetting.hubspot_owner_id.in_(hubspot_owner_ids))
+        )
+        if company_ids is not None:
+            stmt = stmt.where(TrainingAgentSetting.company_id.in_(company_ids))
+        if allowed_agent_ids is not None:
+            stmt = stmt.where(TrainingAgentSetting.hubspot_owner_id.in_(allowed_agent_ids))
+        stmt = stmt.values(
+            include_in_scheduler=include_in_scheduler,
+            updated_at=datetime.now(timezone.utc),
+        )
+        res = await db.execute(stmt)
+        await db.commit()
+        return res.rowcount
 
     @staticmethod
     async def get_or_create_scheduler_settings(db: AsyncSession) -> TrainingSchedulerSetting:
@@ -279,6 +395,324 @@ class PersonalizedTrainingService:
         await db.commit()
         await db.refresh(settings)
         return settings
+
+    # ── Granular Training Schedulers CRUD & Execution ────────────────────────
+
+    @staticmethod
+    def _map_scheduler_to_dict(sch: TrainingScheduler) -> dict:
+        agent_ids = [a.hubspot_owner_id for a in (sch.agents or [])]
+        return {
+            "scheduler_id": sch.scheduler_id,
+            "id": sch.scheduler_id,
+            "name": sch.name,
+            "company_id": sch.company_id,
+            "company_name": sch.company.company_name if sch.company else None,
+            "service_id": sch.service_id,
+            "service_name": sch.service.service_name if sch.service else None,
+            "team_id": sch.team_id,
+            "team_name": sch.team.team_name if sch.team else None,
+            "is_active": sch.is_active,
+            "interval_days": sch.interval_days,
+            "lookback_days": sch.lookback_days,
+            "last_run_at": sch.last_run_at,
+            "next_run_at": sch.next_run_at,
+            "last_status": sch.last_status,
+            "agents_count": len(agent_ids),
+            "hubspot_owner_ids": agent_ids,
+            "created_at": sch.created_at,
+            "updated_at": sch.updated_at,
+        }
+
+    @staticmethod
+    async def list_schedulers(
+        db: AsyncSession,
+        company_ids: Optional[List[int]] = None,
+        service_id: Optional[int] = None,
+        team_id: Optional[int] = None,
+        is_active: Optional[bool] = None,
+    ) -> List[dict]:
+        """List all granular training schedulers with filter and multitenant scoping."""
+        from sqlalchemy.orm import selectinload
+        stmt = (
+            select(TrainingScheduler)
+            .options(
+                selectinload(TrainingScheduler.company),
+                selectinload(TrainingScheduler.service),
+                selectinload(TrainingScheduler.team),
+                selectinload(TrainingScheduler.agents),
+            )
+        )
+        if company_ids is not None:
+            stmt = stmt.where(TrainingScheduler.company_id.in_(company_ids))
+        if service_id is not None:
+            stmt = stmt.where(TrainingScheduler.service_id == service_id)
+        if team_id is not None:
+            stmt = stmt.where(TrainingScheduler.team_id == team_id)
+        if is_active is not None:
+            stmt = stmt.where(TrainingScheduler.is_active == is_active)
+        stmt = stmt.order_by(TrainingScheduler.scheduler_id.asc())
+        res = await db.execute(stmt)
+        schedulers = res.scalars().all()
+        return [PersonalizedTrainingService._map_scheduler_to_dict(s) for s in schedulers]
+
+    @staticmethod
+    async def get_scheduler_by_id(
+        db: AsyncSession,
+        scheduler_id: int,
+    ) -> Optional[dict]:
+        """Fetch a single granular scheduler by ID."""
+        from sqlalchemy.orm import selectinload
+        stmt = (
+            select(TrainingScheduler)
+            .options(
+                selectinload(TrainingScheduler.company),
+                selectinload(TrainingScheduler.service),
+                selectinload(TrainingScheduler.team),
+                selectinload(TrainingScheduler.agents),
+            )
+            .where(TrainingScheduler.scheduler_id == scheduler_id)
+        )
+        res = await db.execute(stmt)
+        sch = res.scalars().first()
+        if not sch:
+            return None
+        return PersonalizedTrainingService._map_scheduler_to_dict(sch)
+
+    @staticmethod
+    async def create_scheduler(
+        db: AsyncSession,
+        name: str,
+        company_id: Optional[int] = None,
+        service_id: Optional[int] = None,
+        team_id: Optional[int] = None,
+        interval_days: int = 14,
+        lookback_days: int = 14,
+        is_active: bool = True,
+        hubspot_owner_ids: Optional[List[str]] = None,
+    ) -> dict:
+        """Create a new granular training scheduler and associate initial agents."""
+        if interval_days < 1:
+            raise ValueError("El intervalo debe ser de al menos 1 día.")
+        if lookback_days < 1:
+            raise ValueError("El periodo lookback debe ser de al menos 1 día.")
+
+        now = datetime.now(timezone.utc)
+        next_run = now + timedelta(days=interval_days)
+
+        sch = TrainingScheduler(
+            name=name.strip(),
+            company_id=company_id,
+            service_id=service_id,
+            team_id=team_id,
+            is_active=is_active,
+            interval_days=interval_days,
+            lookback_days=lookback_days,
+            next_run_at=next_run,
+        )
+        db.add(sch)
+        await db.flush()
+
+        if hubspot_owner_ids:
+            unique_ids = list(dict.fromkeys(str(oid).strip() for oid in hubspot_owner_ids if str(oid).strip()))
+            for oid in unique_ids:
+                db.add(TrainingSchedulerAgent(scheduler_id=sch.scheduler_id, hubspot_owner_id=oid))
+
+        await db.commit()
+        return await PersonalizedTrainingService.get_scheduler_by_id(db, sch.scheduler_id)
+
+    @staticmethod
+    async def update_scheduler(
+        db: AsyncSession,
+        scheduler_id: int,
+        name: Optional[str] = None,
+        service_id: Optional[int] = None,
+        team_id: Optional[int] = None,
+        interval_days: Optional[int] = None,
+        lookback_days: Optional[int] = None,
+        is_active: Optional[bool] = None,
+        hubspot_owner_ids: Optional[List[str]] = None,
+    ) -> Optional[dict]:
+        """Update a granular training scheduler and idempotently synchronize its agents."""
+        from sqlalchemy.orm import selectinload
+        stmt = (
+            select(TrainingScheduler)
+            .options(selectinload(TrainingScheduler.agents))
+            .where(TrainingScheduler.scheduler_id == scheduler_id)
+        )
+        res = await db.execute(stmt)
+        sch = res.scalars().first()
+        if not sch:
+            return None
+
+        if name is not None:
+            sch.name = name.strip()
+        if service_id is not None:
+            sch.service_id = service_id
+        if team_id is not None:
+            sch.team_id = team_id
+        if is_active is not None:
+            sch.is_active = is_active
+        if lookback_days is not None:
+            if lookback_days < 1:
+                raise ValueError("El periodo lookback debe ser de al menos 1 día.")
+            sch.lookback_days = lookback_days
+        if interval_days is not None:
+            if interval_days < 1:
+                raise ValueError("El intervalo debe ser de al menos 1 día.")
+            sch.interval_days = interval_days
+            now = datetime.now(timezone.utc)
+            ref = sch.last_run_at or now
+            sch.next_run_at = ref + timedelta(days=interval_days)
+
+        if hubspot_owner_ids is not None:
+            desired_ids = set(str(oid).strip() for oid in hubspot_owner_ids if str(oid).strip())
+            current_agents = {a.hubspot_owner_id: a for a in sch.agents}
+            current_ids = set(current_agents.keys())
+
+            to_remove = current_ids - desired_ids
+            to_add = desired_ids - current_ids
+
+            for oid in to_remove:
+                agent_to_del = current_agents[oid]
+                if agent_to_del in sch.agents:
+                    sch.agents.remove(agent_to_del)
+                await db.delete(agent_to_del)
+
+            for oid in to_add:
+                new_ag = TrainingSchedulerAgent(scheduler_id=sch.scheduler_id, hubspot_owner_id=oid)
+                sch.agents.append(new_ag)
+                db.add(new_ag)
+
+        target_id = sch.scheduler_id
+        sch.updated_at = datetime.now(timezone.utc)
+        await db.commit()
+        db.expire_all()
+        return await PersonalizedTrainingService.get_scheduler_by_id(db, target_id)
+
+    @staticmethod
+    async def delete_scheduler(db: AsyncSession, scheduler_id: int) -> bool:
+        """Delete a granular training scheduler. Automatically cascade-removes agent associations."""
+        stmt = select(TrainingScheduler).where(TrainingScheduler.scheduler_id == scheduler_id)
+        res = await db.execute(stmt)
+        sch = res.scalars().first()
+        if not sch:
+            return False
+        await db.delete(sch)
+        await db.commit()
+        return True
+
+    @staticmethod
+    async def execute_scheduler(
+        db: AsyncSession,
+        scheduler: TrainingScheduler | int,
+        force: bool = False,
+    ) -> Optional[dict]:
+        """
+        Executes a single granular training scheduler if due (or forced).
+        Verifies active agents and updates last_run_at and next_run_at to prevent duplicates.
+        """
+        from sqlalchemy.orm import selectinload
+        now = datetime.now(timezone.utc)
+
+        if isinstance(scheduler, int):
+            stmt = (
+                select(TrainingScheduler)
+                .options(selectinload(TrainingScheduler.agents))
+                .where(TrainingScheduler.scheduler_id == scheduler)
+            )
+            res = await db.execute(stmt)
+            sch = res.scalars().first()
+            if not sch:
+                return None
+        else:
+            sch = scheduler
+            if sch.agents is None:
+                stmt_ag = select(TrainingSchedulerAgent).where(TrainingSchedulerAgent.scheduler_id == sch.scheduler_id)
+                res_ag = await db.execute(stmt_ag)
+                sch.agents = list(res_ag.scalars().all())
+
+        if not sch.is_active and not force:
+            logger.info("TrainingScheduler %s is inactive, skipping execution.", sch.scheduler_id)
+            return None
+
+        # Check if due
+        if not force:
+            if sch.next_run_at is not None:
+                next_run = sch.next_run_at
+                if next_run.tzinfo is None:
+                    next_run = next_run.replace(tzinfo=timezone.utc)
+                if now < next_run:
+                    logger.info("TrainingScheduler %s is not due yet (next: %s, now: %s).", sch.scheduler_id, next_run, now)
+                    return None
+
+        # Prevent duplicate execution: mark status as running
+        sch.last_status = "running"
+        await db.commit()
+
+        target_owner_ids = [a.hubspot_owner_id for a in (sch.agents or [])]
+        if not target_owner_ids:
+            logger.info("TrainingScheduler %s has no agents associated. Skipping run.", sch.scheduler_id)
+            sch.last_run_at = now
+            sch.next_run_at = now + timedelta(days=sch.interval_days)
+            sch.last_status = "skipped_empty"
+            await db.commit()
+            return {"triggered": False, "scheduler_id": sch.scheduler_id, "reason": "No agents associated"}
+
+        # Verify active agents in TrainingAgentSetting
+        stmt_active = select(TrainingAgentSetting.hubspot_owner_id).where(
+            TrainingAgentSetting.hubspot_owner_id.in_(target_owner_ids),
+            TrainingAgentSetting.is_enabled == True
+        )
+        if sch.company_id is not None:
+            stmt_active = stmt_active.where(TrainingAgentSetting.company_id == sch.company_id)
+        res_active = await db.execute(stmt_active)
+        eligible_agent_ids = list(res_active.scalars().all())
+
+        if not eligible_agent_ids:
+            logger.info("TrainingScheduler %s has no active/enabled agents. Skipping.", sch.scheduler_id)
+            sch.last_run_at = now
+            sch.next_run_at = now + timedelta(days=sch.interval_days)
+            sch.last_status = "skipped_no_active_agents"
+            await db.commit()
+            return {"triggered": False, "scheduler_id": sch.scheduler_id, "reason": "No active agents"}
+
+        period_end = datetime(now.year, now.month, now.day, 23, 59, 59, tzinfo=timezone.utc) - timedelta(days=1)
+        period_start = period_end - timedelta(days=sch.lookback_days) + timedelta(seconds=1)
+
+        try:
+            run = await PersonalizedTrainingService.run_personalized_training_pass(
+                db=db,
+                hubspot_owner_ids=eligible_agent_ids,
+                period_start=period_start,
+                period_end=period_end,
+                triggered_by="scheduler",
+                created_by_email=f"scheduler:{sch.scheduler_id}",
+                company_ids=[sch.company_id] if sch.company_id else None
+            )
+            run_id = run.training_run_id
+            run_status = run.status
+
+            # Refresh scheduler row
+            stmt_re = select(TrainingScheduler).where(TrainingScheduler.scheduler_id == sch.scheduler_id)
+            res_re = await db.execute(stmt_re)
+            sch = res_re.scalars().first()
+            if sch:
+                sch.last_run_at = now
+                sch.next_run_at = now + timedelta(days=sch.interval_days)
+                sch.last_status = run_status
+                await db.commit()
+            return {"triggered": True, "scheduler_id": sch.scheduler_id, "run_id": run_id, "status": run_status}
+        except Exception as e:
+            logger.exception("TrainingScheduler %s execution failed: %s", sch.scheduler_id, e)
+            stmt_re = select(TrainingScheduler).where(TrainingScheduler.scheduler_id == sch.scheduler_id)
+            res_re = await db.execute(stmt_re)
+            sch = res_re.scalars().first()
+            if sch:
+                sch.last_run_at = now
+                sch.next_run_at = now + timedelta(days=sch.interval_days)
+                sch.last_status = "failed"
+                await db.commit()
+            raise e
 
     @staticmethod
     async def get_agent_overview(
@@ -406,11 +840,16 @@ class PersonalizedTrainingService:
             item = {
                 "hubspot_owner_id": s.hubspot_owner_id,
                 "agent_name": s.agent_name,
-                "name": s.agent_name,
+                "name": getattr(s, "name", s.agent_name),
                 "agent_code": agent_code,
                 "agent_initials": s.agent_initials,
-                "team_name": None,
+                "team_name": getattr(s, "team_name", None),
+                "team_id": getattr(s, "team_id", None),
+                "service_id": getattr(s, "service_id", None),
+                "service_name": getattr(s, "service_name", None),
+                "company_name": getattr(s, "company_name", None),
                 "is_enabled": s.is_enabled,
+                "include_in_scheduler": getattr(s, "include_in_scheduler", True),
                 "current_report_id": None,
                 "current_period_start": None,
                 "current_period_end": None,
@@ -479,11 +918,16 @@ class PersonalizedTrainingService:
             "setting_id": s.setting_id,
             "hubspot_owner_id": s.hubspot_owner_id,
             "agent_name": s.agent_name,
-            "name": s.agent_name,
+            "name": getattr(s, "name", s.agent_name),
             "agent_code": agent_code,
             "agent_initials": s.agent_initials,
-            "team_name": None,
+            "team_name": getattr(s, "team_name", None),
+            "team_id": getattr(s, "team_id", None),
+            "service_id": getattr(s, "service_id", None),
+            "service_name": getattr(s, "service_name", None),
+            "company_name": getattr(s, "company_name", None),
             "is_enabled": s.is_enabled,
+            "include_in_scheduler": getattr(s, "include_in_scheduler", True),
             "training_code": s.training_code,
             "training_numeric_code": s.training_numeric_code,
             "training_code_enabled": s.training_code_enabled,
@@ -3597,13 +4041,14 @@ class PersonalizedTrainingService:
             stmt_set = stmt_set.where(TrainingAgentSetting.hubspot_owner_id.in_(allowed_agent_ids))
 
         # Central guard: automatic scheduled training passes strictly exclude demo tenants and unresolvable companies
-        if triggered_by == "scheduler":
+        if triggered_by == "scheduler" and hubspot_owner_ids is None:
             from app.models.companies import Company
             eff_company_id = func.coalesce(TrainingAgentSetting.company_id, User.company_id)
             stmt_set = (
                 stmt_set.outerjoin(User, User.hubspot_owner_id == TrainingAgentSetting.hubspot_owner_id)
                 .join(Company, Company.company_id == eff_company_id)
                 .where(Company.is_demo == False)
+                .where(TrainingAgentSetting.include_in_scheduler == True)
             )
 
         res_set = await db.execute(stmt_set)
@@ -3701,7 +4146,44 @@ class PersonalizedTrainingService:
             logger.info("Training scheduler: Automatically disabled globally by environment variable ENABLE_TRAINING_SCHEDULER=false.")
             return {"triggered": False, "reason": "Scheduler deshabilitado por variable de entorno"}
 
-        # 2. Database persistent settings check
+        # 1.5. Granular Training Schedulers check
+        stmt_count = select(func.count(TrainingScheduler.scheduler_id))
+        res_count = await db.execute(stmt_count)
+        schedulers_count = res_count.scalar() or 0
+
+        if schedulers_count > 0:
+            from sqlalchemy.orm import selectinload
+            stmt_gran = (
+                select(TrainingScheduler)
+                .options(selectinload(TrainingScheduler.agents))
+                .where(TrainingScheduler.is_active == True)
+            )
+            res_gran = await db.execute(stmt_gran)
+            active_schedulers = list(res_gran.scalars().all())
+
+            now = datetime.now(timezone.utc)
+            gran_results = []
+            for sch in active_schedulers:
+                is_due = False
+                if sch.next_run_at is None:
+                    is_due = True
+                else:
+                    next_run = sch.next_run_at
+                    if next_run.tzinfo is None:
+                        next_run = next_run.replace(tzinfo=timezone.utc)
+                    if now >= next_run:
+                        is_due = True
+                if is_due:
+                    res = await PersonalizedTrainingService.execute_scheduler(db=db, scheduler=sch, force=False)
+                    if res:
+                        gran_results.append(res)
+            return {
+                "triggered": any(r.get("triggered") for r in gran_results if r),
+                "scheduler_mode": "granular",
+                "results": gran_results,
+            }
+
+        # 2. Database persistent settings check (legacy fallback when no granular schedulers are configured)
         db_settings = await PersonalizedTrainingService.get_or_create_scheduler_settings(db)
         if not db_settings.is_enabled:
             logger.info("Training scheduler: Persistently disabled in database settings.")

@@ -16,9 +16,14 @@ class TrainingAgentSettingBase(BaseModel):
     team_name: Optional[str] = None
     company_id: Optional[int] = None
     is_enabled: bool = True
+    include_in_scheduler: bool = True
     training_code: Optional[str] = None
     training_numeric_code: Optional[str] = None
     training_code_enabled: bool = True
+    service_id: Optional[int] = None
+    service_name: Optional[str] = None
+    team_id: Optional[int] = None
+    company_name: Optional[str] = None
 
 
 class TrainingAgentSettingOut(TrainingAgentSettingBase):
@@ -33,11 +38,17 @@ class TrainingAgentSettingOut(TrainingAgentSettingBase):
 
 class TrainingAgentSettingUpdate(BaseModel):
     is_enabled: Optional[bool] = None
+    include_in_scheduler: Optional[bool] = None
     agent_name: Optional[str] = None
     agent_initials: Optional[str] = None
     training_code: Optional[str] = None
     training_numeric_code: Optional[str] = None
     training_code_enabled: Optional[bool] = None
+
+
+class BulkSchedulerAgentUpdate(BaseModel):
+    hubspot_owner_ids: List[str]
+    include_in_scheduler: bool
 
 
 # ── Objectives & Prompts sub-schemas ──────────────────────────────────────────
@@ -219,7 +230,12 @@ class AgentOverviewItem(BaseModel):
     agent_code: Optional[str] = None
     agent_initials: str
     team_name: Optional[str] = None
+    team_id: Optional[int] = None
+    service_id: Optional[int] = None
+    service_name: Optional[str] = None
+    company_name: Optional[str] = None
     is_enabled: bool
+    include_in_scheduler: bool = True
     current_report_id: Optional[int] = None
     current_period_start: Optional[datetime] = None
     current_period_end: Optional[datetime] = None
@@ -269,6 +285,9 @@ class AgentDetailResponse(BaseModel):
 
 class ManualGeneratePayload(BaseModel):
     hubspot_owner_ids: Optional[List[str]] = None
+    service_id: Optional[int] = None
+    team_id: Optional[int] = None
+    company_id: Optional[int] = None
     period_start: Optional[datetime] = None
     period_end: Optional[datetime] = None
     force_regenerate: bool = False
@@ -295,6 +314,52 @@ class TrainingSchedulerSettingPatch(BaseModel):
     is_enabled: Optional[bool] = None
     interval_days: Optional[int] = None
     lookback_days: Optional[int] = None
+
+
+class TrainingSchedulerCreate(BaseModel):
+    name: str
+    company_id: Optional[int] = None
+    service_id: Optional[int] = None
+    team_id: Optional[int] = None
+    interval_days: int = 14
+    lookback_days: int = 14
+    is_active: bool = True
+    hubspot_owner_ids: Optional[List[str]] = Field(default_factory=list)
+
+
+class TrainingSchedulerUpdate(BaseModel):
+    name: Optional[str] = None
+    service_id: Optional[int] = None
+    team_id: Optional[int] = None
+    interval_days: Optional[int] = None
+    lookback_days: Optional[int] = None
+    is_active: Optional[bool] = None
+    hubspot_owner_ids: Optional[List[str]] = None
+
+
+class TrainingSchedulerOut(BaseModel):
+    scheduler_id: int
+    id: Optional[int] = None
+    name: str
+    company_id: Optional[int] = None
+    company_name: Optional[str] = None
+    service_id: Optional[int] = None
+    service_name: Optional[str] = None
+    team_id: Optional[int] = None
+    team_name: Optional[str] = None
+    is_active: bool = True
+    interval_days: int = 14
+    lookback_days: int = 14
+    last_run_at: Optional[datetime] = None
+    next_run_at: Optional[datetime] = None
+    last_status: Optional[str] = None
+    agents_count: int = 0
+    hubspot_owner_ids: List[str] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
 
 
 # ── Team Summary Schemas ──────────────────────────────────────────────────────

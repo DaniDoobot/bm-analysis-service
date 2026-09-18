@@ -14,6 +14,7 @@ from app.models.personalized_training import TrainingAgentReport, TrainingAgentS
 from app.schemas.personalized_training import (
     TrainingAgentSettingOut,
     TrainingAgentSettingUpdate,
+    BulkSchedulerAgentUpdate,
     TrainingRunResponse,
     AgentOverviewItem,
     AgentDetailResponse,
@@ -22,6 +23,9 @@ from app.schemas.personalized_training import (
     ManualGeneratePayload,
     TrainingSchedulerSettingOut,
     TrainingSchedulerSettingPatch,
+    TrainingSchedulerCreate,
+    TrainingSchedulerUpdate,
+    TrainingSchedulerOut,
     CyclesTeamSummaryResponse,
     UpdateCycleObjectivesPayload,
     ApproveCycleResponse,
@@ -188,10 +192,59 @@ async def verify_report_write_scope(
 
 # ── Admin Endpoints ──────────────────────────────────────────────────────────
 
+async def _resolve_training_agent_scope(
+    db: AsyncSession,
+    context: TenantContext,
+    service_id: Optional[int] = None,
+    team_id: Optional[int] = None,
+    company_id: Optional[int] = None,
+) -> Optional[List[str]]:
+    """
+    Validates cascade and resolves the allowed hubspot_owner_ids based on role, service_id, and team_id.
+    Returns:
+      - None if all agents in company are allowed (no agent-level restriction)
+      - List[str] if scoped to specific agents (empty list [] if empty team/service or no agents in scope)
+    """
+    from app.utils.team_resolvers import (
+        validate_team_service_cascade,
+        get_team_assigned_owner_ids,
+        get_service_assigned_owner_ids,
+    )
+
+    base_role_set: Optional[set[str]] = None
+    if context.normalized_role == InternalRole.SERVICE_MANAGER:
+        manager_agents = await get_service_manager_agent_ids(db, context)
+        base_role_set = set(manager_agents)
+    elif context.normalized_role == InternalRole.TEAM_COORDINATOR:
+        coord_agents = context.allowed_agent_ids or []
+        base_role_set = set(coord_agents)
+
+    if service_id is not None or team_id is not None or company_id is not None:
+        await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context, company_id=company_id)
+
+    target_filter_set: Optional[set[str]] = None
+    if team_id is not None:
+        target_filter_set = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=company_id)
+    elif service_id is not None:
+        target_filter_set = await get_service_assigned_owner_ids(db, service_id=service_id, context=context, company_id=company_id)
+
+    if base_role_set is not None and target_filter_set is not None:
+        return list(base_role_set.intersection(target_filter_set))
+    elif base_role_set is not None:
+        return list(base_role_set)
+    elif target_filter_set is not None:
+        return list(target_filter_set)
+    return None
+
+
 @router.get("/admin/settings", response_model=List[TrainingAgentSettingOut])
 async def list_agent_settings(
     context: Annotated[TenantContext, Depends(get_tenant_context)],
     company_id: Annotated[Optional[int], Query(description="Filter by company ID")] = None,
+    service_id: Annotated[Optional[int], Query(description="Filter by service ID")] = None,
+    team_id: Annotated[Optional[int], Query(description="Filter by team ID")] = None,
+    is_enabled: Annotated[Optional[bool], Query(description="Filter by is_enabled")] = None,
+    include_in_scheduler: Annotated[Optional[bool], Query(description="Filter by include_in_scheduler")] = None,
     db: AsyncSession = Depends(get_db)
 ):
     """List all personalized training settings for agents (Admin/Company Admin/Service Manager/Team Coordinator)."""
@@ -210,16 +263,16 @@ async def list_agent_settings(
     eff_company_id = company_id if company_id is not None else (None if context.is_super_admin else context.company_id)
     company_ids = [eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
 
-    allowed_agent_ids = None
-    if context.normalized_role == InternalRole.SERVICE_MANAGER:
-        allowed_agent_ids = await get_service_manager_agent_ids(db, context)
-    elif context.normalized_role == InternalRole.TEAM_COORDINATOR:
-        allowed_agent_ids = context.allowed_agent_ids or []
+    allowed_agent_ids = await _resolve_training_agent_scope(
+        db, context=context, service_id=service_id, team_id=team_id, company_id=eff_company_id
+    )
 
     return await PersonalizedTrainingService.get_agent_settings(
         db,
         company_ids=company_ids,
-        allowed_agent_ids=allowed_agent_ids
+        allowed_agent_ids=allowed_agent_ids,
+        is_enabled=is_enabled,
+        include_in_scheduler=include_in_scheduler
     )
 
 
@@ -230,7 +283,7 @@ async def update_agent_setting(
     context: Annotated[TenantContext, Depends(get_tenant_context)],
     db: AsyncSession = Depends(get_db)
 ):
-    """Update training setting for an agent (enable/disable) (Admin/Company Admin/Service Manager)."""
+    """Update training setting for an agent (enable/disable, include_in_scheduler, codes) (Admin/Company Admin/Service Manager)."""
     if context.normalized_role == InternalRole.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -283,6 +336,7 @@ async def update_agent_setting(
             db=db,
             hubspot_owner_id=hubspot_owner_id,
             is_enabled=payload.is_enabled,
+            include_in_scheduler=payload.include_in_scheduler,
             agent_name=payload.agent_name,
             agent_initials=payload.agent_initials,
             training_code=payload.training_code,
@@ -300,49 +354,55 @@ async def update_agent_setting(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
 
 
-async def _resolve_training_agent_scope(
-    db: AsyncSession,
-    context: TenantContext,
-    service_id: Optional[int] = None,
-    team_id: Optional[int] = None,
-    company_id: Optional[int] = None,
-) -> Optional[List[str]]:
-    """
-    Validates cascade and resolves the allowed hubspot_owner_ids based on role, service_id, and team_id.
-    Returns:
-      - None if all agents in company are allowed (no agent-level restriction)
-      - List[str] if scoped to specific agents (empty list [] if empty team/service or no agents in scope)
-    """
-    from app.utils.team_resolvers import (
-        validate_team_service_cascade,
-        get_team_assigned_owner_ids,
-        get_service_assigned_owner_ids,
+@router.post("/admin/settings/bulk-scheduler")
+async def bulk_update_scheduler_settings(
+    payload: BulkSchedulerAgentUpdate,
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+    db: AsyncSession = Depends(get_db)
+):
+    """Bulk update include_in_scheduler for multiple agents (Admin/Company Admin/Service Manager/Team Coordinator)."""
+    if context.normalized_role == InternalRole.AGENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Se requiere rol de administración o coordinación."
+        )
+
+    if not payload.hubspot_owner_ids:
+        return {"updated_count": 0, "hubspot_owner_ids": []}
+
+    # Validate agent-level restrictions
+    if context.normalized_role == InternalRole.SERVICE_MANAGER:
+        sm_agents = await get_service_manager_agent_ids(db, context)
+        for oid in payload.hubspot_owner_ids:
+            if oid not in sm_agents:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Acceso denegado: No tienes permisos para gestionar el agente {oid}."
+                )
+    elif context.allowed_agent_ids is not None:
+        for oid in payload.hubspot_owner_ids:
+            if oid not in context.allowed_agent_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Acceso denegado: No tienes permisos para gestionar el agente {oid}."
+                )
+
+    company_ids = context.allowed_company_ids if not context.is_super_admin else None
+    allowed_agent_ids = context.allowed_agent_ids if not context.is_super_admin else None
+
+    count = await PersonalizedTrainingService.bulk_update_scheduler_settings(
+        db=db,
+        hubspot_owner_ids=payload.hubspot_owner_ids,
+        include_in_scheduler=payload.include_in_scheduler,
+        company_ids=company_ids,
+        allowed_agent_ids=allowed_agent_ids
     )
 
-    base_role_set: Optional[set[str]] = None
-    if context.normalized_role == InternalRole.SERVICE_MANAGER:
-        manager_agents = await get_service_manager_agent_ids(db, context)
-        base_role_set = set(manager_agents)
-    elif context.normalized_role == InternalRole.TEAM_COORDINATOR:
-        coord_agents = context.allowed_agent_ids or []
-        base_role_set = set(coord_agents)
-
-    if service_id is not None or team_id is not None or company_id is not None:
-        await validate_team_service_cascade(db, service_id=service_id, team_id=team_id, context=context, company_id=company_id)
-
-    target_filter_set: Optional[set[str]] = None
-    if team_id is not None:
-        target_filter_set = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=company_id)
-    elif service_id is not None:
-        target_filter_set = await get_service_assigned_owner_ids(db, service_id=service_id, context=context, company_id=company_id)
-
-    if base_role_set is not None and target_filter_set is not None:
-        return list(base_role_set.intersection(target_filter_set))
-    elif base_role_set is not None:
-        return list(base_role_set)
-    elif target_filter_set is not None:
-        return list(target_filter_set)
-    return None
+    return {
+        "updated_count": count,
+        "include_in_scheduler": payload.include_in_scheduler,
+        "hubspot_owner_ids": payload.hubspot_owner_ids
+    }
 
 
 @router.get("/admin/agents-overview", response_model=List[AgentOverviewItem])
@@ -487,6 +547,282 @@ async def update_scheduler_settings(
     )
 
 
+# ── Granular Training Schedulers Endpoints ────────────────────────────────────
+
+@router.get("/admin/schedulers", response_model=List[TrainingSchedulerOut])
+async def list_schedulers(
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+    company_id: Annotated[Optional[int], Query(description="Filter by company ID")] = None,
+    service_id: Annotated[Optional[int], Query(description="Filter by service ID")] = None,
+    team_id: Annotated[Optional[int], Query(description="Filter by team ID")] = None,
+    is_active: Annotated[Optional[bool], Query(description="Filter by active status")] = None,
+    db: AsyncSession = Depends(get_db)
+):
+    """List all training schedulers within user's multitenant scope."""
+    if context.normalized_role == InternalRole.AGENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Se requiere rol de administración."
+        )
+
+    if company_id is not None and not context.is_super_admin:
+        if company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado a otra empresa."
+            )
+    eff_company_id = company_id if company_id is not None else (None if context.is_super_admin else context.company_id)
+    company_ids = [eff_company_id] if eff_company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
+
+    if service_id is not None or team_id is not None or eff_company_id is not None:
+        from app.utils.team_resolvers import validate_team_service_cascade
+        await validate_team_service_cascade(
+            db,
+            service_id=service_id,
+            team_id=team_id,
+            context=context,
+            company_id=eff_company_id
+        )
+
+    schedulers = await PersonalizedTrainingService.list_schedulers(
+        db,
+        company_ids=company_ids,
+        service_id=service_id,
+        team_id=team_id,
+        is_active=is_active
+    )
+    return [TrainingSchedulerOut(**s) for s in schedulers]
+
+
+@router.post("/admin/schedulers", response_model=TrainingSchedulerOut)
+async def create_scheduler(
+    payload: TrainingSchedulerCreate,
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+    db: AsyncSession = Depends(get_db)
+):
+    """Create a new training scheduler with optional agent assignments and hierarchy scope."""
+    if context.normalized_role == InternalRole.AGENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Se requiere rol de administración."
+        )
+
+    target_company_id = payload.company_id
+    if not context.is_super_admin:
+        if target_company_id is not None and target_company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado a otra empresa."
+            )
+        if target_company_id is None:
+            target_company_id = context.company_id
+
+    if payload.service_id is not None or payload.team_id is not None or target_company_id is not None:
+        from app.utils.team_resolvers import validate_team_service_cascade
+        await validate_team_service_cascade(
+            db,
+            service_id=payload.service_id,
+            team_id=payload.team_id,
+            context=context,
+            company_id=target_company_id
+        )
+
+    if payload.hubspot_owner_ids:
+        scoped_agent_ids = await _resolve_training_agent_scope(
+            db,
+            context=context,
+            service_id=payload.service_id,
+            team_id=payload.team_id,
+            company_id=target_company_id
+        )
+        if scoped_agent_ids is not None:
+            invalid_scope = set(payload.hubspot_owner_ids) - set(scoped_agent_ids)
+            if invalid_scope:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Acceso denegado: Agentes fuera del ámbito permitido: {sorted(list(invalid_scope))}"
+                )
+
+        if target_company_id is not None:
+            stmt_chk = select(TrainingAgentSetting.hubspot_owner_id).where(
+                TrainingAgentSetting.hubspot_owner_id.in_(payload.hubspot_owner_ids),
+                TrainingAgentSetting.company_id == target_company_id
+            )
+            res_chk = await db.execute(stmt_chk)
+            found_ids = set(res_chk.scalars().all())
+            invalid_comp = set(payload.hubspot_owner_ids) - found_ids
+            if invalid_comp:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Los siguientes agentes no pertenecen a la empresa indicada: {sorted(list(invalid_comp))}"
+                )
+
+    try:
+        sch = await PersonalizedTrainingService.create_scheduler(
+            db,
+            name=payload.name,
+            company_id=target_company_id,
+            service_id=payload.service_id,
+            team_id=payload.team_id,
+            interval_days=payload.interval_days,
+            lookback_days=payload.lookback_days,
+            is_active=payload.is_active,
+            hubspot_owner_ids=payload.hubspot_owner_ids
+        )
+        return TrainingSchedulerOut(**sch)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.patch("/admin/schedulers/{scheduler_id}", response_model=TrainingSchedulerOut)
+async def update_scheduler(
+    scheduler_id: int,
+    payload: TrainingSchedulerUpdate,
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+    db: AsyncSession = Depends(get_db)
+):
+    """Update a training scheduler, interval, active status or assigned agents."""
+    if context.normalized_role == InternalRole.AGENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Se requiere rol de administración."
+        )
+
+    sch = await PersonalizedTrainingService.get_scheduler_by_id(db, scheduler_id)
+    if not sch:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Planificador no encontrado.")
+
+    if not context.is_super_admin:
+        sch_comp = sch.get("company_id")
+        if sch_comp is not None and sch_comp not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado a este planificador."
+            )
+
+    eff_srv = payload.service_id if payload.service_id is not None else sch.get("service_id")
+    eff_team = payload.team_id if payload.team_id is not None else sch.get("team_id")
+    eff_comp = sch.get("company_id")
+
+    if payload.service_id is not None or payload.team_id is not None:
+        from app.utils.team_resolvers import validate_team_service_cascade
+        await validate_team_service_cascade(
+            db,
+            service_id=eff_srv,
+            team_id=eff_team,
+            context=context,
+            company_id=eff_comp
+        )
+
+    if payload.hubspot_owner_ids is not None:
+        scoped_agent_ids = await _resolve_training_agent_scope(
+            db,
+            context=context,
+            service_id=eff_srv,
+            team_id=eff_team,
+            company_id=eff_comp
+        )
+        if scoped_agent_ids is not None:
+            invalid_scope = set(payload.hubspot_owner_ids) - set(scoped_agent_ids)
+            if invalid_scope:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Acceso denegado: Agentes fuera del ámbito permitido: {sorted(list(invalid_scope))}"
+                )
+
+        if eff_comp is not None:
+            stmt_chk = select(TrainingAgentSetting.hubspot_owner_id).where(
+                TrainingAgentSetting.hubspot_owner_id.in_(payload.hubspot_owner_ids),
+                TrainingAgentSetting.company_id == eff_comp
+            )
+            res_chk = await db.execute(stmt_chk)
+            found_ids = set(res_chk.scalars().all())
+            invalid_comp = set(payload.hubspot_owner_ids) - found_ids
+            if invalid_comp:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Los siguientes agentes no pertenecen a la empresa del planificador: {sorted(list(invalid_comp))}"
+                )
+
+    try:
+        updated = await PersonalizedTrainingService.update_scheduler(
+            db,
+            scheduler_id=scheduler_id,
+            name=payload.name,
+            service_id=payload.service_id,
+            team_id=payload.team_id,
+            interval_days=payload.interval_days,
+            lookback_days=payload.lookback_days,
+            is_active=payload.is_active,
+            hubspot_owner_ids=payload.hubspot_owner_ids
+        )
+        if not updated:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Planificador no encontrado.")
+        return TrainingSchedulerOut(**updated)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.delete("/admin/schedulers/{scheduler_id}")
+async def delete_scheduler(
+    scheduler_id: int,
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+    db: AsyncSession = Depends(get_db)
+):
+    """Delete a training scheduler and remove its agent associations."""
+    if context.normalized_role == InternalRole.AGENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Se requiere rol de administración."
+        )
+
+    sch = await PersonalizedTrainingService.get_scheduler_by_id(db, scheduler_id)
+    if not sch:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Planificador no encontrado.")
+
+    if not context.is_super_admin:
+        sch_comp = sch.get("company_id")
+        if sch_comp is not None and sch_comp not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado a este planificador."
+            )
+
+    deleted = await PersonalizedTrainingService.delete_scheduler(db, scheduler_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Planificador no encontrado.")
+    return {"status": "deleted", "scheduler_id": scheduler_id}
+
+
+@router.post("/admin/schedulers/{scheduler_id}/run")
+async def run_scheduler_manually(
+    scheduler_id: int,
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+    db: AsyncSession = Depends(get_db)
+):
+    """Force an immediate execution of a training scheduler."""
+    if context.normalized_role == InternalRole.AGENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Se requiere rol de administración."
+        )
+
+    sch = await PersonalizedTrainingService.get_scheduler_by_id(db, scheduler_id)
+    if not sch:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Planificador no encontrado.")
+
+    if not context.is_super_admin:
+        sch_comp = sch.get("company_id")
+        if sch_comp is not None and sch_comp not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado a este planificador."
+            )
+
+    res = await PersonalizedTrainingService.execute_scheduler(db, scheduler=scheduler_id, force=True)
+    return res or {"triggered": False, "scheduler_id": scheduler_id, "reason": "Execution skipped or no agents"}
+
+
 @router.get("/admin/agents/{hubspot_owner_id}", response_model=AgentDetailResponse)
 async def get_agent_detail_admin(
     hubspot_owner_id: str,
@@ -554,11 +890,20 @@ async def trigger_manual_generation(
             detail="Acceso denegado: Se requiere rol de administración o coordinación."
         )
 
+    target_owner_ids = payload.hubspot_owner_ids
+    if not target_owner_ids and (payload.service_id is not None or payload.team_id is not None or payload.company_id is not None):
+        eff_cid = payload.company_id if payload.company_id is not None else (None if context.is_super_admin else context.company_id)
+        scoped_ids = await _resolve_training_agent_scope(
+            db, context=context, service_id=payload.service_id, team_id=payload.team_id, company_id=eff_cid
+        )
+        if scoped_ids is not None:
+            target_owner_ids = scoped_ids
+
     # Validate agent scoping if owner IDs were explicitly requested
-    if payload.hubspot_owner_ids:
+    if target_owner_ids:
         # Enforce agent ID restrictions (Service Managers)
         if context.allowed_agent_ids is not None:
-            for oid in payload.hubspot_owner_ids:
+            for oid in target_owner_ids:
                 if oid not in context.allowed_agent_ids:
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN,
@@ -566,7 +911,7 @@ async def trigger_manual_generation(
                     )
         # Enforce company restrictions (Company Admins)
         if not context.is_super_admin:
-            stmt_u = select(User.company_id).where(User.hubspot_owner_id.in_(payload.hubspot_owner_ids))
+            stmt_u = select(User.company_id).where(User.hubspot_owner_id.in_(target_owner_ids))
             res_u = await db.execute(stmt_u)
             companies = list(res_u.scalars().all())
             for cid in companies:
@@ -582,7 +927,7 @@ async def trigger_manual_generation(
     try:
         run = await PersonalizedTrainingService.run_personalized_training_pass(
             db=db,
-            hubspot_owner_ids=payload.hubspot_owner_ids,
+            hubspot_owner_ids=target_owner_ids,
             period_start=payload.period_start,
             period_end=payload.period_end,
             triggered_by="manual",

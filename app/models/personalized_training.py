@@ -11,6 +11,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -32,6 +33,7 @@ class TrainingAgentSetting(Base):
     agent_name: Mapped[str] = mapped_column(Text, nullable=False)
     agent_initials: Mapped[str] = mapped_column(Text, nullable=False)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    include_in_scheduler: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
     training_code: Mapped[str | None] = mapped_column(Text, unique=True, nullable=True, index=True)
     training_numeric_code: Mapped[str | None] = mapped_column(Text, unique=True, nullable=True, index=True)
     training_code_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
@@ -227,6 +229,64 @@ class TrainingSchedulerSetting(Base):
         DateTime(timezone=True), default=func.now(), onupdate=func.now(), server_default=func.now()
     )
     updated_by_email: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class TrainingScheduler(Base):
+    __tablename__ = "bm_training_schedulers"
+
+    scheduler_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    company_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_companies.company_id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    service_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_services.service_id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    team_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_teams.team_id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    interval_days: Mapped[int] = mapped_column(Integer, default=14, server_default="14", nullable=False)
+    lookback_days: Mapped[int] = mapped_column(Integer, default=14, server_default="14", nullable=False)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), onupdate=func.now(), server_default=func.now()
+    )
+
+    company = relationship("Company")
+    service = relationship("Service")
+    team = relationship("Team")
+    agents = relationship(
+        "TrainingSchedulerAgent",
+        back_populates="scheduler",
+        cascade="all, delete-orphan",
+        lazy="selectin"
+    )
+
+
+class TrainingSchedulerAgent(Base):
+    __tablename__ = "bm_training_scheduler_agents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    scheduler_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("bm_training_schedulers.scheduler_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    hubspot_owner_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), server_default=func.now()
+    )
+
+    scheduler = relationship("TrainingScheduler", back_populates="agents")
+
+    __table_args__ = (
+        UniqueConstraint("scheduler_id", "hubspot_owner_id", name="uq_scheduler_hubspot_owner"),
+    )
 
 
 class TrainingCallSession(Base):
