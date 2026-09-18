@@ -101,6 +101,13 @@ from app.models.personalized_training import (
     TrainingAgentReport,
     TrainingSimulationPrompt,
     TrainingCompletionStatus,
+    TrainingCallSession,
+    TrainingCallEvaluation,
+    TrainingEvaluationPrompt,
+)
+from app.services.demo_training_cycle_enhancer import (
+    generate_enhanced_training_cycle_data,
+    generate_simulation_evaluation_data,
 )
 from app.models.trainer import (
     TrainerEvaluationConfig,
@@ -1416,8 +1423,48 @@ async def seed_training_cycles(db: AsyncSession, company: Company) -> Dict[str, 
 
     reports_created = []
 
+    # Ensure default evaluation prompt exists for services
+    eval_prompts = {}
+    for s_key, s_obj in services.items():
+        if not s_obj:
+            continue
+        ep_res = await db.execute(
+            select(TrainingEvaluationPrompt).where(
+                TrainingEvaluationPrompt.service_id == s_obj.service_id,
+                TrainingEvaluationPrompt.is_active == True,
+            )
+        )
+        ep = ep_res.scalars().first()
+        if not ep:
+            ep = TrainingEvaluationPrompt(
+                service_id=s_obj.service_id,
+                company_id=cid,
+                prompt_text="Evalúa la simulación médica según los criterios del protocolo Boston Medical.",
+                version=1,
+                is_active=True,
+                created_by="system",
+            )
+            db.add(ep)
+            await db.flush()
+        eval_prompts[s_obj.service_id] = ep
+
+    default_ep_id = list(eval_prompts.values())[0].id if eval_prompts else 1
+
     # Run 1 reports (completed)
     for agent in agents_run1:
+        service_key = "atencion-al-cliente"
+        if svc_vn and agent.primary_service_id == svc_vn.service_id:
+            service_key = "ventas"
+
+        cycle_data = generate_enhanced_training_cycle_data(
+            agent_id=agent.hubspot_owner_id,
+            agent_name=agent.name,
+            agent_initials=agent.agent_initials or "AD",
+            service_key=service_key,
+            status="completed",
+            cycle_index=1
+        )
+
         report = TrainingAgentReport(
             training_run_id=run1.training_run_id,
             company_id=cid,
@@ -1431,31 +1478,15 @@ async def seed_training_cycles(db: AsyncSession, company: Company) -> Dict[str, 
             cycle_mode="automatic",
             evaluations_count=12,
             calls_count=12,
-            avg_evaluacion_global=Decimal("8.15"),
-            summary_general=(
-                f"Informe de consolidación de ciclo para {agent.name}. "
-                "Evolución positiva con consolidación en protocolos de atención y escucha activa."
-            ),
-            strengths_json={
-                "fortalezas": [
-                    "Excelente empatía y validación del problema del usuario.",
-                    "Disminución drástica de interrupciones en llamada.",
-                ]
-            },
-            weaknesses_json={
-                "puntos_mejora": [
-                    "Afianzar las tentativas de cierre temprano.",
-                    "Sintetizar la explicación de condiciones contractuales.",
-                ]
-            },
-            general_objectives_json={
-                "objetivos": [
-                    {"titulo": "Perfeccionamiento del cierre", "meta": "Superar 8.0 en cierre de llamada"}
-                ]
-            },
-            final_report_json={
-                "conclusiones": "Objetivos alcanzados con éxito. Se recomienda mantener el protocolo establecido."
-            },
+            avg_evaluacion_global=cycle_data["avg_score"],
+            summary_general=cycle_data["summary_general"],
+            evolution_summary=cycle_data["evolution_summary"],
+            strengths_json=cycle_data["strengths_json"],
+            weaknesses_json=cycle_data["weaknesses_json"],
+            notable_data_json=cycle_data["notable_data_json"],
+            general_objectives_json=cycle_data["general_objectives_json"],
+            specific_objectives_json=cycle_data["specific_objectives_json"],
+            final_report_json=cycle_data["final_report_json"],
             is_current=True,
             generated_at=run1.period_end,
             approved_at=run1.period_end,
@@ -1463,47 +1494,89 @@ async def seed_training_cycles(db: AsyncSession, company: Company) -> Dict[str, 
         db.add(report)
         await db.flush()
 
-        # Simulation Prompts
-        p1 = TrainingSimulationPrompt(
-            training_report_id=report.training_report_id,
-            hubspot_owner_id=agent.hubspot_owner_id,
-            prompt_number=1,
-            title="Manejo de Reclamación con Cliente Insatisfecho",
-            scenario_type="roleplay",
-            prompt_text="Simula una llamada con un cliente que ha recibido una factura con cargo duplicado.",
-        )
-        p2 = TrainingSimulationPrompt(
-            training_report_id=report.training_report_id,
-            hubspot_owner_id=agent.hubspot_owner_id,
-            prompt_number=2,
-            title="Resolución Técnica y Despedida Cordial",
-            scenario_type="roleplay",
-            prompt_text="Simula el cierre de una incidencia técnica asegurando la satisfacción del cliente.",
-        )
-        db.add_all([p1, p2])
-        await db.flush()
+        ep_id = eval_prompts.get(agent.primary_service_id, None)
+        ep_id_val = ep_id.id if ep_id else default_ep_id
 
-        c1 = TrainingCompletionStatus(
-            training_report_id=report.training_report_id,
-            simulation_prompt_id=p1.simulation_prompt_id,
-            hubspot_owner_id=agent.hubspot_owner_id,
-            status="completed",
-            completed_at=run1.period_end,
-            notes="Completado con buena soltura.",
-        )
-        c2 = TrainingCompletionStatus(
-            training_report_id=report.training_report_id,
-            simulation_prompt_id=p2.simulation_prompt_id,
-            hubspot_owner_id=agent.hubspot_owner_id,
-            status="completed",
-            completed_at=run1.period_end,
-            notes="Completado satisfactoriamente.",
-        )
-        db.add_all([c1, c2])
+        # Insert rich simulation prompts and complete them with sessions and evaluations
+        for idx, p_info in enumerate(cycle_data["prompts"]):
+            p = TrainingSimulationPrompt(
+                training_report_id=report.training_report_id,
+                hubspot_owner_id=agent.hubspot_owner_id,
+                prompt_number=idx + 1,
+                title=p_info["title"],
+                scenario_type=p_info["scenario_type"],
+                objective_focus_json=p_info["objective_focus_json"],
+                prompt_text=p_info["prompt_text"],
+            )
+            db.add(p)
+            await db.flush()
+
+            sess = TrainingCallSession(
+                call_sid=f"CA_demo_seed_{report.training_report_id}_{p.simulation_prompt_id}_{agent.hubspot_owner_id}",
+                recording_url=f"https://storage.doobot.ai/demo/recordings/{agent.hubspot_owner_id}_{p.simulation_prompt_id}.mp3",
+                agent_id=agent.hubspot_owner_id,
+                cycle_id=report.training_report_id,
+                conversation_id=p.simulation_prompt_id,
+                status="completed",
+                started_at=run1.period_end - timedelta(days=2, hours=idx),
+                ended_at=run1.period_end - timedelta(days=2, hours=idx, minutes=-6),
+                recording_ready_at=run1.period_end - timedelta(days=2, hours=idx, minutes=-5),
+                evaluation_completed_at=run1.period_end - timedelta(days=2, hours=idx, minutes=-4),
+            )
+            db.add(sess)
+            await db.flush()
+
+            eval_res = generate_simulation_evaluation_data(
+                prompt_title=p_info["title"],
+                prompt_number=idx + 1,
+                agent_name=agent.name,
+                service_key=service_key,
+                agent_score_tier=cycle_data["tier"]
+            )
+            ev = TrainingCallEvaluation(
+                session_id=sess.session_id,
+                cycle_id=report.training_report_id,
+                conversation_id=p.simulation_prompt_id,
+                agent_id=agent.hubspot_owner_id,
+                prompt_version_id=ep_id_val,
+                transcription=eval_res["transcription"],
+                result_json=eval_res["result_json"],
+                score=eval_res["score"],
+                feedback=eval_res["feedback"],
+                created_at=run1.period_end - timedelta(days=2, hours=idx, minutes=-4),
+            )
+            db.add(ev)
+            await db.flush()
+
+            comp = TrainingCompletionStatus(
+                training_report_id=report.training_report_id,
+                simulation_prompt_id=p.simulation_prompt_id,
+                hubspot_owner_id=agent.hubspot_owner_id,
+                status="completed",
+                completed_at=run1.period_end - timedelta(days=2, hours=idx, minutes=-4),
+                call_session_id=sess.session_id,
+                evaluation_id=ev.evaluation_id,
+                notes=f"Simulación evaluada con puntuación {eval_res['score']}/10.",
+            )
+            db.add(comp)
+
         reports_created.append(report)
 
     # Run 2 reports (active / in_progress)
     for agent in agents_run2:
+        service_key = "atencion-al-cliente"
+        if svc_vn and agent.primary_service_id == svc_vn.service_id:
+            service_key = "ventas"
+
+        cycle_data = generate_enhanced_training_cycle_data(
+            agent_id=agent.hubspot_owner_id,
+            agent_name=agent.name,
+            agent_initials=agent.agent_initials or "AD",
+            service_key=service_key,
+            status="in_progress",
+            cycle_index=2
+        )
+
         report = TrainingAgentReport(
             training_run_id=run2.training_run_id,
             company_id=cid,
@@ -1517,51 +1590,99 @@ async def seed_training_cycles(db: AsyncSession, company: Company) -> Dict[str, 
             cycle_mode="automatic",
             evaluations_count=8,
             calls_count=8,
-            avg_evaluacion_global=Decimal("7.40"),
-            summary_general=(
-                f"Ciclo activo de mejora para {agent.name}. "
-                "Enfocado en superación de objeciones comerciales y agilidad en consulta."
-            ),
-            strengths_json={
-                "fortalezas": [
-                    "Claridad en la exposición de tarifas y promociones.",
-                ]
-            },
-            weaknesses_json={
-                "puntos_mejora": [
-                    "Aumentar el número de preguntas de sondeo.",
-                    "Manejo de objeción sobre precio de la competencia.",
-                ]
-            },
-            general_objectives_json={
-                "objetivos": [
-                    {"titulo": "Superación de objeciones", "meta": "Alcanzar 7.5 en argumentación"}
-                ]
-            },
+            avg_evaluacion_global=cycle_data["avg_score"],
+            summary_general=cycle_data["summary_general"],
+            evolution_summary=cycle_data["evolution_summary"],
+            strengths_json=cycle_data["strengths_json"],
+            weaknesses_json=cycle_data["weaknesses_json"],
+            notable_data_json=cycle_data["notable_data_json"],
+            general_objectives_json=cycle_data["general_objectives_json"],
+            specific_objectives_json=cycle_data["specific_objectives_json"],
+            final_report_json=None,
             is_current=True,
             generated_at=run2.period_start + timedelta(days=2),
+            approved_at=run2.period_start + timedelta(days=2),
         )
         db.add(report)
         await db.flush()
 
-        p1 = TrainingSimulationPrompt(
-            training_report_id=report.training_report_id,
-            hubspot_owner_id=agent.hubspot_owner_id,
-            prompt_number=1,
-            title="Superación de Objeción de Precio en Venta B2B",
-            scenario_type="roleplay",
-            prompt_text="El cliente afirma que el precio del competidor es un 15% más barato.",
-        )
-        db.add(p1)
-        await db.flush()
+        ep_id = eval_prompts.get(agent.primary_service_id, None)
+        ep_id_val = ep_id.id if ep_id else default_ep_id
 
-        c1 = TrainingCompletionStatus(
-            training_report_id=report.training_report_id,
-            simulation_prompt_id=p1.simulation_prompt_id,
-            hubspot_owner_id=agent.hubspot_owner_id,
-            status="pending",
-        )
-        db.add(c1)
+        # Insert 3 rich simulation prompts (1 completed, 2 pending)
+        for idx, p_info in enumerate(cycle_data["prompts"]):
+            p = TrainingSimulationPrompt(
+                training_report_id=report.training_report_id,
+                hubspot_owner_id=agent.hubspot_owner_id,
+                prompt_number=idx + 1,
+                title=p_info["title"],
+                scenario_type=p_info["scenario_type"],
+                objective_focus_json=p_info["objective_focus_json"],
+                prompt_text=p_info["prompt_text"],
+            )
+            db.add(p)
+            await db.flush()
+
+            if idx == 0:
+                # First simulation completed to demonstrate active progress
+                sess = TrainingCallSession(
+                    call_sid=f"CA_demo_seed_{report.training_report_id}_{p.simulation_prompt_id}_{agent.hubspot_owner_id}",
+                    recording_url=f"https://storage.doobot.ai/demo/recordings/{agent.hubspot_owner_id}_{p.simulation_prompt_id}.mp3",
+                    agent_id=agent.hubspot_owner_id,
+                    cycle_id=report.training_report_id,
+                    conversation_id=p.simulation_prompt_id,
+                    status="completed",
+                    started_at=run2.period_start + timedelta(days=3),
+                    ended_at=run2.period_start + timedelta(days=3, minutes=5),
+                    recording_ready_at=run2.period_start + timedelta(days=3, minutes=6),
+                    evaluation_completed_at=run2.period_start + timedelta(days=3, minutes=7),
+                )
+                db.add(sess)
+                await db.flush()
+
+                eval_res = generate_simulation_evaluation_data(
+                    prompt_title=p_info["title"],
+                    prompt_number=idx + 1,
+                    agent_name=agent.name,
+                    service_key=service_key,
+                    agent_score_tier=cycle_data["tier"]
+                )
+                ev = TrainingCallEvaluation(
+                    session_id=sess.session_id,
+                    cycle_id=report.training_report_id,
+                    conversation_id=p.simulation_prompt_id,
+                    agent_id=agent.hubspot_owner_id,
+                    prompt_version_id=ep_id_val,
+                    transcription=eval_res["transcription"],
+                    result_json=eval_res["result_json"],
+                    score=eval_res["score"],
+                    feedback=eval_res["feedback"],
+                    created_at=run2.period_start + timedelta(days=3, minutes=7),
+                )
+                db.add(ev)
+                await db.flush()
+
+                comp = TrainingCompletionStatus(
+                    training_report_id=report.training_report_id,
+                    simulation_prompt_id=p.simulation_prompt_id,
+                    hubspot_owner_id=agent.hubspot_owner_id,
+                    status="completed",
+                    completed_at=run2.period_start + timedelta(days=3, minutes=7),
+                    call_session_id=sess.session_id,
+                    evaluation_id=ev.evaluation_id,
+                    notes=f"Primera simulación del ciclo completada con {eval_res['score']}/10.",
+                )
+                db.add(comp)
+            else:
+                # Remaining simulations pending
+                comp = TrainingCompletionStatus(
+                    training_report_id=report.training_report_id,
+                    simulation_prompt_id=p.simulation_prompt_id,
+                    hubspot_owner_id=agent.hubspot_owner_id,
+                    status="pending",
+                )
+                db.add(comp)
+
         reports_created.append(report)
 
     logger.info("Successfully seeded %d TrainingAgentReports across 2 runs.", len(reports_created))
