@@ -20,12 +20,18 @@ import argparse
 import asyncio
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
+import json
 import logging
 import os
+import re
 import sys
 from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, os.path.abspath("."))
+
+MEDICAL_TERM_REGEX = re.compile(
+    r"(?i)\b(?:médic[oa]s?|pacientes?|clínicas?|ecografías?|urólog[oa]s?|tratamientos?|anamnesis|patologías?|fármacos?|Boston\s+Medical)\b"
+)
 
 from sqlalchemy import select, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -90,7 +96,7 @@ async def backfill_training_cycles(db: AsyncSession, apply: bool = False) -> Dic
                 ep = TrainingEvaluationPrompt(
                     service_id=svc_id,
                     company_id=DEMO_COMPANY_ID,
-                    prompt_text="Evalúa la simulación médica según los criterios del protocolo Boston Medical.",
+                    prompt_text="Evalúa la simulación de contact center según los criterios de calidad y atención al cliente.",
                     version=1,
                     is_active=True,
                     created_by="backfill_system",
@@ -140,25 +146,53 @@ async def backfill_training_cycles(db: AsyncSession, apply: bool = False) -> Dic
         "new_sessions_created": 0,
         "new_evaluations_created": 0,
         "new_completions_created": 0,
-        "prompts_updated": 0,
-        "prompts_created": 0,
-        "sessions_created": 0,
-        "evaluations_created": 0,
-        "completions_linked": 0,
         "strengths_upgraded": 0,
         "weaknesses_upgraded": 0,
         "general_objectives_upgraded": 0,
         "specific_objectives_created": 0,
         "final_reports_enriched": 0,
+        "prompts_audited": 0,
+        "prompts_updated": 0,
+        "prompts_created": 0,
+        "prompts_with_medical_refs": 0,
+        "prompts_medical_details": [],
+        "sessions_created": 0,
+        "sessions_modified": 0,
+        "evaluations_created": 0,
+        "evaluations_modified": 0,
+        "completions_modified": 0,
+        "base_calls_modified": 0,
+        "criterion_results_modified": 0,
+        "reports_with_medical_refs_before": 0,
+        "reports_medical_details_before": [],
     }
 
     # ── 4. Process Each Report ───────────────────────────────────────────────
     for r in reports:
+        # Check medical references in report before update
+        rep_text = (
+            f"{r.summary_general or ''} {r.evolution_summary or ''} "
+            f"{json.dumps(r.strengths_json or {}, ensure_ascii=False)} "
+            f"{json.dumps(r.weaknesses_json or {}, ensure_ascii=False)} "
+            f"{json.dumps(r.general_objectives_json or {}, ensure_ascii=False)} "
+            f"{json.dumps(r.specific_objectives_json or {}, ensure_ascii=False)} "
+            f"{json.dumps(r.final_report_json or {}, ensure_ascii=False)}"
+        )
+        found_med_rep = MEDICAL_TERM_REGEX.findall(rep_text)
+        if found_med_rep:
+            stats["reports_with_medical_refs_before"] += 1
+            stats["reports_medical_details_before"].append({
+                "training_report_id": r.training_report_id,
+                "agent_id": r.hubspot_owner_id,
+                "agent_name": r.agent_name,
+                "matched_terms": sorted(list(set(found_med_rep))),
+            })
+
         # Determine service key
         svc_obj = services.get(r.service_id)
         service_key = svc_obj.service_key if svc_obj else "atencion-al-cliente"
 
-        # Generate rich data payload
+        # Generate rich generic data payload
         cycle_data = generate_enhanced_training_cycle_data(
             agent_id=r.hubspot_owner_id,
             agent_name=r.agent_name,
@@ -168,7 +202,7 @@ async def backfill_training_cycles(db: AsyncSession, apply: bool = False) -> Dic
             cycle_index=r.training_run_id or 1
         )
 
-        # Update Report Fields
+        # Update Report Fields (EXCLUSIVELY descriptive fields of TrainingAgentReport)
         r.summary_general = cycle_data["summary_general"]
         r.evolution_summary = cycle_data["evolution_summary"]
         r.strengths_json = cycle_data["strengths_json"]
@@ -193,7 +227,7 @@ async def backfill_training_cycles(db: AsyncSession, apply: bool = False) -> Dic
         stats["general_objectives_upgraded"] += 1
         stats["specific_objectives_created"] += 1
 
-        # ── 5. Process Simulation Prompts ────────────────────────────────────
+        # ── 5. Audit Simulation Prompts (READ-ONLY: DO NOT MODIFY) ───────────
         stmt_p = (
             select(TrainingSimulationPrompt)
             .where(TrainingSimulationPrompt.training_report_id == r.training_report_id)
@@ -202,147 +236,21 @@ async def backfill_training_cycles(db: AsyncSession, apply: bool = False) -> Dic
         res_p = await db.execute(stmt_p)
         existing_prompts = list(res_p.scalars().all())
 
-        enhanced_prompts = cycle_data["prompts"]
-
-        # Upgrade existing prompts
-        for idx, p in enumerate(existing_prompts):
-            p_data = enhanced_prompts[idx % len(enhanced_prompts)]
-            p.title = p_data["title"]
-            p.scenario_type = p_data["scenario_type"]
-            p.objective_focus_json = p_data["objective_focus_json"]
-            p.prompt_text = p_data["prompt_text"]
-            stats["prompts_updated"] += 1
-
-        # Add missing prompts if report has fewer prompts than desired
-        prompts_to_add = len(enhanced_prompts) - len(existing_prompts)
-        if prompts_to_add > 0:
-            for idx in range(len(existing_prompts), len(enhanced_prompts)):
-                p_data = enhanced_prompts[idx]
-                new_p = TrainingSimulationPrompt(
-                    training_report_id=r.training_report_id,
-                    hubspot_owner_id=r.hubspot_owner_id,
-                    prompt_number=idx + 1,
-                    title=p_data["title"],
-                    scenario_type=p_data["scenario_type"],
-                    objective_focus_json=p_data["objective_focus_json"],
-                    prompt_text=p_data["prompt_text"],
-                )
-                if apply:
-                    db.add(new_p)
-                    await db.flush()
-                existing_prompts.append(new_p)
-                stats["prompts_created"] += 1
-
-        # ── 6. Process Completion Statuses, Sessions & Evaluations ───────────
-        ep_obj = eval_prompts.get(r.service_id)
-        ep_id = ep_obj.id if ep_obj else default_ep_id
-
-        for idx, p in enumerate(existing_prompts):
-            # Fetch or create completion status
-            stmt_c = select(TrainingCompletionStatus).where(
-                and_(
-                    TrainingCompletionStatus.training_report_id == r.training_report_id,
-                    TrainingCompletionStatus.simulation_prompt_id == p.simulation_prompt_id,
-                )
-            )
-            res_c = await db.execute(stmt_c)
-            comp = res_c.scalars().first()
-
-            should_be_completed = (r.status == "completed") or (r.status == "in_progress" and idx == 0)
-
-            if not comp:
-                comp = TrainingCompletionStatus(
-                    training_report_id=r.training_report_id,
-                    simulation_prompt_id=p.simulation_prompt_id,
-                    hubspot_owner_id=r.hubspot_owner_id,
-                    status="completed" if should_be_completed else "pending",
-                )
-                if apply:
-                    db.add(comp)
-                    await db.flush()
-
-            if should_be_completed:
-                comp.status = "completed"
-                comp_completed_at = r.period_end or datetime.now(timezone.utc)
-                comp.completed_at = comp_completed_at
-
-                # Check if session exists
-                stmt_s = select(TrainingCallSession).where(
-                    and_(
-                        TrainingCallSession.cycle_id == r.training_report_id,
-                        TrainingCallSession.conversation_id == p.simulation_prompt_id,
-                    )
-                )
-                res_s = await db.execute(stmt_s)
-                sess = res_s.scalars().first()
-
-                if not sess and apply:
-                    sess = TrainingCallSession(
-                        call_sid=f"CA_demo_bf_{r.training_report_id}_{p.simulation_prompt_id}_{r.hubspot_owner_id}",
-                        recording_url=f"https://storage.doobot.ai/demo/recordings/{r.hubspot_owner_id}_{p.simulation_prompt_id}.mp3",
-                        agent_id=r.hubspot_owner_id,
-                        cycle_id=r.training_report_id,
-                        conversation_id=p.simulation_prompt_id,
-                        status="completed",
-                        started_at=comp_completed_at - timedelta(minutes=7),
-                        ended_at=comp_completed_at - timedelta(minutes=1),
-                        recording_ready_at=comp_completed_at - timedelta(seconds=45),
-                        evaluation_completed_at=comp_completed_at,
-                    )
-                    db.add(sess)
-                    await db.flush()
-                stats["sessions_created"] += 1
-
-                # Check if evaluation exists
-                eval_obj = None
-                if sess:
-                    stmt_ev = select(TrainingCallEvaluation).where(
-                        and_(
-                            TrainingCallEvaluation.cycle_id == r.training_report_id,
-                            TrainingCallEvaluation.conversation_id == p.simulation_prompt_id,
-                        )
-                    )
-                    res_ev = await db.execute(stmt_ev)
-                    eval_obj = res_ev.scalars().first()
-
-                if not eval_obj and apply and sess:
-                    eval_res = generate_simulation_evaluation_data(
-                        prompt_title=p.title,
-                        prompt_number=p.prompt_number,
-                        agent_name=r.agent_name,
-                        service_key=service_key,
-                        agent_score_tier=cycle_data["tier"],
-                        agent_id=r.hubspot_owner_id,
-                    )
-                    eval_obj = TrainingCallEvaluation(
-                        session_id=sess.session_id,
-                        cycle_id=r.training_report_id,
-                        conversation_id=p.simulation_prompt_id,
-                        agent_id=r.hubspot_owner_id,
-                        prompt_version_id=ep_id,
-                        transcription=eval_res["transcription"],
-                        result_json=eval_res["result_json"],
-                        score=eval_res["score"],
-                        feedback=eval_res["feedback"],
-                        created_at=comp_completed_at,
-                    )
-                    db.add(eval_obj)
-                    await db.flush()
-                stats["evaluations_created"] += 1
-
-                # Link IDs in completion
-                if sess:
-                    comp.call_session_id = sess.session_id
-                if eval_obj:
-                    comp.evaluation_id = eval_obj.evaluation_id
-                    comp.notes = f"Simulación completada y evaluada con nota {eval_obj.score}/10."
-                stats["completions_linked"] += 1
-            else:
-                # Pending simulation
-                comp.status = "pending"
-                comp.call_session_id = None
-                comp.evaluation_id = None
-                comp.completed_at = None
+        for p in existing_prompts:
+            stats["prompts_audited"] += 1
+            p_text = f"{p.title or ''} {p.prompt_text or ''} {json.dumps(p.objective_focus_json or {}, ensure_ascii=False)}"
+            found_med_prompt = MEDICAL_TERM_REGEX.findall(p_text)
+            if found_med_prompt:
+                stats["prompts_with_medical_refs"] += 1
+                stats["prompts_medical_details"].append({
+                    "simulation_prompt_id": p.simulation_prompt_id,
+                    "prompt_number": p.prompt_number,
+                    "training_report_id": r.training_report_id,
+                    "agent_id": r.hubspot_owner_id,
+                    "agent_name": r.agent_name,
+                    "title": p.title,
+                    "matched_terms": sorted(list(set(found_med_prompt))),
+                })
 
     # ── 7. Generate Completed Training Cycles for Uncovered Agents ───────────
     if missing_agents:
@@ -560,21 +468,36 @@ async def main():
     logger.info("- Agentes totales: %d", stats["total_agents"])
     logger.info("- Agentes con ciclos existentes: %d", stats["existing_agents_with_reports"])
     logger.info("- Agentes sin ciclos: %d", stats["missing_agents_without_reports"])
-    logger.info("- Ciclos nuevos %s: %d", "creados" if is_apply else "previstos", stats["new_reports_created"])
     logger.info("- Informes existentes auditados: %d", stats["reports_audited"])
-    logger.info("- Informes existentes enriquecidos: %d", stats["reports_updated"])
-    logger.info("  * Ciclos completados enriquecidos: %d", stats["completed_reports_enriched"])
-    logger.info("  * Ciclos activos enriquecidos: %d", stats["active_reports_enriched"])
-    logger.info("- Fortalezas creadas/actualizadas (formato lista): %d", stats["strengths_upgraded"])
-    logger.info("- Áreas de mejora creadas/actualizadas (formato lista): %d", stats["weaknesses_upgraded"])
-    logger.info("- Objetivos generales creados/actualizados (>=3): %d", stats["general_objectives_upgraded"])
-    logger.info("- Objetivos específicos creados/actualizados (>=3): %d", stats["specific_objectives_created"])
-    logger.info("- Informes finales enriquecidos (con objectives_status): %d", stats["final_reports_enriched"])
-    logger.info("- Prompts de simulación nuevos creados: %d", stats["new_prompts_created"])
-    logger.info("- Prompts de simulación existentes actualizados: %d", stats["prompts_updated"])
-    logger.info("- Sesiones de llamada nuevas creadas: %d", stats["new_sessions_created"])
-    logger.info("- Evaluaciones simuladas nuevas creadas: %d", stats["new_evaluations_created"])
-    logger.info("- Completions nuevos enlazados con evaluation_id: %d", stats["new_completions_created"])
+    logger.info("- Informes existentes que requieren revisión/enriquecimiento: %d", stats["reports_updated"])
+    logger.info("  * Ciclos completados a enriquecer: %d", stats["completed_reports_enriched"])
+    logger.info("  * Ciclos activos a enriquecer: %d", stats["active_reports_enriched"])
+    logger.info("- Fortalezas a actualizar: %d", stats["strengths_upgraded"])
+    logger.info("- Áreas de mejora a actualizar: %d", stats["weaknesses_upgraded"])
+    logger.info("- Objetivos generales a actualizar: %d", stats["general_objectives_upgraded"])
+    logger.info("- Objetivos específicos a actualizar: %d", stats["specific_objectives_created"])
+    logger.info("- Informes finales/objectives_status a enriquecer: %d", stats["final_reports_enriched"])
+    logger.info("- TrainingSimulationPrompt modificados: %d", stats["prompts_updated"])
+    logger.info("- TrainingCallSession modificadas: %d", stats["sessions_modified"])
+    logger.info("- TrainingCallEvaluation modificadas: %d", stats["evaluations_modified"])
+    logger.info("- TrainingCompletionStatus modificados: %d", stats["completions_modified"])
+    logger.info("- Llamadas base modificadas: %d", stats["base_calls_modified"])
+    logger.info("- CriterionResult modificados: %d", stats["criterion_results_modified"])
+    logger.info("--------------------------------------------------")
+    logger.info("COMPROBACIÓN ESPECÍFICA DE CONTENIDO MÉDICO:")
+    logger.info("A) Informes con referencias médicas antes del cambio: %d / %d", stats["reports_with_medical_refs_before"], stats["reports_audited"])
+    logger.info("B) TrainingSimulationPrompt auditados: %d", stats["prompts_audited"])
+    logger.info("   Prompts con referencias médicas detectadas (SOLO INFORME, NO MODIFICADOS): %d", stats["prompts_with_medical_refs"])
+    for p_detail in stats["prompts_medical_details"]:
+        logger.info(
+            "   * Prompt ID=%s (#%s, Report ID=%s, Agente=%s): '%s' -> Términos: %s",
+            p_detail["simulation_prompt_id"],
+            p_detail["prompt_number"],
+            p_detail["training_report_id"],
+            p_detail["agent_name"],
+            p_detail["title"],
+            ", ".join(p_detail["matched_terms"])
+        )
     logger.info("==================================================")
 
 

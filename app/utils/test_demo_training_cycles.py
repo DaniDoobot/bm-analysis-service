@@ -198,10 +198,10 @@ class TestDemoTrainingCycles(unittest.IsolatedAsyncioTestCase):
         )
         self.assertGreaterEqual(float(eval_data["score"]), 8.0)
         self.assertIn("Agente:", eval_data["transcription"])
-        self.assertIn("Paciente:", eval_data["transcription"])
+        self.assertIn("Cliente:", eval_data["transcription"])
         self.assertIn("score", eval_data["result_json"])
         self.assertIn("result_json", eval_data["result_json"])
-        self.assertTrue(eval_data["result_json"]["result_json"]["agendar_cita"])
+        self.assertTrue(eval_data["result_json"]["result_json"]["escucha_activa"])
         self.assertGreater(len(eval_data["strengths"]), 0)
         self.assertGreater(len(eval_data["weaknesses"]), 0)
 
@@ -421,10 +421,11 @@ class TestDemoTrainingCycles(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(stats["reports_updated"], 1)
         self.assertEqual(stats["completed_reports_enriched"], 1)
-        self.assertGreaterEqual(stats["sessions_created"], 1)
-        self.assertGreaterEqual(stats["evaluations_created"], 1)
+        self.assertEqual(stats["sessions_modified"], 0)
+        self.assertEqual(stats["evaluations_modified"], 0)
+        self.assertEqual(stats["prompts_updated"], 0)
 
-        # ── Verify PASS 10: Company 7 data is upgraded ────────────────────────
+        # ── Verify PASS 10: Company 7 report data is upgraded ──────────────────
         await self.db.refresh(rep_c7)
         self.assertIsInstance(rep_c7.strengths_json, list, "strengths_json debe ser ahora una lista")
         self.assertIsInstance(rep_c7.weaknesses_json, list, "weaknesses_json debe ser ahora una lista")
@@ -432,23 +433,9 @@ class TestDemoTrainingCycles(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(rep_c7.specific_objectives_json), 3)
         self.assertIn("objectives_status", rep_c7.final_report_json)
 
+        # Verify existing simulation prompts were NOT modified (scope restriction)
         await self.db.refresh(prompt_c7)
-        self.assertGreater(len(prompt_c7.prompt_text), 600, "El prompt debe tener >600 caracteres")
-
-        await self.db.refresh(comp_c7)
-        self.assertEqual(comp_c7.status, "completed")
-        self.assertIsNotNone(comp_c7.call_session_id, "Debe tener call_session_id")
-        self.assertIsNotNone(comp_c7.evaluation_id, "Debe tener evaluation_id")
-
-        # Verify session and evaluation exist in DB
-        sess = await self.db.get(TrainingCallSession, comp_c7.call_session_id)
-        self.assertIsNotNone(sess)
-        self.assertEqual(sess.cycle_id, 1)
-
-        eval_obj = await self.db.get(TrainingCallEvaluation, comp_c7.evaluation_id)
-        self.assertIsNotNone(eval_obj)
-        self.assertIsNotNone(eval_obj.score)
-        self.assertIn("Agente:", eval_obj.transcription)
+        self.assertEqual(prompt_c7.prompt_text, "Simula una llamada corta.", "El prompt existente no debe ser modificado")
 
         # ── Verify PASS 11: Base Calls were NOT modified ──────────────────────
         call_check = (await self.db.execute(select(MassEvaluationResult).where(MassEvaluationResult.company_id == 7))).scalars().first()
@@ -466,11 +453,11 @@ class TestDemoTrainingCycles(unittest.IsolatedAsyncioTestCase):
         stats_second_run = await backfill_training_cycles(self.db, apply=True)
         self.assertEqual(stats_second_run["reports_updated"], 1)
 
-        # Check that session count and evaluation count for this report are still 2 (one per prompt)
+        # Check that session count for this report is 0 (sessions are not touched)
         sess_count = (await self.db.execute(
             select(func.count(TrainingCallSession.session_id)).where(TrainingCallSession.cycle_id == 1)
         )).scalar()
-        self.assertEqual(sess_count, 2, "No debe duplicar sesiones de llamada en ejecuciones idempotentes")
+        self.assertEqual(sess_count, 0, "No debe crear ni modificar sesiones de llamada")
 
     async def test_backfill_creates_missing_cycles_for_all_uncovered_agents(self):
         """
