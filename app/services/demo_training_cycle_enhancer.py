@@ -384,7 +384,7 @@ def build_roleplay_simulation_prompt(
             }
         ]
 
-    scenario = scenarios[(prompt_number - 1) % len(scenarios)]
+    scenario = scenarios[(prompt_number - 1 + persona_index) % len(scenarios)]
 
     prompt_text = f"""# SIMULACIÓN DE ENTRENAMIENTO BM - ROLEPLAY VOCAL
 
@@ -455,13 +455,25 @@ def generate_simulation_evaluation_data(
     prompt_number: int,
     agent_name: str,
     service_key: str,
-    agent_score_tier: str = "solid"  # "top", "solid", "developing"
+    agent_score_tier: str = "solid",  # "top", "solid", "developing"
+    agent_id: str = "",
 ) -> Dict[str, Any]:
     """
     Generates a realistic multi-turn transcription and full evaluation dict.
+    Supports deterministic score variation per agent and prompt when agent_id is provided.
     """
+    agent_num = 1
+    if agent_id:
+        try:
+            agent_num = int(agent_id.split("_")[-1])
+        except Exception:
+            agent_num = abs(int(hashlib.md5(agent_id.encode()).hexdigest(), 16)) % 60 + 1
+
     if agent_score_tier == "top":
-        score = Decimal(str(round(random.uniform(8.7, 9.4), 2)))
+        if agent_id:
+            score = Decimal(str(round(8.70 + (((agent_num * 11 + prompt_number * 7) % 8) * 0.10), 2)))
+        else:
+            score = Decimal(str(round(random.uniform(8.7, 9.4), 2)))
         transcription_turns = [
             ("Agente", f"Buenos días, le atiende {agent_name} de Boston Medical Group. ¿En qué puedo ayudarle hoy?"),
             ("Paciente", "Buenos días... mire, llamo porque vi información de su clínica, pero no sé muy bien cómo funciona esto y la verdad es que me da bastante reparo hablarlo por teléfono."),
@@ -502,7 +514,10 @@ def generate_simulation_evaluation_data(
             "Mantener esta misma cadencia en llamadas de alta saturación horaria."
         ]
     elif agent_score_tier == "solid":
-        score = Decimal(str(round(random.uniform(7.6, 8.4), 2)))
+        if agent_id:
+            score = Decimal(str(round(7.65 + (((agent_num * 13 + prompt_number * 5) % 15) * 0.06), 2)))
+        else:
+            score = Decimal(str(round(random.uniform(7.6, 8.4), 2)))
         transcription_turns = [
             ("Agente", f"Hola, buenos días, mi nombre es {agent_name} de Boston Medical. ¿Con quién tengo el gusto de hablar?"),
             ("Paciente", "Hola, me llamo Carlos. Quería informarme sobre lo que hacen en su centro, pero me parece que cobran bastante caro."),
@@ -540,7 +555,10 @@ def generate_simulation_evaluation_data(
             "Utilizar dos opciones concretas en el cierre en lugar de preguntar de forma abierta 'qué día le encaja'."
         ]
     else:  # developing
-        score = Decimal(str(round(random.uniform(6.5, 7.3), 2)))
+        if agent_id:
+            score = Decimal(str(round(6.75 + (((agent_num * 7 + prompt_number * 3) % 9) * 0.08), 2)))
+        else:
+            score = Decimal(str(round(random.uniform(6.5, 7.3), 2)))
         transcription_turns = [
             ("Agente", f"Boston Medical, le atiende {agent_name}, dígame."),
             ("Paciente", "Hola... mire, es que llamo porque tengo dudas sobre si operan o qué hacen allí."),
@@ -624,23 +642,28 @@ def generate_enhanced_training_cycle_data(
     except Exception:
         agent_num = abs(int(hashlib.md5(agent_id.encode()).hexdigest(), 16)) % 60 + 1
 
-    # Determine tier
+    # Determine tier and varied deterministic scores
     if agent_num in (3, 6, 9, 12, 15, 18, 21, 24, 33, 36, 45, 48):
         tier = "top"
-        avg_score = Decimal("8.85")
+        offset = Decimal(str(((agent_num * 13) % 9) * 0.06))
+        avg_score = (Decimal("8.65") + offset).quantize(Decimal("0.01"))
     elif agent_num in (10, 26, 27, 28, 29, 30, 39, 40, 57, 58, 59, 60):
         tier = "developing"
-        avg_score = Decimal("7.25")
+        offset = Decimal(str(((agent_num * 17) % 11) * 0.06))
+        avg_score = (Decimal("6.85") + offset).quantize(Decimal("0.01"))
     else:
         tier = "solid"
-        avg_score = Decimal("8.10")
+        offset = Decimal(str(((agent_num * 19) % 15) * 0.06))
+        avg_score = (Decimal("7.65") + offset).quantize(Decimal("0.01"))
 
     # Pick service category (default to atencion-al-cliente if unknown)
     cat_key = "ventas" if "venta" in service_key.lower() or "comercial" in service_key.lower() else "atencion-al-cliente"
     catalog = OBJECTIVES_CATALOG[cat_key]
 
-    # Select 3-4 General Objectives
-    gen_objs_raw = catalog["general"][:4]
+    # Select 3-4 General Objectives (deterministically rotated per agent)
+    gen_list = catalog["general"]
+    gen_count = 4 if (agent_num % 2 == 0) else 3
+    gen_objs_raw = [gen_list[(i + agent_num) % len(gen_list)] for i in range(gen_count)]
     general_objectives = []
     for g in gen_objs_raw:
         general_objectives.append({
@@ -651,8 +674,10 @@ def generate_enhanced_training_cycle_data(
             "success_indicators": g["success_indicators"],
         })
 
-    # Select 3-4 Specific Objectives
-    spec_objs_raw = catalog["specific"][:4]
+    # Select 3-4 Specific Objectives (deterministically rotated per agent)
+    spec_list = catalog["specific"]
+    spec_count = 4 if ((agent_num + 1) % 2 == 0) else 3
+    spec_objs_raw = [spec_list[(i + agent_num) % len(spec_list)] for i in range(spec_count)]
     specific_objectives = []
     for s in spec_objs_raw:
         specific_objectives.append({
@@ -833,15 +858,24 @@ def generate_enhanced_training_cycle_data(
             "objectives_status": objs_status
         }
 
-    # Simulation Prompts (2 for completed, 2-3 for active)
-    prompts_count = 2 if status == "completed" else 3
+    # Simulation Prompts (2 to 4 for completed cycles, 3 for active)
+    if status == "completed":
+        if agent_num % 4 == 0:
+            prompts_count = 4
+        elif agent_num % 2 == 0:
+            prompts_count = 3
+        else:
+            prompts_count = 2
+    else:
+        prompts_count = 3
+
     prompts = []
     for p_num in range(1, prompts_count + 1):
         prompt_data = build_roleplay_simulation_prompt(
             prompt_number=p_num,
             agent_name=agent_name,
             service_key=cat_key,
-            persona_index=(agent_num + p_num),
+            persona_index=(agent_num * 3 + p_num),
             difficulty_level="alta" if p_num == prompts_count else "media"
         )
         prompts.append(prompt_data)

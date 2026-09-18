@@ -1377,7 +1377,23 @@ async def seed_training_cycles(db: AsyncSession, company: Company) -> Dict[str, 
     now_utc = datetime.now(timezone.utc)
 
     # 1. Create 2 Runs
-    # Run 1: Completed 45 days ago
+    # Fetch agents
+    agent_res = await db.execute(
+        select(User).where(User.company_id == cid, User.role == "agent").order_by(User.user_id.asc())
+    )
+    agents = list(agent_res.scalars().all())
+
+    # Assign all 48 stable/improving agents to Run 1 (completed)
+    # and the 12 struggling/new-hire agents to Run 2 (active cycle)
+    struggling_or_new = [
+        a for a in agents
+        if int(a.hubspot_owner_id.split("_")[-1]) in (10, 26, 27, 28, 29, 30, 39, 40, 57, 58, 59, 60)
+    ]
+    other_agents = [a for a in agents if a not in struggling_or_new]
+    agents_run1 = other_agents
+    agents_run2 = struggling_or_new
+
+    # Run 1: Completed 45 days ago (all 48 standard agents)
     run1 = TrainingRun(
         company_id=cid,
         service_id=svc_at.service_id if svc_at else None,
@@ -1385,12 +1401,12 @@ async def seed_training_cycles(db: AsyncSession, company: Company) -> Dict[str, 
         period_end=now_utc - timedelta(days=45),
         status="completed",
         triggered_by="scheduler",
-        agents_total=20,
-        agents_completed=20,
+        agents_total=len(agents_run1),
+        agents_completed=len(agents_run1),
         started_at=now_utc - timedelta(days=60),
         finished_at=now_utc - timedelta(days=45),
     )
-    # Run 2: Active / Running 10 days ago
+    # Run 2: Active / Running 10 days ago (12 struggling agents)
     run2 = TrainingRun(
         company_id=cid,
         service_id=svc_vn.service_id if svc_vn else None,
@@ -1398,28 +1414,12 @@ async def seed_training_cycles(db: AsyncSession, company: Company) -> Dict[str, 
         period_end=now_utc - timedelta(days=5),
         status="running",
         triggered_by="scheduler",
-        agents_total=12,
+        agents_total=len(agents_run2),
         agents_completed=0,
         started_at=now_utc - timedelta(days=20),
     )
     db.add_all([run1, run2])
     await db.flush()
-
-    # Fetch agents
-    agent_res = await db.execute(
-        select(User).where(User.company_id == cid, User.role == "agent").order_by(User.user_id.asc())
-    )
-    agents = list(agent_res.scalars().all())
-
-    # Assign 20 agents from improving/stable to Run 1 (completed)
-    # and the 12 struggling/new-hire agents to Run 2 (active cycle)
-    struggling_or_new = [
-        a for a in agents
-        if int(a.hubspot_owner_id.split("_")[-1]) in (10, 26, 27, 28, 29, 30, 39, 40, 57, 58, 59, 60)
-    ]
-    other_agents = [a for a in agents if a not in struggling_or_new]
-    agents_run1 = other_agents[:20]
-    agents_run2 = struggling_or_new
 
     reports_created = []
 
@@ -1531,7 +1531,8 @@ async def seed_training_cycles(db: AsyncSession, company: Company) -> Dict[str, 
                 prompt_number=idx + 1,
                 agent_name=agent.name,
                 service_key=service_key,
-                agent_score_tier=cycle_data["tier"]
+                agent_score_tier=cycle_data["tier"],
+                agent_id=agent.hubspot_owner_id,
             )
             ev = TrainingCallEvaluation(
                 session_id=sess.session_id,
@@ -1645,7 +1646,8 @@ async def seed_training_cycles(db: AsyncSession, company: Company) -> Dict[str, 
                     prompt_number=idx + 1,
                     agent_name=agent.name,
                     service_key=service_key,
-                    agent_score_tier=cycle_data["tier"]
+                    agent_score_tier=cycle_data["tier"],
+                    agent_id=agent.hubspot_owner_id,
                 )
                 ev = TrainingCallEvaluation(
                     session_id=sess.session_id,

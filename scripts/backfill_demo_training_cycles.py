@@ -102,7 +102,15 @@ async def backfill_training_cycles(db: AsyncSession, apply: bool = False) -> Dic
 
     default_ep_id = list(eval_prompts.values())[0].id if eval_prompts else 1
 
-    # ── 3. Query All Existing Reports for Company 7 ──────────────────────────
+    # ── 3. Query All Agents & Existing Reports for Company 7 ─────────────────
+    stmt_agents = (
+        select(User)
+        .where(User.company_id == DEMO_COMPANY_ID, User.role == "agent")
+        .order_by(User.user_id.asc())
+    )
+    res_agents = await db.execute(stmt_agents)
+    all_agents = list(res_agents.scalars().all())
+
     stmt_reports = (
         select(TrainingAgentReport)
         .where(TrainingAgentReport.company_id == DEMO_COMPANY_ID)
@@ -111,13 +119,27 @@ async def backfill_training_cycles(db: AsyncSession, apply: bool = False) -> Dic
     res_reports = await db.execute(stmt_reports)
     reports = list(res_reports.scalars().all())
 
-    logger.info("Encontrados %d informes de entrenamiento para Empresa Demo (company_id=%d)", len(reports), DEMO_COMPANY_ID)
+    existing_agent_ids = {r.hubspot_owner_id for r in reports}
+    missing_agents = [a for a in all_agents if a.hubspot_owner_id not in existing_agent_ids]
+
+    logger.info(
+        "Empresa Demo: %d agentes totales, %d con informe existente, %d sin ciclo formativo.",
+        len(all_agents), len(existing_agent_ids), len(missing_agents)
+    )
 
     stats = {
+        "total_agents": len(all_agents),
+        "existing_agents_with_reports": len(existing_agent_ids),
+        "missing_agents_without_reports": len(missing_agents),
         "reports_audited": len(reports),
         "reports_updated": 0,
         "completed_reports_enriched": 0,
         "active_reports_enriched": 0,
+        "new_reports_created": 0,
+        "new_prompts_created": 0,
+        "new_sessions_created": 0,
+        "new_evaluations_created": 0,
+        "new_completions_created": 0,
         "prompts_updated": 0,
         "prompts_created": 0,
         "sessions_created": 0,
@@ -289,7 +311,8 @@ async def backfill_training_cycles(db: AsyncSession, apply: bool = False) -> Dic
                         prompt_number=p.prompt_number,
                         agent_name=r.agent_name,
                         service_key=service_key,
-                        agent_score_tier=cycle_data["tier"]
+                        agent_score_tier=cycle_data["tier"],
+                        agent_id=r.hubspot_owner_id,
                     )
                     eval_obj = TrainingCallEvaluation(
                         session_id=sess.session_id,
@@ -320,6 +343,184 @@ async def backfill_training_cycles(db: AsyncSession, apply: bool = False) -> Dic
                 comp.call_session_id = None
                 comp.evaluation_id = None
                 comp.completed_at = None
+
+    # ── 7. Generate Completed Training Cycles for Uncovered Agents ───────────
+    if missing_agents:
+        logger.info(
+            "Iniciando generación de %d ciclos formativos históricos para agentes sin registro previo...",
+            len(missing_agents)
+        )
+
+        # Retrieve or create historical Run 1
+        stmt_run1 = (
+            select(TrainingRun)
+            .where(
+                TrainingRun.company_id == DEMO_COMPANY_ID,
+                TrainingRun.status == "completed"
+            )
+            .order_by(TrainingRun.training_run_id.asc())
+        )
+        res_run1 = await db.execute(stmt_run1)
+        run1 = res_run1.scalars().first()
+
+        if not run1:
+            run1_id = next((r.training_run_id for r in reports if r.status == "completed"), None)
+            if run1_id:
+                run1 = await db.get(TrainingRun, run1_id)
+
+        if not run1:
+            logger.info("Creando TrainingRun histórico completado para Empresa Demo...")
+            now_utc = datetime.now(timezone.utc)
+            run1 = TrainingRun(
+                company_id=DEMO_COMPANY_ID,
+                service_id=list(services.keys())[0] if services else None,
+                period_start=now_utc - timedelta(days=60),
+                period_end=now_utc - timedelta(days=45),
+                status="completed",
+                triggered_by="scheduler",
+                agents_total=len([r for r in reports if r.status == "completed"]) + len(missing_agents),
+                agents_completed=len([r for r in reports if r.status == "completed"]) + len(missing_agents),
+                started_at=now_utc - timedelta(days=60),
+                finished_at=now_utc - timedelta(days=45),
+            )
+            if apply:
+                db.add(run1)
+                await db.flush()
+
+        if run1 and apply:
+            total_completed_agents = len([r for r in reports if r.status == "completed"]) + len(missing_agents)
+            run1.agents_total = total_completed_agents
+            run1.agents_completed = total_completed_agents
+
+        p_start = run1.period_start if run1 else (datetime.now(timezone.utc) - timedelta(days=60))
+        p_end = run1.period_end if run1 else (datetime.now(timezone.utc) - timedelta(days=45))
+
+        for agent in missing_agents:
+            svc_obj = services.get(agent.primary_service_id)
+            service_key = svc_obj.service_key if svc_obj else "atencion-al-cliente"
+
+            cycle_data = generate_enhanced_training_cycle_data(
+                agent_id=agent.hubspot_owner_id,
+                agent_name=agent.name,
+                agent_initials=agent.agent_initials or "AD",
+                service_key=service_key,
+                status="completed",
+                cycle_index=run1.training_run_id if run1 else 1,
+            )
+
+            new_rep = TrainingAgentReport(
+                training_run_id=run1.training_run_id if run1 else 1,
+                company_id=DEMO_COMPANY_ID,
+                service_id=agent.primary_service_id or (list(services.keys())[0] if services else None),
+                hubspot_owner_id=agent.hubspot_owner_id,
+                agent_name=agent.name,
+                agent_initials=agent.agent_initials or "AD",
+                period_start=p_start,
+                period_end=p_end,
+                status="completed",
+                cycle_mode="automatic",
+                evaluations_count=12,
+                calls_count=12,
+                avg_evaluacion_global=cycle_data["avg_score"],
+                summary_general=cycle_data["summary_general"],
+                evolution_summary=cycle_data["evolution_summary"],
+                strengths_json=cycle_data["strengths_json"],
+                weaknesses_json=cycle_data["weaknesses_json"],
+                notable_data_json=cycle_data["notable_data_json"],
+                general_objectives_json=cycle_data["general_objectives_json"],
+                specific_objectives_json=cycle_data["specific_objectives_json"],
+                final_report_json=cycle_data["final_report_json"],
+                is_current=True,
+                generated_at=p_end,
+                approved_at=p_end,
+            )
+            if apply:
+                db.add(new_rep)
+                await db.flush()
+
+            stats["new_reports_created"] += 1
+            stats["strengths_upgraded"] += 1
+            stats["weaknesses_upgraded"] += 1
+            stats["general_objectives_upgraded"] += 1
+            stats["specific_objectives_created"] += 1
+            stats["final_reports_enriched"] += 1
+
+            ep_obj = eval_prompts.get(agent.primary_service_id)
+            ep_id = ep_obj.id if ep_obj else default_ep_id
+
+            for idx, p_info in enumerate(cycle_data["prompts"]):
+                new_p = TrainingSimulationPrompt(
+                    training_report_id=new_rep.training_report_id if apply else (1000 + stats["new_reports_created"]),
+                    hubspot_owner_id=agent.hubspot_owner_id,
+                    prompt_number=idx + 1,
+                    title=p_info["title"],
+                    scenario_type=p_info["scenario_type"],
+                    objective_focus_json=p_info["objective_focus_json"],
+                    prompt_text=p_info["prompt_text"],
+                )
+                if apply:
+                    db.add(new_p)
+                    await db.flush()
+                stats["new_prompts_created"] += 1
+
+                comp_time = p_end - timedelta(days=2, hours=idx)
+                sess = None
+                if apply:
+                    sess = TrainingCallSession(
+                        call_sid=f"CA_demo_bf_{new_rep.training_report_id}_{new_p.simulation_prompt_id}_{agent.hubspot_owner_id}",
+                        recording_url=f"https://storage.doobot.ai/demo/recordings/{agent.hubspot_owner_id}_{new_p.simulation_prompt_id}.mp3",
+                        agent_id=agent.hubspot_owner_id,
+                        cycle_id=new_rep.training_report_id,
+                        conversation_id=new_p.simulation_prompt_id,
+                        status="completed",
+                        started_at=comp_time - timedelta(minutes=7),
+                        ended_at=comp_time - timedelta(minutes=1),
+                        recording_ready_at=comp_time - timedelta(seconds=45),
+                        evaluation_completed_at=comp_time,
+                    )
+                    db.add(sess)
+                    await db.flush()
+                stats["new_sessions_created"] += 1
+
+                eval_res = generate_simulation_evaluation_data(
+                    prompt_title=p_info["title"],
+                    prompt_number=idx + 1,
+                    agent_name=agent.name,
+                    service_key=service_key,
+                    agent_score_tier=cycle_data["tier"],
+                    agent_id=agent.hubspot_owner_id,
+                )
+                ev = None
+                if apply and sess:
+                    ev = TrainingCallEvaluation(
+                        session_id=sess.session_id,
+                        cycle_id=new_rep.training_report_id,
+                        conversation_id=new_p.simulation_prompt_id,
+                        agent_id=agent.hubspot_owner_id,
+                        prompt_version_id=ep_id,
+                        transcription=eval_res["transcription"],
+                        result_json=eval_res["result_json"],
+                        score=eval_res["score"],
+                        feedback=eval_res["feedback"],
+                        created_at=comp_time,
+                    )
+                    db.add(ev)
+                    await db.flush()
+                stats["new_evaluations_created"] += 1
+
+                if apply:
+                    comp = TrainingCompletionStatus(
+                        training_report_id=new_rep.training_report_id,
+                        simulation_prompt_id=new_p.simulation_prompt_id,
+                        hubspot_owner_id=agent.hubspot_owner_id,
+                        status="completed",
+                        completed_at=comp_time,
+                        call_session_id=sess.session_id if sess else None,
+                        evaluation_id=ev.evaluation_id if ev else None,
+                        notes=f"Simulación evaluada con nota {eval_res['score']}/10.",
+                    )
+                    db.add(comp)
+                stats["new_completions_created"] += 1
 
     if apply:
         await db.commit()
@@ -356,20 +557,24 @@ async def main():
 
     logger.info("==================================================")
     logger.info("RESUMEN DE RESULTADOS (%s):", "APPLY" if is_apply else "DRY-RUN")
-    logger.info("- Informes auditados: %d", stats["reports_audited"])
-    logger.info("- Informes actualizados: %d", stats["reports_updated"])
+    logger.info("- Agentes totales: %d", stats["total_agents"])
+    logger.info("- Agentes con ciclos existentes: %d", stats["existing_agents_with_reports"])
+    logger.info("- Agentes sin ciclos: %d", stats["missing_agents_without_reports"])
+    logger.info("- Ciclos nuevos %s: %d", "creados" if is_apply else "previstos", stats["new_reports_created"])
+    logger.info("- Informes existentes auditados: %d", stats["reports_audited"])
+    logger.info("- Informes existentes enriquecidos: %d", stats["reports_updated"])
     logger.info("  * Ciclos completados enriquecidos: %d", stats["completed_reports_enriched"])
     logger.info("  * Ciclos activos enriquecidos: %d", stats["active_reports_enriched"])
-    logger.info("- Fortalezas actualizadas (formato lista): %d", stats["strengths_upgraded"])
-    logger.info("- Áreas de mejora actualizadas (formato lista): %d", stats["weaknesses_upgraded"])
-    logger.info("- Objetivos generales actualizados (>=3): %d", stats["general_objectives_upgraded"])
-    logger.info("- Objetivos específicos creados (>=3): %d", stats["specific_objectives_created"])
+    logger.info("- Fortalezas creadas/actualizadas (formato lista): %d", stats["strengths_upgraded"])
+    logger.info("- Áreas de mejora creadas/actualizadas (formato lista): %d", stats["weaknesses_upgraded"])
+    logger.info("- Objetivos generales creados/actualizados (>=3): %d", stats["general_objectives_upgraded"])
+    logger.info("- Objetivos específicos creados/actualizados (>=3): %d", stats["specific_objectives_created"])
     logger.info("- Informes finales enriquecidos (con objectives_status): %d", stats["final_reports_enriched"])
-    logger.info("- Prompts de simulación actualizados (>600 caracteres): %d", stats["prompts_updated"])
-    logger.info("- Prompts de simulación creados: %d", stats["prompts_created"])
-    logger.info("- Sesiones de llamada creadas: %d", stats["sessions_created"])
-    logger.info("- Evaluaciones simuladas creadas: %d", stats["evaluations_created"])
-    logger.info("- Completions vinculados con evaluation_id: %d", stats["completions_linked"])
+    logger.info("- Prompts de simulación nuevos creados: %d", stats["new_prompts_created"])
+    logger.info("- Prompts de simulación existentes actualizados: %d", stats["prompts_updated"])
+    logger.info("- Sesiones de llamada nuevas creadas: %d", stats["new_sessions_created"])
+    logger.info("- Evaluaciones simuladas nuevas creadas: %d", stats["new_evaluations_created"])
+    logger.info("- Completions nuevos enlazados con evaluation_id: %d", stats["new_completions_created"])
     logger.info("==================================================")
 
 

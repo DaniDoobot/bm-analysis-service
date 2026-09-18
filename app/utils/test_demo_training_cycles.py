@@ -472,6 +472,240 @@ class TestDemoTrainingCycles(unittest.IsolatedAsyncioTestCase):
         )).scalar()
         self.assertEqual(sess_count, 2, "No debe duplicar sesiones de llamada en ejecuciones idempotentes")
 
+    async def test_backfill_creates_missing_cycles_for_all_uncovered_agents(self):
+        """
+        Validates all requirements for uncovered agents in Empresa Demo:
+        1. Identifies 28 missing agents out of 60.
+        2. Preserves 32 existing reports.
+        3. Creates exactly 28 new reports with status 'completed'.
+        4. Each new cycle has >= 3 general objectives.
+        5. Each new cycle has >= 3 specific objectives.
+        6. Each cycle has 2-4 simulations with sessions and evaluations.
+        7. Scores vary plausibly (not all 8.0/10).
+        8. Strengths and weaknesses are lists with evidence.
+        9. final_report_json contains objectives_status.
+        10. 100% idempotent: running backfill again creates 0 new records.
+        11. Total isolation: Boston Medical (company_id=1) is never touched.
+        """
+        # 1. Setup Company 7 (Demo) and Company 1 (Boston Medical)
+        c7 = Company(company_id=7, company_name="Empresa Demo", company_key="empresa-demo", is_demo=True)
+        c1 = Company(company_id=1, company_name="Boston Medical", company_key="boston-medical", is_demo=False)
+        self.db.add_all([c7, c1])
+        await self.db.flush()
+
+        svc_at = Service(service_id=701, company_id=7, service_name="Atención al Cliente", service_key="atencion-al-cliente")
+        svc_vn = Service(service_id=702, company_id=7, service_name="Ventas", service_key="ventas")
+        svc_bm = Service(service_id=101, company_id=1, service_name="Servicio BM", service_key="servicio-bm")
+        self.db.add_all([svc_at, svc_vn, svc_bm])
+        await self.db.flush()
+
+        # Create 60 agents for Empresa Demo (demo_agent_01 to demo_agent_60)
+        demo_users = []
+        for i in range(1, 61):
+            demo_users.append(
+                User(
+                    user_id=1000 + i,
+                    username=f"demo_agent_{i:02d}",
+                    email=f"agent{i:02d}@demo.com",
+                    password_hash="mock_hash",
+                    name=f"Agente Demo {i}",
+                    agent_initials=f"D{i}",
+                    role="agent",
+                    company_id=7,
+                    primary_service_id=702 if i <= 40 else 701,
+                    hubspot_owner_id=f"demo_agent_{i:02d}",
+                )
+            )
+        # Create 5 agents for Boston Medical
+        for i in range(1, 6):
+            demo_users.append(
+                User(
+                    user_id=2000 + i,
+                    username=f"bm_agent_{i:02d}",
+                    email=f"bm_agent{i:02d}@bm.com",
+                    password_hash="mock_hash",
+                    name=f"BM Agent {i}",
+                    agent_initials=f"BM{i}",
+                    role="agent",
+                    company_id=1,
+                    primary_service_id=101,
+                    hubspot_owner_id=f"bm_agent_{i:02d}",
+                )
+            )
+        self.db.add_all(demo_users)
+        await self.db.flush()
+
+        # Create Run 1 (completed) and Run 2 (active) for Company 7
+        now_utc = datetime(2026, 9, 15, tzinfo=timezone.utc)
+        run1 = TrainingRun(
+            training_run_id=1,
+            company_id=7,
+            service_id=701,
+            period_start=now_utc - timedelta(days=60),
+            period_end=now_utc - timedelta(days=45),
+            status="completed",
+            agents_total=20,
+            agents_completed=20,
+        )
+        run2 = TrainingRun(
+            training_run_id=2,
+            company_id=7,
+            service_id=702,
+            period_start=now_utc - timedelta(days=20),
+            period_end=now_utc - timedelta(days=5),
+            status="running",
+            agents_total=12,
+            agents_completed=0,
+        )
+        self.db.add_all([run1, run2])
+        await self.db.flush()
+
+        # Existing 32 reports:
+        # 20 completed (demo_agent_01 to demo_agent_09, 11 to 21)
+        # 12 active (10, 26, 27, 28, 29, 30, 39, 40, 57, 58, 59, 60)
+        run1_agent_nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+        run2_agent_nums = [10, 26, 27, 28, 29, 30, 39, 40, 57, 58, 59, 60]
+
+        existing_reports = []
+        for num in run1_agent_nums:
+            rep = TrainingAgentReport(
+                training_run_id=1,
+                company_id=7,
+                service_id=702 if num <= 40 else 701,
+                hubspot_owner_id=f"demo_agent_{num:02d}",
+                agent_name=f"Agente Demo {num}",
+                agent_initials=f"D{num}",
+                period_start=run1.period_start,
+                period_end=run1.period_end,
+                status="completed",
+                is_current=True,
+            )
+            existing_reports.append(rep)
+
+        for num in run2_agent_nums:
+            rep = TrainingAgentReport(
+                training_run_id=2,
+                company_id=7,
+                service_id=702 if num <= 40 else 701,
+                hubspot_owner_id=f"demo_agent_{num:02d}",
+                agent_name=f"Agente Demo {num}",
+                agent_initials=f"D{num}",
+                period_start=run2.period_start,
+                period_end=run2.period_end,
+                status="in_progress",
+                is_current=True,
+            )
+            existing_reports.append(rep)
+
+        self.db.add_all(existing_reports)
+        await self.db.commit()
+
+        # Verify baseline setup in DB: 32 reports
+        count_baseline = (await self.db.execute(
+            select(func.count(TrainingAgentReport.training_report_id)).where(TrainingAgentReport.company_id == 7)
+        )).scalar()
+        self.assertEqual(count_baseline, 32, "Debe haber exactamente 32 informes en el baseline")
+
+        # ── Test DRY-RUN ──────────────────────────────────────────────────────
+        stats_dry = await backfill_training_cycles(self.db, apply=False)
+        self.assertEqual(stats_dry["total_agents"], 60)
+        self.assertEqual(stats_dry["existing_agents_with_reports"], 32)
+        self.assertEqual(stats_dry["missing_agents_without_reports"], 28)
+        self.assertEqual(stats_dry["new_reports_created"], 28)
+
+        # In DB, count must STILL be 32 because dry-run didn't persist anything
+        count_post_dry = (await self.db.execute(
+            select(func.count(TrainingAgentReport.training_report_id)).where(TrainingAgentReport.company_id == 7)
+        )).scalar()
+        self.assertEqual(count_post_dry, 32, "El modo DRY-RUN no debe alterar la BD")
+
+        # ── Test APPLY ────────────────────────────────────────────────────────
+        stats_apply = await backfill_training_cycles(self.db, apply=True)
+        self.assertEqual(stats_apply["new_reports_created"], 28)
+
+        # Verify total reports in DB for company 7 is now exactly 60
+        all_reps_c7 = (await self.db.execute(
+            select(TrainingAgentReport).where(TrainingAgentReport.company_id == 7)
+        )).scalars().all()
+        self.assertEqual(len(all_reps_c7), 60, "Debe haber exactamente 60 informes tras el backfill")
+
+        # Status distribution: 48 completed, 12 in_progress
+        completed_reps = [r for r in all_reps_c7 if r.status == "completed"]
+        active_reps = [r for r in all_reps_c7 if r.status == "in_progress"]
+        self.assertEqual(len(completed_reps), 48, "Debe haber exactamente 48 ciclos completados")
+        self.assertEqual(len(active_reps), 12, "Debe haber exactamente 12 ciclos activos")
+
+        # Verify no reports created for Boston Medical (company 1)
+        reps_c1 = (await self.db.execute(
+            select(TrainingAgentReport).where(TrainingAgentReport.company_id == 1)
+        )).scalars().all()
+        self.assertEqual(len(reps_c1), 0, "No deben crearse informes para Company 1")
+
+        # Check the 28 newly created reports
+        new_hubspot_ids = {f"demo_agent_{i:02d}" for i in range(1, 61)} - set(f"demo_agent_{num:02d}" for num in (run1_agent_nums + run2_agent_nums))
+        self.assertEqual(len(new_hubspot_ids), 28)
+
+        new_reps = [r for r in all_reps_c7 if r.hubspot_owner_id in new_hubspot_ids]
+        self.assertEqual(len(new_reps), 28)
+
+        scores = []
+        for r in new_reps:
+            self.assertEqual(r.status, "completed")
+            self.assertGreaterEqual(len(r.general_objectives_json), 3, "Debe tener >= 3 objetivos generales")
+            self.assertGreaterEqual(len(r.specific_objectives_json), 3, "Debe tener >= 3 objetivos específicos")
+            self.assertGreaterEqual(len(r.strengths_json), 2, "Debe tener fortalezas")
+            self.assertGreaterEqual(len(r.weaknesses_json), 2, "Debe tener debilidades")
+            self.assertIsNotNone(r.final_report_json, "Debe tener informe final")
+            self.assertIn("objectives_status", r.final_report_json)
+            self.assertGreaterEqual(len(r.final_report_json["objectives_status"]), 3)
+            scores.append(float(r.avg_evaluacion_global))
+
+            # Check simulations and evaluations
+            prompts = (await self.db.execute(
+                select(TrainingSimulationPrompt).where(TrainingSimulationPrompt.training_report_id == r.training_report_id)
+            )).scalars().all()
+            self.assertGreaterEqual(len(prompts), 2, "Debe tener entre 2 y 4 simulaciones")
+            self.assertLessEqual(len(prompts), 4, "Debe tener entre 2 y 4 simulaciones")
+
+            for p in prompts:
+                self.assertGreater(len(p.prompt_text), 600, "El prompt de simulación debe superar 600 caracteres")
+
+                # Verify completion status
+                comp = (await self.db.execute(
+                    select(TrainingCompletionStatus).where(
+                        TrainingCompletionStatus.training_report_id == r.training_report_id,
+                        TrainingCompletionStatus.simulation_prompt_id == p.simulation_prompt_id
+                    )
+                )).scalars().first()
+                self.assertIsNotNone(comp)
+                self.assertEqual(comp.status, "completed")
+                self.assertIsNotNone(comp.call_session_id)
+                self.assertIsNotNone(comp.evaluation_id)
+
+                # Verify session and evaluation
+                sess = await self.db.get(TrainingCallSession, comp.call_session_id)
+                self.assertIsNotNone(sess)
+                self.assertEqual(sess.status, "completed")
+
+                ev = await self.db.get(TrainingCallEvaluation, comp.evaluation_id)
+                self.assertIsNotNone(ev)
+                self.assertGreater(float(ev.score), 6.0)
+                self.assertIn("Agente:", ev.transcription)
+
+        # Check score variety: not all identical
+        unique_scores = set(scores)
+        self.assertGreater(len(unique_scores), 5, "Las puntuaciones deben ser variadas (no un valor fijo)")
+
+        # ── Test IDEMPOTENCY ──────────────────────────────────────────────────
+        stats_idempotent = await backfill_training_cycles(self.db, apply=True)
+        self.assertEqual(stats_idempotent["missing_agents_without_reports"], 0)
+        self.assertEqual(stats_idempotent["new_reports_created"], 0)
+
+        count_idempotent = (await self.db.execute(
+            select(func.count(TrainingAgentReport.training_report_id)).where(TrainingAgentReport.company_id == 7)
+        )).scalar()
+        self.assertEqual(count_idempotent, 60, "El recuento total debe mantenerse en 60 sin duplicados")
+
 
 if __name__ == "__main__":
     unittest.main()
