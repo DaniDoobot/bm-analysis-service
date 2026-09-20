@@ -40,6 +40,8 @@ settings = get_settings()
 
 router = APIRouter(prefix="/bm/training", tags=["Training Voice Voice/IVR"])
 
+HANGUP_EARLY_BLOCK_SECONDS = 90
+
 IDENTIFICATION_SYSTEM_INSTRUCTION = """
 Eres el Asistente de Identificación por Voz de Doobot (marca pronunciada siempre exactamente como "Dubot").
 Tu labor en esta fase es identificar al agente y, si tiene varios ciclos de entrenamiento pendientes, ayudarle a seleccionar uno de ellos.
@@ -1472,7 +1474,12 @@ async def twilio_media_stream(
                     "functionDeclarations": [
                         {
                             "name": "hangup_call",
-                            "description": "Finaliza el roleplay y cuelga la llamada de forma limpia.",
+                            "description": (
+                                "Finaliza el roleplay y cuelga la llamada de forma limpia. ÚNICAMENTE debe "
+                                "invocarse cuando la conversación haya terminado de forma natural con despedida mutua. "
+                                "NUNCA debe invocarse durante pausas, mientras el agente habla o piensa, ante ofertas "
+                                "de solución o cuando el agente menciona supervisores o transferencias."
+                            ),
                             "parameters": {
                                 "type": "OBJECT",
                                 "properties": {
@@ -1518,9 +1525,9 @@ async def twilio_media_stream(
                         "automaticActivityDetection": {
                             "disabled": False,
                             "startOfSpeechSensitivity": "START_SENSITIVITY_LOW",
-                            "endOfSpeechSensitivity": "END_SENSITIVITY_HIGH",
-                            "prefixPaddingMs": 120,
-                            "silenceDurationMs": 130,
+                            "endOfSpeechSensitivity": "END_SENSITIVITY_LOW",
+                            "prefixPaddingMs": 200,
+                            "silenceDurationMs": 600,
                         },
                         "turnCoverage": "TURN_INCLUDES_ONLY_ACTIVITY",
                         "activityHandling": "START_OF_ACTIVITY_INTERRUPTS",
@@ -1767,6 +1774,42 @@ async def twilio_media_stream(
                                         
                                 elif name == "hangup_call":
                                     reason = args.get("reason", "fin_de_conversacion")
+                                    elapsed_seconds = 0
+                                    if call_start_time:
+                                        elapsed_seconds = (datetime.now(timezone.utc) - call_start_time).total_seconds()
+
+                                    if elapsed_seconds < HANGUP_EARLY_BLOCK_SECONDS:
+                                        logger.warning(
+                                            "Trainer hangup blocked: roleplay still within early-call protection window (elapsed: %.1fs < %ds, reason: %s)",
+                                            elapsed_seconds,
+                                            HANGUP_EARLY_BLOCK_SECONDS,
+                                            reason
+                                        )
+                                        resp_msg = {
+                                            "toolResponse": {
+                                                "functionResponses": [{
+                                                    "id": call_id,
+                                                    "name": name,
+                                                    "response": {
+                                                        "result": "blocked_too_early",
+                                                        "instruction": (
+                                                            "La simulación sigue activa. NO cuelgues. Una pausa, una reformulación, "
+                                                            "una petición de ayuda o la mención de un supervisor NO significan que la llamada haya terminado. "
+                                                            "Continúa interpretando a tu personaje y responde al agente."
+                                                        )
+                                                    }
+                                                }]
+                                            }
+                                        }
+                                        await gemini_ws.send(json.dumps(resp_msg))
+                                        continue
+
+                                    logger.info(
+                                        "Trainer hangup allowed: elapsed %.1fs >= %ds. Reason: %s",
+                                        elapsed_seconds,
+                                        HANGUP_EARLY_BLOCK_SECONDS,
+                                        reason
+                                    )
                                     await handle_roleplay_hangup(
                                         session_id=session_id,
                                         call_sid=call_sid,
