@@ -24,6 +24,9 @@ from app.models.personalized_training import (
 )
 from app.models.mass_evaluations import MassEvaluationResult, MassEvaluationCriterionResult
 from app.models.users import User
+from app.models.companies import Company
+from app.models.prompts import Prompt
+from app.models.criteria import PromptCriterion
 from app.services.openai_service import complete_text
 from app.utils.json_utils import safe_parse_json
 
@@ -1355,6 +1358,10 @@ class PersonalizedTrainingService:
                             turns.append({"role": "agente", "text": line[len("Agente:"):].strip()})
                         elif line.startswith("Paciente:"):
                             turns.append({"role": "paciente", "text": line[len("Paciente:"):].strip()})
+                        elif line.startswith("Cliente:"):
+                            turns.append({"role": "paciente", "text": line[len("Cliente:"):].strip()})
+                        elif line.startswith("Usuario:"):
+                            turns.append({"role": "paciente", "text": line[len("Usuario:"):].strip()})
                         else:
                             turns.append({"role": "unknown", "text": line})
                     transcription_turns = turns
@@ -4274,17 +4281,154 @@ class PersonalizedTrainingService:
 
 DEFAULT_EVALUATION_PROMPT = """
 Analiza la siguiente grabación de audio de una llamada de entrenamiento de roleplay.
-El usuario es un agente telefónico que practica objetivos de Boston Medical Group.
-El bot actuó como el paciente.
+El usuario es un agente telefónico que practica objetivos de atención al cliente / ventas.
+El bot actuó como el cliente / paciente.
 
 Debes devolver estrictamente un objeto JSON estructurado que contenga:
 - score: número decimal entre 1 y 10 indicando el desempeño del agente.
 - feedback: texto resumido explicando fortalezas y debilidades del agente en el roleplay.
-- transcription: transcripción completa de la llamada (agente y paciente).
-- result_json: objeto con detalles de la llamada, como el cumplimiento de los objetivos.
+- transcription: transcripción completa de la llamada (agente y paciente/cliente).
+- result_json: objeto con detalles de la llamada y cumplimiento de criterios de calidad.
 
 Devuelve únicamente el JSON puro sin markdown.
 """
+
+
+def _build_personalized_training_evaluation_prompt(
+    sim_prompt: Optional[TrainingSimulationPrompt] = None,
+    agent_report: Optional[TrainingAgentReport] = None,
+    criteria_items: Optional[List[Any]] = None,
+    company_name: str = "la empresa",
+) -> str:
+    """
+    Builds a comprehensive, context-aware prompt for Azure OpenAI multimodal audio analysis
+    of a training simulation roleplay call.
+    """
+    # 1. Simulación & Escenario
+    sim_title = sim_prompt.title if sim_prompt and sim_prompt.title else "Simulación de Entrenamiento"
+    scenario_type = sim_prompt.scenario_type if sim_prompt and sim_prompt.scenario_type else "Atención al cliente / Ventas"
+    roleplay_instructions = sim_prompt.prompt_text if sim_prompt and sim_prompt.prompt_text else "El bot actúa como cliente con dudas o incidencias y el agente debe resolverlas."
+
+    sim_objectives = []
+    if sim_prompt and sim_prompt.objective_focus_json:
+        if isinstance(sim_prompt.objective_focus_json, list):
+            sim_objectives = [str(o) for o in sim_prompt.objective_focus_json if o]
+        elif isinstance(sim_prompt.objective_focus_json, str):
+            sim_objectives = [sim_prompt.objective_focus_json]
+
+    # 2. Objetivos del Ciclo del Agente
+    cycle_general = []
+    cycle_specific = []
+    if agent_report:
+        if agent_report.general_objectives_json and isinstance(agent_report.general_objectives_json, list):
+            cycle_general = [str(o) for o in agent_report.general_objectives_json if o]
+        if agent_report.specific_objectives_json and isinstance(agent_report.specific_objectives_json, list):
+            cycle_specific = [str(o) for o in agent_report.specific_objectives_json if o]
+
+    # 3. Criterios de Calidad
+    criterios_desc = []
+    criterios_keys = []
+    if criteria_items:
+        for c in criteria_items:
+            c_name = getattr(c, "criterion_name", None) or getattr(c, "criterion_key", None)
+            if not c_name and isinstance(c, dict):
+                c_name = c.get("criterion_name") or c.get("criterion_key")
+            elif not c_name and isinstance(c, str):
+                c_name = c
+            if c_name:
+                desc = getattr(c, "criterion_description", None) if hasattr(c, "criterion_description") else None
+                if not desc and isinstance(c, dict):
+                    desc = c.get("criterion_description")
+                criterios_keys.append(c_name)
+                if desc:
+                    criterios_desc.append(f"- {c_name}: {desc}")
+                else:
+                    criterios_desc.append(f"- {c_name}")
+
+    if not criterios_keys:
+        default_crits = [
+            ("Saludo profesional e identificación", "El agente saluda cordialmente, se identifica a sí mismo y a la empresa."),
+            ("Escucha activa y empatía", "Demuestra interés genuino, no interrumpe y valida las emociones o dudas del interlocutor."),
+            ("Sondeo y detección de necesidades", "Realiza preguntas pertinentes para comprender a fondo la situación o motivo de la llamada."),
+            ("Claridad en la información", "Explica con precisión, solvencia y lenguaje adaptado al interlocutor."),
+            ("Manejo de dudas y objeciones", "Responde con argumentos sólidos, seguridad y actitud constructiva."),
+            ("Cierre formal y despedida", "Resume acuerdos o próximos pasos, ofrece ayuda adicional y se despide cordialmente.")
+        ]
+        for name, desc in default_crits:
+            criterios_keys.append(name)
+            criterios_desc.append(f"- {name}: {desc}")
+
+    sim_objs_text = "\n".join(f"- {o}" for o in sim_objectives) if sim_objectives else "- Conducir la llamada con profesionalidad y resolver la consulta planteada."
+    if cycle_general or cycle_specific:
+        all_objs = cycle_general + cycle_specific
+        cycle_objs_text = "\n".join(f"- {o}" for o in all_objs)
+    else:
+        cycle_objs_text = "- Cumplir con los estándares de calidad y resolución del servicio."
+
+    criterios_text = "\n".join(criterios_desc)
+    criterios_json_template = ",\n    ".join(f'"{k}": true' for k in criterios_keys)
+
+    prompt = f"""Eres un evaluador y auditor de calidad experto en contact center y atención al cliente para {company_name}.
+Tu tarea es escuchar y analizar con absoluto rigor técnico la grabación de audio de una simulación telefónica de entrenamiento (roleplay) realizada por un agente.
+
+=== ROLES EN LA LLAMADA ===
+- AGENTE (humano): Representante de {company_name}. Es a quien debes evaluar de forma exhaustiva.
+- CLIENTE / PACIENTE / INTERLOCUTOR (bot de IA): Interpreta el papel del cliente. Sus réplicas son para desafiar al agente.
+- IMPORTANTE: Evalúa exclusivamente al AGENTE HUMANO. No lo penalices por respuestas o quejas del bot interlocutor. Ignora cualquier frase introductoria del sistema previo a la llamada.
+
+=== ESCENARIO DE LA SIMULACIÓN ===
+- Título: {sim_title}
+- Tipo de llamada: {scenario_type}
+- Instrucciones del roleplay:
+\"\"\"{roleplay_instructions}\"\"\"
+
+=== OBJETIVOS DE ESTA SIMULACIÓN ===
+{sim_objs_text}
+
+=== OBJETIVOS DEL PLAN DE ENTRENAMIENTO DEL AGENTE ===
+{cycle_objs_text}
+
+=== CRITERIOS DE CALIDAD A EVALUAR ===
+Debes auditar individualmente cada uno de los siguientes criterios:
+{criterios_text}
+
+=== REGLAS PARA EVALUAR ===
+1. 'is_valid_roleplay' (boolean):
+   - DEBE ser true si el agente realizó una interacción sustancial de roleplay, intentó atender al interlocutor y la llamada tuvo desarrollo.
+   - DEBE ser false únicamente si la llamada se cortó inmediatamente (menos de 2 turnos), no hubo interacción real, o el agente colgó sin interactuar.
+2. 'score' (número decimal de 1.0 a 10.0):
+   - Calificación global del desempeño del agente en la simulación.
+3. 'feedback' (string detallado):
+   - Análisis pedagógico y constructivo: explica qué hizo bien, qué debe corregir y recomendaciones prácticas para futuras llamadas.
+4. 'objectives_met' (lista de strings):
+   - Lista con los objetivos y criterios que el agente superó con éxito.
+5. 'areas_for_improvement' (lista de strings):
+   - Lista con los aspectos concretos donde el agente falló o debe mejorar.
+6. 'result_json' (objeto clave-valor):
+   - DEBE contener un booleano (true si cumple, false si no cumple) para CADA UNO de los criterios de calidad especificados.
+7. 'transcription' (string):
+   - Transcripción completa de la conversación identificando a los hablantes con 'Agente:' y 'Cliente:' (o 'Paciente:').
+
+=== FORMATO DE SALIDA ESTRICTO ===
+Devuelve ÚNICAMENTE un objeto JSON válido con la siguiente estructura exacta (sin bloques ```json ni texto adicional):
+{{
+  "is_valid_roleplay": true,
+  "score": 8.0,
+  "feedback": "El agente demostró buena capacidad de escucha y empatía...",
+  "objectives_met": [
+    "Identificación clara",
+    "Sondeo activo"
+  ],
+  "areas_for_improvement": [
+    "Cierre de la llamada"
+  ],
+  "result_json": {{
+    {criterios_json_template}
+  }},
+  "transcription": "Agente: Hola, buenos días...\\nCliente: Hola, llamaba por..."
+}}
+"""
+    return prompt.strip()
 
 
 async def evaluate_training_session_task(session_id: int):
@@ -4332,16 +4476,41 @@ async def evaluate_training_session_task(session_id: int):
                 comp.evaluation_id = None
             await db.commit()
             return
-            
-        # 2. Resolve service_id for the agent
+
+        # 2. Fetch Simulation Prompt & Agent Report for contextual evaluation
+        sim_prompt = None
+        if conversation_id:
+            stmt_sim = select(TrainingSimulationPrompt).where(TrainingSimulationPrompt.simulation_prompt_id == conversation_id)
+            res_sim = await db.execute(stmt_sim)
+            sim_prompt = res_sim.scalars().first()
+
+        agent_report = None
+        if cycle_id:
+            stmt_rep = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == cycle_id)
+            res_rep = await db.execute(stmt_rep)
+            agent_report = res_rep.scalars().first()
+
+        # Resolve company_id and company_name
+        company_id = getattr(agent_report, "company_id", None) if agent_report else None
+        company_name = "la empresa"
+        if company_id:
+            stmt_comp_info = select(Company.company_name, Company.brand_name).where(Company.company_id == company_id)
+            res_comp_info = await db.execute(stmt_comp_info)
+            comp_info = res_comp_info.first()
+            if comp_info:
+                company_name = comp_info.brand_name or comp_info.company_name or "la empresa"
+
+        # 3. Resolve service_id for the agent
+        service_id = getattr(agent_report, "service_id", None) if agent_report else None
         agent_id = session.agent_id
-        # Check from MassEvaluationResult
-        stmt_srv = select(MassEvaluationResult.service_id).where(
-            MassEvaluationResult.hubspot_owner_id == agent_id
-        ).limit(1)
-        res_srv = await db.execute(stmt_srv)
-        service_id = res_srv.scalar()
-        
+        if not service_id:
+            # Check from MassEvaluationResult
+            stmt_srv = select(MassEvaluationResult.service_id).where(
+                MassEvaluationResult.hubspot_owner_id == agent_id
+            ).limit(1)
+            res_srv = await db.execute(stmt_srv)
+            service_id = res_srv.scalar()
+
         if not service_id:
             # Fallback to general analyses
             from app.models.analyses import AnalysisCriterionResult
@@ -4368,21 +4537,56 @@ async def evaluate_training_session_task(session_id: int):
                 comp.evaluation_id = None
             await db.commit()
             return
+
+        # 4. Fetch Active Criteria for this Service and Company
+        criteria_items = []
+        try:
+            query_crits = (
+                select(PromptCriterion)
+                .join(Prompt, Prompt.prompt_id == PromptCriterion.prompt_id)
+                .where(
+                    Prompt.service_id == service_id,
+                    Prompt.is_active == True,
+                    PromptCriterion.is_active == True,
+                    PromptCriterion.deleted_at.is_(None)
+                )
+            )
+            if company_id:
+                stmt_comp_crits = query_crits.where(Prompt.company_id == company_id).order_by(PromptCriterion.order_index)
+                res_comp_crits = await db.execute(stmt_comp_crits)
+                criteria_items = list(res_comp_crits.scalars().all())
+
+            if not criteria_items:
+                stmt_gen_crits = query_crits.order_by(PromptCriterion.order_index)
+                res_gen_crits = await db.execute(stmt_gen_crits)
+                criteria_items = list(res_gen_crits.scalars().all())
+        except Exception as e_crit:
+            logger.warning("Error fetching criteria for service %d: %s. Using fallback criteria.", service_id, e_crit)
+            criteria_items = []
             
-        # 3. Retrieve or create default Training Evaluation Prompt
+        # 5. Retrieve or create default Training Evaluation Prompt (for prompt_version_id FK)
         stmt_prompt = select(TrainingEvaluationPrompt).where(
             and_(
                 TrainingEvaluationPrompt.service_id == service_id,
                 TrainingEvaluationPrompt.is_active == True
             )
         )
-        res_prompt = await db.execute(stmt_prompt)
-        eval_prompt = res_prompt.scalars().first()
+        if company_id:
+            stmt_prompt_comp = stmt_prompt.where(TrainingEvaluationPrompt.company_id == company_id)
+            res_prompt = await db.execute(stmt_prompt_comp)
+            eval_prompt = res_prompt.scalars().first()
+        else:
+            eval_prompt = None
+
+        if not eval_prompt:
+            res_prompt = await db.execute(stmt_prompt)
+            eval_prompt = res_prompt.scalars().first()
         
         if not eval_prompt:
             logger.info("No active training evaluation prompt found for service %d. Seeding default...", service_id)
             eval_prompt = TrainingEvaluationPrompt(
                 service_id=service_id,
+                company_id=company_id,
                 prompt_text=DEFAULT_EVALUATION_PROMPT.strip(),
                 version=1,
                 is_active=True,
@@ -4391,17 +4595,17 @@ async def evaluate_training_session_task(session_id: int):
             db.add(eval_prompt)
             await db.flush()
             
-        # Inject dynamic instruction to evaluate is_valid_roleplay
-        is_valid_rule = (
-            "\nAdemás de los campos solicitados, DEBES incluir obligatoriamente el siguiente campo en la raíz del JSON devuelto:\n"
-            "- is_valid_roleplay: un valor booleano (true o false) que indique si la llamada es válida para ser evaluada. "
-            "Debe ser true si el agente realizó una interacción de roleplay sustancial, completó el juego de rol o al menos llegó a la fase de despedida/cierre antes de que la llamada se cortara. "
-            "Debe ser false únicamente si la llamada se cortó de forma muy abrupta al principio, si no hubo interacción real de roleplay, o si el agente colgó inmediatamente después de presentarse sin abordar los objetivos en absoluto."
-        )
-        prompt_text = eval_prompt.prompt_text + is_valid_rule
         prompt_version_id = eval_prompt.id
+
+        # 6. Build Rich Context-Aware Prompt for Audio Analysis
+        prompt_text = _build_personalized_training_evaluation_prompt(
+            sim_prompt=sim_prompt,
+            agent_report=agent_report,
+            criteria_items=criteria_items,
+            company_name=company_name,
+        )
         
-        # 4. Download recording audio bytes using TwilioService
+        # 7. Download recording audio bytes using TwilioService
         from app.services.twilio_service import TwilioService
         tw_service = TwilioService()
         
@@ -4424,7 +4628,7 @@ async def evaluate_training_session_task(session_id: int):
         if recording_url.lower().endswith(".wav"):
             audio_format = "wav"
             
-        # 5. Call Azure OpenAI Multimodal Audio
+        # 8. Call Azure OpenAI Multimodal Audio
         from app.services.openai_service import analyze_audio_bytes
         try:
             logger.info("Sending audio to Azure OpenAI multimodal analysis for session %d...", session_id)
@@ -4444,7 +4648,7 @@ async def evaluate_training_session_task(session_id: int):
             await db.commit()
             return
             
-        # 6. Parse and validate JSON
+        # 9. Parse and validate JSON
         from app.utils.json_utils import safe_parse_json
         parsed_res = safe_parse_json(raw_response)
         
@@ -4492,21 +4696,87 @@ async def evaluate_training_session_task(session_id: int):
             await db.commit()
             return
 
-            
-        # Extract evaluation metrics
-        score = parsed_res.get("score")
-        feedback = parsed_res.get("feedback") or parsed_res.get("resumen") or parsed_res.get("comentarios")
-        transcription = parsed_res.get("transcription") or parsed_res.get("transcripcion")
-        
-        # Parse score safely
+        # 10. Normalize parsed results
+        raw_inner = parsed_res.get("result_json")
+        if not isinstance(raw_inner, dict):
+            raw_inner = {}
+
+        # Merge boolean criteria at the root level into raw_inner
+        for k, v in list(parsed_res.items()):
+            if isinstance(v, bool) and k not in ["is_valid_roleplay", "is_valid"]:
+                raw_inner[k] = v
+
+        # Reconcile criteria names with criteria_items if present
+        if criteria_items:
+            for c in criteria_items:
+                c_name = getattr(c, "criterion_name", None) or getattr(c, "criterion_key", None)
+                if not c_name and isinstance(c, dict):
+                    c_name = c.get("criterion_name") or c.get("criterion_key")
+                elif not c_name and isinstance(c, str):
+                    c_name = c
+                if c_name and c_name not in raw_inner:
+                    for k, v in list(raw_inner.items()):
+                        if isinstance(v, bool) and (c_name.lower() in k.lower() or k.lower() in c_name.lower()):
+                            raw_inner[c_name] = v
+                            break
+
+        parsed_res["result_json"] = raw_inner
+
+        # Normalize objectives_met
+        obj_met = (
+            parsed_res.get("objectives_met")
+            or parsed_res.get("objetivos_cumplidos")
+            or parsed_res.get("strengths")
+            or parsed_res.get("fortalezas")
+        )
+        if isinstance(obj_met, list) and obj_met:
+            parsed_res["objectives_met"] = [str(x) for x in obj_met]
+        else:
+            parsed_res["objectives_met"] = [k for k, v in raw_inner.items() if v is True]
+
+        # Normalize areas_for_improvement
+        areas_imp = (
+            parsed_res.get("areas_for_improvement")
+            or parsed_res.get("objetivos_no_cumplidos")
+            or parsed_res.get("weaknesses")
+            or parsed_res.get("areas_mejora")
+            or parsed_res.get("debilidades")
+        )
+        if isinstance(areas_imp, list) and areas_imp:
+            parsed_res["areas_for_improvement"] = [str(x) for x in areas_imp]
+        else:
+            parsed_res["areas_for_improvement"] = [k for k, v in raw_inner.items() if v is False]
+
+        # Extract & normalize score
+        score = parsed_res.get("score") or parsed_res.get("evaluacion_global")
         decimal_score = None
         if score is not None:
             try:
-                decimal_score = Decimal(str(score))
+                flt_score = float(score)
+                if flt_score > 10.0 and flt_score <= 100.0:
+                    flt_score = flt_score / 10.0
+                decimal_score = Decimal(str(round(flt_score, 1)))
+                parsed_res["score"] = float(decimal_score)
             except Exception:
                 pass
-                
-        # 7. Save Training Call Evaluation
+
+        if decimal_score is None and raw_inner:
+            bool_vals = [v for v in raw_inner.values() if isinstance(v, bool)]
+            if bool_vals:
+                calc = round((sum(1 for v in bool_vals if v) / len(bool_vals)) * 10, 1)
+                decimal_score = Decimal(str(calc))
+                parsed_res["score"] = float(decimal_score)
+
+        feedback = (
+            parsed_res.get("feedback")
+            or parsed_res.get("resumen")
+            or parsed_res.get("comentarios")
+            or parsed_res.get("summary")
+        )
+        parsed_res["feedback"] = feedback
+        transcription = parsed_res.get("transcription") or parsed_res.get("transcripcion")
+
+        # 11. Save Training Call Evaluation
         evaluation = TrainingCallEvaluation(
             session_id=session_id,
             cycle_id=cycle_id,
@@ -4522,7 +4792,7 @@ async def evaluate_training_session_task(session_id: int):
         await db.flush()
         eval_id = evaluation.evaluation_id
         
-        # 8. Update Session and Completion Status based on validity of roleplay
+        # 12. Update Session and Completion Status based on validity of roleplay
         is_valid = parsed_res.get("is_valid_roleplay")
         if is_valid is None:
             is_valid = True  # Default to True to avoid accidental discards
@@ -4547,14 +4817,14 @@ async def evaluate_training_session_task(session_id: int):
             
         await db.commit()
         
-        # 9. Check if the cycle is completed (4/4 conversations complete) and finalize it if so
+        # 13. Check if the cycle is completed and finalize it if so
         if is_valid:
             await check_and_finalize_training_cycle(db, cycle_id)
 
 
 async def check_and_finalize_training_cycle(db: AsyncSession, cycle_id: int):
     """
-    Checks if all 4 conversations in a training cycle are completed.
+    Checks if all conversations in a training cycle are completed.
     If so, aggregates evaluations, triggers Azure OpenAI to generate the final cycle report,
     persist the results in final_report_json, and marks the cycle as completed.
     """
@@ -4580,8 +4850,8 @@ async def check_and_finalize_training_cycle(db: AsyncSession, cycle_id: int):
     
     logger.info("Cycle %d status: %d of %d simulations completed.", cycle_id, done_count, total_count)
     
-    if done_count < 4 or total_count < 4:
-        logger.info("Cycle %d is not yet ready to be finalized. Progress: %d/4", cycle_id, done_count)
+    if total_count == 0 or done_count < total_count:
+        logger.info("Cycle %d is not yet ready to be finalized. Progress: %d/%d", cycle_id, done_count, total_count)
         return
         
     # 2. Finalize! Load report details and evaluations

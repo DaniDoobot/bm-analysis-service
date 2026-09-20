@@ -1377,6 +1377,10 @@ async def get_evaluation_detail(
                 turns.append({"role": "agent", "text": line[len("Agente:"):].strip()})
             elif line.startswith("Paciente:"):
                 turns.append({"role": "patient", "text": line[len("Paciente:"):].strip()})
+            elif line.startswith("Cliente:"):
+                turns.append({"role": "patient", "text": line[len("Cliente:"):].strip()})
+            elif line.startswith("Usuario:"):
+                turns.append({"role": "patient", "text": line[len("Usuario:"):].strip()})
             else:
                 turns.append({"role": "unknown", "text": line})
 
@@ -1392,6 +1396,8 @@ async def get_evaluation_detail(
             # Flat structure — pick only boolean values as criteria
             criteria = {k: v for k, v in raw.items() if isinstance(v, bool)}
 
+    strengths, weaknesses = PersonalizedTrainingService._extract_strengths_weaknesses(ev.result_json or {})
+
     return {
         "evaluation_id": ev.evaluation_id,
         "session_id": ev.session_id,
@@ -1401,6 +1407,10 @@ async def get_evaluation_detail(
         "transcription_raw": ev.transcription,
         "transcription_turns": turns,
         "criteria": criteria,
+        "strengths": strengths,
+        "weaknesses": weaknesses,
+        "objectives_met": strengths,
+        "areas_for_improvement": weaknesses,
         "result_json": ev.result_json,
         "created_at": ev.created_at,
     }
