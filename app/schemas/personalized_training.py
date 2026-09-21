@@ -473,3 +473,23 @@ class ManualCycleCreateRequest(BaseModel):
         default=None,
         description="[Legacy] Lista de objetivos; se tratan como objetivos específicos si no llegan general_objectives/specific_objectives."
     )
+
+
+class TrainingKnowledgeDocumentOut(BaseModel):
+    id: int
+    company_id: Optional[int] = None
+    hubspot_owner_id: str
+    service_id: Optional[int] = None
+    team_id: Optional[int] = None
+    cycle_id: int
+    simulation_id: Optional[int] = None
+    evaluation_id: Optional[int] = None
+    document_type: str
+    title: str
+    content: str
+    metadata_json: dict = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True

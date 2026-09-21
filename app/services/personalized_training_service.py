@@ -5023,6 +5023,12 @@ async def evaluate_training_session_task(session_id: int):
         
         # 13. Check if the cycle is completed and finalize it if so
         if is_valid:
+            try:
+                from app.services.training_knowledge_service import TrainingKnowledgeService
+                await TrainingKnowledgeService.generate_simulation_knowledge_document(db, eval_id)
+            except Exception as e:
+                logger.exception("Failed generating simulation knowledge document for eval %d: %s", eval_id, e)
+
             await check_and_finalize_training_cycle(db, cycle_id)
 
 
@@ -5315,6 +5321,13 @@ async def check_and_finalize_training_cycle(db: AsyncSession, cycle_id: int):
             report.avg_evaluacion_global = Decimal(str(avg_score)).quantize(Decimal("0.01")) if avg_score is not None else None
             await db.commit()
             logger.info("Successfully finalized training cycle ID %d.", cycle_id)
+
+            # Phase 2 Knowledge Layer: Generate cycle and simulations knowledge documents
+            try:
+                from app.services.training_knowledge_service import TrainingKnowledgeService
+                await TrainingKnowledgeService.generate_cycle_knowledge_documents(db, cycle_id)
+            except Exception as e:
+                logger.exception("Failed generating knowledge documents for cycle %d: %s", cycle_id, e)
         else:
             logger.error("Failed to parse consolidated report JSON for cycle %d after retry: %s", cycle_id, raw_response[:300])
             report.status = "finalization_failed"

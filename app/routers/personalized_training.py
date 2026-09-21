@@ -31,6 +31,7 @@ from app.schemas.personalized_training import (
     UpdateCycleObjectivesPayload,
     ApproveCycleResponse,
     ManualCycleCreateRequest,
+    TrainingKnowledgeDocumentOut,
 )
 from app.services.personalized_training_service import PersonalizedTrainingService
 
@@ -1424,3 +1425,82 @@ async def get_evaluation_detail(
         "created_at": ev.created_at,
     }
 
+
+# ── Knowledge Layer Endpoints (Phase 2) ─────────────────────────────────────
+
+@router.get(
+    "/admin/knowledge-documents/{document_id}",
+    response_model=TrainingKnowledgeDocumentOut,
+    summary="Obtener un documento de conocimiento por ID",
+)
+async def get_knowledge_document(
+    document_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    context: TenantContext = Depends(get_tenant_context),
+):
+    """Obtiene un documento de conocimiento de entrenamiento asegurando aislamiento de tenant y rol."""
+    from app.services.training_knowledge_service import TrainingKnowledgeService
+
+    doc = await TrainingKnowledgeService.get_document_by_id(db, document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Documento de conocimiento no encontrado.",
+        )
+
+    # Multi-tenant isolation: verify company matches context if set
+    if context.company_id is not None and doc.company_id is not None and doc.company_id != context.company_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Documento de conocimiento no encontrado.",
+        )
+
+    # Enforce agent or admin ownership
+    enforce_agent_or_admin_ownership(current_user, doc.hubspot_owner_id, context)
+
+    return doc
+
+
+@router.get(
+    "/admin/knowledge-documents",
+    response_model=List[TrainingKnowledgeDocumentOut],
+    summary="Listar documentos de conocimiento con filtros",
+)
+async def list_knowledge_documents(
+    agent_id: Optional[str] = Query(None, description="Filtrar por hubspot_owner_id del agente"),
+    cycle_id: Optional[int] = Query(None, description="Filtrar por cycle_id / training_report_id"),
+    simulation_id: Optional[int] = Query(None, description="Filtrar por simulation_prompt_id"),
+    document_type: Optional[str] = Query(None, description="Filtrar por tipo ('simulation', 'cycle')"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    context: TenantContext = Depends(get_tenant_context),
+):
+    """Lista documentos de conocimiento de entrenamiento aplicando filtros y scoping de permisos."""
+    from app.services.training_knowledge_service import TrainingKnowledgeService
+    from app.core.roles import normalize_role, InternalRole
+
+    norm_role = normalize_role(current_user.role)
+    target_owner_id = agent_id
+
+    # If the user is an agent, restrict strictly to their own owner_id
+    if norm_role == InternalRole.AGENT:
+        if not current_user.hubspot_owner_id:
+            return []
+        target_owner_id = current_user.hubspot_owner_id
+    elif agent_id:
+        enforce_agent_or_admin_ownership(current_user, agent_id, context)
+
+    docs = await TrainingKnowledgeService.list_documents(
+        db=db,
+        company_id=context.company_id,
+        hubspot_owner_id=target_owner_id,
+        cycle_id=cycle_id,
+        simulation_id=simulation_id,
+        document_type=document_type,
+        limit=limit,
+        offset=offset,
+    )
+    return docs

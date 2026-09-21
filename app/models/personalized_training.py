@@ -371,3 +371,48 @@ class TrainingCallEvaluation(Base):
     cycle = relationship("TrainingAgentReport")
     prompt = relationship("TrainingSimulationPrompt")
     prompt_version = relationship("TrainingEvaluationPrompt")
+
+
+class TrainingKnowledgeDocument(Base):
+    __tablename__ = "bm_training_knowledge_documents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    company_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_companies.company_id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    hubspot_owner_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    service_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_services.service_id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    team_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_teams.team_id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    cycle_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("bm_training_agent_reports.training_report_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    simulation_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_training_simulation_prompts.simulation_prompt_id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    evaluation_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("bm_training_call_evaluations.evaluation_id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    document_type: Mapped[str] = mapped_column(Text, nullable=False, index=True)  # simulation, cycle, agent_history
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default="'{}'::jsonb", nullable=False
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), onupdate=func.now(), server_default=func.now()
+    )
+
+    company = relationship("Company")
+    service = relationship("Service")
+    team = relationship("Team")
+    cycle = relationship("TrainingAgentReport")
+    simulation = relationship("TrainingSimulationPrompt")
+    evaluation = relationship("TrainingCallEvaluation")
