@@ -1,6 +1,7 @@
 """Service for personalized training report generation and management using Azure OpenAI."""
 import json
 import logging
+import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -1365,14 +1366,19 @@ class PersonalizedTrainingService:
                 feedback = getattr(evaluation, "feedback", None)
                 result_json_extracted = getattr(evaluation, "result_json", None)
                 
-                # Extract criteria
-                if result_json_extracted:
+                # Extract criteria and criteria_evaluations
+                criteria_evaluations = None
+                if result_json_extracted and isinstance(result_json_extracted, dict):
                     raw = result_json_extracted
-                    inner = raw.get("result_json") if isinstance(raw, dict) else None
+                    inner = raw.get("result_json") if isinstance(raw.get("result_json"), dict) else None
                     if isinstance(inner, dict):
                         criteria = inner
-                    elif isinstance(raw, dict):
+                    else:
                         criteria = {k: v for k, v in raw.items() if isinstance(v, bool)}
+
+                    crit_evals = raw.get("criteria_evaluations")
+                    if isinstance(crit_evals, list):
+                        criteria_evaluations = crit_evals
                 
                 # Extract strengths & weaknesses from evaluation result_json
                 if result_json_extracted:
@@ -1386,16 +1392,18 @@ class PersonalizedTrainingService:
                         line = line.strip()
                         if not line:
                             continue
-                        if line.startswith("Agente:"):
-                            turns.append({"role": "agente", "text": line[len("Agente:"):].strip()})
-                        elif line.startswith("Paciente:"):
-                            turns.append({"role": "paciente", "text": line[len("Paciente:"):].strip()})
-                        elif line.startswith("Cliente:"):
-                            turns.append({"role": "paciente", "text": line[len("Cliente:"):].strip()})
-                        elif line.startswith("Usuario:"):
-                            turns.append({"role": "paciente", "text": line[len("Usuario:"):].strip()})
+                        cleaned_line = re.sub(r"^\[Turno\s*\d+\]\s*", "", line, flags=re.IGNORECASE).strip()
+                        cleaned_line = re.sub(r"^Turno\s*\d+\s*[:-]\s*", "", cleaned_line, flags=re.IGNORECASE).strip()
+                        if cleaned_line.startswith("Agente:"):
+                            turns.append({"role": "agente", "text": cleaned_line[len("Agente:"):].strip()})
+                        elif cleaned_line.startswith("Paciente:"):
+                            turns.append({"role": "paciente", "text": cleaned_line[len("Paciente:"):].strip()})
+                        elif cleaned_line.startswith("Cliente:"):
+                            turns.append({"role": "paciente", "text": cleaned_line[len("Cliente:"):].strip()})
+                        elif cleaned_line.startswith("Usuario:"):
+                            turns.append({"role": "paciente", "text": cleaned_line[len("Usuario:"):].strip()})
                         else:
-                            turns.append({"role": "unknown", "text": line})
+                            turns.append({"role": "unknown", "text": cleaned_line})
                     transcription_turns = turns
         except Exception:
             pass
@@ -1430,6 +1438,7 @@ class PersonalizedTrainingService:
             "title": title or get_val(c, "title"),
             "feedback": feedback,
             "criteria": criteria,
+            "criteria_evaluations": criteria_evaluations,
             "transcription_turns": transcription_turns,
             "strengths": strengths,
             "weaknesses": weaknesses,
@@ -4417,6 +4426,26 @@ def _build_personalized_training_evaluation_prompt(
     criterios_text = "\n".join(criterios_desc)
     criterios_json_template = ",\n    ".join(f'"{k}": true' for k in criterios_keys)
 
+    # Build concise example for criteria_evaluations in the JSON schema
+    criteria_eval_example_list = []
+    for idx, k in enumerate(criterios_keys[:2]):
+        slug = k.lower().replace(" ", "_").replace("á", "a").replace("é", "e").replace("í", "i").replace("ó", "o").replace("ú", "u").replace("ñ", "n")
+        criteria_eval_example_list.append(
+            f'    {{\n'
+            f'      "criterion_key": "{slug}",\n'
+            f'      "criterion_name": "{k}",\n'
+            f'      "score": 8.0,\n'
+            f'      "passed": true,\n'
+            f'      "expected_behavior": "El agente debía conducirse con profesionalidad y aplicar las pautas de {k}.",\n'
+            f'      "observed_behavior": "El agente aplicó correctamente las pautas requeridas durante la interacción.",\n'
+            f'      "evidence_quote": "Cita textual REAL y literal extraída de la transcripción.",\n'
+            f'      "relevant_turns": [2, 3],\n'
+            f'      "reasoning": "El comportamiento observado cumple satisfactoriamente con el estándar requerido.",\n'
+            f'      "improvement_tip": "Mantener esta conducta en llamadas sucesivas."\n'
+            f'    }}'
+        )
+    criteria_eval_example_str = ",\n".join(criteria_eval_example_list)
+
     prompt = f"""Eres un evaluador y auditor de calidad experto en contact center y atención al cliente para {company_name}.
 Tu tarea es escuchar y analizar con absoluto rigor técnico la grabación de audio de una simulación telefónica de entrenamiento (roleplay) realizada por un agente.
 
@@ -4446,7 +4475,7 @@ Debes auditar individualmente cada uno de los siguientes criterios:
    - DEBE ser true si el agente realizó una interacción sustancial de roleplay, intentó atender al interlocutor y la llamada tuvo desarrollo.
    - DEBE ser false únicamente si la llamada se cortó inmediatamente (menos de 2 turnos), no hubo interacción real, o el agente colgó sin interactuar.
 2. 'score' (número decimal de 1.0 a 10.0):
-   - Calificación global del desempeño del agente en la simulación.
+   - Calificación global del desempeño del agente en la simulación completa.
 3. 'feedback' (string detallado):
    - Análisis pedagógico y constructivo: explica qué hizo bien, qué debe corregir y recomendaciones prácticas para futuras llamadas.
 4. 'objectives_met' (lista de strings):
@@ -4455,8 +4484,22 @@ Debes auditar individualmente cada uno de los siguientes criterios:
    - Lista con los aspectos concretos donde el agente falló o debe mejorar.
 6. 'result_json' (objeto clave-valor):
    - DEBE contener un booleano (true si cumple, false si no cumple) para CADA UNO de los criterios de calidad especificados.
-7. 'transcription' (string):
-   - Transcripción completa de la conversación identificando a los hablantes con 'Agente:' y 'Cliente:' (o 'Paciente:').
+7. 'criteria_evaluations' (lista exhaustiva de evidencias estructuradas por criterio):
+   - DEBE contener obligatoriamente un objeto para CADA criterio de calidad auditado (lista completa de todos los criterios evaluados).
+   - 'criterion_key' (string): identificador en minúsculas (slug) del criterio.
+   - 'criterion_name' (string): nombre exacto del criterio evaluado.
+   - 'score' (número decimal entre 1.0 y 10.0): valoración numérica individual obtenida exclusivamente en este criterio (no confundir con el score global de la simulación).
+   - 'passed' (boolean): true si superó el criterio, false si no lo superó.
+   - 'expected_behavior' (string): qué comportamiento específico se esperaba del agente en esta simulación según el criterio, el escenario y los objetivos.
+   - 'observed_behavior' (string): descripción objetiva de lo que realmente hizo o dijo el agente humano durante la llamada.
+   - 'evidence_quote' (string): cita textual REAL y literal de la conversación que sustenta la valoración. No inventes frases que no aparezcan en la conversación. Si no hubo oportunidad o evidencia suficiente, indica explícitamente "Sin evidencia suficiente en la conversación".
+   - 'relevant_turns' (lista de enteros): números de turno reales de la conversación (ej. [2, 3]) donde ocurre la evidencia.
+   - 'reasoning' (string): explicación breve y concreta de cómo el comportamiento observado y la evidencia justifican esa valoración individual y nota.
+   - 'improvement_tip' (string): recomendación concreta y accionable para mejorar en este criterio en futuras llamadas.
+   - REGLA CRÍTICA: Evalúa exclusivamente al AGENTE HUMANO. No evalúes el comportamiento del bot/cliente como si fuera el agente.
+8. 'transcription' (string):
+   - Transcripción completa de la conversación identificando a los hablantes y numerando cada turno de forma explícita comenzando en [Turno 1], por ejemplo:
+     "[Turno 1] Cliente: Hola, buenos días...\\n[Turno 2] Agente: Buenos días, le atiende Juan..."
 
 === FORMATO DE SALIDA ESTRICTO ===
 Devuelve ÚNICAMENTE un objeto JSON válido con la siguiente estructura exacta (sin bloques ```json ni texto adicional):
@@ -4474,7 +4517,10 @@ Devuelve ÚNICAMENTE un objeto JSON válido con la siguiente estructura exacta (
   "result_json": {{
     {criterios_json_template}
   }},
-  "transcription": "Agente: Hola, buenos días...\\nCliente: Hola, llamaba por..."
+  "criteria_evaluations": [
+{criteria_eval_example_str}
+  ],
+  "transcription": "[Turno 1] Cliente: Hola, buenos días...\\n[Turno 2] Agente: Hola, llamaba por..."
 }}
 """
     return prompt.strip()
@@ -4769,6 +4815,115 @@ async def evaluate_training_session_task(session_id: int):
                             raw_inner[c_name] = v
                             break
 
+        # Normalize criteria_evaluations defensively
+        raw_crit_evals = parsed_res.get("criteria_evaluations")
+        normalized_crit_evals = []
+
+        def _clean_slug(s_val: str) -> str:
+            s_clean = s_val.lower().strip()
+            s_clean = re.sub(r"[áàäâ]", "a", s_clean)
+            s_clean = re.sub(r"[éèëê]", "e", s_clean)
+            s_clean = re.sub(r"[íìïî]", "i", s_clean)
+            s_clean = re.sub(r"[óòöô]", "o", s_clean)
+            s_clean = re.sub(r"[úùüû]", "u", s_clean)
+            s_clean = re.sub(r"[ñ]", "n", s_clean)
+            s_clean = re.sub(r"[^\w\s-]", "", s_clean)
+            return re.sub(r"[-\s]+", "_", s_clean)
+
+        if isinstance(raw_crit_evals, list):
+            for item in raw_crit_evals:
+                if not isinstance(item, dict):
+                    logger.warning("Session %d: criteria_evaluations entry is not a dict: %s", session_id, type(item))
+                    continue
+
+                c_name = str(
+                    item.get("criterion_name")
+                    or item.get("criterio")
+                    or item.get("name")
+                    or item.get("criterion_key")
+                    or "Criterio"
+                ).strip()
+                c_key = str(item.get("criterion_key") or _clean_slug(c_name)).strip()
+
+                # Parse individual score: only normalize when an actual numeric value was provided
+                c_score = None
+                raw_c_score = item.get("score") if item.get("score") is not None else item.get("puntuacion")
+                if raw_c_score is not None:
+                    try:
+                        sc_f = float(raw_c_score)
+                        if sc_f > 10.0 and sc_f <= 100.0:
+                            sc_f = sc_f / 10.0
+                        c_score = round(sc_f, 1)
+                    except (ValueError, TypeError):
+                        logger.warning("Session %d: unparseable score for criterion %s: %s", session_id, c_name, raw_c_score)
+
+                # Parse passed
+                passed = item.get("passed")
+                if passed is None:
+                    passed = item.get("cumple")
+                if isinstance(passed, bool):
+                    c_passed = passed
+                elif c_score is not None:
+                    c_passed = bool(c_score >= 7.0)
+                else:
+                    c_passed = bool(raw_inner.get(c_name, True))
+
+                # Parse relevant turns
+                relevant_turns = []
+                raw_turns = item.get("relevant_turns") if item.get("relevant_turns") is not None else item.get("turnos")
+                if isinstance(raw_turns, list):
+                    for t in raw_turns:
+                        try:
+                            if isinstance(t, (int, float)):
+                                relevant_turns.append(int(t))
+                            elif isinstance(t, str) and t.strip().isdigit():
+                                relevant_turns.append(int(t.strip()))
+                        except Exception:
+                            pass
+                elif isinstance(raw_turns, (int, float)):
+                    relevant_turns.append(int(raw_turns))
+                elif isinstance(raw_turns, str) and raw_turns.strip().isdigit():
+                    relevant_turns.append(int(raw_turns.strip()))
+
+                evidence_quote = str(
+                    item.get("evidence_quote")
+                    or item.get("evidencia")
+                    or item.get("cita")
+                    or ""
+                ).strip()
+                expected_behavior = str(item.get("expected_behavior") or item.get("comportamiento_esperado") or "").strip()
+                observed_behavior = str(item.get("observed_behavior") or item.get("comportamiento_observado") or "").strip()
+                reasoning = str(item.get("reasoning") or item.get("razonamiento") or item.get("justificacion") or "").strip()
+                improvement_tip = str(item.get("improvement_tip") or item.get("recomendacion") or item.get("consejo") or "").strip()
+
+                norm_item = {
+                    "criterion_key": c_key,
+                    "criterion_name": c_name,
+                    "score": c_score,
+                    "passed": c_passed,
+                    "expected_behavior": expected_behavior,
+                    "observed_behavior": observed_behavior,
+                    "evidence_quote": evidence_quote,
+                    "relevant_turns": relevant_turns,
+                    "reasoning": reasoning,
+                    "improvement_tip": improvement_tip,
+                }
+                normalized_crit_evals.append(norm_item)
+
+                # Keep legacy raw_inner in sync
+                if c_name not in raw_inner:
+                    raw_inner[c_name] = c_passed
+
+            parsed_res["criteria_evaluations"] = normalized_crit_evals
+        else:
+            logger.warning(
+                "Session %d: LLM response did not contain 'criteria_evaluations' (got %s). "
+                "No artificial evidence will be fabricated.",
+                session_id,
+                type(raw_crit_evals) if raw_crit_evals is not None else "None"
+            )
+            parsed_res["criteria_evaluations"] = []
+
         parsed_res["result_json"] = raw_inner
 
         # Normalize objectives_met
@@ -4929,6 +5084,23 @@ async def check_and_finalize_training_cycle(db: AsyncSession, cycle_id: int):
     def extract_criterion_score(result_json: dict, criterion_key: str) -> Optional[float]:
         if not isinstance(result_json, dict):
             return None
+
+        # 1. Prioritize rich criteria_evaluations if present
+        crit_evals = result_json.get("criteria_evaluations")
+        if isinstance(crit_evals, list):
+            target = criterion_key.lower().replace("_", " ").strip()
+            for item in crit_evals:
+                if isinstance(item, dict):
+                    k = str(item.get("criterion_key") or "").lower().replace("_", " ").strip()
+                    n = str(item.get("criterion_name") or "").lower().replace("_", " ").strip()
+                    if target in (k, n) or k in target or n in target:
+                        raw_sc = item.get("score") if item.get("score") is not None else item.get("puntuacion")
+                        if raw_sc is not None:
+                            try:
+                                return float(raw_sc)
+                            except (ValueError, TypeError):
+                                pass
+
         dicts_to_search = [
             result_json,
             result_json.get("scores", {}),

@@ -1,5 +1,6 @@
 """FastAPI router for personalized agent training, settings, admin overview, reports and simulations."""
 import logging
+import re
 from typing import Annotated, List, Optional
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Query
@@ -1373,28 +1374,35 @@ async def get_evaluation_detail(
             line = line.strip()
             if not line:
                 continue
-            if line.startswith("Agente:"):
-                turns.append({"role": "agent", "text": line[len("Agente:"):].strip()})
-            elif line.startswith("Paciente:"):
-                turns.append({"role": "patient", "text": line[len("Paciente:"):].strip()})
-            elif line.startswith("Cliente:"):
-                turns.append({"role": "patient", "text": line[len("Cliente:"):].strip()})
-            elif line.startswith("Usuario:"):
-                turns.append({"role": "patient", "text": line[len("Usuario:"):].strip()})
+            cleaned_line = re.sub(r"^\[Turno\s*\d+\]\s*", "", line, flags=re.IGNORECASE).strip()
+            cleaned_line = re.sub(r"^Turno\s*\d+\s*[:-]\s*", "", cleaned_line, flags=re.IGNORECASE).strip()
+            if cleaned_line.startswith("Agente:"):
+                turns.append({"role": "agent", "text": cleaned_line[len("Agente:"):].strip()})
+            elif cleaned_line.startswith("Paciente:"):
+                turns.append({"role": "patient", "text": cleaned_line[len("Paciente:"):].strip()})
+            elif cleaned_line.startswith("Cliente:"):
+                turns.append({"role": "patient", "text": cleaned_line[len("Cliente:"):].strip()})
+            elif cleaned_line.startswith("Usuario:"):
+                turns.append({"role": "patient", "text": cleaned_line[len("Usuario:"):].strip()})
             else:
-                turns.append({"role": "unknown", "text": line})
+                turns.append({"role": "unknown", "text": cleaned_line})
 
     # Extract criteria checklist from result_json (handles nested structure)
     criteria = {}
-    if ev.result_json:
+    criteria_evaluations = None
+    if ev.result_json and isinstance(ev.result_json, dict):
         raw = ev.result_json
         # Handle nested: { ..., result_json: { key: bool } }
-        inner = raw.get("result_json") if isinstance(raw, dict) else None
+        inner = raw.get("result_json") if isinstance(raw.get("result_json"), dict) else None
         if isinstance(inner, dict):
             criteria = inner
-        elif isinstance(raw, dict):
+        else:
             # Flat structure — pick only boolean values as criteria
             criteria = {k: v for k, v in raw.items() if isinstance(v, bool)}
+
+        crit_evals = raw.get("criteria_evaluations")
+        if isinstance(crit_evals, list):
+            criteria_evaluations = crit_evals
 
     strengths, weaknesses = PersonalizedTrainingService._extract_strengths_weaknesses(ev.result_json or {})
 
@@ -1407,6 +1415,7 @@ async def get_evaluation_detail(
         "transcription_raw": ev.transcription,
         "transcription_turns": turns,
         "criteria": criteria,
+        "criteria_evaluations": criteria_evaluations,
         "strengths": strengths,
         "weaknesses": weaknesses,
         "objectives_met": strengths,
