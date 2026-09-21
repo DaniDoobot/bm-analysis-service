@@ -648,39 +648,71 @@ class PersonalizedTrainingService:
                     logger.info("TrainingScheduler %s is not due yet (next: %s, now: %s).", sch.scheduler_id, next_run, now)
                     return None
 
+        # Check if already running concurrently (within last 15 minutes)
+        if sch.last_status == "running":
+            ref_time = sch.updated_at or sch.last_run_at
+            if ref_time:
+                if ref_time.tzinfo is None:
+                    ref_time = ref_time.replace(tzinfo=timezone.utc)
+                if (now - ref_time) < timedelta(minutes=15):
+                    logger.warning(
+                        "TrainingScheduler %s is already running (since %s). Skipping duplicate execution.",
+                        sch.scheduler_id, ref_time
+                    )
+                    return {
+                        "triggered": False,
+                        "scheduler_id": sch.scheduler_id,
+                        "reason": "Scheduler already running"
+                    }
+
+        # Extract all needed properties and agents BEFORE committing to avoid MissingGreenlet
+        sch_id = sch.scheduler_id
+        sch_company_id = sch.company_id
+        sch_interval_days = sch.interval_days
+        sch_lookback_days = sch.lookback_days
+        target_owner_ids = [str(a.hubspot_owner_id) for a in (sch.agents or [])]
+
         # Prevent duplicate execution: mark status as running
         sch.last_status = "running"
+        sch.last_run_at = now
         await db.commit()
 
-        target_owner_ids = [a.hubspot_owner_id for a in (sch.agents or [])]
         if not target_owner_ids:
-            logger.info("TrainingScheduler %s has no agents associated. Skipping run.", sch.scheduler_id)
-            sch.last_run_at = now
-            sch.next_run_at = now + timedelta(days=sch.interval_days)
-            sch.last_status = "skipped_empty"
-            await db.commit()
-            return {"triggered": False, "scheduler_id": sch.scheduler_id, "reason": "No agents associated"}
+            logger.info("TrainingScheduler %s has no agents associated. Skipping run.", sch_id)
+            stmt_re = select(TrainingScheduler).where(TrainingScheduler.scheduler_id == sch_id)
+            res_re = await db.execute(stmt_re)
+            sch_row = res_re.scalars().first()
+            if sch_row:
+                sch_row.last_run_at = now
+                sch_row.next_run_at = now + timedelta(days=sch_interval_days)
+                sch_row.last_status = "skipped_empty"
+                await db.commit()
+            return {"triggered": False, "scheduler_id": sch_id, "reason": "No agents associated"}
 
         # Verify active agents in TrainingAgentSetting
         stmt_active = select(TrainingAgentSetting.hubspot_owner_id).where(
             TrainingAgentSetting.hubspot_owner_id.in_(target_owner_ids),
             TrainingAgentSetting.is_enabled == True
         )
-        if sch.company_id is not None:
-            stmt_active = stmt_active.where(TrainingAgentSetting.company_id == sch.company_id)
+        if sch_company_id is not None:
+            stmt_active = stmt_active.where(TrainingAgentSetting.company_id == sch_company_id)
         res_active = await db.execute(stmt_active)
         eligible_agent_ids = list(res_active.scalars().all())
 
         if not eligible_agent_ids:
-            logger.info("TrainingScheduler %s has no active/enabled agents. Skipping.", sch.scheduler_id)
-            sch.last_run_at = now
-            sch.next_run_at = now + timedelta(days=sch.interval_days)
-            sch.last_status = "skipped_no_active_agents"
-            await db.commit()
-            return {"triggered": False, "scheduler_id": sch.scheduler_id, "reason": "No active agents"}
+            logger.info("TrainingScheduler %s has no active/enabled agents. Skipping.", sch_id)
+            stmt_re = select(TrainingScheduler).where(TrainingScheduler.scheduler_id == sch_id)
+            res_re = await db.execute(stmt_re)
+            sch_row = res_re.scalars().first()
+            if sch_row:
+                sch_row.last_run_at = now
+                sch_row.next_run_at = now + timedelta(days=sch_interval_days)
+                sch_row.last_status = "skipped_no_active_agents"
+                await db.commit()
+            return {"triggered": False, "scheduler_id": sch_id, "reason": "No active agents"}
 
         period_end = datetime(now.year, now.month, now.day, 23, 59, 59, tzinfo=timezone.utc) - timedelta(days=1)
-        period_start = period_end - timedelta(days=sch.lookback_days) + timedelta(seconds=1)
+        period_start = period_end - timedelta(days=sch_lookback_days) + timedelta(seconds=1)
 
         try:
             run = await PersonalizedTrainingService.run_personalized_training_pass(
@@ -689,31 +721,31 @@ class PersonalizedTrainingService:
                 period_start=period_start,
                 period_end=period_end,
                 triggered_by="scheduler",
-                created_by_email=f"scheduler:{sch.scheduler_id}",
-                company_ids=[sch.company_id] if sch.company_id else None
+                created_by_email=f"scheduler:{sch_id}",
+                company_ids=[sch_company_id] if sch_company_id else None
             )
             run_id = run.training_run_id
             run_status = run.status
 
             # Refresh scheduler row
-            stmt_re = select(TrainingScheduler).where(TrainingScheduler.scheduler_id == sch.scheduler_id)
+            stmt_re = select(TrainingScheduler).where(TrainingScheduler.scheduler_id == sch_id)
             res_re = await db.execute(stmt_re)
-            sch = res_re.scalars().first()
-            if sch:
-                sch.last_run_at = now
-                sch.next_run_at = now + timedelta(days=sch.interval_days)
-                sch.last_status = run_status
+            sch_row = res_re.scalars().first()
+            if sch_row:
+                sch_row.last_run_at = now
+                sch_row.next_run_at = now + timedelta(days=sch_interval_days)
+                sch_row.last_status = run_status
                 await db.commit()
-            return {"triggered": True, "scheduler_id": sch.scheduler_id, "run_id": run_id, "status": run_status}
+            return {"triggered": True, "scheduler_id": sch_id, "run_id": run_id, "status": run_status}
         except Exception as e:
-            logger.exception("TrainingScheduler %s execution failed: %s", sch.scheduler_id, e)
-            stmt_re = select(TrainingScheduler).where(TrainingScheduler.scheduler_id == sch.scheduler_id)
+            logger.exception("TrainingScheduler %s execution failed: %s", sch_id, e)
+            stmt_re = select(TrainingScheduler).where(TrainingScheduler.scheduler_id == sch_id)
             res_re = await db.execute(stmt_re)
-            sch = res_re.scalars().first()
-            if sch:
-                sch.last_run_at = now
-                sch.next_run_at = now + timedelta(days=sch.interval_days)
-                sch.last_status = "failed"
+            sch_row = res_re.scalars().first()
+            if sch_row:
+                sch_row.last_run_at = now
+                sch_row.next_run_at = now + timedelta(days=sch_interval_days)
+                sch_row.last_status = "failed"
                 await db.commit()
             raise e
 
@@ -1667,9 +1699,17 @@ class PersonalizedTrainingService:
         if progress_total > 0:
             progress_percentage = Decimal(str(progress_completed / float(progress_total) * 100.0)).quantize(Decimal("0.01"))
 
+        triggered_by = None
+        created_by_email = None
+        if hasattr(r, "__dict__") and "run" in r.__dict__ and r.run is not None:
+            triggered_by = getattr(r.run, "triggered_by", None)
+            created_by_email = getattr(r.run, "created_by_email", None)
+
         mapped = {
             "training_report_id": r.training_report_id,
             "training_run_id": r.training_run_id,
+            "triggered_by": triggered_by,
+            "created_by_email": created_by_email,
             "hubspot_owner_id": r.hubspot_owner_id,
             "agent_name": r.agent_name,
             "agent_initials": r.agent_initials,
@@ -4181,9 +4221,18 @@ class PersonalizedTrainingService:
                     if now >= next_run:
                         is_due = True
                 if is_due:
-                    res = await PersonalizedTrainingService.execute_scheduler(db=db, scheduler=sch, force=False)
-                    if res:
-                        gran_results.append(res)
+                    try:
+                        res = await PersonalizedTrainingService.execute_scheduler(db=db, scheduler=sch, force=False)
+                        if res:
+                            gran_results.append(res)
+                    except Exception as e_sch:
+                        logger.error("Error executing granular scheduler %s: %s", sch.scheduler_id, e_sch, exc_info=True)
+                        gran_results.append({
+                            "triggered": False,
+                            "scheduler_id": sch.scheduler_id,
+                            "status": "failed",
+                            "error": str(e_sch)
+                        })
             return {
                 "triggered": any(r.get("triggered") for r in gran_results if r),
                 "scheduler_mode": "granular",

@@ -366,6 +366,170 @@ class TestTrainingSchedulers(unittest.IsolatedAsyncioTestCase):
                 second_res = await PersonalizedTrainingService.execute_scheduler(db, scheduler=sch_id, force=False)
                 self.assertIsNone(second_res)
 
+    async def test_14_multiple_schedulers_simultaneous_execution(self):
+        """Verify two schedulers active simultaneously run their own agents, intervals, and lookbacks."""
+        now = datetime.now(timezone.utc)
+        async with self.async_session() as db:
+            sch_a = await PersonalizedTrainingService.create_scheduler(
+                db, name='Sched A (Company 1)', company_id=1, is_active=True,
+                interval_days=7, lookback_days=14, hubspot_owner_ids=['1001']
+            )
+            sch_b = await PersonalizedTrainingService.create_scheduler(
+                db, name='Sched B (Company 2)', company_id=2, is_active=True,
+                interval_days=10, lookback_days=21, hubspot_owner_ids=['2001']
+            )
+
+            # Set both to be due in the past
+            past_time = now - timedelta(hours=1)
+            stmt = select(TrainingScheduler).where(TrainingScheduler.scheduler_id.in_([sch_a['scheduler_id'], sch_b['scheduler_id']]))
+            res = await db.execute(stmt)
+            for m in res.scalars().all():
+                m.next_run_at = past_time
+            await db.commit()
+
+            runs_created = []
+            async def fake_pass(**kwargs):
+                r = TrainingRun(
+                    training_run_id=700 + len(runs_created),
+                    period_start=kwargs.get('period_start'),
+                    period_end=kwargs.get('period_end'),
+                    status='completed',
+                    triggered_by='scheduler',
+                    created_by_email=kwargs.get('created_by_email'),
+                    company_id=kwargs.get('company_ids', [None])[0] if kwargs.get('company_ids') else None,
+                    agents_total=len(kwargs.get('hubspot_owner_ids', [])),
+                    agents_completed=len(kwargs.get('hubspot_owner_ids', [])),
+                    agents_failed=0,
+                )
+                runs_created.append((kwargs, r))
+                return r
+
+            with patch.object(PersonalizedTrainingService, 'run_personalized_training_pass', side_effect=fake_pass):
+                res_jobs = await PersonalizedTrainingService.run_due_training_jobs(db)
+                self.assertTrue(res_jobs['triggered'])
+                self.assertEqual(res_jobs['scheduler_mode'], 'granular')
+                self.assertEqual(len(res_jobs['results']), 2)
+
+            self.assertEqual(len(runs_created), 2)
+            # Verify Scheduler A pass
+            call_a = runs_created[0][0]
+            self.assertEqual(call_a['hubspot_owner_ids'], ['1001'])
+            self.assertEqual(call_a['created_by_email'], f"scheduler:{sch_a['scheduler_id']}")
+            self.assertEqual(call_a['company_ids'], [1])
+            expected_lookback_a = (call_a['period_end'] - call_a['period_start']).days + 1
+            self.assertEqual(expected_lookback_a, 14)
+
+            # Verify Scheduler B pass
+            call_b = runs_created[1][0]
+            self.assertEqual(call_b['hubspot_owner_ids'], ['2001'])
+            self.assertEqual(call_b['created_by_email'], f"scheduler:{sch_b['scheduler_id']}")
+            self.assertEqual(call_b['company_ids'], [2])
+            expected_lookback_b = (call_b['period_end'] - call_b['period_start']).days + 1
+            self.assertEqual(expected_lookback_b, 21)
+
+            # Check next_run_at calculation independence
+            ref_a = await PersonalizedTrainingService.get_scheduler_by_id(db, sch_a['scheduler_id'])
+            ref_b = await PersonalizedTrainingService.get_scheduler_by_id(db, sch_b['scheduler_id'])
+            self.assertEqual(ref_a['last_status'], 'completed')
+            self.assertEqual(ref_b['last_status'], 'completed')
+            self.assertGreater(ref_a['next_run_at'].replace(tzinfo=timezone.utc), now + timedelta(days=6))
+            self.assertGreater(ref_b['next_run_at'].replace(tzinfo=timezone.utc), now + timedelta(days=9))
+
+    async def test_15_scheduler_error_isolation(self):
+        """Verify that an error executing Scheduler A does not block Scheduler B from executing."""
+        now = datetime.now(timezone.utc)
+        async with self.async_session() as db:
+            sch_fail = await PersonalizedTrainingService.create_scheduler(
+                db, name='Sched Fail', company_id=1, is_active=True, interval_days=7, hubspot_owner_ids=['1001']
+            )
+            sch_ok = await PersonalizedTrainingService.create_scheduler(
+                db, name='Sched OK', company_id=1, is_active=True, interval_days=7, hubspot_owner_ids=['1002']
+            )
+
+            stmt = select(TrainingScheduler).where(TrainingScheduler.scheduler_id.in_([sch_fail['scheduler_id'], sch_ok['scheduler_id']]))
+            res = await db.execute(stmt)
+            for m in res.scalars().all():
+                m.next_run_at = now - timedelta(hours=1)
+            await db.commit()
+
+            async def fake_pass(**kwargs):
+                if kwargs.get('created_by_email') == f"scheduler:{sch_fail['scheduler_id']}":
+                    raise RuntimeError("Gemini API connection error on scheduler A")
+                return TrainingRun(
+                    training_run_id=888,
+                    status='completed',
+                    triggered_by='scheduler',
+                    created_by_email=kwargs.get('created_by_email'),
+                    agents_total=1,
+                    agents_completed=1,
+                    agents_failed=0,
+                )
+
+            with patch.object(PersonalizedTrainingService, 'run_personalized_training_pass', side_effect=fake_pass):
+                res_jobs = await PersonalizedTrainingService.run_due_training_jobs(db)
+                self.assertEqual(res_jobs['scheduler_mode'], 'granular')
+                # Scheduler B succeeded, overall triggered should still be True
+                self.assertTrue(res_jobs['triggered'])
+                self.assertEqual(len(res_jobs['results']), 2)
+
+            ref_fail = await PersonalizedTrainingService.get_scheduler_by_id(db, sch_fail['scheduler_id'])
+            ref_ok = await PersonalizedTrainingService.get_scheduler_by_id(db, sch_ok['scheduler_id'])
+            self.assertEqual(ref_fail['last_status'], 'failed')
+            self.assertEqual(ref_ok['last_status'], 'completed')
+
+    async def test_16_concurrent_running_lock(self):
+        """Verify that a scheduler in 'running' status (< 15 min) skips duplicate execution even when forced."""
+        now = datetime.now(timezone.utc)
+        async with self.async_session() as db:
+            sch = await PersonalizedTrainingService.create_scheduler(
+                db, name='Running Test', company_id=1, is_active=True, interval_days=7, hubspot_owner_ids=['1001']
+            )
+            sch_id = sch['scheduler_id']
+
+            stmt = select(TrainingScheduler).where(TrainingScheduler.scheduler_id == sch_id)
+            res = await db.execute(stmt)
+            m = res.scalars().first()
+            m.last_status = 'running'
+            m.last_run_at = now - timedelta(minutes=2)
+            await db.commit()
+
+            # Attempt execution while running
+            res_running = await PersonalizedTrainingService.execute_scheduler(db, scheduler=sch_id, force=True)
+            self.assertIsNotNone(res_running)
+            self.assertFalse(res_running['triggered'])
+            self.assertEqual(res_running['reason'], 'Scheduler already running')
+
+    async def test_17_legacy_fallback_when_zero_granular(self):
+        """Verify fallback to legacy scheduler settings when 0 granular schedulers exist."""
+        now = datetime.now(timezone.utc)
+        async with self.async_session() as db:
+            # Delete all granular schedulers in this session
+            stmt = select(TrainingScheduler)
+            res = await db.execute(stmt)
+            for s in res.scalars().all():
+                await db.delete(s)
+            await db.commit()
+
+            # Configure legacy persistent settings
+            db_settings = await PersonalizedTrainingService.get_or_create_scheduler_settings(db)
+            db_settings.is_enabled = True
+            db_settings.next_run_at = now - timedelta(hours=1)
+            await db.commit()
+
+            mock_run = TrainingRun(
+                training_run_id=999,
+                status='completed',
+                triggered_by='scheduler',
+                agents_total=2,
+                agents_completed=2,
+                agents_failed=0,
+            )
+
+            with patch.object(PersonalizedTrainingService, 'run_personalized_training_pass', AsyncMock(return_value=mock_run)):
+                res_legacy = await PersonalizedTrainingService.run_due_training_jobs(db)
+                self.assertTrue(res_legacy['triggered'])
+                self.assertEqual(res_legacy['run_id'], 999)
+
 
 if __name__ == '__main__':
     unittest.main()

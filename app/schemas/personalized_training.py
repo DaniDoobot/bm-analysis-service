@@ -148,6 +148,8 @@ class CompletionStatusOut(BaseModel):
 class TrainingAgentReportBase(BaseModel):
     training_report_id: int
     training_run_id: Optional[int] = None
+    triggered_by: Optional[str] = None
+    created_by_email: Optional[str] = None
     company_id: Optional[int] = None
     service_id: Optional[int] = None
     hubspot_owner_id: str
