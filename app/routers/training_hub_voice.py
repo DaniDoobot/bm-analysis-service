@@ -68,7 +68,7 @@ Cuando estés en esta fase:
 1. Tu única labor es obtener el código de la simulación que quiere practicar.
 2. No repitas el prompt de entrada a Trainer si ya se ha enviado.
 3. Cuando el usuario proporcione cualquier número, código o secuencia alfanumérica, llama INMEDIATAMENTE a `validate_trainer_simulation_code(code=codigo_normalizado)`. NO esperes ni digas "lo compruebo" sin llamar a la tool en ese mismo momento. NO inventes el resultado.
-4. Si el backend devuelve valid=false, di exactamente: "No he encontrado ese código. Repítelo, por favor."
+4. Si el backend devuelve valid=false: si incluye un mensaje explicativo en el campo 'message' (por ejemplo porque el código pertenece a otro servicio), di exactamente ese mensaje. Si no hay mensaje explicativo, di exactamente: "No he encontrado ese código. Repítelo, por favor."
 5. Si es válido, di exactamente: "Perfecto, iniciamos la simulación." y quédate en silencio mientras se transfiere la llamada.
 6. NO pidas código de agente en esta fase. El agente ya está identificado.
 
@@ -86,7 +86,7 @@ NO des nunca explicaciones sobre el uso de la entrada vocal o el marcado en tecl
 Tu única labor es obtener el código de simulación:
 1. Di exactamente: "Perfecto. Pasamos a Trainer. Dime el código de simulación."
 2. Cuando el usuario proporcione el código, normalízalo y llama INMEDIATAMENTE a `validate_trainer_simulation_code(code=codigo_normalizado)`. NO esperes ni digas "lo compruebo" sin llamar a la tool en ese mismo turno. NO inventes el resultado.
-3. Si el backend devuelve valid=false, di exactamente: "No he encontrado ese código. Repítelo, por favor." y espera nueva entrada.
+3. Si el backend devuelve valid=false: si incluye un mensaje explicativo en el campo 'message' (por ejemplo porque el código pertenece a otro servicio), di exactamente ese mensaje. Si no incluye 'message', di exactamente: "No he encontrado ese código. Repítelo, por favor." y espera nueva entrada.
 4. Si es válido, di exactamente: "Perfecto, iniciamos la simulación." y quédate en silencio.
 5. NO pidas código de agente. El agente ya está identificado.
 
@@ -440,8 +440,9 @@ async def verify_simulation_dtmf(request: Request, agent_id: str = Query(...), c
     form_data = await request.form()
     digits = form_data.get("Digits", "").strip()
     
-    sim = await TrainerService.validate_simulation_code(db, digits)
-    if sim:
+    val_res = await TrainerService.validate_simulation_for_agent(db, digits, agent_id)
+    if val_res["valid"] and val_res["simulation"]:
+        sim = val_res["simulation"]
         logger.info("Simulation validated via DTMF: sim_id=%s, code=%s", sim.simulation_id, digits)
         host = request.headers.get("x-forwarded-host") or request.headers.get("host") or "localhost"
         await redirect_trainer_call(call_sid, host, agent_id, sim.simulation_id)
@@ -450,6 +451,16 @@ async def verify_simulation_dtmf(request: Request, agent_id: str = Query(...), c
             <Say language="es-ES">Código verificado. Iniciando simulación.</Say>
         </Response>
         """, media_type="application/xml")
+    elif val_res["status"] == "service_mismatch":
+        logger.warning("Simulation code entered via DTMF belongs to another service: code=%s, agent_id=%s", digits, agent_id)
+        msg = val_res.get("message") or "Ese código de simulación pertenece a otro servicio y no al tuyo actual."
+        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+        <Response>
+            <Say language="es-ES">{msg} La llamada finalizará.</Say>
+            <Hangup/>
+        </Response>
+        """
+        return Response(content=twiml, media_type="application/xml")
     else:
         logger.warning("Invalid simulation code entered via DTMF: %s", digits)
         twiml = """<?xml version="1.0" encoding="UTF-8"?>
@@ -727,8 +738,9 @@ Reglas de pronunciación:
                 
                 logger.info("Trainer simulation code validation started: code=%s", sim_code)
                 async with AsyncSessionLocal() as sub_db:
-                    sim = await TrainerService.validate_simulation_code(sub_db, sim_code)
-                    if sim and identified_agent_id:
+                    val_res = await TrainerService.validate_simulation_for_agent(sub_db, sim_code, identified_agent_id)
+                    if val_res["valid"] and val_res["simulation"] and identified_agent_id:
+                        sim = val_res["simulation"]
                         logger.info("Trainer simulation validation success: simulation_id=%s, code=%s, name=%s", sim.simulation_id, sim_code, getattr(sim, 'name', 'unknown'))
                         logger.info("Redirecting call to trainer roleplay: agent_id=%s, simulation_id=%s, call_sid=%s", identified_agent_id, sim.simulation_id, call_sid)
                         ok = await redirect_trainer_call(call_sid, host, identified_agent_id, sim.simulation_id)
@@ -739,6 +751,19 @@ Reglas de pronunciación:
                             logger.error("Trainer roleplay redirect failed: reason=redirect_trainer_call_returned_false")
                             await play_redirection_error()
                             redirected = True
+                    elif val_res["status"] == "service_mismatch":
+                        logger.warning("Trainer simulation validation failed: code=%s, reason=service_mismatch", sim_code)
+                        msg = val_res.get("message") or "Ese código de simulación pertenece a otro servicio y no al tuyo actual."
+                        err_msg = {
+                            "clientContent": {
+                                "turns": [{
+                                    "role": "user",
+                                    "parts": [{"text": f"Di exactamente: '{msg}' y quédate en silencio."}]
+                                }],
+                                "turnComplete": True
+                            }
+                        }
+                        await gemini_ws.send(json.dumps(err_msg))
                     else:
                         logger.warning("Trainer simulation validation failed: code=%s, reason=not_found", sim_code)
                         attempts += 1
@@ -1080,8 +1105,9 @@ Reglas de pronunciación:
                                     logger.info("Trainer simulation code received: raw=%r, normalized=%r", sim_code, sim_code)
                                     logger.info("Trainer simulation code validation started: code=%s", sim_code)
                                     async with AsyncSessionLocal() as sub_db:
-                                        sim = await TrainerService.validate_simulation_code(sub_db, sim_code)
-                                        if sim and identified_agent_id:
+                                        val_res = await TrainerService.validate_simulation_for_agent(sub_db, sim_code, identified_agent_id)
+                                        if val_res["valid"] and val_res["simulation"] and identified_agent_id:
+                                            sim = val_res["simulation"]
                                             host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"
                                             logger.info("Trainer simulation validation success: simulation_id=%s, code=%s, name=%s",
                                                         sim.simulation_id, sim_code, getattr(sim, "name", "unknown"))
@@ -1107,6 +1133,15 @@ Reglas de pronunciación:
                                                 await asyncio.sleep(4.0)
                                                 await websocket.close()
                                                 return
+                                        elif val_res["status"] == "service_mismatch":
+                                            logger.warning("Trainer simulation validation failed: code=%s, reason=service_mismatch", sim_code)
+                                            result_val = {
+                                                "valid": False,
+                                                "reason": "service_mismatch",
+                                                "status": "service_mismatch",
+                                                "message": val_res.get("message") or "Ese código de simulación pertenece a otro servicio y no al tuyo actual.",
+                                                "attempts": attempts,
+                                            }
                                         else:
                                             logger.warning("Trainer simulation validation failed: code=%s, reason=not_found", sim_code)
                                             attempts += 1

@@ -66,8 +66,9 @@ Sigue estas pautas estrictas:
 3. Si el backend te devuelve que el código es incorrecto (status es "invalid"), infórmale con tacto y pídele que lo intente de nuevo.
 4. Si el backend te devuelve que el código de agente es correcto (status es "valid"), salúdalo por su nombre (ej: "Hola Fernanda.") y pídele inmediatamente el código de la simulación que desea iniciar (por ejemplo: SIM101, VENTAS2).
 5. Cuando el agente te diga el código de la simulación, extráelo, normalízalo y llama inmediatamente a la herramienta `verify_simulation_code(simulation_code=codigo_simulacion, agent_code=codigo_agente)`.
-6. Si el backend te devuelve que la simulación es incorrecta o no está publicada (status es "invalid"), indícaselo y pídele que repita el código de simulación.
-7. Si el backend te devuelve que se inicia la redirección (status es "redirecting"), avisa brevemente ("Código de simulación verificado, un momento por favor...") y no digas nada más, ya que la llamada será transferida de inmediato.
+6. Si el backend te devuelve que el código de simulación pertenece a otro servicio (status es "service_mismatch"), di exactamente el mensaje recibido en el campo 'message' indicándole que el código pertenece a otro servicio y no al suyo, y pídele que introduzca un código de simulación de su servicio.
+7. Si el backend te devuelve que la simulación es incorrecta o no está publicada (status es "invalid"), indícaselo y pídele que repita el código de simulación.
+8. Si el backend te devuelve que se inicia la redirección (status es "redirecting"), avisa brevemente ("Código de simulación verificado, un momento por favor...") y no digas nada más, ya que la llamada será transferida de inmediato.
 """
 
 SPANISH_VOICE_RULES = """
@@ -278,12 +279,23 @@ async def verify_simulation_numeric_code(
         return Response(content=twiml, media_type="application/xml")
 
     # Clean code: if digits matches a simulation code (numeric or string)
-    # Use canonical TrainerService.validate_simulation_code with optional SIM prefix fallback
-    sim = await TrainerService.validate_simulation_code(db, digits)
-    if not sim and digits.isdigit():
-        sim = await TrainerService.validate_simulation_code(db, f"SIM{digits}")
+    # Use canonical TrainerService.validate_simulation_for_agent with optional SIM prefix fallback
+    val_res = await TrainerService.validate_simulation_for_agent(db, digits, agent_id)
+    if not val_res["valid"] and digits.isdigit() and val_res["status"] != "service_mismatch":
+        val_res = await TrainerService.validate_simulation_for_agent(db, f"SIM{digits}", agent_id)
 
-    if not sim:
+    if val_res["valid"] and val_res["simulation"]:
+        sim = val_res["simulation"]
+    elif val_res["status"] == "service_mismatch":
+        msg = val_res.get("message") or "Ese código de simulación pertenece a otro servicio y no al tuyo actual."
+        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+        <Response>
+            <Say language="es-ES">{msg} Por favor, contacta con tu supervisor.</Say>
+            <Hangup/>
+        </Response>
+        """
+        return Response(content=twiml, media_type="application/xml")
+    else:
         twiml = """<?xml version="1.0" encoding="UTF-8"?>
         <Response>
             <Say language="es-ES">La simulación no es válida o no está publicada. Por favor, contacta con tu supervisor.</Say>
@@ -1378,12 +1390,18 @@ async def media_stream(
                                 elif name == "verify_simulation_code" and flow == "identify":
                                     sim_code = args.get("simulation_code", "").strip()
                                     async with AsyncSessionLocal() as sub_db:
-                                        sim = await TrainerService.validate_simulation_code(sub_db, sim_code)
-                                        if sim and identified_agent_id:
+                                        val_res = await TrainerService.validate_simulation_for_agent(sub_db, sim_code, identified_agent_id)
+                                        if val_res["valid"] and val_res["simulation"] and identified_agent_id:
+                                            sim = val_res["simulation"]
                                             host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"
                                             await redirect_trainer_call(call_sid, host, identified_agent_id, sim.simulation_id)
                                             redirected = True
                                             return
+                                        elif val_res["status"] == "service_mismatch":
+                                            result_val = {
+                                                "status": "service_mismatch",
+                                                "message": val_res.get("message") or "Ese código de simulación pertenece a otro servicio y no al tuyo actual.",
+                                            }
                                         else:
                                             result_val = {"status": "invalid"}
 

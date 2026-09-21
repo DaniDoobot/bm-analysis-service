@@ -5,8 +5,9 @@ import logging
 import re
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, List, Optional
-from sqlalchemy import select, and_, or_, desc, func, delete
+from typing import Any, List, Optional, Set, Dict
+from sqlalchemy import select, and_, or_, desc, func, delete, Text
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.services import Service
@@ -19,7 +20,9 @@ from app.models.trainer import (
     TrainerSession,
     TrainerEvaluation,
 )
-from app.models.personalized_training import TrainingAgentSetting
+from app.models.personalized_training import TrainingAgentSetting, TrainingAgentReport
+from app.models.users import User
+from app.models.teams import UserServiceAssociation
 from app.schemas.trainer import (
     TrainerEvaluationConfigCreate,
     TrainerEvaluationConfigUpdate,
@@ -713,6 +716,151 @@ class TrainerService:
         )
         res = await db.execute(stmt)
         return res.scalars().first()
+
+    @staticmethod
+    async def get_agent_service_context(db: AsyncSession, agent_id: str) -> Dict[str, Any]:
+        """
+        Resolve service context for an agent by hubspot_owner_id or user_id.
+        Returns:
+            {
+                "service_ids": Set[int],
+                "primary_service_name": Optional[str],
+                "company_id": Optional[int]
+            }
+        """
+        if not agent_id:
+            return {"service_ids": set(), "primary_service_name": None, "company_id": None}
+
+        service_ids: Set[int] = set()
+        primary_service_name: Optional[str] = None
+        company_id: Optional[int] = None
+
+        # 1. Try to find user in bm_users
+        stmt_user = (
+            select(User)
+            .options(selectinload(User.primary_service))
+            .where(
+                or_(
+                    User.hubspot_owner_id == agent_id,
+                    func.cast(User.user_id, Text) == agent_id,
+                )
+            )
+        )
+        res_user = await db.execute(stmt_user)
+        user = res_user.scalars().first()
+
+        if user:
+            company_id = user.company_id
+            if user.primary_service_id:
+                service_ids.add(user.primary_service_id)
+                if user.primary_service:
+                    primary_service_name = user.primary_service.service_name
+
+            # Secondary / additional services in bm_user_services
+            stmt_assoc = select(UserServiceAssociation.service_id).where(
+                UserServiceAssociation.user_id == user.user_id
+            )
+            res_assoc = await db.execute(stmt_assoc)
+            for sid in res_assoc.scalars().all():
+                service_ids.add(sid)
+
+        # 2. If no services found from User, check TrainingAgentReport as fallback
+        if not service_ids:
+            stmt_rep = (
+                select(TrainingAgentReport.service_id, Service.service_name, TrainingAgentReport.company_id)
+                .outerjoin(Service, TrainingAgentReport.service_id == Service.service_id)
+                .where(
+                    and_(
+                        TrainingAgentReport.hubspot_owner_id == agent_id,
+                        TrainingAgentReport.service_id.is_not(None),
+                    )
+                )
+                .order_by(desc(TrainingAgentReport.training_report_id))
+                .limit(1)
+            )
+            res_rep = await db.execute(stmt_rep)
+            rep_row = res_rep.first()
+            if rep_row and rep_row[0]:
+                service_ids.add(rep_row[0])
+                if not primary_service_name and rep_row[1]:
+                    primary_service_name = rep_row[1]
+                if not company_id and rep_row[2]:
+                    company_id = rep_row[2]
+
+        return {
+            "service_ids": service_ids,
+            "primary_service_name": primary_service_name,
+            "company_id": company_id,
+        }
+
+    @staticmethod
+    async def validate_simulation_for_agent(
+        db: AsyncSession, simulation_code: str, agent_id: Optional[str]
+    ) -> Dict[str, Any]:
+        """
+        Validate simulation code and check service match with the identified agent.
+        Returns:
+            {
+                "valid": bool,
+                "simulation": Optional[TrainerSimulation],
+                "status": "valid" | "not_found" | "service_mismatch",
+                "reason": Optional[str],
+                "message": Optional[str],
+                "agent_service_name": Optional[str],
+                "simulation_service_name": Optional[str],
+            }
+        """
+        sim = await TrainerService.validate_simulation_code(db, simulation_code)
+        if not sim:
+            return {
+                "valid": False,
+                "simulation": None,
+                "status": "not_found",
+                "reason": "not_found",
+                "message": "No he encontrado ese código de simulación. Por favor, repítelo.",
+                "agent_service_name": None,
+                "simulation_service_name": None,
+            }
+
+        if not agent_id:
+            return {
+                "valid": True,
+                "simulation": sim,
+                "status": "valid",
+                "reason": None,
+                "message": None,
+                "agent_service_name": None,
+                "simulation_service_name": getattr(sim.service, "service_name", None) if getattr(sim, "service", None) else None,
+            }
+
+        service_ctx = await TrainerService.get_agent_service_context(db, agent_id)
+        allowed_service_ids = service_ctx.get("service_ids") or set()
+
+        if allowed_service_ids and sim.service_id not in allowed_service_ids:
+            agent_service_name = service_ctx.get("primary_service_name")
+            if agent_service_name:
+                msg = f"Ese código de simulación pertenece a otro servicio y no al tuyo actual ({agent_service_name}). Por favor, introduce un código de simulación de tu servicio."
+            else:
+                msg = "Ese código de simulación pertenece a otro servicio y no a tu servicio actual. Por favor, introduce un código de tu servicio."
+            return {
+                "valid": False,
+                "simulation": sim,
+                "status": "service_mismatch",
+                "reason": "service_mismatch",
+                "message": msg,
+                "agent_service_name": agent_service_name,
+                "simulation_service_name": getattr(sim.service, "service_name", None) if getattr(sim, "service", None) else None,
+            }
+
+        return {
+            "valid": True,
+            "simulation": sim,
+            "status": "valid",
+            "reason": None,
+            "message": None,
+            "agent_service_name": service_ctx.get("primary_service_name"),
+            "simulation_service_name": getattr(sim.service, "service_name", None) if getattr(sim, "service", None) else None,
+        }
 
     @staticmethod
     async def start_phone_session(
