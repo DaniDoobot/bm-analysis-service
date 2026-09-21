@@ -2091,8 +2091,10 @@ async def retry_session_evaluation(
 
     # Reset the associated completion status to pending if it exists
     stmt_comp = select(TrainingCompletionStatus).where(
-        TrainingCompletionStatus.training_report_id == session.cycle_id,
-        TrainingCompletionStatus.prompt_number == session.prompt_number,
+        and_(
+            TrainingCompletionStatus.training_report_id == session.cycle_id,
+            TrainingCompletionStatus.simulation_prompt_id == session.conversation_id,
+        )
     )
     res_comp = await db.execute(stmt_comp)
     comp = res_comp.scalars().first()
@@ -2101,18 +2103,22 @@ async def retry_session_evaluation(
         comp.completed_at = None
         comp.evaluation_id = None
 
+    agent_id = session.agent_id
+    cycle_id = session.cycle_id
+    recording_url = session.recording_url
+
     await db.commit()
 
     background_tasks.add_task(evaluate_training_session_task, session_id)
 
     logger.info(
         "Admin re-triggered evaluation for session %d (agent %s, cycle %s).",
-        session_id, session.agent_id, session.cycle_id
+        session_id, agent_id, cycle_id
     )
     return {
         "message": f"Evaluation re-triggered for session {session_id}.",
         "session_id": session_id,
-        "recording_url": session.recording_url,
+        "recording_url": recording_url,
     }
 
 
@@ -2210,9 +2216,19 @@ async def get_cycle_status(
         if context.allowed_agent_ids is not None and report.hubspot_owner_id not in context.allowed_agent_ids:
             raise HTTPException(status_code=403, detail="Acceso denegado: No tienes permiso sobre el agente de este ciclo.")
 
-    stmt_all = select(TrainingCompletionStatus).where(
-        TrainingCompletionStatus.training_report_id == cycle_id
-    ).order_by(TrainingCompletionStatus.prompt_number.asc())
+    from app.models.personalized_training import TrainingSimulationPrompt
+    from sqlalchemy.orm import selectinload
+
+    stmt_all = (
+        select(TrainingCompletionStatus)
+        .options(selectinload(TrainingCompletionStatus.prompt))
+        .outerjoin(
+            TrainingSimulationPrompt,
+            TrainingCompletionStatus.simulation_prompt_id == TrainingSimulationPrompt.simulation_prompt_id,
+        )
+        .where(TrainingCompletionStatus.training_report_id == cycle_id)
+        .order_by(TrainingSimulationPrompt.prompt_number.asc().nulls_last())
+    )
     res_all = await db.execute(stmt_all)
     completions = list(res_all.scalars().all())
 
@@ -2224,7 +2240,7 @@ async def get_cycle_status(
         "period": f"{report.period_start} – {report.period_end}",
         "simulations": [
             {
-                "prompt_number": c.prompt_number,
+                "prompt_number": c.prompt.prompt_number if c.prompt else None,
                 "status": c.status,
                 "evaluation_id": c.evaluation_id,
                 "completed_at": c.completed_at,

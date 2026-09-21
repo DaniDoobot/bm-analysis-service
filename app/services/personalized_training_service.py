@@ -1344,6 +1344,7 @@ class PersonalizedTrainingService:
         title = None
         feedback = None
         criteria = None
+        criteria_evaluations = None
         transcription_turns = None
         strengths = None
         weaknesses = None
@@ -1367,7 +1368,6 @@ class PersonalizedTrainingService:
                 result_json_extracted = getattr(evaluation, "result_json", None)
                 
                 # Extract criteria and criteria_evaluations
-                criteria_evaluations = None
                 if result_json_extracted and isinstance(result_json_extracted, dict):
                     raw = result_json_extracted
                     inner = raw.get("result_json") if isinstance(raw.get("result_json"), dict) else None
@@ -4531,6 +4531,40 @@ async def evaluate_training_session_task(session_id: int):
     Background task to evaluate a completed training voice call session.
     Idempotent and non-destructive.
     """
+    try:
+        await _evaluate_training_session_task_impl(session_id)
+    except Exception as unhandled_err:
+        logger.exception("Unhandled error evaluating session %d: %s", session_id, unhandled_err)
+        try:
+            engine = get_engine()
+            async with AsyncSession(engine) as db:
+                stmt = select(TrainingCallSession).where(TrainingCallSession.session_id == session_id)
+                res = await db.execute(stmt)
+                session = res.scalars().first()
+                if session and session.status != "evaluated":
+                    session.status = "failed"
+                    session.error_message = f"Error no controlado durante la evaluación: {str(unhandled_err)}"
+                    session.evaluation_completed_at = datetime.now(timezone.utc)
+
+                    stmt_comp = select(TrainingCompletionStatus).where(
+                        and_(
+                            TrainingCompletionStatus.training_report_id == session.cycle_id,
+                            TrainingCompletionStatus.simulation_prompt_id == session.conversation_id,
+                        )
+                    )
+                    res_comp = await db.execute(stmt_comp)
+                    comp = res_comp.scalars().first()
+                    if comp and comp.status != "completed":
+                        comp.status = "pending"
+                        comp.completed_at = None
+                        comp.evaluation_id = None
+                    await db.commit()
+                    logger.info("Successfully marked session %d as failed and restored completion to pending after unhandled exception.", session_id)
+        except Exception as recovery_err:
+            logger.exception("Recovery error setting session %d to failed: %s", session_id, recovery_err)
+
+
+async def _evaluate_training_session_task_impl(session_id: int):
     logger.info("Starting background evaluation for training session ID: %d", session_id)
     engine = get_engine()
     
