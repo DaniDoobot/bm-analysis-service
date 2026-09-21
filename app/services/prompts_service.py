@@ -1186,9 +1186,25 @@ async def list_base_structures(
     if not include_archived:
         stmt = stmt.where(PromptBaseStructure.is_active == True)
     if service_id is not None:
-        stmt = stmt.where(PromptBaseStructure.service_id == service_id)
+        if include_global:
+            stmt = stmt.where(
+                or_(
+                    PromptBaseStructure.service_id == service_id,
+                    PromptBaseStructure.is_global == True,
+                )
+            )
+        else:
+            stmt = stmt.where(PromptBaseStructure.service_id == service_id)
     elif service_ids is not None:
-        stmt = stmt.where(PromptBaseStructure.service_id.in_(service_ids))
+        if include_global:
+            stmt = stmt.where(
+                or_(
+                    PromptBaseStructure.service_id.in_(service_ids),
+                    PromptBaseStructure.is_global == True,
+                )
+            )
+        else:
+            stmt = stmt.where(PromptBaseStructure.service_id.in_(service_ids))
 
     if company_id is not None:
         if include_global:

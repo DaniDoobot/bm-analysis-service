@@ -113,8 +113,8 @@ async def get_effective_structure_permission(
             if obj.company_id != context.company_id:
                 return no_access_dict
             
-            # Check service scope for service managers and team coordinators
-            if role in (InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR):
+            # Check service scope for service managers and team coordinators (owners retain access to their own structures within their company)
+            if not is_owner and role in (InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR):
                 if context.allowed_service_ids is None or obj.service_id not in context.allowed_service_ids:
                     return no_access_dict
 

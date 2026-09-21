@@ -1,4 +1,4 @@
-﻿import os
+import os
 import unittest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy import select, text
@@ -34,14 +34,18 @@ class TestBaseStructuresMultitenant(unittest.IsolatedAsyncioTestCase):
             # 2. Services
             self.s_boston = Service(service_id=10, service_name="Front Boston", service_key="front-boston", company_id=1, is_active=True)
             self.s_demo = Service(service_id=20, service_name="Atención Demo", service_key="atencion-demo", company_id=2, is_active=True)
-            db.add_all([self.s_boston, self.s_demo])
+            self.s_demo_sales = Service(service_id=21, service_name="Ventas Demo", service_key="ventas-demo", company_id=2, is_active=True)
+            db.add_all([self.s_boston, self.s_demo, self.s_demo_sales])
             await db.flush()
 
             # 3. Users
             self.u_super = User(user_id=1, username="superadmin", email="super@test.com", role="super_admin", password_hash=pwd, is_active=True)
             self.u_admin_boston = User(user_id=2, username="admin_boston", email="admin_boston@test.com", role="company_admin", company_id=1, password_hash=pwd, is_active=True)
             self.u_admin_demo = User(user_id=3, username="admin_demo", email="admin_demo@test.com", role="company_admin", company_id=2, password_hash=pwd, is_active=True)
-            db.add_all([self.u_super, self.u_admin_boston, self.u_admin_demo])
+            self.u_csa_demo = User(user_id=4, username="superadmin_demo", email="superadmin_demo@test.com", role="company_super_admin", company_id=2, password_hash=pwd, is_active=True)
+            self.u_sm_demo = User(user_id=5, username="sm_demo", email="sm_demo@test.com", role="service_manager", company_id=2, primary_service_id=20, password_hash=pwd, is_active=True)
+            self.u_agent_demo = User(user_id=6, username="agent_demo", email="agent_demo@test.com", role="agent", company_id=2, primary_service_id=20, password_hash=pwd, is_active=True)
+            db.add_all([self.u_super, self.u_admin_boston, self.u_admin_demo, self.u_csa_demo, self.u_sm_demo, self.u_agent_demo])
             await db.flush()
 
             # 4. Existing structures prior to migration fix
@@ -81,6 +85,9 @@ class TestBaseStructuresMultitenant(unittest.IsolatedAsyncioTestCase):
         self.t_super = create_access_token({"user_id": 1, "email": "super@test.com"})
         self.t_admin_boston = create_access_token({"user_id": 2, "email": "admin_boston@test.com"})
         self.t_admin_demo = create_access_token({"user_id": 3, "email": "admin_demo@test.com"})
+        self.t_csa_demo = create_access_token({"user_id": 4, "email": "superadmin_demo@test.com"})
+        self.t_sm_demo = create_access_token({"user_id": 5, "email": "sm_demo@test.com"})
+        self.t_agent_demo = create_access_token({"user_id": 6, "email": "agent_demo@test.com"})
 
         async def override_get_db():
             async with self.session_maker() as session:
@@ -301,6 +308,118 @@ class TestBaseStructuresMultitenant(unittest.IsolatedAsyncioTestCase):
         keys_bm = [item["structure_key"] for item in res_bm.json()]
         self.assertIn("boston_medical_audio", keys_bm)
         self.assertIn("boston_medical_appointment", keys_bm)
+
+    # ── 11. Company super admin sees global and company structures ───────────
+    async def test_company_super_admin_sees_global_and_company_structures(self):
+        async with self.session_maker() as db:
+            s_glob = PromptBaseStructure(
+                structure_key="csa_global_struct", structure_name="CSA Global",
+                base_prompt="P", prompt_type="text", service_id=None, company_id=None, is_global=True, is_active=True, owner_user_id=1
+            )
+            s_demo = PromptBaseStructure(
+                structure_key="csa_demo_struct", structure_name="CSA Demo Private",
+                base_prompt="P", prompt_type="text", service_id=20, company_id=2, is_global=False, is_active=True, owner_user_id=4
+            )
+            db.add_all([s_glob, s_demo])
+            await db.commit()
+
+        res = await self.client.get(
+            "/bm/prompt-base-structures",
+            headers={"Authorization": f"Bearer {self.t_csa_demo}"}
+        )
+        self.assertEqual(res.status_code, 200)
+        keys = [item["structure_key"] for item in res.json()]
+        self.assertIn("csa_global_struct", keys)
+        self.assertIn("csa_demo_struct", keys)
+        # Cannot see other company's structures
+        self.assertNotIn("boston_medical_audio", keys)
+        self.assertNotIn("boston_medical_appointment", keys)
+
+    # ── 12. Company admin with service_id filter still sees global structures ──
+    async def test_company_admin_with_service_id_filter_sees_globals_and_service(self):
+        async with self.session_maker() as db:
+            s_glob = PromptBaseStructure(
+                structure_key="svc_filter_global", structure_name="Svc Filter Global",
+                base_prompt="P", prompt_type="text", service_id=None, company_id=None, is_global=True, is_active=True, owner_user_id=1
+            )
+            s_s20 = PromptBaseStructure(
+                structure_key="demo_struct_s20", structure_name="Demo Struct S20",
+                base_prompt="P", prompt_type="text", service_id=20, company_id=2, is_global=False, is_active=True, owner_user_id=3
+            )
+            s_s21 = PromptBaseStructure(
+                structure_key="demo_struct_s21", structure_name="Demo Struct S21",
+                base_prompt="P", prompt_type="text", service_id=21, company_id=2, is_global=False, is_active=True, owner_user_id=3
+            )
+            db.add_all([s_glob, s_s20, s_s21])
+            await db.commit()
+
+        # Query with service_id=20
+        res = await self.client.get(
+            "/bm/prompt-base-structures?service_id=20",
+            headers={"Authorization": f"Bearer {self.t_admin_demo}"}
+        )
+        self.assertEqual(res.status_code, 200)
+        keys = [item["structure_key"] for item in res.json()]
+        self.assertIn("svc_filter_global", keys)
+        self.assertIn("demo_struct_s20", keys)
+        self.assertNotIn("demo_struct_s21", keys)
+        self.assertNotIn("boston_medical_audio", keys)
+
+    # ── 13. Service manager sees globals and their allowed service ───────────
+    async def test_service_manager_sees_globals_and_allowed_service(self):
+        async with self.session_maker() as db:
+            s_glob = PromptBaseStructure(
+                structure_key="sm_test_global", structure_name="SM Test Global",
+                base_prompt="P", prompt_type="text", service_id=None, company_id=None, is_global=True, is_active=True, owner_user_id=1
+            )
+            s_s20 = PromptBaseStructure(
+                structure_key="sm_demo_struct_s20", structure_name="SM Demo S20",
+                base_prompt="P", prompt_type="text", service_id=20, company_id=2, is_global=False, is_active=True, owner_user_id=3
+            )
+            s_s21 = PromptBaseStructure(
+                structure_key="sm_demo_struct_s21", structure_name="SM Demo S21",
+                base_prompt="P", prompt_type="text", service_id=21, company_id=2, is_global=False, is_active=True, owner_user_id=3
+            )
+            db.add_all([s_glob, s_s20, s_s21])
+            await db.commit()
+
+        res = await self.client.get(
+            "/bm/prompt-base-structures",
+            headers={"Authorization": f"Bearer {self.t_sm_demo}"}
+        )
+        self.assertEqual(res.status_code, 200)
+        keys = [item["structure_key"] for item in res.json()]
+        self.assertIn("sm_test_global", keys)
+        self.assertIn("sm_demo_struct_s20", keys)
+        self.assertNotIn("sm_demo_struct_s21", keys)
+        self.assertNotIn("boston_medical_audio", keys)
+
+    # ── 14. Structure owner in same company retains access across services ───
+    async def test_service_manager_owner_retains_access_across_services(self):
+        async with self.session_maker() as db:
+            s_owned = PromptBaseStructure(
+                structure_key="sm_owned_in_other_svc", structure_name="SM Owned S21",
+                base_prompt="P", prompt_type="text", service_id=21, company_id=2, is_global=False, is_active=True, owner_user_id=5
+            )
+            db.add(s_owned)
+            await db.commit()
+            await db.refresh(s_owned)
+            struct_id = s_owned.id
+
+        from app.services.auth_service import get_effective_structure_permission
+        async with self.session_maker() as db:
+            perm = await get_effective_structure_permission(db, self.u_sm_demo, "base", struct_id)
+            self.assertTrue(perm["can_view"])
+            self.assertTrue(perm["is_owner"])
+
+    # ── 15. Agent cannot access base structures ──────────────────────────────
+    async def test_agent_cannot_access_base_structures(self):
+        res = await self.client.get(
+            "/bm/prompt-base-structures",
+            headers={"Authorization": f"Bearer {self.t_agent_demo}"}
+        )
+        self.assertEqual(res.status_code, 403)
+        self.assertIn("Los agentes no tienen acceso", res.json()["detail"])
 
 
 if __name__ == "__main__":
