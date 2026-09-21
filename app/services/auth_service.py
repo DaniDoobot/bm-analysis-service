@@ -118,33 +118,40 @@ async def get_effective_structure_permission(
                 if context.allowed_service_ids is None or obj.service_id not in context.allowed_service_ids:
                     return no_access_dict
 
-    is_admin = context.is_super_admin or role == InternalRole.COMPANY_ADMIN or (
-        role in (InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR) and context.allowed_service_ids is not None and getattr(obj, "service_id", None) in context.allowed_service_ids
+    is_global = getattr(obj, "is_global", False)
+    is_admin = context.is_super_admin or (
+        not is_global and (
+            role == InternalRole.COMPANY_ADMIN or (
+                role in (InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR)
+                and context.allowed_service_ids is not None
+                and getattr(obj, "service_id", None) in context.allowed_service_ids
+            )
+        )
     )
 
     settings = get_settings()
     if not settings.enable_structure_permissions:
         # When permissions feature flag is disabled:
-        # Non-agents have virtual rights to view, use, edit, duplicate.
-        # But sharing and archiving/restoring are strictly restricted to actual owner or admin.
-        # Transfer ownership and delete are strictly admin-only.
-        can_share_archive_restore = is_admin or is_owner
+        # Non-agents have virtual rights to view, use, edit, duplicate within their company scope.
+        # Global structures cannot be edited, shared, archived or deleted by non-superadmins.
+        can_edit = (is_admin or is_owner) if is_global else True
+        can_share_archive_restore = (is_admin or is_owner) and not is_global
         return {
             "is_admin": is_admin,
             "is_owner": is_owner,
             "manual_permission": "none",
             "inherited_permission": "none",
-            "effective_permission": "admin" if is_admin else ("owner" if is_owner else "edit"),
+            "effective_permission": "admin" if is_admin else ("owner" if is_owner else ("view" if is_global else "edit")),
             "can_view": True,
             "can_use": True,
-            "can_edit": True,
+            "can_edit": can_edit,
             "can_share": can_share_archive_restore,
             "can_delete": is_admin,
             "can_transfer": is_admin,
             "can_duplicate": True,
             "can_archive": can_share_archive_restore,
             "can_restore": can_share_archive_restore,
-            "access_source": "admin" if is_admin else ("owner" if is_owner else "virtual_fallback")
+            "access_source": "global" if is_global else ("admin" if is_admin else ("owner" if is_owner else "virtual_fallback"))
         }
 
     if is_admin:
@@ -260,6 +267,15 @@ async def get_effective_structure_permission(
         access_source = "inherited"
     else:
         access_source = "none"
+
+    if is_global:
+        can_view = True
+        can_use = True
+        can_duplicate = True
+        if effective_perm == "none":
+            effective_perm = "use"
+        if access_source == "none":
+            access_source = "global"
 
     return {
         "is_admin": False,

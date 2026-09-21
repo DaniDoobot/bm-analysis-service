@@ -184,6 +184,8 @@ class PromptBaseStructureOut(BaseModel):
     service_id: int | None = None
     service_key: str | None = None
     service_name: str | None = None
+    company_id: int | None = None
+    is_global: bool = False
 
     # Permissions metadata
     owner: OwnerUserOut | None = None
@@ -207,6 +209,8 @@ class PromptBaseStructureCreate(BaseModel):
     service_id: int | None = None
     owner_user_id: int | None = None
     typology_ids: list[int] | None = None
+    company_id: int | None = None
+    is_global: bool = False
 
 
 class PromptBaseStructureUpdate(BaseModel):

@@ -344,6 +344,8 @@ def _base_structure_out(struct) -> dict:
         "service_id": struct.service_id,
         "service_key": struct.service.service_key if struct.service else None,
         "service_name": struct.service.service_name if struct.service else None,
+        "company_id": struct.company_id,
+        "is_global": getattr(struct, "is_global", False),
     }
 
 
@@ -364,6 +366,8 @@ def _base_structure_detail_out(struct) -> dict:
         "service_id": struct.service_id,
         "service_key": struct.service.service_key if struct.service else None,
         "service_name": struct.service.service_name if struct.service else None,
+        "company_id": struct.company_id,
+        "is_global": getattr(struct, "is_global", False),
     }
 
 
@@ -392,12 +396,16 @@ async def list_prompt_base_structures(
             else:
                 target_service_ids = context.allowed_service_ids
 
+    target_company_id = None if context.is_super_admin else context.company_id
+
     structures = await prompts_service.list_base_structures(
         db,
         prompt_type=type,
         include_archived=include_archived,
         service_id=target_service_id,
         service_ids=target_service_ids,
+        company_id=target_company_id,
+        include_global=True,
     )
     
     enriched_structures = []
@@ -523,19 +531,85 @@ async def create_prompt_base_structure(
     body: PromptBaseStructureCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
 ):
     """Create a new prompt base structure."""
-    if getattr(current_user, "role", "agent").lower() == "agent":
+    from app.models.services import Service
+
+    role = context.normalized_role
+    if role == InternalRole.AGENT:
         raise HTTPException(status_code=403, detail="Los agentes no tienen acceso a las estructuras.")
-        
-    is_admin = getattr(current_user, "role", "usuario").lower() in ("admin", "administrador")
+
+    # 1. Resolve & validate company_id & is_global
+    if not context.is_super_admin:
+        # Non-superadmin: cannot create global structures
+        if body.is_global:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Solo los superadministradores pueden crear estructuras base globales."
+            )
+        target_company_id = context.company_id
+        is_global = False
+
+        # If service_id is provided, validate it belongs to context.company_id
+        if body.service_id is not None:
+            svc_res = await db.execute(select(Service).where(Service.service_id == body.service_id))
+            svc = svc_res.scalars().first()
+            if not svc:
+                raise HTTPException(status_code=404, detail=f"Servicio con ID {body.service_id} no encontrado.")
+            if svc.company_id != context.company_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="El servicio seleccionado no pertenece a tu empresa."
+                )
+            if role in (InternalRole.SERVICE_MANAGER, InternalRole.TEAM_COORDINATOR):
+                if context.allowed_service_ids is None or body.service_id not in context.allowed_service_ids:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="No tienes permisos para crear estructuras en este servicio."
+                    )
+    else:
+        # Superadmin logic
+        if body.is_global:
+            if body.company_id is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Una estructura global no puede estar asignada a una empresa concreta."
+                )
+            if body.service_id is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Una estructura global no puede estar vinculada a un servicio específico."
+                )
+            target_company_id = None
+            is_global = True
+        else:
+            is_global = False
+            if body.service_id is not None:
+                svc_res = await db.execute(select(Service).where(Service.service_id == body.service_id))
+                svc = svc_res.scalars().first()
+                if not svc:
+                    raise HTTPException(status_code=404, detail=f"Servicio con ID {body.service_id} no encontrado.")
+                if body.company_id is not None and body.company_id != svc.company_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Conflicto: El service_id y el company_id especificados pertenecen a empresas distintas."
+                    )
+                target_company_id = svc.company_id
+            else:
+                target_company_id = body.company_id or context.company_id
+
+    body.company_id = target_company_id
+    body.is_global = is_global
+
+    is_admin = getattr(current_user, "role", "usuario").lower() in ("admin", "administrador", "super_admin", "company_admin")
     if not is_admin or body.owner_user_id is None:
         body.owner_user_id = current_user.user_id
-        
+
     struct = await prompts_service.create_base_structure(db, body)
-    
+
     await log_audit(db, current_user.user_id, "create", "base", struct.id)
-    
+
     s_dict = _base_structure_detail_out(struct)
     return await _enrich_structure_response(db, current_user, "base", struct.id, struct.owner_user_id, s_dict)
 
@@ -546,18 +620,47 @@ async def update_prompt_base_structure(
     body: PromptBaseStructureUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
 ):
     """Update an existing prompt base structure."""
-    if getattr(current_user, "role", "agent").lower() == "agent":
+    from app.models.services import Service
+    role = context.normalized_role
+    if role == InternalRole.AGENT:
         raise HTTPException(status_code=403, detail="Los agentes no tienen acceso a las estructuras.")
-    struct = await prompts_service.update_base_structure(db, structure_id=id, body=body)
+
+    struct = await db.get(PromptBaseStructure, id)
     if not struct:
         raise HTTPException(status_code=404, detail=f"Base structure {id} not found.")
-    
-    await log_audit(db, current_user.user_id, "modify", "base", struct.id)
-    
-    s_dict = _base_structure_detail_out(struct)
-    return await _enrich_structure_response(db, current_user, "base", struct.id, struct.owner_user_id, s_dict)
+
+    if struct.is_global and not context.is_super_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo los superadministradores pueden modificar estructuras base globales."
+        )
+
+    if not context.is_super_admin and struct.company_id != context.company_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permisos para modificar estructuras de otra empresa."
+        )
+
+    if body.service_id is not None and not context.is_super_admin:
+        svc_res = await db.execute(select(Service).where(Service.service_id == body.service_id))
+        svc = svc_res.scalars().first()
+        if not svc:
+            raise HTTPException(status_code=404, detail=f"Servicio con ID {body.service_id} no encontrado.")
+        if svc.company_id != context.company_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El servicio seleccionado no pertenece a tu empresa."
+            )
+
+    updated_struct = await prompts_service.update_base_structure(db, structure_id=id, body=body)
+
+    await log_audit(db, current_user.user_id, "modify", "base", updated_struct.id)
+
+    s_dict = _base_structure_detail_out(updated_struct)
+    return await _enrich_structure_response(db, current_user, "base", updated_struct.id, updated_struct.owner_user_id, s_dict)
 
 
 @router.delete("/prompt-base-structures/{id}")
@@ -584,6 +687,12 @@ async def delete_prompt_base_structure(
     struct = await db.get(PromptBaseStructure, id)
     if not struct:
         raise HTTPException(status_code=404, detail=f"Base structure {id} not found.")
+
+    if struct.is_global and not context.is_super_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo los superadministradores pueden eliminar estructuras base globales."
+        )
 
     from app.routers.base_structures import _verify_base_structure_tenant_access
     _verify_base_structure_tenant_access(struct, context)

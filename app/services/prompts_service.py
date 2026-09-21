@@ -1177,8 +1177,11 @@ async def list_base_structures(
     include_archived: bool = False,
     service_id: int | None = None,
     service_ids: list[int] | None = None,
+    company_id: int | None = None,
+    include_global: bool = True,
 ) -> list[PromptBaseStructure]:
     """Return base structures. By default only active ones; pass include_archived=True to see all."""
+    from sqlalchemy import or_
     stmt = select(PromptBaseStructure)
     if not include_archived:
         stmt = stmt.where(PromptBaseStructure.is_active == True)
@@ -1186,6 +1189,18 @@ async def list_base_structures(
         stmt = stmt.where(PromptBaseStructure.service_id == service_id)
     elif service_ids is not None:
         stmt = stmt.where(PromptBaseStructure.service_id.in_(service_ids))
+
+    if company_id is not None:
+        if include_global:
+            stmt = stmt.where(
+                or_(
+                    PromptBaseStructure.company_id == company_id,
+                    PromptBaseStructure.is_global == True,
+                )
+            )
+        else:
+            stmt = stmt.where(PromptBaseStructure.company_id == company_id)
+
     stmt = stmt.order_by(PromptBaseStructure.id.asc())
     result = await db.execute(stmt)
     return list(result.scalars().all())
@@ -1277,6 +1292,8 @@ async def create_base_structure(db: AsyncSession, body: PromptBaseStructureCreat
         created_by=body.created_by,
         created_by_email=body.created_by_email,
         service_id=body.service_id,
+        company_id=body.company_id,
+        is_global=body.is_global,
         owner_user_id=body.owner_user_id,
     )
     db.add(new_struct)

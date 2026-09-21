@@ -61,6 +61,7 @@ DEFAULT_STRUCTURES = [
         ),
         "default_criteria": None,
         "is_active": True,
+        "is_global": True,
     },
     {
         "structure_key": "commercial_quality",
@@ -76,6 +77,7 @@ DEFAULT_STRUCTURES = [
         ),
         "default_criteria": None,
         "is_active": True,
+        "is_global": True,
     },
     {
         "structure_key": "blank",
@@ -85,6 +87,7 @@ DEFAULT_STRUCTURES = [
         "base_prompt": "",
         "default_criteria": None,
         "is_active": True,
+        "is_global": True,
     }
 ]
 
@@ -1555,6 +1558,7 @@ async def init_db():
                         base_prompt=struct_data["base_prompt"],
                         default_criteria=struct_data["default_criteria"],
                         is_active=struct_data["is_active"],
+                        is_global=struct_data.get("is_global", False),
                         created_by="system",
                         created_by_email="system@doobot.ai",
                         owner_user_id=default_owner_id
