@@ -1,10 +1,11 @@
 -- v019_base_structures_multitenant_fix.sql
 -- Migration script to fix prompt base structures multi-tenant scoping and backfill global catalog templates.
 
--- 1. Standard generic catalog templates must be global and not bound to any company
+-- 1. Standard generic catalog templates must be global, active, and not bound to any company
 UPDATE public.bm_prompt_base_structures
 SET is_global = TRUE,
-    company_id = NULL
+    company_id = NULL,
+    is_active = TRUE
 WHERE structure_key IN ('generic_customer_service', 'commercial_quality', 'blank');
 
 -- 2. Ensure Boston Medical structures remain private to Boston Medical
