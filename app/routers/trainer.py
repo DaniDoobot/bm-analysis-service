@@ -464,7 +464,7 @@ async def generate_roleplay_prompt(
             detail="Acceso denegado: Se requiere rol de administración."
         )
     try:
-        prompt_text = await TrainerService.generate_roleplay_prompt_ai(payload)
+        prompt_text = await TrainerService.generate_roleplay_prompt_ai(payload, db=db)
         return {"roleplay_prompt": prompt_text}
     except Exception as e:
         raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"AI generation failed: {str(e)}")

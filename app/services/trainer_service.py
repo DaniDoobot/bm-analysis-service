@@ -553,21 +553,56 @@ class TrainerService:
     # ── AI Prompts Generation / Improvement ───────────────────────────────────────
 
     @staticmethod
-    async def generate_roleplay_prompt_ai(payload: AIPromptGenerateRequest) -> str:
+    async def generate_roleplay_prompt_ai(payload: AIPromptGenerateRequest, db: Optional[AsyncSession] = None) -> str:
+        service_name = None
+        company_name = None
+        is_healthcare = False
+        is_demo = False
+
+        if db and payload.service_id:
+            stmt_svc = select(Service).options(selectinload(Service.company)).where(Service.service_id == payload.service_id)
+            res_svc = await db.execute(stmt_svc)
+            svc = res_svc.scalars().first()
+            if svc:
+                service_name = svc.service_name
+                comp = getattr(svc, "company", None)
+                if comp:
+                    company_name = comp.company_name
+                    is_demo = bool(comp.is_demo or comp.company_key == "empresa-demo")
+                    if not is_demo:
+                        c_sector = (comp.sector or "").lower()
+                        c_name = (comp.company_name or "").lower()
+                        c_key = (comp.company_key or "").lower()
+                        if c_sector in ("healthcare", "salud", "medico", "médico", "clinica", "clínica"):
+                            is_healthcare = True
+                        elif "boston" in c_name or "boston" in c_key or comp.company_id == 1:
+                            is_healthcare = True
+
+        if is_healthcare:
+            role_desc = f"un paciente llamando a {company_name or 'una clínica médica'}"
+            context_bullet = "1. Su nombre, edad y contexto clínico ficticio acorde al servicio.\n"
+            char_rule = "nunca salirse del personaje de paciente"
+        else:
+            org_desc = f" de {company_name}" if company_name and not is_demo else ""
+            svc_desc = f" del servicio de {service_name}" if service_name else ""
+            role_desc = f"un cliente o interlocutor llamando{svc_desc}{org_desc}"
+            context_bullet = "1. Su nombre, perfil y motivo concreto de la llamada acorde al servicio.\n"
+            char_rule = "nunca salirse del personaje simulado de cliente/interlocutor"
+
         system_instruction = (
             "Eres un experto en redactar prompts de juego de rol (roleplay) inmersivos en español para simulaciones de voz interactiva.\n"
-            "Tu tarea es diseñar un prompt para un modelo de lenguaje que simulará a un paciente o cliente llamando a una clínica de Boston Medical Group.\n"
+            f"Tu tarea es diseñar un prompt para un modelo de lenguaje que simulará a {role_desc}.\n"
             "El prompt debe ser muy detallado e instruir al modelo sobre:\n"
-            "1. Su nombre, edad y contexto clínico ficticio acorde al servicio.\n"
-            "2. Su personalidad, estado emocional (ej. ansioso, tímido, impaciente) y tono.\n"
+            f"{context_bullet}"
+            "2. Su personalidad, estado emocional (ej. ansioso, tímido, enfadado, exigente o apresurado) y tono.\n"
             "3. Pautas de conversación: responder de forma natural, dar respuestas cortas típicas de llamadas telefónicas, interrumpir si el agente habla demasiado, simular vacilaciones.\n"
-            "4. Sus objeciones principales que el agente telefónico debe resolver.\n"
-            "5. Reglas estrictas de juego: nunca salirse del personaje de paciente, colgar limpiamente llamando al tool `hangup_call` cuando el roleplay sea exitoso o si el agente es grosero.\n"
+            "4. Sus objeciones principales o dudas que el agente telefónico debe resolver.\n"
+            f"5. Reglas estrictas de juego: {char_rule}, colgar limpiamente llamando al tool `hangup_call` cuando el roleplay sea exitoso o si el agente es grosero.\n"
             "Devuelve única y exclusivamente el texto final del prompt listo para ser copiado y guardado, sin formato markdown ni texto introductorio."
         )
         user_message = (
             f"Por favor genera un prompt de roleplay basado en los siguientes parámetros:\n"
-            f"- Servicio ID: {payload.service_id}\n"
+            f"- Servicio: {service_name or payload.service_id}\n"
             f"- Objetivo de la llamada: {payload.objective}\n"
             f"- Ideas clave del escenario: {payload.ideas}\n"
             f"- Dificultad sugerida: {payload.difficulty or 'media'}\n"
@@ -764,8 +799,18 @@ class TrainerService:
             for sid in res_assoc.scalars().all():
                 service_ids.add(sid)
 
-        # 2. If no services found from User, check TrainingAgentReport as fallback
-        if not service_ids:
+        # 2. If company_id not found from User, check TrainingAgentSetting
+        if company_id is None:
+            stmt_setting = select(TrainingAgentSetting.company_id).where(
+                TrainingAgentSetting.hubspot_owner_id == agent_id
+            )
+            res_setting = await db.execute(stmt_setting)
+            setting_cid = res_setting.scalar()
+            if setting_cid:
+                company_id = setting_cid
+
+        # 3. If no services or company_id found from User, check TrainingAgentReport as fallback
+        if not service_ids or company_id is None:
             stmt_rep = (
                 select(TrainingAgentReport.service_id, Service.service_name, TrainingAgentReport.company_id)
                 .outerjoin(Service, TrainingAgentReport.service_id == Service.service_id)
@@ -780,12 +825,20 @@ class TrainerService:
             )
             res_rep = await db.execute(stmt_rep)
             rep_row = res_rep.first()
-            if rep_row and rep_row[0]:
-                service_ids.add(rep_row[0])
+            if rep_row:
+                if rep_row[0] and not service_ids:
+                    service_ids.add(rep_row[0])
                 if not primary_service_name and rep_row[1]:
                     primary_service_name = rep_row[1]
                 if not company_id and rep_row[2]:
                     company_id = rep_row[2]
+
+        # 4. If still no company_id but we have service_ids, resolve from Service
+        if not company_id and service_ids:
+            first_sid = next(iter(service_ids))
+            stmt_svc_comp = select(Service.company_id).where(Service.service_id == first_sid)
+            res_svc_comp = await db.execute(stmt_svc_comp)
+            company_id = res_svc_comp.scalar()
 
         return {
             "service_ids": service_ids,
@@ -834,8 +887,27 @@ class TrainerService:
             }
 
         service_ctx = await TrainerService.get_agent_service_context(db, agent_id)
+        agent_company_id = service_ctx.get("company_id")
         allowed_service_ids = service_ctx.get("service_ids") or set()
 
+        # 1. Company isolation check
+        if agent_company_id is not None and sim.company_id is not None and sim.company_id != agent_company_id:
+            logger.warning(
+                "Trainer simulation validation COMPANY MISMATCH: agent_id=%s (company_id=%s) "
+                "attempted simulation %s (company_id=%s)",
+                agent_id, agent_company_id, sim.code, sim.company_id
+            )
+            return {
+                "valid": False,
+                "simulation": sim,
+                "status": "company_mismatch",
+                "reason": "company_mismatch",
+                "message": "Ese código de simulación pertenece a otra organización y no a la tuya. Por favor, introduce un código de simulación válido.",
+                "agent_service_name": service_ctx.get("primary_service_name"),
+                "simulation_service_name": getattr(sim.service, "service_name", None) if getattr(sim, "service", None) else None,
+            }
+
+        # 2. Service match check
         if allowed_service_ids and sim.service_id not in allowed_service_ids:
             agent_service_name = service_ctx.get("primary_service_name")
             if agent_service_name:
@@ -873,6 +945,11 @@ class TrainerService:
         sim = await TrainerService.validate_simulation_code(db, simulation_code)
         if not sim:
             raise ValueError(f"Código de simulación '{simulation_code}' no válido o no está publicada.")
+
+        # Enforce company isolation and service match
+        val_res = await TrainerService.validate_simulation_for_agent(db, simulation_code, agent["agent_id"])
+        if not val_res["valid"]:
+            raise ValueError(val_res.get("message") or f"La simulación '{simulation_code}' no es accesible para el agente '{agent_code}'.")
 
         # Find active version of simulation
         stmt_v = select(TrainerSimulationVersion).where(

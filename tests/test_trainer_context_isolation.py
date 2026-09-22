@@ -1,0 +1,345 @@
+"""
+tests/test_trainer_context_isolation.py
+=======================================
+Unit and integration tests verifying context isolation in Trainer module:
+1. Neutrality for Empresa Demo and general companies (no Boston Medical, no paciente, no medical terms).
+2. Healthcare context preservation for Boston Medical Group (paciente, clinical rules).
+3. Strict company isolation in validate_simulation_for_agent and start_phone_session.
+4. AI prompt generator neutrality for non-healthcare services.
+"""
+import unittest
+from unittest.mock import AsyncMock, MagicMock, patch
+from sqlalchemy import select
+
+from app.routers import trainer_voice
+from app.routers.trainer_voice import (
+    IDENTIFICATION_SYSTEM_INSTRUCTION,
+    SPANISH_VOICE_RULES,
+    HEALTHCARE_VOICE_RULES,
+    build_turn_discipline,
+)
+from app.models.companies import Company
+from app.models.services import Service
+from app.models.trainer import TrainerSimulation, TrainerSession, TrainerSimulationVersion
+from app.schemas.trainer import AIPromptGenerateRequest
+from app.services.trainer_service import TrainerService
+
+
+class TestTrainerVoiceContextIsolation(unittest.TestCase):
+    """Tests verifying that voice instructions dynamically isolate context."""
+
+    def test_identification_system_instruction_is_neutral(self):
+        """IDENTIFICATION_SYSTEM_INSTRUCTION must not contain Boston Medical Group or medical terms."""
+        self.assertNotIn("Boston Medical", IDENTIFICATION_SYSTEM_INSTRUCTION)
+        self.assertNotIn("paciente", IDENTIFICATION_SYSTEM_INSTRUCTION.lower())
+        self.assertNotIn("médico", IDENTIFICATION_SYSTEM_INSTRUCTION.lower())
+        self.assertNotIn("clinica", IDENTIFICATION_SYSTEM_INSTRUCTION.lower())
+        self.assertIn("Asistente de Identificación por Voz", IDENTIFICATION_SYSTEM_INSTRUCTION)
+
+    def test_spanish_voice_rules_base_is_neutral(self):
+        """SPANISH_VOICE_RULES must be neutral and suitable for any industry."""
+        self.assertNotIn("Boston Medical", SPANISH_VOICE_RULES)
+        self.assertNotIn("paciente", SPANISH_VOICE_RULES.lower())
+        self.assertNotIn("consejos médicos", SPANISH_VOICE_RULES.lower())
+        self.assertNotIn("urgencias", SPANISH_VOICE_RULES.lower())
+        self.assertNotIn("profesional sanitario", SPANISH_VOICE_RULES.lower())
+        # Must retain brevity rule
+        self.assertIn("PRIMERA INTERVENCIÓN BREVE", SPANISH_VOICE_RULES)
+
+    def test_build_turn_discipline_demo_is_neutral(self):
+        """build_turn_discipline for non-healthcare must use cliente and neutral objections."""
+        td = build_turn_discipline(is_healthcare=False, interlocutor_role="cliente")
+        self.assertIn("cliente", td.lower())
+        self.assertNotIn("paciente", td.lower())
+        self.assertNotIn("tratamiento", td.lower())
+        self.assertNotIn("primera cita", td.lower())
+        self.assertIn("condiciones del servicio", td.lower())
+
+    def test_build_turn_discipline_healthcare_uses_clinical_context(self):
+        """build_turn_discipline for healthcare must use paciente and clinical objections."""
+        td = build_turn_discipline(is_healthcare=True, interlocutor_role="paciente")
+        self.assertIn("paciente", td.lower())
+        self.assertIn("tratamiento", td.lower())
+        self.assertIn("primera cita", td.lower())
+
+    def test_healthcare_voice_rules_contains_medical_protections(self):
+        """HEALTHCARE_VOICE_RULES must contain explicit medical guardrails for BMG."""
+        self.assertIn("PACIENTE", HEALTHCARE_VOICE_RULES)
+        self.assertIn("consejos médicos", HEALTHCARE_VOICE_RULES.lower())
+        self.assertIn("Boston Medical Group", HEALTHCARE_VOICE_RULES)
+        self.assertIn("profesional sanitario", HEALTHCARE_VOICE_RULES.lower())
+
+
+class TestVoiceSessionInstructionAssembly(unittest.IsolatedAsyncioTestCase):
+    """Verify how instruction is constructed during media-stream connection."""
+
+    async def test_demo_company_assembly_has_zero_medical_or_boston_references(self):
+        """An Empresa Demo session must not receive ANY Boston Medical, paciente, or medical terms."""
+        demo_comp = Company(
+            company_id=7,
+            company_name="Empresa Demo",
+            company_key="empresa-demo",
+            is_demo=True,
+            sector="customer_service",
+        )
+        sim = TrainerSimulation(
+            simulation_id=102,
+            company_id=7,
+            service_id=20,
+            name="Protocolo de Desescalada con Cliente Furioso",
+            code="ATEN02",
+            roleplay_prompt="Simula un cliente muy molesto que eleva el tono de voz; el objetivo es desescalar sin perder la compostura.",
+            status="published",
+        )
+        sess = TrainerSession(
+            session_id=999,
+            simulation_id=102,
+            simulation=sim,
+            simulation_version_id=None,
+        )
+
+        # Simulate the resolution in media-stream
+        company = demo_comp
+        is_healthcare = False
+        if company:
+            is_demo = bool(company.is_demo or company.company_key == "empresa-demo")
+            if not is_demo:
+                c_sector = (company.sector or "").lower()
+                c_name = (company.company_name or "").lower()
+                c_key = (company.company_key or "").lower()
+                if c_sector in ("healthcare", "salud", "medico", "médico", "clinica", "clínica"):
+                    is_healthcare = True
+                elif "boston" in c_name or "boston" in c_key or company.company_id == 1:
+                    is_healthcare = True
+
+        self.assertFalse(is_healthcare, "Empresa Demo must NEVER be flagged as healthcare.")
+
+        interlocutor_role = "paciente" if is_healthcare else "cliente"
+        turn_discipline = build_turn_discipline(is_healthcare=is_healthcare, interlocutor_role=interlocutor_role)
+
+        instruction_parts = [sim.roleplay_prompt, turn_discipline, SPANISH_VOICE_RULES]
+        if is_healthcare:
+            instruction_parts.append(HEALTHCARE_VOICE_RULES)
+        instruction = "\n".join(instruction_parts)
+
+        # Strict assertions: zero leaks
+        self.assertNotIn("Boston Medical", instruction)
+        self.assertNotIn("paciente", instruction.lower())
+        self.assertNotIn("médico", instruction.lower())
+        self.assertNotIn("urgencias", instruction.lower())
+        self.assertNotIn("profesional sanitario", instruction.lower())
+        self.assertNotIn("tratamiento", instruction.lower())
+        self.assertIn("cliente", instruction.lower())
+        self.assertIn("PRIMERA INTERVENCIÓN BREVE", instruction)
+
+    async def test_boston_medical_session_retains_clinical_context(self):
+        """A Boston Medical session must retain its healthcare rules and paciente role."""
+        bm_comp = Company(
+            company_id=1,
+            company_name="Boston Medical Group",
+            company_key="boston-medical",
+            is_demo=False,
+            sector="healthcare",
+        )
+        sim = TrainerSimulation(
+            simulation_id=1,
+            company_id=1,
+            service_id=2,
+            name="Primera Consulta Informativa",
+            code="MED01",
+            roleplay_prompt="Simula una primera consulta donde el paciente tiene dudas sobre el tratamiento.",
+            status="published",
+        )
+
+        company = bm_comp
+        is_healthcare = False
+        if company:
+            is_demo = bool(company.is_demo or company.company_key == "empresa-demo")
+            if not is_demo:
+                c_sector = (company.sector or "").lower()
+                c_name = (company.company_name or "").lower()
+                c_key = (company.company_key or "").lower()
+                if c_sector in ("healthcare", "salud", "medico", "médico", "clinica", "clínica"):
+                    is_healthcare = True
+                elif "boston" in c_name or "boston" in c_key or company.company_id == 1:
+                    is_healthcare = True
+
+        self.assertTrue(is_healthcare, "Boston Medical must be flagged as healthcare.")
+
+        interlocutor_role = "paciente" if is_healthcare else "cliente"
+        turn_discipline = build_turn_discipline(is_healthcare=is_healthcare, interlocutor_role=interlocutor_role)
+
+        instruction_parts = [sim.roleplay_prompt, turn_discipline, SPANISH_VOICE_RULES]
+        if is_healthcare:
+            instruction_parts.append(HEALTHCARE_VOICE_RULES)
+        instruction = "\n".join(instruction_parts)
+
+        self.assertIn("Boston Medical Group", instruction)
+        self.assertIn("PACIENTE", instruction)
+        self.assertIn("consejos médicos", instruction.lower())
+        self.assertIn("tratamiento", instruction.lower())
+
+
+class TestCompanyIsolationValidation(unittest.IsolatedAsyncioTestCase):
+    """Verify that agents cannot access simulations belonging to another company."""
+
+    async def test_validate_simulation_blocks_cross_company_access(self):
+        """Agent from company 7 (Demo) attempting simulation from company 1 (BMG) is blocked."""
+        mock_db = AsyncMock()
+
+        bmg_sim = TrainerSimulation(
+            simulation_id=1,
+            code="MED01",
+            company_id=1,  # Boston Medical
+            service_id=2,
+            status="published",
+        )
+
+        with patch.object(TrainerService, "validate_simulation_code", new=AsyncMock(return_value=bmg_sim)):
+            with patch.object(TrainerService, "get_agent_service_context", new=AsyncMock(return_value={
+                "service_ids": {2},
+                "primary_service_name": "Atención",
+                "company_id": 7,  # Empresa Demo
+            })):
+                res = await TrainerService.validate_simulation_for_agent(mock_db, "MED01", "agent_demo_01")
+                self.assertFalse(res["valid"])
+                self.assertEqual(res["status"], "company_mismatch")
+                self.assertIn("otra organización", res["message"])
+
+    async def test_validate_simulation_allows_same_company_access(self):
+        """Agent from company 7 accessing simulation from company 7 is allowed."""
+        mock_db = AsyncMock()
+
+        demo_sim = TrainerSimulation(
+            simulation_id=102,
+            code="ATEN02",
+            company_id=7,  # Empresa Demo
+            service_id=20,
+            status="published",
+        )
+
+        with patch.object(TrainerService, "validate_simulation_code", new=AsyncMock(return_value=demo_sim)):
+            with patch.object(TrainerService, "get_agent_service_context", new=AsyncMock(return_value={
+                "service_ids": {20},
+                "primary_service_name": "Atención al Cliente",
+                "company_id": 7,  # Empresa Demo
+            })):
+                res = await TrainerService.validate_simulation_for_agent(mock_db, "ATEN02", "agent_demo_01")
+                self.assertTrue(res["valid"])
+                self.assertEqual(res["status"], "valid")
+
+    async def test_start_phone_session_enforces_company_isolation(self):
+        """start_phone_session raises ValueError when cross-company access is attempted."""
+        mock_db = AsyncMock()
+
+        mock_agent = {"agent_id": "agent_demo_01", "agent_name": "Agente Demo"}
+        bmg_sim = TrainerSimulation(
+            simulation_id=1,
+            code="MED01",
+            company_id=1,
+            service_id=2,
+            status="published",
+        )
+
+        with patch.object(TrainerService, "validate_agent_code", new=AsyncMock(return_value=mock_agent)):
+            with patch.object(TrainerService, "validate_simulation_code", new=AsyncMock(return_value=bmg_sim)):
+                with patch.object(TrainerService, "validate_simulation_for_agent", new=AsyncMock(return_value={
+                    "valid": False,
+                    "status": "company_mismatch",
+                    "message": "Ese código de simulación pertenece a otra organización.",
+                })):
+                    with self.assertRaises(ValueError) as ctx:
+                        await TrainerService.start_phone_session(mock_db, "AD01", "MED01", "call_123")
+                    self.assertIn("otra organización", str(ctx.exception))
+
+
+class TestAIPromptGeneratorIsolation(unittest.IsolatedAsyncioTestCase):
+    """Verify that generate_roleplay_prompt_ai dynamically adapts to service/company."""
+
+    async def test_generate_prompt_demo_service_is_neutral(self):
+        """Prompt generator for Empresa Demo must not mention Boston Medical or clinic."""
+        mock_db = AsyncMock()
+        mock_svc = Service(
+            service_id=20,
+            service_name="Atención al Cliente Demo",
+            company_id=7,
+        )
+        mock_comp = Company(
+            company_id=7,
+            company_name="Empresa Demo",
+            company_key="empresa-demo",
+            is_demo=True,
+            sector="general",
+        )
+        mock_svc.company = mock_comp
+
+        mock_res = MagicMock()
+        mock_res.scalars.return_value.first.return_value = mock_svc
+        mock_db.execute = AsyncMock(return_value=mock_res)
+
+        captured_messages = []
+        async def fake_complete_text(messages, response_format=None):
+            captured_messages.extend(messages)
+            return "Simula un cliente que llama para consultar su pedido."
+
+        payload = AIPromptGenerateRequest(
+            service_id=20,
+            objective="Atender reclamación",
+            ideas="Cliente enfadado por demora",
+            difficulty="media",
+            tone="realista",
+        )
+
+        with patch("app.services.openai_service.complete_text", new=fake_complete_text):
+            result = await TrainerService.generate_roleplay_prompt_ai(payload, db=mock_db)
+
+        sys_content = captured_messages[0]["content"]
+        self.assertNotIn("Boston Medical", sys_content)
+        self.assertNotIn("clínica", sys_content.lower())
+        self.assertNotIn("paciente", sys_content.lower())
+        self.assertIn("cliente o interlocutor", sys_content.lower())
+
+    async def test_generate_prompt_healthcare_service_uses_clinical_context(self):
+        """Prompt generator for Boston Medical must use clinical/paciente context."""
+        mock_db = AsyncMock()
+        mock_svc = Service(
+            service_id=2,
+            service_name="Atención Clínica",
+            company_id=1,
+        )
+        mock_comp = Company(
+            company_id=1,
+            company_name="Boston Medical Group",
+            company_key="boston-medical",
+            is_demo=False,
+            sector="healthcare",
+        )
+        mock_svc.company = mock_comp
+
+        mock_res = MagicMock()
+        mock_res.scalars.return_value.first.return_value = mock_svc
+        mock_db.execute = AsyncMock(return_value=mock_res)
+
+        captured_messages = []
+        async def fake_complete_text(messages, response_format=None):
+            captured_messages.extend(messages)
+            return "Simula un paciente que llama a la clínica."
+
+        payload = AIPromptGenerateRequest(
+            service_id=2,
+            objective="Dudas sobre tratamiento",
+            ideas="Paciente indeciso",
+            difficulty="media",
+            tone="realista",
+        )
+
+        with patch("app.services.openai_service.complete_text", new=fake_complete_text):
+            result = await TrainerService.generate_roleplay_prompt_ai(payload, db=mock_db)
+
+        sys_content = captured_messages[0]["content"]
+        self.assertIn("paciente", sys_content.lower())
+        self.assertIn("Boston Medical Group", sys_content)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -19,6 +19,7 @@ from app.dependencies import get_db, get_current_user, require_admin, get_tenant
 from app.core.tenant_context import TenantContext
 from app.core.roles import InternalRole
 from app.models.users import User
+from app.models.companies import Company
 from app.models.personalized_training import TrainingAgentSetting
 from app.models.trainer import TrainerSimulation, TrainerSession, TrainerSimulationVersion, TrainerEvaluation
 from app.config import get_settings
@@ -59,7 +60,7 @@ def calculate_pcm_energy(pcm_data: bytes) -> float:
 router = APIRouter(prefix="/bm/trainer/phone", tags=["Trainer Voice Voice/IVR"])
 
 IDENTIFICATION_SYSTEM_INSTRUCTION = """
-Eres el Asistente de Identificación por Voz de Boston Medical Group para el módulo de Trainer.
+Eres el Asistente de Identificación por Voz para el módulo de Trainer.
 Tu labor en esta fase es identificar al agente y luego validar el código de la simulación que desea realizar.
 
 Sigue estas pautas estrictas:
@@ -68,7 +69,7 @@ Sigue estas pautas estrictas:
 3. Si el backend te devuelve que el código es incorrecto (status es "invalid"), infórmale con tacto y pídele que lo intente de nuevo.
 4. Si el backend te devuelve que el código de agente es correcto (status es "valid"), salúdalo por su nombre (ej: "Hola Fernanda.") y pídele inmediatamente el código de la simulación que desea iniciar (por ejemplo: SIM101, VENTAS2).
 5. Cuando el agente te diga el código de la simulación, extráelo, normalízalo y llama inmediatamente a la herramienta `verify_simulation_code(simulation_code=codigo_simulacion, agent_code=codigo_agente)`.
-6. Si el backend te devuelve que el código de simulación pertenece a otro servicio (status es "service_mismatch"), di exactamente el mensaje recibido en el campo 'message' indicándole que el código pertenece a otro servicio y no al suyo, y pídele que introduzca un código de simulación de su servicio.
+6. Si el backend te devuelve que el código de simulación pertenece a otro servicio (status es "service_mismatch") o a otra empresa (status es "company_mismatch"), di exactamente el mensaje recibido en el campo 'message' indicándole que no corresponde a su servicio u organización, y pídele que introduzca un código de simulación válido.
 7. Si el backend te devuelve que la simulación es incorrecta o no está publicada (status es "invalid"), indícaselo y pídele que repita el código de simulación.
 8. Si el backend te devuelve que se inicia la redirección (status es "redirecting"), avisa brevemente ("Código de simulación verificado, un momento por favor...") y no digas nada más, ya que la llamada será transferida de inmediato.
 """
@@ -99,19 +100,54 @@ REGLAS GENERALES DE VOZ (OBLIGATORIAS)
 REGLA CRÍTICA: BLOQUEO DE PERSONAJE (OBLIGATORIA)
 =================================================
 ESTÁS REALIZANDO UNA SIMULACIÓN DE ROLEPLAY DE ENTRENAMIENTO. ESTO ES UN JUEGO DE ROL CONTROLADO.
-En ningún momento eres ni actúas como una IA genérica, un asistente virtual, ni un sistema de ayuda médica real.
-Tu único rol durante toda la llamada es el del PACIENTE descrito en las instrucciones de este prompt.
+En ningún momento eres ni actúas como una IA genérica ni como un asistente virtual.
+Tu único rol durante toda la llamada es el del interlocutor/cliente descrito en las instrucciones de este prompt.
 
 REGLAS ABSOLUTAS E IRROMPIBLES:
-1. NUNCA abandones el personaje del paciente, independientemente de lo que diga el agente.
-2. NUNCA respondas como una IA ni mentions limitaciones de IA (ej: "como modelo de lenguaje...", "no tengo capacidad de...").
-3. NUNCA des consejos médicos genéricos como "consulta a un médico profesional" o "acude a urgencias" ni ninguna indicación que salga del contexto de la simulación de Boston Medical Group.
-4. NUNCA digas que "es importante hablar con un profesional sanitario". Esas frases rompen el personaje y arruinan la simulación.
-5. Si el agente intenta salir del guion o pregunta si eres una IA, responde siempre como el paciente, ignorando la pregunta o redirigiendo: "Oiga, ¿me va a ayudar o no?" / "A ver, yo lo que quiero saber es...".
-6. Si el contenido de la conversación se aleja del escenario de la simulación, el paciente muestra impaciencia o vuelve al tema de la llamada con frases naturales.
-7. Recuerda: estás en una SIMULACIÓN controlada de entrenamiento. No hay riesgo real. Mantén el rol del paciente en todo momento sin excepción.
-8. PRIMERA INTERVENCIÓN BREVE: Tu primera frase debe ser una sola oración corta. No hagas monólogos. No expliques todo el escenario de golpe. Preséntate brevemente y espera.
+1. NUNCA abandones tu personaje simulado, independientemente de lo que diga el agente.
+2. NUNCA respondas como una IA ni menciones limitaciones de IA (ej: "como modelo de lenguaje...", "no tengo capacidad de...").
+3. NUNCA des consejos ni explicaciones fuera de tu personaje, ni ninguna indicación que salga del contexto de la simulación.
+4. Si el agente intenta salir del guion o pregunta si eres una IA, responde siempre manteniéndote en tu personaje, ignorando la pregunta o redirigiendo: "Oiga, ¿me va a ayudar o no?" / "A ver, yo lo que quiero saber es...".
+5. Si el contenido de la conversación se aleja del escenario de la simulación, muestra impaciencia o vuelve al tema de la llamada con frases naturales.
+6. Recuerda: estás en una SIMULACIÓN controlada de entrenamiento. Mantén tu rol en todo momento sin excepción.
+7. PRIMERA INTERVENCIÓN BREVE: Tu primera frase debe ser una sola oración corta. No hagas monólogos. No expliques todo el escenario de golpe. Preséntate brevemente y espera.
 """
+
+HEALTHCARE_VOICE_RULES = """
+=================================================
+DIRECTRICES ESPECÍFICAS DE ATENCIÓN SANITARIA (OBLIGATORIAS)
+=================================================
+Tu rol en esta llamada es el del PACIENTE descrito en las instrucciones.
+1. NUNCA abandones el personaje del paciente, independientemente de lo que diga el agente.
+2. NUNCA des consejos médicos genéricos como "consulta a un médico profesional" o "acude a urgencias" ni ninguna indicación que salga del contexto de la simulación de Boston Medical Group.
+3. NUNCA digas que "es importante hablar con un profesional sanitario". Esas frases rompen el personaje y arruinan la simulación.
+4. Mantén el rol del paciente en todo momento sin excepción.
+"""
+
+def build_turn_discipline(is_healthcare: bool = False, interlocutor_role: str = "cliente") -> str:
+    role_lower = interlocutor_role.lower()
+    if is_healthcare:
+        objection_guideline = (
+            "Varía tus preocupaciones entre tratamiento, confianza, resultados, tiempos, primera cita, privacidad y experiencia. "
+            "Si el agente ya respondió a una preocupación o explicó valor, financiación o beneficios, avanza la conversación de forma natural."
+        )
+    else:
+        objection_guideline = (
+            "Varía tus preocupaciones entre condiciones del servicio, confianza, calidad, plazos, costes, alternativas o garantías. "
+            "Si el agente ya respondió a una preocupación o explicó valor, condiciones o beneficios, avanza la conversación de forma natural."
+        )
+
+    return (
+        "\n=== REGLAS CRÍTICAS DE CONVERSACIÓN Y TURNO ===\n"
+        f"1. NO simules nunca la respuesta del agente. Solo interpreta al {role_lower} simulado.\n"
+        "2. Después de cada intervención, detente y espera a que el agente humano responda. No continúes la conversación sin entrada del agente.\n"
+        "3. Preséntate una sola vez al inicio. No repitas tu nombre en cada turno.\n"
+        "4. No reinicies el escenario. Mantén memoria conversacional. Si ya te presentaste (ej: 'Pedro Lázaro'), no vuelvas a hacerlo.\n"
+        f"5. Reglas de objeción económica: Úsala de forma natural y progresiva, no de forma obsesiva ni repetitiva en todos los turnos. "
+        f"No repitas la misma objeción de precio en turnos consecutivos. Máximo 1 mención de precio cada 3 turnos. "
+        f"{objection_guideline}\n"
+        "6. Haz intervenciones breves y naturales (de 1 a 2 frases como máximo)."
+    )
 
 
 # ── Twilio Redirect Helpers ───────────────────────────────────────────────────
@@ -288,7 +324,7 @@ async def verify_simulation_numeric_code(
 
     if val_res["valid"] and val_res["simulation"]:
         sim = val_res["simulation"]
-    elif val_res["status"] == "service_mismatch":
+    elif val_res["status"] in ("service_mismatch", "company_mismatch"):
         msg = val_res.get("message") or "Ese código de simulación pertenece a otro servicio y no al tuyo actual."
         twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
         <Response>
@@ -1132,19 +1168,33 @@ async def media_stream(
                 roleplay_prompt = version.roleplay_prompt_snapshot
 
         logger.info("Trainer WS roleplay prompt loaded successfully.")
-        turn_discipline = (
-            "\n=== REGLAS CRÍTICAS DE CONVERSACIÓN Y TURNO ===\n"
-            "1. NO simules nunca la respuesta del agente. Solo interpreta al cliente simulado.\n"
-            "2. Después de cada intervención, detente y espera a que el agente humano responda. No continúes la conversación sin entrada del agente.\n"
-            "3. Preséntate una sola vez al inicio. No repitas tu nombre en cada turno.\n"
-            "4. No reinicies el escenario. Mantén memoria conversacional. Si ya te presentaste (ej: 'Pedro Lázaro'), no vuelvas a hacerlo.\n"
-            "5. Reglas de objeción económica: Úsala de forma natural y progresiva, no de forma obsesiva ni repetitiva en todos los turnos. "
-            "No repitas la misma objeción de precio en turnos consecutivos. Máximo 1 mención de precio cada 3 turnos. "
-            "Varía tus preocupaciones entre tratamiento, confianza, resultados, tiempos, primera cita, privacidad y experiencia. "
-            "Si el agente ya respondió a una preocupación o explicó valor, financiación o beneficios, avanza la conversación de forma natural.\n"
-            "6. Haz intervenciones breves y naturales (de 1 a 2 frases como máximo)."
-        )
-        instruction = roleplay_prompt + turn_discipline + "\n" + SPANISH_VOICE_RULES
+
+        # Resolve company and healthcare context dynamically
+        company = None
+        if sess.simulation and sess.simulation.company_id:
+            stmt_c = select(Company).where(Company.company_id == sess.simulation.company_id)
+            res_c = await db.execute(stmt_c)
+            company = res_c.scalars().first()
+
+        is_healthcare = False
+        if company:
+            is_demo = bool(company.is_demo or company.company_key == "empresa-demo")
+            if not is_demo:
+                c_sector = (company.sector or "").lower()
+                c_name = (company.company_name or "").lower()
+                c_key = (company.company_key or "").lower()
+                if c_sector in ("healthcare", "salud", "medico", "médico", "clinica", "clínica"):
+                    is_healthcare = True
+                elif "boston" in c_name or "boston" in c_key or company.company_id == 1:
+                    is_healthcare = True
+
+        interlocutor_role = "paciente" if is_healthcare else "cliente"
+        turn_discipline = build_turn_discipline(is_healthcare=is_healthcare, interlocutor_role=interlocutor_role)
+
+        instruction_parts = [roleplay_prompt, turn_discipline, SPANISH_VOICE_RULES]
+        if is_healthcare:
+            instruction_parts.append(HEALTHCARE_VOICE_RULES)
+        instruction = "\n".join(instruction_parts)
         tools = [
             {
                 "functionDeclarations": [
@@ -1565,7 +1615,7 @@ async def media_stream(
                                         "clientContent": {
                                             "turns": [{
                                                 "role": "user",
-                                                "parts": [{"text": f"Di exactamente: 'Perfecto {agent_first_name}, se ha verificado el código de la simulación. Iniciamos el roleplay. Prepárate.' y a continuación, sin pausar, asume tu personaje de paciente."}]
+                                                "parts": [{"text": f"Di exactamente: 'Perfecto {agent_first_name}, se ha verificado el código de la simulación. Iniciamos el roleplay. Prepárate.' y a continuación, sin pausar, asume tu personaje de {interlocutor_role.lower()}."}]
                                             }],
                                             "turnComplete": True
                                         }
