@@ -228,7 +228,7 @@ class TestTrainerVoiceRoleplayIntegrity(unittest.IsolatedAsyncioTestCase):
         initial_turn = client_contents[0]["clientContent"]["turns"][0]["parts"][0]["text"]
 
         # Gemini says the exact confirmation and seamlessly starts roleplay in character
-        self.assertIn("Di exactamente: 'Código de simulación correcto. Comenzamos.'", initial_turn)
+        self.assertIn("Di exactamente: 'Código de simulación correcto. Vamos a dar comienzo a la simulación, prepárate.'", initial_turn)
         self.assertIn("sin pausar ni esperar respuesta", initial_turn)
         self.assertIn("inicia la llamada interpretando exclusivamente a tu personaje", initial_turn)
 
@@ -567,3 +567,128 @@ class TestTrainerVoiceRoleplayIntegrity(unittest.IsolatedAsyncioTestCase):
         # Verify that the valid message after the error was processed successfully
         media_packets = [json.loads(m) for m in mock_tw_ws.sent_messages if "media" in m and "payload" in m]
         self.assertGreaterEqual(len(media_packets), 1, "Loop died on malformed message instead of continuing!")
+
+
+class TestDTMFSimulationValidation(unittest.IsolatedAsyncioTestCase):
+    """
+    Tests for fix: DTMF gather accepts variable-length codes (finishOnKey=#)
+    and verify_simulation_numeric_code resolves numeric simulation IDs to
+    their alfanumeric codes (e.g. "202" → ATEN02).
+    """
+
+    # ── 9. Gather uses finishOnKey=# instead of numDigits=4 ───────────────────
+
+    async def test_9_verify_numeric_code_gather_uses_finish_on_key(self):
+        """verify-numeric-code TwiML must use finishOnKey='#' and NOT numDigits='4' so alphanumeric simulation codes are reachable."""
+        from app.routers.trainer_voice import verify_numeric_code
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from fastapi import Request
+
+        mock_db = AsyncMock()
+        mock_setting = MagicMock()
+        mock_setting.agent_name = "Agente Demo 11"
+        mock_setting.hubspot_owner_id = "agent_demo_11"
+        res_set = MagicMock()
+        res_set.scalars.return_value.first.return_value = mock_setting
+        mock_db.execute.return_value = res_set
+
+        mock_request = MagicMock(spec=Request)
+        mock_request.form = AsyncMock(return_value={"Digits": "9999"})
+        mock_request.headers = {"host": "test.com"}
+
+        response = await verify_numeric_code(request=mock_request, db=mock_db)
+        content = response.body.decode("utf-8")
+
+        self.assertIn('finishOnKey="#"', content, "Gather must use finishOnKey='#' to support variable-length simulation codes")
+        self.assertNotIn('numDigits="4"', content, "Must NOT restrict to exactly 4 digits")
+
+    # ── 10. ATEN02 entered as full alphanumeric code resolves and redirects ──────
+
+    @patch("app.routers.trainer_voice.TrainerService.validate_simulation_for_agent")
+    async def test_10_aten02_full_code_resolves_and_redirects(self, mock_validate):
+        """Agent enters ATEN02# via DTMF → Digits='ATEN02' → validated directly by code → redirects to start-roleplay.
+        simulation_id (DB internal PK) must NOT be used as a user-facing code."""
+        from app.routers.trainer_voice import verify_simulation_numeric_code
+        from unittest.mock import AsyncMock, MagicMock
+        from fastapi import Request
+
+        mock_aten02_sim = MagicMock()
+        mock_aten02_sim.simulation_id = 5
+        mock_aten02_sim.code = "ATEN02"
+
+        # validate_simulation_for_agent resolves ATEN02 on the first (direct) call
+        mock_validate.return_value = {
+            "valid": True,
+            "status": "valid",
+            "simulation": mock_aten02_sim,
+        }
+
+        mock_db = AsyncMock()
+        mock_request = MagicMock(spec=Request)
+        # Twilio delivers Digits="ATEN02" when agent keys A-T-E-N-0-2#
+        mock_request.form = AsyncMock(return_value={"Digits": "ATEN02", "CallSid": "CA_ATEN02"})
+        mock_request.headers = {"host": "test.com", "x-forwarded-proto": "https"}
+
+        response = await verify_simulation_numeric_code(request=mock_request, agent_id="agent_demo_11", db=mock_db)
+        content = response.body.decode("utf-8")
+
+        # Must redirect to start-roleplay with the resolved simulation_id
+        self.assertIn("<Redirect>", content)
+        self.assertIn("start-roleplay", content)
+        self.assertIn("simulation_id=5", content)
+        self.assertNotIn("<Say", content, "Must NOT play error when code is valid")
+
+        # Validator was called with the real code, NOT with a numeric ID
+        mock_validate.assert_called_once_with(mock_db, "ATEN02", "agent_demo_11")
+
+    # ── 11. Wrong company is still rejected ───────────────────────────────────
+
+    @patch("app.routers.trainer_voice.TrainerService.validate_simulation_for_agent")
+    async def test_11_company_mismatch_rejects_dtmf(self, mock_validate):
+        """DTMF validation must reject a simulation from a different company even if numeric ID matches."""
+        from app.routers.trainer_voice import verify_simulation_numeric_code
+        from unittest.mock import AsyncMock, MagicMock
+        from fastapi import Request
+
+        mock_validate.return_value = {
+            "valid": False,
+            "status": "company_mismatch",
+            "message": "Ese código de simulación pertenece a otra organización.",
+            "simulation": None,
+        }
+
+        mock_db = AsyncMock()
+        mock_request = MagicMock(spec=Request)
+        mock_request.form = AsyncMock(return_value={"Digits": "9999", "CallSid": "CA_MISMATCH"})
+        mock_request.headers = {"host": "test.com"}
+
+        response = await verify_simulation_numeric_code(request=mock_request, agent_id="agent_foreign", db=mock_db)
+        content = response.body.decode("utf-8")
+
+        self.assertIn("<Say", content)
+        self.assertIn("otra organización", content)
+        self.assertIn("<Hangup", content)
+
+    # ── 12. Genuinely invalid code is rejected ────────────────────────────────
+
+    @patch("app.routers.trainer_voice.TrainerService.validate_simulation_for_agent")
+    async def test_12_invalid_dtmf_code_plays_error_and_hangs_up(self, mock_validate):
+        """A code that does not match any simulation by code, SIM prefix, or simulation_id must trigger error message."""
+        from app.routers.trainer_voice import verify_simulation_numeric_code
+        from unittest.mock import AsyncMock, MagicMock
+        from fastapi import Request
+
+        mock_validate.return_value = {"valid": False, "status": "invalid", "simulation": None}
+
+        mock_db = AsyncMock()
+        mock_request = MagicMock(spec=Request)
+        mock_request.form = AsyncMock(return_value={"Digits": "0000", "CallSid": "CA_INVALID"})
+        mock_request.headers = {"host": "test.com"}
+
+        response = await verify_simulation_numeric_code(request=mock_request, agent_id="agent_demo_11", db=mock_db)
+        content = response.body.decode("utf-8")
+
+        self.assertIn("<Say", content)
+        self.assertIn("no es válida", content)
+        self.assertIn("<Hangup", content)
+        self.assertNotIn("<Redirect>", content)

@@ -306,8 +306,8 @@ async def verify_numeric_code(
     
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
-        <Gather numDigits="4" timeout="10" action="{action_url}">
-            <Say language="es-ES">Hola {agent_name}. Por favor, introduce ahora el código numérico de la simulación de cuatro dígitos, seguido de la tecla almohadilla.</Say>
+        <Gather finishOnKey="#" timeout="15" action="{action_url}">
+            <Say language="es-ES">Hola {agent_name}. Por favor, introduce el código numérico de la simulación seguido de la tecla almohadilla.</Say>
         </Gather>
         <Say language="es-ES">No he recibido el código de la simulación. La llamada finalizará.</Say>
         <Hangup/>
@@ -337,10 +337,12 @@ async def verify_simulation_numeric_code(
         """
         return Response(content=twiml, media_type="application/xml")
 
-    # Clean code: if digits matches a simulation code (numeric or string)
-    # Use canonical TrainerService.validate_simulation_for_agent with optional SIM prefix fallback
+    # Validate the code exactly as entered. The agent keys the full alphanumeric code
+    # (e.g. ATEN02#, SIM101#) so Digits arrives as the real simulation code.
+    # SIM-prefix fallback covers cases where the agent keys only the numeric suffix
+    # of a legacy SIMxxx code (e.g. "101" → tries "SIM101").
     val_res = await TrainerService.validate_simulation_for_agent(db, digits, agent_id)
-    if not val_res["valid"] and digits.isdigit() and val_res["status"] != "service_mismatch":
+    if not val_res["valid"] and digits.isdigit() and val_res["status"] not in ("service_mismatch", "company_mismatch"):
         val_res = await TrainerService.validate_simulation_for_agent(db, f"SIM{digits}", agent_id)
 
     if val_res["valid"] and val_res["simulation"]:
@@ -1636,7 +1638,7 @@ async def media_stream(
                                     initial_roleplay_prompt_sent = True
                                     logger.info("Trainer roleplay initial in-character prompt sent.")
                                     initial_prompt_text = (
-                                        "Di exactamente: 'Código de simulación correcto. Comenzamos.' "
+                                        "Di exactamente: 'Código de simulación correcto. Vamos a dar comienzo a la simulación, prepárate.' "
                                         f"y a continuación, sin pausar ni esperar respuesta, inicia la llamada interpretando exclusivamente a tu personaje de {interlocutor_role.lower()} diciendo tu primera frase breve."
                                     )
                                     start_msg = {
