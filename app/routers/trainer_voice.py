@@ -7,18 +7,20 @@ import httpx
 import asyncio
 import websockets
 from decimal import Decimal
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Query, Request, Response, WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_, desc, func
+from sqlalchemy import select, and_, or_, desc, func, update
 from sqlalchemy.orm import selectinload, joinedload
 
-from app.dependencies import get_db, get_current_user, require_admin
+from app.dependencies import get_db, get_current_user, require_admin, get_tenant_context
+from app.core.tenant_context import TenantContext
+from app.core.roles import InternalRole
 from app.models.users import User
 from app.models.personalized_training import TrainingAgentSetting
-from app.models.trainer import TrainerSimulation, TrainerSession, TrainerSimulationVersion
+from app.models.trainer import TrainerSimulation, TrainerSession, TrainerSimulationVersion, TrainerEvaluation
 from app.config import get_settings
 from app.db import get_engine, AsyncSessionLocal
 from app.services.trainer_service import TrainerService
@@ -385,16 +387,32 @@ async def check_and_trigger_evaluation(db: AsyncSession, session_id: int):
         return
 
     has_recording_url = bool(sess.recording_url)
+
+    # If recording_url is present and session is still 'started', the call has finished!
+    if has_recording_url and sess.status == "started":
+        if sess.duration_seconds is not None and sess.duration_seconds < 15:
+            sess.status = "failed"
+            if sess.evaluation_status != "recording_start_failed":
+                sess.evaluation_status = "failed"
+        else:
+            sess.status = "completed"
+            if sess.evaluation_status == "started":
+                sess.evaluation_status = "completed_waiting_recording"
+        if not sess.ended_at:
+            sess.ended_at = datetime.now(timezone.utc)
+        await db.commit()
+        await db.refresh(sess)
+
     stream_stopped = (sess.status in ("completed", "failed"))
-    already_evaluating = (sess.evaluation_status in ("evaluation_pending", "evaluated"))
+    already_evaluating = (sess.evaluation_status in ("evaluation_pending", "running", "evaluated"))
 
     if sess.status == "failed" or sess.evaluation_status == "failed":
         action = "skip"
     elif already_evaluating:
         action = "skip"
-    elif not stream_stopped:
-        action = "wait"
     elif not has_recording_url:
+        action = "wait"
+    elif not stream_stopped:
         action = "wait"
     else:
         action = "trigger"
@@ -413,20 +431,61 @@ async def check_and_trigger_evaluation(db: AsyncSession, session_id: int):
     )
 
     if action == "trigger":
-        # Mark evaluation_pending to avoid race conditions
-        sess.evaluation_status = "evaluation_pending"
+        # Atomically transition from non-evaluating status to 'evaluation_pending'
+        # to guarantee no two concurrent tasks can both trigger evaluation
+        stmt_atomic = (
+            update(TrainerSession)
+            .where(
+                and_(
+                    TrainerSession.session_id == session_id,
+                    TrainerSession.evaluation_status.notin_(["evaluation_pending", "running", "evaluated"])
+                )
+            )
+            .values(evaluation_status="evaluation_pending", updated_at=datetime.now(timezone.utc))
+        )
+        res_atomic = await db.execute(stmt_atomic)
         await db.commit()
+        if res_atomic.rowcount == 0:
+            logger.info("Trainer evaluation trigger skipped for session %d: already triggered concurrently", session_id)
+            return
 
         async def run_evaluation_task():
             from app.db import AsyncSessionLocal
-            async with AsyncSessionLocal() as task_db:
-                try:
+            try:
+                async with AsyncSessionLocal() as task_db:
                     await TrainerService.evaluate_session_task(task_db, session_id)
-                except Exception as e_task:
-                    logger.exception(
-                        "Failed background evaluation for trainer session %d: %s",
-                        session_id, e_task
-                    )
+            except Exception as e_task:
+                logger.exception(
+                    "Failed background evaluation for trainer session %d: %s",
+                    session_id, e_task
+                )
+                try:
+                    async with AsyncSessionLocal() as err_db:
+                        stmt_err = select(TrainerSession).where(TrainerSession.session_id == session_id)
+                        res_err = await err_db.execute(stmt_err)
+                        s_err = res_err.scalars().first()
+                        if s_err and s_err.evaluation_status not in ("evaluated", "completed_without_score"):
+                            s_err.evaluation_status = "evaluation_error"
+                            s_err.updated_at = datetime.now(timezone.utc)
+
+                            stmt_ev = select(TrainerEvaluation).where(TrainerEvaluation.session_id == session_id)
+                            res_ev = await err_db.execute(stmt_ev)
+                            eval_record = res_ev.scalars().first()
+                            if eval_record:
+                                eval_record.error_message = f"Error no controlado en worker: {str(e_task)}"
+                                eval_record.updated_at = datetime.now(timezone.utc)
+                            else:
+                                err_eval = TrainerEvaluation(
+                                    session_id=session_id,
+                                    prompt_snapshot="Worker crashed",
+                                    result_json={"error": str(e_task)},
+                                    score=None,
+                                    error_message=f"Error no controlado en worker: {str(e_task)}",
+                                )
+                                err_db.add(err_eval)
+                            await err_db.commit()
+                except Exception as recovery_err:
+                    logger.exception("Failed to mark evaluation_error for session %d: %s", session_id, recovery_err)
 
         asyncio.create_task(run_evaluation_task())
 
@@ -475,6 +534,20 @@ async def recording_completed(
     duration_seconds = int(duration_str) if duration_str.isdigit() else None
     if duration_seconds is not None and not sess.duration_seconds:
         sess.duration_seconds = duration_seconds
+
+    # If session is still 'started', completed recording means call has ended!
+    if sess.status == "started":
+        if duration_seconds is not None and duration_seconds < 15:
+            sess.status = "failed"
+            if sess.evaluation_status != "recording_start_failed":
+                sess.evaluation_status = "failed"
+        else:
+            sess.status = "completed"
+            if sess.evaluation_status == "started":
+                sess.evaluation_status = "completed_waiting_recording"
+        if not sess.ended_at:
+            sess.ended_at = datetime.now(timezone.utc)
+
     await db.commit()
     await db.refresh(sess)
 
@@ -488,82 +561,232 @@ async def reconcile_trainer_sessions(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Reconcile trainer sessions stuck in 'completed_waiting_recording' by fetching recording from Twilio."""
-    # 1. Fetch sessions
-    stmt = select(TrainerSession).where(
-        and_(
-            TrainerSession.status == "completed",
-            TrainerSession.evaluation_status == "completed_waiting_recording",
-            TrainerSession.recording_url.is_(None)
-        )
-    )
-    res = await db.execute(stmt)
-    sessions = res.scalars().all()
-    
+    """Reconcile trainer sessions stuck in 'completed_waiting_recording' or 'started' by checking recording URL or Twilio."""
     reconciled = []
     failed = []
-    
+
+    # 1. Recover sessions that already have a recording_url but are stuck:
+    # - status == 'started'
+    # - evaluation_status in ('started', 'completed_waiting_recording')
+    stmt_with_url = select(TrainerSession).where(
+        and_(
+            TrainerSession.recording_url.is_not(None),
+            or_(
+                TrainerSession.status == "started",
+                TrainerSession.evaluation_status.in_(["started", "completed_waiting_recording"])
+            )
+        )
+    )
+    res_url = await db.execute(stmt_with_url)
+    sessions_with_url = res_url.scalars().all()
+
+    for sess in sessions_with_url:
+        sess.status = "completed"
+        if not sess.ended_at:
+            sess.ended_at = datetime.now(timezone.utc)
+        await db.commit()
+        await db.refresh(sess)
+
+        await check_and_trigger_evaluation(db, sess.session_id)
+        reconciled.append({
+            "session_id": sess.session_id,
+            "call_sid": sess.call_id,
+            "recording_url": sess.recording_url
+        })
+
+    # 2. Fetch sessions without recording_url that need to be checked against Twilio:
+    stmt_no_url = select(TrainerSession).where(
+        and_(
+            TrainerSession.recording_url.is_(None),
+            TrainerSession.call_id.is_not(None),
+            TrainerSession.status.in_(["completed", "started"]),
+            TrainerSession.evaluation_status.in_(["completed_waiting_recording", "started"])
+        )
+    )
+    res_no_url = await db.execute(stmt_no_url)
+    sessions_no_url = res_no_url.scalars().all()
+
     account_sid = getattr(settings, "twilio_account_sid", None) or os.getenv("TWILIO_ACCOUNT_SID")
     auth_token = getattr(settings, "twilio_auth_token", None) or os.getenv("TWILIO_AUTH_TOKEN")
-    
-    if not account_sid or not auth_token:
-        return {"status": "error", "message": "Twilio credentials not configured on server."}
-        
-    async with httpx.AsyncClient() as client:
-        for sess in sessions:
-            call_sid = sess.call_id
-            url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Calls/{call_sid}/Recordings.json"
-            try:
-                response = await client.get(url, auth=(account_sid, auth_token))
-                if response.status_code == 200:
-                    data = response.json()
-                    recordings = data.get("recordings", [])
-                    # Find a completed recording
-                    completed_rec = next((r for r in recordings if r.get("status") == "completed"), None)
-                    if completed_rec:
-                        rec_url = f"https://api.twilio.com{completed_rec.get('uri').replace('.json', '.wav')}"
-                        duration = completed_rec.get("duration")
-                        
-                        sess.recording_url = rec_url
-                        if duration and not sess.duration_seconds:
-                            sess.duration_seconds = int(duration)
-                        
-                        await db.commit()
-                        await db.refresh(sess)
-                        
-                        # Trigger evaluation (idempotent)
-                        await check_and_trigger_evaluation(db, sess.session_id)
-                        
-                        reconciled.append({
-                            "session_id": sess.session_id,
-                            "call_sid": call_sid,
-                            "recording_url": rec_url
-                        })
+
+    if sessions_no_url and (not account_sid or not auth_token):
+        logger.warning("Twilio credentials not configured on server. Cannot query Twilio API.")
+        return {
+            "status": "ok",
+            "reconciled_count": len(reconciled),
+            "failed_count": len(failed),
+            "reconciled": reconciled,
+            "failed": failed
+        }
+
+    if sessions_no_url:
+        async with httpx.AsyncClient() as client:
+            for sess in sessions_no_url:
+                call_sid = sess.call_id
+                url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Calls/{call_sid}/Recordings.json"
+                try:
+                    response = await client.get(url, auth=(account_sid, auth_token))
+                    if response.status_code == 200:
+                        data = response.json()
+                        recordings = data.get("recordings", [])
+                        completed_rec = next((r for r in recordings if r.get("status") == "completed"), None)
+                        if completed_rec:
+                            rec_url = f"https://api.twilio.com{completed_rec.get('uri').replace('.json', '.wav')}"
+                            duration = completed_rec.get("duration")
+
+                            sess.recording_url = rec_url
+                            sess.status = "completed"
+                            if not sess.ended_at:
+                                sess.ended_at = datetime.now(timezone.utc)
+                            if duration and not sess.duration_seconds:
+                                sess.duration_seconds = int(duration)
+
+                            if sess.duration_seconds is not None and sess.duration_seconds < 15:
+                                sess.status = "failed"
+                                if sess.evaluation_status != "recording_start_failed":
+                                    sess.evaluation_status = "failed"
+                            else:
+                                if sess.evaluation_status == "started":
+                                    sess.evaluation_status = "completed_waiting_recording"
+
+                            await db.commit()
+                            await db.refresh(sess)
+
+                            # Trigger evaluation (idempotent)
+                            if sess.status == "completed":
+                                await check_and_trigger_evaluation(db, sess.session_id)
+
+                            reconciled.append({
+                                "session_id": sess.session_id,
+                                "call_sid": call_sid,
+                                "recording_url": rec_url
+                            })
+                        else:
+                            # Check if the call itself is already finished/failed on Twilio
+                            now_utc = datetime.now(timezone.utc)
+                            sess_age_seconds = (now_utc - sess.created_at).total_seconds() if sess.created_at else 9999
+                            if sess_age_seconds > 300:
+                                call_url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Calls/{call_sid}.json"
+                                try:
+                                    call_resp = await client.get(call_url, auth=(account_sid, auth_token))
+                                    if call_resp.status_code == 200:
+                                        c_data = call_resp.json()
+                                        c_status = c_data.get("status", "").lower()
+                                        c_dur = c_data.get("duration")
+                                        if c_status in ("completed", "canceled", "failed", "busy", "no-answer"):
+                                            sess.status = "failed"
+                                            if sess.evaluation_status != "recording_start_failed":
+                                                sess.evaluation_status = "failed"
+                                            if not sess.ended_at:
+                                                sess.ended_at = now_utc
+                                            await db.commit()
+                                            reconciled.append({
+                                                "session_id": sess.session_id,
+                                                "call_sid": call_sid,
+                                                "reason": f"marked_failed_twilio_{c_status}"
+                                            })
+                                            continue
+                                except Exception as e_call:
+                                    logger.warning("Failed to check Twilio call status for %s: %s", call_sid, e_call)
+
+                            failed.append({
+                                "session_id": sess.session_id,
+                                "call_sid": call_sid,
+                                "reason": "No completed recording found on Twilio for this call yet."
+                            })
                     else:
                         failed.append({
                             "session_id": sess.session_id,
                             "call_sid": call_sid,
-                            "reason": "No completed recording found on Twilio for this call yet."
+                            "reason": f"Twilio API returned status {response.status_code}: {response.text}"
                         })
-                else:
+                except Exception as e:
                     failed.append({
                         "session_id": sess.session_id,
                         "call_sid": call_sid,
-                        "reason": f"Twilio API returned status {response.status_code}: {response.text}"
+                        "reason": f"Error querying Twilio API: {str(e)}"
                     })
-            except Exception as e:
-                failed.append({
-                    "session_id": sess.session_id,
-                    "call_sid": call_sid,
-                    "reason": f"Error querying Twilio API: {str(e)}"
-                })
-                
+
     return {
         "status": "ok",
         "reconciled_count": len(reconciled),
         "failed_count": len(failed),
         "reconciled": reconciled,
         "failed": failed
+    }
+
+
+@router.post("/sessions/{session_id}/retry-evaluation")
+async def retry_trainer_session_evaluation(
+    session_id: int,
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-trigger evaluation for an existing Trainer session (scoped by tenant and agent permissions)."""
+    stmt = select(TrainerSession).where(TrainerSession.session_id == session_id)
+    res = await db.execute(stmt)
+    sess = res.scalars().first()
+    if not sess:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No se encontró la sesión de entrenamiento {session_id}."
+        )
+
+    # Permission check: Agent can only retry their own session
+    if context.normalized_role == InternalRole.AGENT:
+        if not context.allowed_agent_ids or sess.agent_id not in context.allowed_agent_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes permisos para reintentar la evaluación de este agente."
+            )
+    else:
+        # Non-superadmin scope check
+        if not context.is_super_admin:
+            if context.allowed_agent_ids is not None and sess.agent_id not in context.allowed_agent_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="No tienes permisos para acceder a las sesiones de este agente."
+                )
+            if context.allowed_service_ids is not None and sess.service_id not in context.allowed_service_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="No tienes permisos para el servicio de esta sesión."
+                )
+
+    if not sess.recording_url and not sess.transcript:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La sesión no dispone de grabación ni de transcripción para ser evaluada."
+        )
+
+    if sess.evaluation_status == "running":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="La evaluación de esta sesión ya se está ejecutando actualmente."
+        )
+
+    if sess.evaluation_status == "evaluation_pending":
+        now = datetime.now(timezone.utc)
+        if sess.updated_at and (now - sess.updated_at).total_seconds() < 120:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="La evaluación de esta sesión ya está en cola de procesamiento."
+            )
+
+    sess.status = "completed"
+    sess.evaluation_status = "completed_waiting_recording"
+    if not sess.ended_at:
+        sess.ended_at = datetime.now(timezone.utc)
+    sess.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(sess)
+
+    await check_and_trigger_evaluation(db, session_id)
+    return {
+        "status": "ok",
+        "message": f"Evaluación relanzada correctamente para la sesión {session_id}.",
+        "session_id": session_id,
+        "evaluation_status": "evaluation_pending"
     }
 
 
@@ -739,7 +962,6 @@ async def handle_roleplay_hangup(
                 session.status = "failed"
                 if session.evaluation_status != "recording_start_failed":
                     session.evaluation_status = "failed"
-                session.error_message = f"Call hung up too early. Duration: {int(duration_seconds)}s. Reason: {reason}."
                 session.ended_at = datetime.now(timezone.utc)
                 logger.warning(
                     "Trainer session %d marked as failed because duration was too short (%ds)",
@@ -785,6 +1007,8 @@ async def media_stream(
     call_sid = None
     call_active = True
     call_start_time = None
+    redirected = False
+    monitor_task = None
     
     # If parameters not provided in query params, wait for start event from Twilio
     if flow is None and session_id is None:
@@ -1585,12 +1809,31 @@ async def media_stream(
                         break
 
             # Run loops concurrently
-            await asyncio.gather(
-                twilio_to_gemini_loop(),
-                gemini_to_twilio_loop(),
-                barge_in_watchdog_loop()
-            )
-            
+            tw_task = asyncio.create_task(twilio_to_gemini_loop())
+            gem_task = asyncio.create_task(gemini_to_twilio_loop())
+            barge_task = asyncio.create_task(barge_in_watchdog_loop())
+
+            try:
+                while not tw_task.done():
+                    done, _ = await asyncio.wait(
+                        [tw_task, gem_task],
+                        return_when=asyncio.FIRST_COMPLETED
+                    )
+                    for t in done:
+                        if t.exception():
+                            t.result()
+                    if tw_task.done():
+                        break
+                    if gem_task.done():
+                        await tw_task
+                        break
+            finally:
+                call_active = False
+                for t in [tw_task, gem_task, barge_task]:
+                    if not t.done():
+                        t.cancel()
+                await asyncio.gather(tw_task, gem_task, barge_task, return_exceptions=True)
+
             # Cancel monitor task if running
             if monitor_task:
                 monitor_task.cancel()
@@ -1604,6 +1847,7 @@ async def media_stream(
         else:
             logger.error("Error in media_stream websocket: %s", e)
     finally:
+        call_active = False
         # Cancel monitor task if running
         try:
             if 'monitor_task' in locals() and monitor_task:
@@ -1611,13 +1855,16 @@ async def media_stream(
         except Exception:
             pass
         if not websocket.client_state.name == "DISCONNECTED":
-            await websocket.close()
-            
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+
         # Finalize session if websocket closed and not redirected
-        if session_id is not None and 'redirected' in locals() and not redirected:
+        if session_id is not None and not redirected:
             try:
                 await handle_roleplay_hangup(session_id, call_sid, call_start_time, "websocket_close")
             except Exception as e_hang:
                 logger.error("Error finalizing session in hangup finally: %s", e_hang)
-                
+
         logger.info("Media stream cleanup completed.")
