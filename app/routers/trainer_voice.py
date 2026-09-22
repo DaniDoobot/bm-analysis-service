@@ -421,7 +421,6 @@ async def start_roleplay(
 
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
-        <Say language="es-ES">Código de simulación correcto. Comenzamos.</Say>
         <Connect>
             <Stream url="{ws_url_escaped}">
                 <Parameter name="session_id" value="{session.session_id}" />
@@ -1631,16 +1630,20 @@ async def media_stream(
                             logger.info("Gemini Live Live API setup complete.")
                             gemini_ready = True
                             
-                            # Initial start message: begin in-character immediately
+                            # Initial start message: begin with confirmation and in-character immediately
                             if session_id is not None:
                                 if not initial_roleplay_prompt_sent:
                                     initial_roleplay_prompt_sent = True
                                     logger.info("Trainer roleplay initial in-character prompt sent.")
+                                    initial_prompt_text = (
+                                        "Di exactamente: 'Código de simulación correcto. Comenzamos.' "
+                                        f"y a continuación, sin pausar ni esperar respuesta, inicia la llamada interpretando exclusivamente a tu personaje de {interlocutor_role.lower()} diciendo tu primera frase breve."
+                                    )
                                     start_msg = {
                                         "clientContent": {
                                             "turns": [{
                                                 "role": "user",
-                                                "parts": [{"text": f"El agente ya está conectado al teléfono. Inicia la llamada interpretando exclusivamente a tu personaje de {interlocutor_role.lower()} diciendo tu primera frase breve."}]
+                                                "parts": [{"text": initial_prompt_text}]
                                             }],
                                             "turnComplete": True
                                         }
