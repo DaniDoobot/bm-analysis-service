@@ -1214,8 +1214,8 @@ class TestTrainerVoiceBargeInRecovery(unittest.IsolatedAsyncioTestCase):
             })
             # Wait for assistant to start speaking
             await asyncio.sleep(0.2)
-            # 2. Yield 10 media events (total 200ms > 160ms VAD threshold)
-            for _ in range(10):
+            # 2. Yield 15 media events (total 300ms >= 260ms sustained barge-in threshold)
+            for _ in range(15):
                 yield json.dumps({
                     "event": "media",
                     "media": {
@@ -1234,8 +1234,8 @@ class TestTrainerVoiceBargeInRecovery(unittest.IsolatedAsyncioTestCase):
                     }
                 })
                 await asyncio.sleep(0.02)
-            # Sleep long enough for watchdog loop to detect 1.5s of silence and nudge Gemini
-            await asyncio.sleep(1.8)
+            # Sleep long enough for recovery window
+            await asyncio.sleep(2.1)
             # 3. Stop event
             yield json.dumps({"event": "stop"})
             
@@ -1269,8 +1269,8 @@ class TestTrainerVoiceBargeInRecovery(unittest.IsolatedAsyncioTestCase):
         mock_connect = AsyncMock()
         mock_connect.__aenter__.return_value = mock_gemini_ws
         
-        # We want first 10 frames to have energy 500 (voice), then 40 frames to have energy 10 (silence)
-        energy_values = [500.0] * 10 + [10.0] * 100
+        # 15 frames with energy 500 (voice), then 40 frames with energy 10 (silence)
+        energy_values = [500.0] * 15 + [10.0] * 100
         energy_iter = iter(energy_values)
         def mock_calculate_energy(*args, **kwargs):
             try:
@@ -1296,7 +1296,7 @@ class TestTrainerVoiceBargeInRecovery(unittest.IsolatedAsyncioTestCase):
                 clear_sent = True
         self.assertTrue(clear_sent)
         
-        # Verify nudge was sent to Gemini
+        # Verify NO synthetic user nudge was sent during roleplay that pollutes conversation
         nudge_sent = False
         for call in mock_gemini_ws.send.call_args_list:
             payload = json.loads(call[0][0])
@@ -1306,7 +1306,7 @@ class TestTrainerVoiceBargeInRecovery(unittest.IsolatedAsyncioTestCase):
                     for part in turn.get("parts", []):
                         if "el roleplay respondiendo al" in part.get("text", ""):
                             nudge_sent = True
-        self.assertTrue(nudge_sent)
+        self.assertFalse(nudge_sent, "Watchdog must not inject synthetic user text turns during roleplay")
 
 
 class TestTrainerVoiceGracefulHangup(unittest.IsolatedAsyncioTestCase):

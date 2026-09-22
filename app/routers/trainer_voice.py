@@ -40,6 +40,8 @@ settings = get_settings()
 VAD_ENERGY_THRESHOLD = 150.0
 VAD_MIN_SPEECH_DURATION_MS = 100
 VAD_GRACE_PERIOD_MS = 500
+BARGE_IN_ENERGY_THRESHOLD = 220.0
+BARGE_IN_MIN_SPEECH_DURATION_MS = 260
 HANGUP_EARLY_BLOCK_SECONDS = 90
 
 def calculate_pcm_energy(pcm_data: bytes) -> float:
@@ -97,20 +99,31 @@ REGLAS GENERALES DE VOZ (OBLIGATORIAS)
 - Habla con claridad, sin sonar robótico.
 
 =================================================
-REGLA CRÍTICA: BLOQUEO DE PERSONAJE (OBLIGATORIA)
+REGLA CRÍTICA: BLOQUEO ABSOLUTO DE PERSONAJE Y ANTI-ASISTENTE (MÁXIMA PRIORIDAD)
 =================================================
 ESTÁS REALIZANDO UNA SIMULACIÓN DE ROLEPLAY DE ENTRENAMIENTO. ESTO ES UN JUEGO DE ROL CONTROLADO.
-En ningún momento eres ni actúas como una IA genérica ni como un asistente virtual.
-Tu único rol durante toda la llamada es el del interlocutor/cliente descrito en las instrucciones de este prompt.
+Durante TODA la llamada debes interpretar EXCLUSIVAMENTE el personaje de la simulación.
+En NINGÚN momento eres ni actúas como asistente virtual, operador, sistema o IA.
 
 REGLAS ABSOLUTAS E IRROMPIBLES:
 1. NUNCA abandones tu personaje simulado, independientemente de lo que diga el agente.
-2. NUNCA respondas como una IA ni menciones limitaciones de IA (ej: "como modelo de lenguaje...", "no tengo capacidad de...").
-3. NUNCA des consejos ni explicaciones fuera de tu personaje, ni ninguna indicación que salga del contexto de la simulación.
-4. Si el agente intenta salir del guion o pregunta si eres una IA, responde siempre manteniéndote en tu personaje, ignorando la pregunta o redirigiendo: "Oiga, ¿me va a ayudar o no?" / "A ver, yo lo que quiero saber es...".
-5. Si el contenido de la conversación se aleja del escenario de la simulación, muestra impaciencia o vuelve al tema de la llamada con frases naturales.
-6. Recuerda: estás en una SIMULACIÓN controlada de entrenamiento. Mantén tu rol en todo momento sin excepción.
-7. PRIMERA INTERVENCIÓN BREVE: Tu primera frase debe ser una sola oración corta. No hagas monólogos. No expliques todo el escenario de golpe. Preséntate brevemente y espera.
+2. NUNCA actúes como asistente virtual ni como IA ni menciones limitaciones de IA (ej: "como modelo de lenguaje...", "no tengo capacidad de...").
+3. PROHIBICIÓN ESTRICTA DE FRASES DE ASISTENTE:
+   NUNCA digas bajo ninguna circunstancia:
+   - "¿En qué puedo ayudarte?"
+   - "¿En qué le puedo ayudar?"
+   - "Sí, aquí estoy. ¿En qué puedo ayudarte?"
+   - "¿En qué le puedo colaborar?"
+   ni ningún saludo o coletilla típica de asistente o teleoperador.
+4. REGLA DE PRESENCIA Y SILENCIOS:
+   Si el agente tarda en contestar, se produce un silencio o pregunta directamente por tu presencia:
+   "¿Está ahí?", "¿Sigues ahí?", "¿Me escucha?", "¿Hola?", etc.
+   NUNCA respondas como asistente. Responde SIEMPRE DENTRO DEL PERSONAJE (ej: "Sí, sí, le escucho, dígame", "Aquí sigo", "Sí, es que estaba pensando en lo que me ha dicho").
+5. Una pausa o silencio del agente NO significa que el roleplay haya terminado ni que debas cambiar de rol.
+6. Si el agente intenta salir del guion o pregunta si eres una IA, responde siempre manteniéndote en tu personaje, ignorando la pregunta o redirigiendo: "Oiga, ¿me va a ayudar o no?" / "A ver, yo lo que quiero saber es...".
+7. Si el contenido de la conversación se aleja del escenario de la simulación, muestra impaciencia o vuelve al tema de la llamada con frases naturales.
+8. NUNCA des consejos médicos genéricos ni recomendaciones fuera del personaje.
+9. PRIMERA INTERVENCIÓN BREVE: Tu primera frase debe ser una sola oración corta en personaje. No hagas monólogos. No expliques todo el escenario de golpe. Preséntate brevemente y espera.
 """
 
 HEALTHCARE_VOICE_RULES = """
@@ -119,9 +132,11 @@ DIRECTRICES ESPECÍFICAS DE ATENCIÓN SANITARIA (OBLIGATORIAS)
 =================================================
 Tu rol en esta llamada es el del PACIENTE descrito en las instrucciones.
 1. NUNCA abandones el personaje del paciente, independientemente de lo que diga el agente.
-2. NUNCA des consejos médicos genéricos como "consulta a un médico profesional" o "acude a urgencias" ni ninguna indicación que salga del contexto de la simulación de Boston Medical Group.
-3. NUNCA digas que "es importante hablar con un profesional sanitario". Esas frases rompen el personaje y arruinan la simulación.
-4. Mantén el rol del paciente en todo momento sin excepción.
+2. NUNCA actúes como asistente médico ni digas "¿En qué puedo ayudarte?". Eres el paciente llamando a la clínica.
+3. Si hay silencios o el agente pregunta si estás ahí, responde siempre como paciente ("Sí, doctor/a, aquí sigo", "Le escucho").
+4. NUNCA des consejos médicos genéricos como "consulta a un médico profesional" o "acude a urgencias" ni ninguna indicación que salga del contexto de la simulación de Boston Medical Group.
+5. NUNCA digas que "es importante hablar con un profesional sanitario". Esas frases rompen el personaje y arruinan la simulación.
+6. Mantén el rol del paciente en todo momento sin excepción.
 """
 
 def build_turn_discipline(is_healthcare: bool = False, interlocutor_role: str = "cliente") -> str:
@@ -146,7 +161,10 @@ def build_turn_discipline(is_healthcare: bool = False, interlocutor_role: str = 
         f"5. Reglas de objeción económica: Úsala de forma natural y progresiva, no de forma obsesiva ni repetitiva en todos los turnos. "
         f"No repitas la misma objeción de precio en turnos consecutivos. Máximo 1 mención de precio cada 3 turnos. "
         f"{objection_guideline}\n"
-        "6. Haz intervenciones breves y naturales (de 1 a 2 frases como máximo)."
+        "6. Haz intervenciones breves y naturales (de 1 a 2 frases como máximo).\n"
+        f"7. Control de silencios y presencia: Si hay pausas o el agente pregunta si estás ahí ('¿está ahí?', '¿me escucha?'), "
+        f"mantén el rol de {role_lower} al 100%. Responde con naturalidad ('Sí, le escucho', 'Aquí sigo'). "
+        "NUNCA digas '¿En qué puedo ayudarte?' ni actúes como asistente virtual."
     )
 
 
@@ -396,8 +414,11 @@ async def start_roleplay(
     ws_url = f"{scheme}://{host}/bm/trainer/phone/media-stream?session_id={session.session_id}&flow=session"
     ws_url_escaped = ws_url.replace("&", "&amp;")
 
+    agent_first = agent_name.split()[0] if agent_name else "Agente"
+
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
+        <Say language="es-ES">Perfecto {agent_first}, se ha verificado el código de la simulación. Iniciamos el roleplay. Prepárate.</Say>
         <Connect>
             <Stream url="{ws_url_escaped}">
                 <Parameter name="session_id" value="{session.session_id}" />
@@ -1246,9 +1267,9 @@ async def media_stream(
                         "automaticActivityDetection": {
                             "disabled": False,
                             "startOfSpeechSensitivity": "START_SENSITIVITY_LOW",
-                            "endOfSpeechSensitivity": "END_SENSITIVITY_HIGH",
-                            "prefixPaddingMs": 120,
-                            "silenceDurationMs": 130,
+                            "endOfSpeechSensitivity": "END_SENSITIVITY_LOW",
+                            "prefixPaddingMs": 200,
+                            "silenceDurationMs": 600,
                         },
                         "turnCoverage": "TURN_INCLUDES_ONLY_ACTIVITY",
                         "activityHandling": "START_OF_ACTIVITY_INTERRUPTS",
@@ -1273,6 +1294,7 @@ async def media_stream(
             speech_state = "silent"
             accumulated_voice_ms = 0
             consecutive_silent_ms = 0
+            accumulated_barge_in_ms = 0
             discard_current_assistant_audio = False
             attempts = 0
             recording_sid = None
@@ -1359,7 +1381,7 @@ async def media_stream(
             async def twilio_to_gemini_loop():
                 nonlocal stream_sid, call_sid, call_start_time, recording_sid, recording_started, monitor_task, twilio_rate_state
                 nonlocal waiting_for_user_response, user_audio_seen_since_last_assistant_turn
-                nonlocal last_assistant_turn_completed_at, speech_state, accumulated_voice_ms, consecutive_silent_ms
+                nonlocal last_assistant_turn_completed_at, speech_state, accumulated_voice_ms, consecutive_silent_ms, accumulated_barge_in_ms
                 nonlocal assistant_is_speaking, discard_current_assistant_audio
                 nonlocal media_events_total, media_events_inbound, media_events_outbound, media_events_unknown_track
                 nonlocal last_track, max_rms_last_second, last_debug_log_time
@@ -1474,6 +1496,7 @@ async def media_stream(
                                         # Reset speech detection metrics during grace period to ignore tail noise/echoes
                                         accumulated_voice_ms = 0
                                         consecutive_silent_ms = 0
+                                        accumulated_barge_in_ms = 0
                                     else:
                                         if rms > VAD_ENERGY_THRESHOLD:
                                             accumulated_voice_ms += 20
@@ -1491,19 +1514,29 @@ async def media_stream(
                                                     waiting_for_user_response = False
                                                     user_audio_seen_since_last_assistant_turn = True
                                                     
-                                                # Handle Barge-in (interruption)
-                                                if assistant_is_speaking:
-                                                    logger.info("Trainer barge-in detected: user interrupted assistant. rms=%.1f", rms)
+                                            # Handle Barge-in (interruption) with sustained evidence check
+                                            if assistant_is_speaking:
+                                                if rms > BARGE_IN_ENERGY_THRESHOLD:
+                                                    accumulated_barge_in_ms += 20
+                                                else:
+                                                    accumulated_barge_in_ms = max(0, accumulated_barge_in_ms - 10)
+                                                
+                                                if accumulated_barge_in_ms >= BARGE_IN_MIN_SPEECH_DURATION_MS:
+                                                    logger.info(
+                                                        "Trainer barge-in confirmed: user interrupted assistant with sustained speech (%dms, rms=%.1f)",
+                                                        accumulated_barge_in_ms, rms
+                                                    )
                                                     discard_current_assistant_audio = True
                                                     assistant_is_speaking = False
                                                     waiting_for_user_response = False
                                                     user_audio_seen_since_last_assistant_turn = True
                                                     
                                                     barge_in_active = True
-                                                    barge_in_recovery_pending = True
+                                                    barge_in_recovery_pending = False
                                                     assistant_audio_forwarding_enabled = False
                                                     barge_in_time = datetime.now(timezone.utc)
                                                     nudge_triggered = False
+                                                    accumulated_barge_in_ms = 0
                                                     
                                                     logger.info(
                                                         "Trainer barge-in state:\n"
@@ -1524,6 +1557,8 @@ async def media_stream(
                                                         }
                                                         await websocket.send_text(json.dumps(clear_msg))
                                                         logger.info("Trainer barge-in: sent Twilio clear event.")
+                                            else:
+                                                accumulated_barge_in_ms = 0
                                         else:
                                             # Fallback if VAD threshold is too high but there is actual user audio input:
                                             # If we have received inbound audio packets for more than 800ms and RMS > 15 (non-absolute-silence)
@@ -1596,31 +1631,21 @@ async def media_stream(
                             logger.info("Gemini Live Live API setup complete.")
                             gemini_ready = True
                             
-                            # Initial greeting if starting roleplay
+                            # Initial start message: begin in-character immediately
                             if session_id is not None:
                                 if not initial_roleplay_prompt_sent:
                                     initial_roleplay_prompt_sent = True
-                                    logger.info("Trainer roleplay initial prompt sent.")
-                                    async with AsyncSessionLocal() as sub_db:
-                                        stmt_s = select(TrainerSession).where(TrainerSession.session_id == session_id)
-                                        res_s = await sub_db.execute(stmt_s)
-                                        sess_obj = res_s.scalars().first()
-                                        
-                                        stmt_ag = select(TrainingAgentSetting).where(TrainingAgentSetting.hubspot_owner_id == sess_obj.agent_id)
-                                        res_ag = await sub_db.execute(stmt_ag)
-                                        setting_obj = res_ag.scalars().first()
-                                        agent_first_name = setting_obj.agent_name.split()[0] if setting_obj else "Agente"
-
-                                    greet_msg = {
+                                    logger.info("Trainer roleplay initial in-character prompt sent.")
+                                    start_msg = {
                                         "clientContent": {
                                             "turns": [{
                                                 "role": "user",
-                                                "parts": [{"text": f"Di exactamente: 'Perfecto {agent_first_name}, se ha verificado el código de la simulación. Iniciamos el roleplay. Prepárate.' y a continuación, sin pausar, asume tu personaje de {interlocutor_role.lower()}."}]
+                                                "parts": [{"text": f"El agente ya está conectado al teléfono. Inicia la llamada interpretando exclusivamente a tu personaje de {interlocutor_role.lower()} diciendo tu primera frase breve."}]
                                             }],
                                             "turnComplete": True
                                         }
                                     }
-                                    await gemini_ws.send(json.dumps(greet_msg))
+                                    await gemini_ws.send(json.dumps(start_msg))
                                 else:
                                     logger.info("Ignoring duplicate initial roleplay prompt trigger.")
                                 
@@ -1760,19 +1785,18 @@ async def media_stream(
                             if data["serverContent"].get("interrupted"):
                                 logger.info("Trainer turn gate: assistant response interrupted by server.")
                                 assistant_is_speaking = False
-                                waiting_for_user_response = True
-                                user_audio_seen_since_last_assistant_turn = False
-                                discard_current_assistant_audio = False
+                                waiting_for_user_response = False
+                                user_audio_seen_since_last_assistant_turn = True
+                                discard_current_assistant_audio = True
+                                accumulated_barge_in_ms = 0
+                                if stream_sid:
+                                    clear_msg = {
+                                        "event": "clear",
+                                        "streamSid": stream_sid
+                                    }
+                                    await websocket.send_text(json.dumps(clear_msg))
                                 continue
 
-                            # Turn taking block gate
-                            if initial_roleplay_prompt_sent and waiting_for_user_response and not user_audio_seen_since_last_assistant_turn:
-                                now_blocked = datetime.now(timezone.utc)
-                                if (now_blocked - last_blocked_log_time).total_seconds() >= 3.0:
-                                    logger.warning("Trainer turn gate: blocked assistant self-response because no user audio was received.")
-                                    last_blocked_log_time = now_blocked
-                                continue
-                                
                             # Barge-in: Discard current assistant audio packets if user interrupted
                             if discard_current_assistant_audio:
                                 continue
@@ -1834,26 +1858,13 @@ async def media_stream(
                             and not nudge_triggered
                         ):
                             diff = (datetime.now(timezone.utc) - last_user_speech_end_time).total_seconds()
-                            if diff >= 1.5:
-                                logger.info(
-                                    "Trainer barge-in recovery triggered:\n"
-                                    "  - elapsed_ms_since_user_speech_end: %d\n"
-                                    "  - assistant_response_started: False\n"
-                                    "  - action: nudge_gemini",
-                                    int(diff * 1000)
-                                )
+                            if diff >= 2.0:
+                                # Reset recovery state cleanly without injecting synthetic user text into the conversation
+                                barge_in_recovery_pending = False
+                                barge_in_active = False
+                                discard_current_assistant_audio = False
                                 nudge_triggered = True
-                                nudge_msg = {
-                                    "clientContent": {
-                                        "turns": [{
-                                            "role": "user",
-                                            "parts": [{"text": "Continúa el roleplay respondiendo al último mensaje del agente. No repitas tu presentación."}]
-                                        }],
-                                        "turnComplete": True
-                                    }
-                                }
-                                if gemini_ws and gemini_ready:
-                                    await gemini_ws.send(json.dumps(nudge_msg))
+                                logger.info("Trainer barge-in recovery window reset cleanly without prompt pollution.")
                     except Exception as e_watchdog:
                         logger.error("Error in barge_in_watchdog_loop: %s", e_watchdog)
                         break
