@@ -205,6 +205,26 @@ async def init_db():
             await conn.run_sync(Base.metadata.create_all)
             logger.info("Database tables initialized successfully.")
 
+        # 1.b Ensure bm_training_knowledge_documents and its partial unique indexes exist (v018)
+        if engine.dialect.name != "sqlite":
+            import os
+            v018_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                "migrations",
+                "v018_training_knowledge_documents.sql"
+            )
+            if os.path.exists(v018_path):
+                try:
+                    async with engine.begin() as conn:
+                        with open(v018_path, "r", encoding="utf-8") as mf:
+                            sql_content = mf.read()
+                        statements = [stmt.strip() for stmt in sql_content.split(";") if stmt.strip()]
+                        for stmt in statements:
+                            await conn.execute(text(stmt))
+                        logger.info("Migration v018_training_knowledge_documents verified/applied successfully.")
+                except Exception as e_v018:
+                    logger.warning("Could not apply v018_training_knowledge_documents script directly: %s", e_v018)
+
         # Early dynamic column migration for bm_users to avoid ProgrammingError on User model queries
         async with engine.begin() as conn:
             for col_name, col_type in [

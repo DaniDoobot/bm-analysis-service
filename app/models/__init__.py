@@ -19,6 +19,7 @@ from app.models.personalized_training import (
     TrainingCallSession,
     TrainingEvaluationPrompt,
     TrainingCallEvaluation,
+    TrainingKnowledgeDocument,
 )
 from app.models.trainer import (
     TrainerEvaluationConfig,
@@ -71,6 +72,7 @@ __all__ = [
     "TrainingCallSession",
     "TrainingEvaluationPrompt",
     "TrainingCallEvaluation",
+    "TrainingKnowledgeDocument",
     "TrainerEvaluationConfig",
     "TrainerSimulation",
     "TrainerSimulationVersion",

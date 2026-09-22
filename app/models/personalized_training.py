@@ -13,6 +13,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -416,3 +417,21 @@ class TrainingKnowledgeDocument(Base):
     cycle = relationship("TrainingAgentReport")
     simulation = relationship("TrainingSimulationPrompt")
     evaluation = relationship("TrainingCallEvaluation")
+
+    __table_args__ = (
+        Index(
+            "uq_bm_knowledge_docs_simulation",
+            "cycle_id",
+            "simulation_id",
+            "document_type",
+            unique=True,
+            postgresql_where=text("simulation_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_bm_knowledge_docs_cycle",
+            "cycle_id",
+            "document_type",
+            unique=True,
+            postgresql_where=text("simulation_id IS NULL"),
+        ),
+    )

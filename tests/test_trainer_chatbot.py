@@ -561,6 +561,58 @@ class TestTrainerChatbot(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("vector", source.lower())
         self.assertNotIn("embedding", source.lower())
 
+    def test_training_knowledge_documents_registered_in_app_models_metadata(self):
+        """15. Verifica que TrainingKnowledgeDocument está registrado en app.models y en Base.metadata.tables con todas sus columnas."""
+        import app.models
+        self.assertIn("TrainingKnowledgeDocument", app.models.__all__)
+        self.assertTrue(hasattr(app.models, "TrainingKnowledgeDocument"))
+        self.assertIn("bm_training_knowledge_documents", Base.metadata.tables)
+
+        table = Base.metadata.tables["bm_training_knowledge_documents"]
+        expected_cols = {
+            "id", "company_id", "hubspot_owner_id", "service_id", "team_id",
+            "cycle_id", "simulation_id", "evaluation_id", "document_type",
+            "title", "content", "metadata_json", "created_at", "updated_at"
+        }
+        actual_cols = {col.name for col in table.columns}
+        self.assertTrue(expected_cols.issubset(actual_cols), f"Missing columns: {expected_cols - actual_cols}")
+
+    async def test_chat_queries_knowledge_documents_without_undefined_table_error(self):
+        """16. Verifica que el endpoint /bm/trainer/chat ejecuta la consulta contra bm_training_knowledge_documents sin lanzar UndefinedTableError para demo_owner_11."""
+        async def override_get_db():
+            async with self.session_maker() as session:
+                yield session
+
+        user = User(user_id=11, email="agente.demo.11@doobot.ai", role="agent", hubspot_owner_id="demo_owner_11", company_id=7)
+        context = TenantContext(
+            user_id=11,
+            user_email="agente.demo.11@doobot.ai",
+            raw_role="agent",
+            normalized_role=InternalRole.AGENT,
+            is_super_admin=False,
+            company_id=7,
+            allowed_company_ids=[7],
+            allowed_agent_ids=["demo_owner_11"],
+        )
+
+        app.dependency_overrides[get_db] = override_get_db
+        app.dependency_overrides[get_current_user] = lambda: user
+        app.dependency_overrides[get_tenant_context] = lambda: context
+
+        with patch("app.services.openai_service.complete_text", new_callable=AsyncMock) as mock_complete:
+            mock_complete.return_value = "Hola agente demo 11, estoy aquí para ayudarte con tu entrenamiento."
+
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                res = await client.post(
+                    "/bm/trainer/chat",
+                    json={"message": "¿Cuál es mi progreso en las simulaciones?"}
+                )
+
+                self.assertEqual(res.status_code, 200)
+                data = res.json()
+                self.assertEqual(data["input_type"], "text")
+                self.assertIn("Hola agente demo 11", data["response"])
+
 
 if __name__ == "__main__":
     unittest.main()
