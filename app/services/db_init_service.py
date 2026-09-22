@@ -200,10 +200,14 @@ async def init_db():
         
         # 1. Create all missing tables unconditionally via Base.metadata.create_all
         # SQLAlchemy is native, safe, and idempotent. It only creates tables that do not yet exist.
-        async with engine.begin() as conn:
-            logger.info("Initializing database tables via SQLAlchemy metadata (unconditional & safe)...")
-            await conn.run_sync(Base.metadata.create_all)
-            logger.info("Database tables initialized successfully.")
+        try:
+            async with engine.begin() as conn:
+                logger.info("Initializing database tables via SQLAlchemy metadata (unconditional & safe)...")
+                await conn.run_sync(Base.metadata.create_all)
+                logger.info("Database tables initialized successfully.")
+        except Exception as e_create:
+            logger.error("[DB INIT] CRITICAL: Base.metadata.create_all failed: %s", e_create, exc_info=True)
+            raise e_create
 
         # 1.b Ensure bm_training_knowledge_documents and its partial unique indexes exist (v018)
         if engine.dialect.name != "sqlite":
@@ -224,6 +228,17 @@ async def init_db():
                         logger.info("Migration v018_training_knowledge_documents verified/applied successfully.")
                 except Exception as e_v018:
                     logger.warning("Could not apply v018_training_knowledge_documents script directly: %s", e_v018)
+
+        # 1.c Verify that bm_training_knowledge_documents table exists
+        async with engine.begin() as conn:
+            from sqlalchemy import inspect
+            has_knowledge_table = await conn.run_sync(
+                lambda sync_conn: inspect(sync_conn).has_table("bm_training_knowledge_documents")
+            )
+            if not has_knowledge_table:
+                logger.error("[DB INIT] CRITICAL: Table 'bm_training_knowledge_documents' does not exist after create_all!")
+                raise RuntimeError("Table 'bm_training_knowledge_documents' failed to initialize.")
+            logger.info("[DB INIT] Verified table 'bm_training_knowledge_documents' is present.")
 
         # Early dynamic column migration for bm_users to avoid ProgrammingError on User model queries
         async with engine.begin() as conn:

@@ -613,6 +613,25 @@ class TestTrainerChatbot(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(data["input_type"], "text")
                 self.assertIn("Hola agente demo 11", data["response"])
 
+    def test_metadata_json_server_default_compiles_valid_postgresql_ddl(self):
+        """17. Verifica que metadata_json genera DEFAULT '{}'::jsonb en PostgreSQL DDL y no una cadena con comillas duplicadas."""
+        from sqlalchemy.dialects import postgresql
+        from sqlalchemy.schema import CreateTable
+        from app.models.personalized_training import TrainingKnowledgeDocument
+
+        table = TrainingKnowledgeDocument.__table__
+        ddl = str(CreateTable(table).compile(dialect=postgresql.dialect()))
+
+        # Debe compilar con sintaxis válida DEFAULT '{}'::jsonb
+        self.assertIn("DEFAULT '{}'::jsonb", ddl, f"DDL did not contain expected DEFAULT: {ddl}")
+        # NO debe contener el error de comillas anidadas/escapadas
+        self.assertNotIn("'''{}''::jsonb'", ddl, f"DDL contains invalid quoted default: {ddl}")
+
+        # Comprobar la columna en el modelo
+        col = table.c.metadata_json
+        self.assertFalse(col.nullable)
+        self.assertIsNotNone(col.server_default)
+
 
 if __name__ == "__main__":
     unittest.main()

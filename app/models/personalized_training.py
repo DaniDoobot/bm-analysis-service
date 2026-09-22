@@ -16,7 +16,9 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.sql.expression import FunctionElement
 
 from app.db import Base
 
@@ -374,6 +376,25 @@ class TrainingCallEvaluation(Base):
     prompt_version = relationship("TrainingEvaluationPrompt")
 
 
+class default_empty_json(FunctionElement):
+    name = "default_empty_json"
+
+
+@compiles(default_empty_json, "postgresql")
+def _default_empty_json_pg(element, compiler, **kw):
+    return "'{}'::jsonb"
+
+
+@compiles(default_empty_json, "sqlite")
+def _default_empty_json_sqlite(element, compiler, **kw):
+    return "'{}'"
+
+
+@compiles(default_empty_json)
+def _default_empty_json_default(element, compiler, **kw):
+    return "'{}'::jsonb"
+
+
 class TrainingKnowledgeDocument(Base):
     __tablename__ = "bm_training_knowledge_documents"
 
@@ -401,7 +422,7 @@ class TrainingKnowledgeDocument(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, default=dict, server_default="'{}'::jsonb", nullable=False
+        JSONB, default=dict, server_default=default_empty_json(), nullable=False
     )
 
     created_at: Mapped[datetime] = mapped_column(
