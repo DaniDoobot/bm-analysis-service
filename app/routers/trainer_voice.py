@@ -421,6 +421,7 @@ async def start_roleplay(
 
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
+        <Say language="es-ES">Código de simulación correcto. Comenzamos.</Say>
         <Connect>
             <Stream url="{ws_url_escaped}">
                 <Parameter name="session_id" value="{session.session_id}" />

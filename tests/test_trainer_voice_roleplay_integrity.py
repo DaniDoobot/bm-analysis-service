@@ -150,8 +150,8 @@ class TestTrainerVoiceRoleplayIntegrity(unittest.IsolatedAsyncioTestCase):
         self.assertIn("NUNCA digas 'Sí, aquí estoy. ¿En qué puedo ayudarte?'", discipline)
 
     @patch("app.routers.trainer_voice.TrainerService.start_phone_session", new_callable=AsyncMock)
-    async def test_3_start_roleplay_twiml_connects_immediately_without_spoken_greeting(self, mock_start_session):
-        """start_roleplay endpoint must directly connect to <Stream> without any spoken <Say> confirmation."""
+    async def test_3_start_roleplay_twiml_brief_technical_confirmation_before_stream(self, mock_start_session):
+        """start_roleplay endpoint must render exactly one brief technical confirmation via Twilio <Say> before connecting <Stream>."""
         mock_db = AsyncMock()
         mock_setting = MagicMock(agent_name="Laura Martinez", training_code="LM01")
         mock_sim = MagicMock(simulation_id=5, code="SIM05")
@@ -176,15 +176,27 @@ class TestTrainerVoiceRoleplayIntegrity(unittest.IsolatedAsyncioTestCase):
         )
         content = response.body.decode("utf-8")
 
-        # Must NOT include <Say> with verification or greeting
-        self.assertNotIn("<Say", content, "<Say> element must be eliminated to ensure silent stream connection")
-        # Must include <Stream>
+        # 1. Exactly one Twilio confirmation before stream
+        self.assertEqual(content.count("<Say"), 1, "Must contain exactly one <Say> confirmation before stream")
+        say_idx = content.find("<Say")
+        stream_idx = content.find("<Stream")
+        self.assertTrue(0 <= say_idx < stream_idx, "<Say> must appear before <Stream>")
+        self.assertIn("<Say language=\"es-ES\">Código de simulación correcto. Comenzamos.</Say>", content)
+
+        # 2. Must NOT contain the old assistant presentation
+        self.assertNotIn("Perfecto", content)
+        self.assertNotIn("se ha verificado el código", content)
+        self.assertNotIn("Iniciamos el roleplay. Prepárate.", content)
+        self.assertNotIn("¿En qué puedo ayudarte?", content)
+
+        # 4. Stream connects directly
+        self.assertIn("<Connect>", content)
         self.assertIn("<Stream url=\"wss://test-service.com/bm/trainer/phone/media-stream?session_id=88&amp;flow=session\">", content)
 
     @patch("app.routers.trainer_voice.AsyncSessionLocal")
     @patch("app.routers.trainer_voice.websockets.connect")
     async def test_3_gemini_start_message_is_purely_in_character(self, mock_ws_connect, mock_session_local):
-        """Initial message sent to Gemini Live must instruct it to begin in-character, without assistant persona."""
+        """Initial message sent to Gemini Live must instruct it to begin in-character, without assistant persona or confirmation text."""
         mock_db = AsyncMock()
         mock_session_local.return_value.__aenter__.return_value = mock_db
 
@@ -219,9 +231,12 @@ class TestTrainerVoiceRoleplayIntegrity(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(len(client_contents) > 0, "Expected clientContent after setupComplete")
         initial_turn = client_contents[0]["clientContent"]["turns"][0]["parts"][0]["text"]
 
-        # Must NOT instruct to say 'se ha verificado el código' or act as assistant
+        # 3. Gemini does not receive the confirmation or assistant preamble as a conversation turn
+        self.assertNotIn("Código de simulación correcto", initial_turn)
+        self.assertNotIn("Comenzamos", initial_turn)
         self.assertNotIn("se ha verificado el código", initial_turn)
         self.assertNotIn("Iniciamos el roleplay. Prepárate.", initial_turn)
+        self.assertNotIn("asistente", initial_turn.lower())
         self.assertIn("Inicia la llamada interpretando exclusivamente a tu personaje", initial_turn)
 
     @patch("app.routers.trainer_voice.encode_gemini_to_twilio", return_value=("MULAW_PAYLOAD", None))
