@@ -3,7 +3,7 @@ import logging
 from typing import Annotated, List, Optional
 from datetime import datetime
 from decimal import Decimal
-from fastapi import APIRouter, Depends, HTTPException, status as http_status, Query
+from fastapi import APIRouter, Depends, HTTPException, status as http_status, Query, Request, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -23,6 +23,7 @@ from app.schemas.trainer import (
     AIPromptGenerateRequest,
     AIPromptImproveRequest,
     AvailableSpeechStructure,
+    TrainerChatResponse,
 )
 from app.services.trainer_service import TrainerService
 
@@ -636,4 +637,97 @@ async def get_session_recording_audio(
             "Cache-Control": "private, no-store",
             "Content-Disposition": f"inline; filename=session_{session_id}.mp3"
         }
+    )
+
+
+# ── Trainer Chatbot Endpoint (Knowledge Layer RAG) ─────────────────────────────
+
+@router.post(
+    "/chat",
+    response_model=TrainerChatResponse,
+    summary="Chatbot de Trainer con RAG sobre documentos de conocimiento (Texto y Audio)",
+)
+async def trainer_chat(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    context: TenantContext = Depends(get_tenant_context),
+):
+    """
+    Endpoint del Chatbot de Trainer con entrada multimodal:
+    - Acepta texto (message) o archivo de audio (audio_file) mediante multipart/form-data o JSON.
+    - Convierte el audio en texto mediante transcripción y continúa por el mismo pipeline RAG.
+    - Recupera determinísticamente los documentos de conocimiento del agente.
+    - Devuelve la respuesta fundamentada con citas y fuentes de conocimiento.
+    """
+    from app.services.trainer_chatbot_service import TrainerChatbotService
+
+    content_type = request.headers.get("content-type", "")
+    message: Optional[str] = None
+    audio_file: Optional[Any] = None
+    agent_id: Optional[str] = None
+    cycle_id: Optional[int] = None
+    conversation_history: Any = None
+
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        raw_msg = form.get("message")
+        if isinstance(raw_msg, str) and raw_msg.strip():
+            message = raw_msg.strip()
+
+        raw_file = form.get("audio_file") or form.get("audio")
+        if raw_file is not None and (isinstance(raw_file, UploadFile) or hasattr(raw_file, "file")):
+            audio_file = raw_file
+
+        raw_agent = form.get("agent_id")
+        if isinstance(raw_agent, str) and raw_agent.strip():
+            agent_id = raw_agent.strip()
+
+        raw_cycle = form.get("cycle_id")
+        if raw_cycle is not None and str(raw_cycle).strip():
+            try:
+                cycle_id = int(raw_cycle)
+            except (ValueError, TypeError):
+                raise HTTPException(
+                    status_code=http_status.HTTP_400_BAD_REQUEST,
+                    detail="El parámetro 'cycle_id' debe ser un número entero válido.",
+                )
+
+        conversation_history = form.get("conversation_history")
+    else:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+
+        if isinstance(body, dict):
+            raw_msg = body.get("message")
+            if isinstance(raw_msg, str) and raw_msg.strip():
+                message = raw_msg.strip()
+
+            raw_agent = body.get("agent_id")
+            if isinstance(raw_agent, str) and raw_agent.strip():
+                agent_id = raw_agent.strip()
+
+            raw_cycle = body.get("cycle_id")
+            if raw_cycle is not None and str(raw_cycle).strip():
+                try:
+                    cycle_id = int(raw_cycle)
+                except (ValueError, TypeError):
+                    raise HTTPException(
+                        status_code=http_status.HTTP_400_BAD_REQUEST,
+                        detail="El parámetro 'cycle_id' debe ser un número entero válido.",
+                    )
+
+            conversation_history = body.get("conversation_history")
+
+    return await TrainerChatbotService.process_chat(
+        db=db,
+        current_user=current_user,
+        context=context,
+        message=message,
+        audio_file=audio_file,
+        agent_id=agent_id,
+        cycle_id=cycle_id,
+        conversation_history=conversation_history,
     )

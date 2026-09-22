@@ -212,3 +212,19 @@ class PhoneCompleteSessionRequest(BaseModel):
     transcript: str
     recording_url: str
     duration_seconds: int
+
+
+# ── Chatbot / Knowledge Layer Schemas ──────────────────────────────────────────
+
+class ChatSourceDocument(BaseModel):
+    document_id: int
+    title: str
+    document_type: str
+    cycle_id: int
+
+
+class TrainerChatResponse(BaseModel):
+    response: str
+    user_query: str
+    input_type: str  # "text" | "audio"
+    sources: List[ChatSourceDocument] = []
