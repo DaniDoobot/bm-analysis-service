@@ -965,6 +965,72 @@ class TrainerService:
         return await twilio.download_audio(recording_url)
 
 
+    @staticmethod
+    def _extract_robust_score(parsed_res: dict, criteria_evals: list = None) -> Optional[Decimal]:
+        """Robustly extract numerical score from LLM response handling various formats and fallbacks."""
+        if not parsed_res or not isinstance(parsed_res, dict):
+            return None
+
+        # 1. Candidate keys in root
+        candidate_keys = [
+            "score", "evaluacion_global", "puntuacion", "calificacion",
+            "nota", "nota_global", "global_score", "puntaje"
+        ]
+        
+        raw_val = None
+        for k in candidate_keys:
+            if k in parsed_res and parsed_res[k] is not None:
+                raw_val = parsed_res[k]
+                break
+
+        # Check nested structures: {"evaluacion": {"score": ...}}, {"evaluation": {...}}
+        if raw_val is None:
+            for parent in ["evaluacion", "evaluation", "resumen", "summary"]:
+                sub = parsed_res.get(parent)
+                if isinstance(sub, dict):
+                    for k in candidate_keys:
+                        if k in sub and sub[k] is not None:
+                            raw_val = sub[k]
+                            break
+                if raw_val is not None:
+                    break
+
+        if raw_val is not None:
+            clean_str = str(raw_val).strip()
+            # Clean "8.5/10", "8/10", "8 / 10"
+            clean_str = re.sub(r"\s*/\s*10(\.0+)?.*$", "", clean_str, flags=re.IGNORECASE)
+            # Clean "8 sobre 10", "8 de 10"
+            clean_str = re.sub(r"\s*(sobre|de)\s*10(\.0+)?.*$", "", clean_str, flags=re.IGNORECASE)
+            clean_str = clean_str.replace(",", ".").replace("%", "").strip()
+            try:
+                dec = Decimal(clean_str)
+                if 0 <= dec <= 10:
+                    return Decimal(str(round(float(dec), 2)))
+                elif 10 < dec <= 100:
+                    return Decimal(str(round(float(dec) / 10.0, 2)))
+            except Exception:
+                pass
+
+        # 2. Fallback: average scores from criteria_evaluations if present
+        evals_to_check = criteria_evals if criteria_evals is not None else parsed_res.get("criteria_evaluations")
+        if isinstance(evals_to_check, list) and evals_to_check:
+            crit_scores = []
+            for item in evals_to_check:
+                if isinstance(item, dict) and item.get("score") is not None:
+                    try:
+                        s_str = str(item["score"]).replace(",", ".").replace("%", "").strip()
+                        s_str = re.sub(r"\s*/\s*10.*$", "", s_str)
+                        val = float(s_str)
+                        if 0 <= val <= 10:
+                            crit_scores.append(val)
+                    except (ValueError, TypeError):
+                        pass
+            if crit_scores:
+                avg = sum(crit_scores) / len(crit_scores)
+                return Decimal(str(round(avg, 2)))
+
+        return None
+
     # ── Background Evaluation Execution ──────────────────────────────────────────
 
     @staticmethod
@@ -1028,7 +1094,7 @@ class TrainerService:
             if not cfg:
                 raise ValueError(f"La configuración de evaluación ID {config_id} no existe.")
 
-            # 3. Retrieve Speech evaluation structure template
+            # 3. Retrieve Speech evaluation structure template and active criteria
             stmt_prompt = select(PromptVersion).where(
                 and_(
                     PromptVersion.prompt_id == cfg.speech_structure_id,
@@ -1043,27 +1109,136 @@ class TrainerService:
 
             prompt_content = prompt_version.prompt
 
-            # 4. Build prompt
-            system_prompt = (
-                f"Estás evaluando una simulación de entrenamiento telefónico (roleplay) realizada por un agente de Boston Medical Group.\n\n"
-                f"=== CONTEXTO DE ROLES ===\n"
-                f"- La llamada es entre UN AGENTE HUMANO de BMG y UN PACIENTE SIMULADO por IA.\n"
-                f"- El AGENTE HUMANO es quien se identifica como representante de Boston Medical Group, inicia la llamada de seguimiento, presenta servicios y maneja objeciones.\n"
-                f"- El PACIENTE SIMULADO es quien hace preguntas, pone objeciones (ej: preguntas sobre precio, dudas sobre el tratamiento) y actúa como cliente potencial.\n"
-                f"- Ignora cualquier frase introductoria del sistema como 'Perfecto, [nombre]...' o 'Iniciamos el roleplay' — estas NO son parte de la conversación real.\n"
-                f"- Evalúa ÚNICAMENTE al agente humano. No penalices al agente por frases dichas por el paciente simulado.\n\n"
-                f"=== ESTRUCTURA DE EVALUACIÓN ===\n"
-                f"\"\"\"{prompt_content}\"\"\"\n\n"
-                f"=== INSTRUCCIONES ADICIONALES DEL MÓDULO TRAINER ===\n"
-                f"\"\"\"{cfg.extra_instructions or ''}\"\"\"\n\n"
-                f"=== INFORMACIÓN DE LA SIMULACIÓN ===\n"
-                f"- Nombre: {sim.name}\n"
-                f"- Objetivo: {sim.objective or 'No especificado'}\n"
-                f"- Escenario/Personaje del paciente simulado: {roleplay_prompt}\n\n"
-                f"Devuelve exclusivamente un objeto JSON válido que cumpla con el formato de salida JSON especificado en la estructura base. "
-                f"No agregues texto explicativo ni bloques de código de markdown. Asegúrate de incluir los campos 'score' (o 'evaluacion_global'), "
-                f"'summary' (o 'feedback'), 'strengths' y 'improvement_points' en el JSON."
-            )
+            stmt_crits = select(PromptCriterion).where(
+                and_(
+                    PromptCriterion.prompt_id == cfg.speech_structure_id,
+                    PromptCriterion.is_active == True,
+                    PromptCriterion.deleted_at.is_(None),
+                )
+            ).order_by(PromptCriterion.order_index.asc().nullslast(), PromptCriterion.criterion_id.asc())
+            res_crits = await db.execute(stmt_crits)
+            active_criteria = list(res_crits.scalars().all())
+
+            # If no active criteria exist in speech structure, mark as non-evaluable by configuration
+            # per user specification: do NOT invent fallback standard criteria.
+            if not active_criteria:
+                logger.warning(
+                    "Session %d: speech structure %d has no active criteria configured. "
+                    "Marking session as completed_without_score (non-evaluable by configuration).",
+                    session_id, cfg.speech_structure_id
+                )
+                eval_record = TrainerEvaluation(
+                    session_id=session_id,
+                    evaluation_config_id=config_id,
+                    prompt_snapshot="No active criteria configured in speech structure",
+                    result_json={
+                        "error": "no_active_criteria_configured",
+                        "speech_structure_id": cfg.speech_structure_id,
+                        "criteria_evaluations": []
+                    },
+                    score=None,
+                    summary="No se pudo evaluar: la estructura de evaluación no tiene criterios activos configurados.",
+                    strengths={},
+                    improvement_points={},
+                )
+                db.add(eval_record)
+                sess.evaluation_status = "completed_without_score"
+                sess.updated_at = datetime.now(timezone.utc)
+                await db.commit()
+                return
+
+            criterios_desc = []
+            criterios_keys = []
+            example_evals = []
+
+            for crit in active_criteria:
+                c_key = crit.output_key or crit.criterion_key
+                c_name = crit.criterion_name
+                c_desc = crit.criterion_description or crit.criterion_name
+                c_type = crit.criterion_type or "score_1_10"
+                criterios_desc.append(f"- {c_name} (clave: '{c_key}', tipo: {c_type}): {c_desc}")
+                criterios_keys.append(c_key)
+
+            criterios_text = "\n".join(criterios_desc)
+
+            for crit in active_criteria[:2]:
+                c_slug = crit.criterion_key or (crit.output_key or "").replace("_score", "")
+                example_evals.append(
+                    f'    {{\n'
+                    f'      "criterion_key": "{c_slug}",\n'
+                    f'      "criterion_name": "{crit.criterion_name}",\n'
+                    f'      "score": 8.0,\n'
+                    f'      "passed": true,\n'
+                    f'      "expected_behavior": "Comportamiento específico que debía mostrar el agente humano en esta simulación.",\n'
+                    f'      "observed_behavior": "Comportamiento real y observable que mostró el agente humano durante la llamada.",\n'
+                    f'      "evidence_quote": "Cita textual REAL y literal extraída de la transcripción.",\n'
+                    f'      "relevant_turns": [1, 2],\n'
+                    f'      "reasoning": "Justificación objetiva de la valoración y puntuación obtenida en este criterio.",\n'
+                    f'      "improvement_tip": "Consejo concreto y accionable para mejorar en este criterio en futuras llamadas."\n'
+                    f'    }}'
+                )
+            example_evals_str = ",\n".join(example_evals)
+
+            # 4. Build system prompt
+            system_prompt = f"""Estás evaluando una simulación de entrenamiento telefónico (roleplay) realizada por un agente de Boston Medical Group.
+
+=== CONTEXTO DE ROLES ===
+- La llamada es entre UN AGENTE HUMANO de BMG y UN PACIENTE SIMULADO por IA.
+- El AGENTE HUMANO es quien se identifica como representante de Boston Medical Group, inicia la llamada, presenta servicios y maneja objeciones.
+- El PACIENTE SIMULADO es quien hace preguntas, pone objeciones y actúa como cliente potencial.
+- Ignora cualquier frase introductoria del sistema como 'Perfecto, [nombre]...' o 'Iniciamos el roleplay' — estas NO son parte de la conversación real.
+- Evalúa ÚNICAMENTE al agente humano. No penalices al agente por frases dichas por el paciente simulado.
+
+=== INFORMACIÓN DE LA SIMULACIÓN ===
+- Nombre: {sim.name}
+- Objetivo: {sim.objective or 'No especificado'}
+- Dificultad: {sim.difficulty or 'media'}
+- Escenario/Personaje del paciente simulado: {roleplay_prompt}
+
+=== ESTRUCTURA BASE DE EVALUACIÓN ===
+\"\"\"{prompt_content}\"\"\"
+
+=== INSTRUCCIONES ADICIONALES DEL MÓDULO TRAINER ===
+\"\"\"{cfg.extra_instructions or ''}\"\"\"
+
+=== CRITERIOS OBLIGATORIOS A EVALUAR ===
+Debes auditar individualmente CADA UNO de los siguientes criterios activos de la estructura:
+{criterios_text}
+
+=== REGLAS PARA LA EVALUACIÓN ===
+1. 'score' (número decimal de 1.0 a 10.0): Puntuación global del desempeño del agente en la simulación.
+2. 'feedback' (string detallado): Análisis pedagógico y constructivo con lo que hizo bien y recomendaciones.
+3. 'strengths' (lista de strings): Puntos fuertes destacados del agente.
+4. 'improvement_points' (lista de strings): Puntos concretos de mejora.
+5. 'result_json' (objeto clave-valor): Valor obtenido para cada criterio usando su clave ('output_key' descrita arriba).
+6. 'criteria_evaluations' (lista exhaustiva de evidencias por criterio):
+   - DEBE contener obligatoriamente un objeto para CADA uno de los criterios listados arriba.
+   - 'criterion_key': slug identificador del criterio.
+   - 'criterion_name': nombre exacto del criterio.
+   - 'score': número decimal de 1.0 a 10.0 obtenido en este criterio.
+   - 'passed': booleano indicando si superó el criterio (true si score >= 6.0, false si menor).
+   - 'expected_behavior': qué conducta se esperaba del agente humano.
+   - 'observed_behavior': qué hizo o dijo realmente el agente en la llamada.
+   - 'evidence_quote': cita textual literal de la llamada que demuestra el comportamiento (o 'Sin evidencia suficiente en la conversación').
+   - 'relevant_turns': lista de enteros con números de turno de la evidencia.
+   - 'reasoning': justificación breve y objetiva de la nota en este criterio.
+   - 'improvement_tip': recomendación accionable de mejora para este criterio.
+
+=== FORMATO DE SALIDA ESTRICTO ===
+Devuelve EXCLUSIVAMENTE un objeto JSON válido (sin markdown ```json ni texto adicional):
+{{
+  "score": 8.5,
+  "feedback": "El agente demostró buena capacidad de escucha y empatía...",
+  "strengths": ["Escucha activa adecuada", "Saludo institucional formal"],
+  "improvement_points": ["Reforzar el cierre formal y comprobación de dudas"],
+  "result_json": {{
+    "{criterios_keys[0]}": 8.5
+  }},
+  "criteria_evaluations": [
+{example_evals_str}
+  ]
+}}
+"""
 
             user_prompt = f"Transcripción de la llamada telefónica:\n\n{transcript_text}"
 
@@ -1072,8 +1247,8 @@ class TrainerService:
                 {"role": "user", "content": user_prompt}
             ]
 
-            # 5. Call OpenAI Text Completion
-            logger.info("Calling OpenAI Text Completion for session %d...", session_id)
+            # 5. Call AI completion
+            logger.info("Calling AI completion for session %d...", session_id)
             raw_response = await openai_service.complete_text(
                 messages=messages,
                 response_format="json_object",
@@ -1084,49 +1259,104 @@ class TrainerService:
             if not parsed_res:
                 raise ValueError(f"La IA no devolvió un JSON válido. Respuesta cruda: {raw_response[:500]}")
 
-            score_raw = parsed_res.get("evaluacion_global") or parsed_res.get("score")
-            score_decimal = None
-            if score_raw is not None:
-                try:
-                    score_decimal = Decimal(str(score_raw))
-                except Exception:
-                    logger.warning("Failed to parse evaluation score %s as decimal.", score_raw)
+            # Normalize criteria_evaluations
+            raw_crit_evals = parsed_res.get("criteria_evaluations")
+            normalized_crit_evals = []
+            if isinstance(raw_crit_evals, list):
+                for item in raw_crit_evals:
+                    if isinstance(item, dict):
+                        crit_score = None
+                        if item.get("score") is not None:
+                            try:
+                                s_clean = re.sub(r"\s*/\s*10.*$", "", str(item["score"])).replace(",", ".").strip()
+                                crit_score = round(float(s_clean), 2)
+                            except Exception:
+                                pass
+                        passed = item.get("passed")
+                        if passed is None and crit_score is not None:
+                            passed = (crit_score >= 6.0)
 
-            # Fallback: if no top-level score, compute average of score_1_10 criteria present in result_json
+                        normalized_item = {
+                            "criterion_key": item.get("criterion_key") or "",
+                            "criterion_name": item.get("criterion_name") or "",
+                            "score": crit_score,
+                            "passed": bool(passed) if passed is not None else None,
+                            "expected_behavior": item.get("expected_behavior") or "",
+                            "observed_behavior": item.get("observed_behavior") or "",
+                            "evidence_quote": item.get("evidence_quote") or "Sin evidencia suficiente en la conversación",
+                            "relevant_turns": item.get("relevant_turns") or [],
+                            "reasoning": item.get("reasoning") or item.get("feedback") or "",
+                            "improvement_tip": item.get("improvement_tip") or "",
+                        }
+                        normalized_crit_evals.append(normalized_item)
+
+            # Robust score extraction
+            score_decimal = TrainerService._extract_robust_score(parsed_res, normalized_crit_evals)
+
+            # Fallback criteria averaging if top-level score was None
             if score_decimal is None:
-                stmt_crits = select(PromptCriterion).where(
-                    PromptCriterion.prompt_id == cfg.speech_structure_id,
-                    PromptCriterion.is_active == True,
-                    PromptCriterion.deleted_at.is_(None),
-                    PromptCriterion.criterion_type == "score_1_10",
-                )
-                res_crits = await db.execute(stmt_crits)
-                score_crits = list(res_crits.scalars().all())
                 numeric_scores = []
-                for crit in score_crits:
-                    raw = parsed_res.get(crit.output_key)
-                    if raw is not None:
+                for crit in active_criteria:
+                    out_k = crit.output_key
+                    if out_k and out_k in parsed_res:
                         try:
-                            numeric_scores.append(float(str(raw).replace("%", "").strip()))
+                            numeric_scores.append(float(str(parsed_res[out_k]).replace("%", "").strip()))
                         except (ValueError, TypeError):
                             pass
                 if numeric_scores:
                     avg = sum(numeric_scores) / len(numeric_scores)
                     score_decimal = Decimal(str(round(avg, 2)))
                     logger.info(
-                        "Session %d: no top-level score in AI response. "
-                        "Computed criteria average: %s (from %d criteria).",
+                        "Session %d: computed criteria average: %s (from %d criteria).",
                         session_id, score_decimal, len(numeric_scores)
                     )
-                else:
-                    logger.warning(
-                        "Session %d: no top-level score and no score_1_10 criteria found in result_json. "
-                        "Marking as completed_without_score.",
-                        session_id
-                    )
+
+            # Synchronize flat result_json keys with criteria_evaluations
+            for crit in active_criteria:
+                out_k = crit.output_key
+                feed_k = crit.feed_key
+                c_slug = crit.criterion_key or (out_k or "").replace("_score", "")
+                matched_eval = None
+                for ce in normalized_crit_evals:
+                    if ce["criterion_key"] in (c_slug, out_k, crit.criterion_key) or \
+                       (ce["criterion_name"] and ce["criterion_name"].lower() == crit.criterion_name.lower()):
+                        matched_eval = ce
+                        break
+
+                if matched_eval:
+                    if out_k and out_k not in parsed_res:
+                        if crit.criterion_type == "score_1_10":
+                            parsed_res[out_k] = matched_eval["score"]
+                        elif crit.criterion_type == "boolean":
+                            parsed_res[out_k] = matched_eval["passed"]
+                        else:
+                            parsed_res[out_k] = matched_eval["score"] if matched_eval["score"] is not None else matched_eval["passed"]
+                    if feed_k and feed_k not in parsed_res:
+                        parsed_res[feed_k] = matched_eval["reasoning"] or matched_eval["improvement_tip"]
+                elif out_k and out_k in parsed_res:
+                    val = parsed_res[out_k]
+                    feed_val = parsed_res.get(feed_k, "") if feed_k else ""
+                    val_score = None
+                    try:
+                        val_score = float(str(val).replace("%", "").strip())
+                    except Exception:
+                        pass
+                    normalized_crit_evals.append({
+                        "criterion_key": c_slug,
+                        "criterion_name": crit.criterion_name,
+                        "score": val_score,
+                        "passed": (val_score >= 6.0) if val_score is not None else bool(val),
+                        "expected_behavior": f"Cumplir con {crit.criterion_name}",
+                        "observed_behavior": str(feed_val) if feed_val else "Observado en llamada",
+                        "evidence_quote": "Sin evidencia textual detallada",
+                        "relevant_turns": [],
+                        "reasoning": str(feed_val) if feed_val else "",
+                        "improvement_tip": "",
+                    })
+
+            parsed_res["criteria_evaluations"] = normalized_crit_evals
 
             summary = parsed_res.get("feedback") or parsed_res.get("summary")
-            # Fallback summary: try to collect criterion feedback fields if summary is absent
             if not summary:
                 feedback_parts = [
                     str(v).strip()
@@ -1156,7 +1386,7 @@ class TrainerService:
             # Update session evaluation_status
             if score_decimal is None:
                 sess.evaluation_status = "completed_without_score"
-                logger.warning("Session %d evaluated but completed without score.", session_id)
+                logger.warning("Session %d evaluated but completed without score (insufficient scoring data).", session_id)
             else:
                 sess.evaluation_status = "evaluated"
                 logger.info("Session %d evaluated successfully with score %s.", session_id, score_decimal)
@@ -1167,11 +1397,11 @@ class TrainerService:
             logger.exception("Evaluation execution failed for session %d: %s", session_id, e)
             sess.evaluation_status = "evaluation_error"
             sess.updated_at = datetime.now(timezone.utc)
-            
+
             eval_config_id = None
             if 'sim' in locals() and sim:
                 eval_config_id = sim.evaluation_config_id
-                
+
             # Save evaluation record with error
             eval_record = TrainerEvaluation(
                 session_id=session_id,
@@ -1386,6 +1616,8 @@ class TrainerService:
         _TRUE_VALUES = {"si", "sí", "yes", "true", "1", True}
         _FALSE_VALUES = {"no", "false", "0", False}
         
+        crit_evals_list = result_json.get("criteria_evaluations") if isinstance(result_json.get("criteria_evaluations"), list) else []
+
         for crit in active_criteria:
             output_key = crit.output_key
             feed_key = crit.feed_key
@@ -1393,9 +1625,30 @@ class TrainerService:
             is_score = (item_type == "score_1_10")
             max_score = 10 if is_score else None
             
-            raw_val = result_json.get(output_key)
+            raw_val = result_json.get(output_key) if output_key else None
             raw_feedback = result_json.get(feed_key) if feed_key else None
             
+            # Check in criteria_evaluations if not found in flat result_json
+            matched_ce = None
+            c_slug = crit.criterion_key or (output_key or "").replace("_score", "")
+            for ce in crit_evals_list:
+                if isinstance(ce, dict):
+                    if (ce.get("criterion_key") and ce["criterion_key"] in (c_slug, output_key, crit.criterion_key)) or \
+                       (ce.get("criterion_name") and ce["criterion_name"].lower() == crit.criterion_name.lower()):
+                        matched_ce = ce
+                        break
+
+            if raw_val is None and matched_ce:
+                if is_score:
+                    raw_val = matched_ce.get("score")
+                elif item_type == "boolean":
+                    raw_val = matched_ce.get("passed")
+                else:
+                    raw_val = matched_ce.get("score") if matched_ce.get("score") is not None else matched_ce.get("passed")
+
+            if raw_feedback is None and matched_ce:
+                raw_feedback = matched_ce.get("reasoning") or matched_ce.get("improvement_tip")
+
             # Coerce/Extract value and display_value
             value = None
             score = None
@@ -1406,8 +1659,8 @@ class TrainerService:
             else:
                 if item_type in ("score_1_10", "percentage", "number"):
                     try:
-                        # Clean potential non-numeric chars
                         val_str = str(raw_val).replace("%", "").strip()
+                        val_str = re.sub(r"\s*/\s*10.*$", "", val_str)
                         coerced_val = float(val_str)
                         value = coerced_val
                         if is_score:
@@ -1458,7 +1711,13 @@ class TrainerService:
                 "value": value,
                 "feedback": feedback,
                 "display_value": display_value,
-                "is_score": is_score
+                "is_score": is_score,
+                "expected_behavior": matched_ce.get("expected_behavior") if matched_ce else None,
+                "observed_behavior": matched_ce.get("observed_behavior") if matched_ce else None,
+                "evidence_quote": matched_ce.get("evidence_quote") if matched_ce else None,
+                "relevant_turns": matched_ce.get("relevant_turns") if matched_ce else [],
+                "reasoning": matched_ce.get("reasoning") if matched_ce else None,
+                "improvement_tip": matched_ce.get("improvement_tip") if matched_ce else None,
             })
             
         return criteria_scores
@@ -1480,6 +1739,7 @@ class TrainerService:
         session.__dict__["score_source"] = "none"
         session.__dict__["evaluation_summary"] = None
         session.__dict__["criteria_scores"] = []
+        session.__dict__["criteria_evaluations"] = []
         session.__dict__["extraction_values"] = {}
         session.__dict__["score_items"] = []
         session.__dict__["non_score_items"] = []
@@ -1527,6 +1787,7 @@ class TrainerService:
             result_json = evaluation.result_json or {}
             session.__dict__["evaluation_json"] = result_json
             session.__dict__["evaluation_summary"] = evaluation.summary
+            session.__dict__["criteria_evaluations"] = result_json.get("criteria_evaluations") or []
             
             # Map criteria_scores if we have active criteria
             if active_criteria:
@@ -1534,7 +1795,7 @@ class TrainerService:
                 session.__dict__["criteria_scores"] = scores
                 session.__dict__["score_items"] = [item for item in scores if item["is_score"]]
                 session.__dict__["non_score_items"] = [item for item in scores if not item["is_score"]]
-                session.__dict__["extraction_values"] = {item["output_key"]: item["value"] for item in scores if item["output_key"]}
+                session.__dict__["extraction_values"] = {item["output_key"]: item["value"] for item in scores if item.get("output_key")}
                 
             # Score resolution logic
             if evaluation.score is not None:
@@ -1543,7 +1804,7 @@ class TrainerService:
                 session.__dict__["score_source"] = "evaluation_score"
             else:
                 # Calculate average of numeric score_1_10 criteria
-                score_items = session.__dict__["score_items"]
+                score_items = session.__dict__.get("score_items", [])
                 numeric_scores = [item["score"] for item in score_items if item["score"] is not None]
                 if numeric_scores:
                     avg_score = sum(numeric_scores) / len(numeric_scores)
@@ -1552,5 +1813,8 @@ class TrainerService:
                     session.__dict__["score_source"] = "criteria_average"
                     
         # 7. Check for completed_without_score status
-        if session.evaluation_status == "evaluated" and session.__dict__["score"] is None:
-            session.evaluation_status = "completed_without_score"
+        if session.evaluation_status in ("evaluated", "completed_without_score"):
+            if session.__dict__["score"] is None:
+                session.evaluation_status = "completed_without_score"
+            else:
+                session.evaluation_status = "evaluated"

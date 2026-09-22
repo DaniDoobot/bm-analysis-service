@@ -138,6 +138,7 @@ class TrainerSessionResponse(BaseModel):
 
     evaluation_summary: Optional[str] = None
     criteria_scores: Optional[List[dict]] = None
+    criteria_evaluations: Optional[List[dict]] = None
     extraction_values: Optional[dict] = None
     score_items: Optional[List[dict]] = None
     non_score_items: Optional[List[dict]] = None

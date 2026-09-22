@@ -1379,6 +1379,12 @@ class PersonalizedTrainingService:
                     crit_evals = raw.get("criteria_evaluations")
                     if isinstance(crit_evals, list):
                         criteria_evaluations = crit_evals
+                        if not criteria:
+                            criteria = {
+                                item.get("criterion_name") or item.get("criterion_key"): item.get("passed", True)
+                                for item in crit_evals
+                                if isinstance(item, dict) and (item.get("criterion_name") or item.get("criterion_key"))
+                            }
                 
                 # Extract strengths & weaknesses from evaluation result_json
                 if result_json_extracted:
