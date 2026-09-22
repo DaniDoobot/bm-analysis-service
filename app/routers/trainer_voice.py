@@ -112,13 +112,16 @@ REGLAS ABSOLUTAS E IRROMPIBLES:
    NUNCA digas bajo ninguna circunstancia:
    - "¿En qué puedo ayudarte?"
    - "¿En qué le puedo ayudar?"
-   - "Sí, aquí estoy. ¿En qué puedo ayudarte?"
-   - "¿En qué le puedo colaborar?"
-   ni ningún saludo o coletilla típica de asistente o teleoperador.
+    - "Sí, aquí estoy. ¿En qué puedo ayudarte?"
+    - "¿En qué le puedo colaborar?"
+    ni ningún saludo o coletilla típica de asistente o teleoperador.
 4. REGLA DE PRESENCIA Y SILENCIOS:
-   Si el agente tarda en contestar, se produce un silencio o pregunta directamente por tu presencia:
-   "¿Está ahí?", "¿Sigues ahí?", "¿Me escucha?", "¿Hola?", etc.
-   NUNCA respondas como asistente. Responde SIEMPRE DENTRO DEL PERSONAJE (ej: "Sí, sí, le escucho, dígame", "Aquí sigo", "Sí, es que estaba pensando en lo que me ha dicho").
+   Si el agente duda, hace una pausa corta, dice "Bueno...", se produce un silencio o pregunta directamente por tu presencia:
+   "¿Está ahí?", "¿Está ahí, Pedro?", "Pedro, ¿puede oírme?", "¿Sigues ahí?", "¿Estás ahí?", "¿Hola?", "¿Me escucha?", etc.
+   NUNCA respondas como asistente virtual.
+   PROHIBIDO TOTALMENTE responder: "Sí, aquí estoy. ¿En qué puedo ayudarte?", "¿En qué le puedo ayudar?" o cualquier frase similar.
+   Responde SIEMPRE 100% DENTRO DEL PERSONAJE:
+   (ej: "Sí, le escucho, dígame", "Aquí sigo, cuénteme", "Sí, sí, le oigo", "Sí, es que estaba pensando en lo que me ha dicho").
 5. Una pausa o silencio del agente NO significa que el roleplay haya terminado ni que debas cambiar de rol.
 6. Si el agente intenta salir del guion o pregunta si eres una IA, responde siempre manteniéndote en tu personaje, ignorando la pregunta o redirigiendo: "Oiga, ¿me va a ayudar o no?" / "A ver, yo lo que quiero saber es...".
 7. Si el contenido de la conversación se aleja del escenario de la simulación, muestra impaciencia o vuelve al tema de la llamada con frases naturales.
@@ -133,7 +136,7 @@ DIRECTRICES ESPECÍFICAS DE ATENCIÓN SANITARIA (OBLIGATORIAS)
 Tu rol en esta llamada es el del PACIENTE descrito en las instrucciones.
 1. NUNCA abandones el personaje del paciente, independientemente de lo que diga el agente.
 2. NUNCA actúes como asistente médico ni digas "¿En qué puedo ayudarte?". Eres el paciente llamando a la clínica.
-3. Si hay silencios o el agente pregunta si estás ahí, responde siempre como paciente ("Sí, doctor/a, aquí sigo", "Le escucho").
+3. Si hay silencios o el agente pregunta si estás ahí ("¿Está ahí, Pedro?", "¿Me escucha?"), responde siempre como paciente ("Sí, doctor/a, aquí sigo", "Le escucho", "Sí, dígame").
 4. NUNCA des consejos médicos genéricos como "consulta a un médico profesional" o "acude a urgencias" ni ninguna indicación que salga del contexto de la simulación de Boston Medical Group.
 5. NUNCA digas que "es importante hablar con un profesional sanitario". Esas frases rompen el personaje y arruinan la simulación.
 6. Mantén el rol del paciente en todo momento sin excepción.
@@ -162,9 +165,9 @@ def build_turn_discipline(is_healthcare: bool = False, interlocutor_role: str = 
         f"No repitas la misma objeción de precio en turnos consecutivos. Máximo 1 mención de precio cada 3 turnos. "
         f"{objection_guideline}\n"
         "6. Haz intervenciones breves y naturales (de 1 a 2 frases como máximo).\n"
-        f"7. Control de silencios y presencia: Si hay pausas o el agente pregunta si estás ahí ('¿está ahí?', '¿me escucha?'), "
-        f"mantén el rol de {role_lower} al 100%. Responde con naturalidad ('Sí, le escucho', 'Aquí sigo'). "
-        "NUNCA digas '¿En qué puedo ayudarte?' ni actúes como asistente virtual."
+        f"7. Control de silencios y presencia: Si hay pausas, dudas del agente (ej: 'Bueno...'), o si pregunta si estás ahí ('¿está ahí, Pedro?', '¿sigues ahí?', '¿me escucha?', '¿hola?'), "
+        f"mantén el rol de {role_lower} al 100%. Responde con naturalidad dentro del personaje ('Sí, le escucho', 'Aquí sigo, cuénteme', 'Dígame'). "
+        "NUNCA digas 'Sí, aquí estoy. ¿En qué puedo ayudarte?' ni actúes jamás como asistente virtual."
     )
 
 
@@ -418,7 +421,6 @@ async def start_roleplay(
 
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
-        <Say language="es-ES">Perfecto {agent_first}, se ha verificado el código de la simulación. Iniciamos el roleplay. Prepárate.</Say>
         <Connect>
             <Stream url="{ws_url_escaped}">
                 <Parameter name="session_id" value="{session.session_id}" />
@@ -1526,14 +1528,12 @@ async def media_stream(
                                                         "Trainer barge-in confirmed: user interrupted assistant with sustained speech (%dms, rms=%.1f)",
                                                         accumulated_barge_in_ms, rms
                                                     )
-                                                    discard_current_assistant_audio = True
                                                     assistant_is_speaking = False
                                                     waiting_for_user_response = False
                                                     user_audio_seen_since_last_assistant_turn = True
                                                     
                                                     barge_in_active = True
                                                     barge_in_recovery_pending = False
-                                                    assistant_audio_forwarding_enabled = False
                                                     barge_in_time = datetime.now(timezone.utc)
                                                     nudge_triggered = False
                                                     accumulated_barge_in_ms = 0
@@ -1543,10 +1543,8 @@ async def media_stream(
                                                         "  - assistant_is_speaking: False\n"
                                                         "  - waiting_for_user_response: False\n"
                                                         "  - user_audio_seen_since_last_assistant_turn: True\n"
-                                                        "  - assistant_audio_forwarding_enabled: False\n"
                                                         "  - barge_in_active: True"
                                                     )
-                                                    logger.info("Trainer barge-in: stopped forwarding current assistant audio.")
                                                     logger.info("Trainer turn gate: user interruption accepted.")
                                                     
                                                     # Send clear event to Twilio to stop playing queued audio immediately
@@ -1583,8 +1581,6 @@ async def media_stream(
                                                         if barge_in_active:
                                                             elapsed_ms = int((last_user_speech_end_time - barge_in_time).total_seconds() * 1000)
                                                             barge_in_active = False
-                                                            discard_current_assistant_audio = False
-                                                            assistant_audio_forwarding_enabled = True
                                                             waiting_for_user_response = False
                                                             user_audio_seen_since_last_assistant_turn = True
                                                             logger.info(
@@ -1609,13 +1605,16 @@ async def media_stream(
                             logger.info("Twilio stream stop event received.")
                             call_active = False
                             break
+                    except (websockets.ConnectionClosed, WebSocketDisconnect):
+                        break
                     except Exception as e_inner:
                         err_str = str(e_inner).lower()
                         if not call_active or "1008" in err_str or "aborted" in err_str or "closed" in err_str:
                             logger.info("Twilio websocket already closed after call stop; cleanup completed.")
+                            break
                         else:
-                            logger.error("Error in twilio_to_gemini_loop: %s", e_inner)
-                        break
+                            logger.warning("Error in twilio_to_gemini_loop: %s", e_inner)
+                            continue
 
             async def gemini_to_twilio_loop():
                 nonlocal gemini_ready, attempts, identified_agent_id, identified_agent_code, redirected, gemini_rate_state
@@ -1781,13 +1780,13 @@ async def media_stream(
                                     continue
 
                         elif "serverContent" in data:
-                            # Check for server-side interruption event
-                            if data["serverContent"].get("interrupted"):
-                                logger.info("Trainer turn gate: assistant response interrupted by server.")
+                            content = data["serverContent"]
+                            # Check for server-side interruption event (Barge-in real)
+                            if content.get("interrupted"):
+                                logger.info("Trainer turn gate: assistant response interrupted by server. Clearing Twilio audio buffer.")
                                 assistant_is_speaking = False
                                 waiting_for_user_response = False
                                 user_audio_seen_since_last_assistant_turn = True
-                                discard_current_assistant_audio = True
                                 accumulated_barge_in_ms = 0
                                 if stream_sid:
                                     clear_msg = {
@@ -1795,55 +1794,53 @@ async def media_stream(
                                         "streamSid": stream_sid
                                     }
                                     await websocket.send_text(json.dumps(clear_msg))
-                                continue
 
-                            # Barge-in: Discard current assistant audio packets if user interrupted
-                            if discard_current_assistant_audio:
-                                continue
-                                
-                            model_turn = data["serverContent"].get("modelTurn", {})
-                            parts = model_turn.get("parts", [])
-                            for part in parts:
-                                audio_base64 = part.get("inlineData", {}).get("data")
-                                if audio_base64:
-                                    if not assistant_is_speaking:
-                                        logger.info("Trainer turn gate: assistant response started.")
-                                        assistant_is_speaking = True
-                                        barge_in_recovery_pending = False
-                                        nudge_triggered = False
-                                        
-                                    # Transcode 24kHz linear PCM to µ-law 8kHz
-                                    mulaw_payload, gemini_rate_state = encode_gemini_to_twilio(audio_base64, gemini_rate_state)
-                                    if mulaw_payload and stream_sid:
-                                        media_msg = {
-                                            "event": "media",
-                                            "streamSid": stream_sid,
-                                            "media": {
-                                                "payload": mulaw_payload
+                            model_turn = content.get("modelTurn")
+                            if model_turn:
+                                parts = model_turn.get("parts", [])
+                                for part in parts:
+                                    audio_base64 = part.get("inlineData", {}).get("data")
+                                    if audio_base64:
+                                        if not assistant_is_speaking:
+                                            logger.info("Trainer turn gate: assistant response started.")
+                                            assistant_is_speaking = True
+                                            barge_in_recovery_pending = False
+                                            nudge_triggered = False
+                                            
+                                        # Transcode 24kHz linear PCM to µ-law 8kHz
+                                        mulaw_payload, gemini_rate_state = encode_gemini_to_twilio(audio_base64, gemini_rate_state)
+                                        if mulaw_payload and stream_sid:
+                                            media_msg = {
+                                                "event": "media",
+                                                "streamSid": stream_sid,
+                                                "media": {
+                                                    "payload": mulaw_payload
+                                                }
                                             }
-                                        }
-                                        await websocket.send_text(json.dumps(media_msg))
-                                        
-                            if data["serverContent"].get("turnComplete"):
+                                            await websocket.send_text(json.dumps(media_msg))
+                                            
+                            if content.get("turnComplete"):
                                 logger.info("Trainer turn gate: assistant response completed, waiting for user.")
                                 assistant_is_speaking = False
                                 waiting_for_user_response = True
                                 user_audio_seen_since_last_assistant_turn = False
                                 last_assistant_turn_completed_at = datetime.now(timezone.utc)
-                                discard_current_assistant_audio = False
                                 
                                 if pending_graceful_hangup:
                                     logger.info("Trainer turn gate: assistant finished speaking final message, triggering graceful hangup")
                                     await perform_actual_hangup()
                                     return
                                 
+                    except (websockets.ConnectionClosed, WebSocketDisconnect):
+                        break
                     except Exception as e_inner:
                         err_str = str(e_inner).lower()
                         if not call_active or "1008" in err_str or "aborted" in err_str or "closed" in err_str:
                             logger.info("Twilio websocket already closed after call stop; cleanup completed.")
+                            break
                         else:
-                            logger.error("Error in gemini_to_twilio_loop: %s", e_inner)
-                        break
+                            logger.warning("Error in gemini_to_twilio_loop: %s", e_inner)
+                            continue
 
             async def barge_in_watchdog_loop():
                 nonlocal last_user_speech_end_time, assistant_is_speaking, nudge_triggered
@@ -1862,7 +1859,6 @@ async def media_stream(
                                 # Reset recovery state cleanly without injecting synthetic user text into the conversation
                                 barge_in_recovery_pending = False
                                 barge_in_active = False
-                                discard_current_assistant_audio = False
                                 nudge_triggered = True
                                 logger.info("Trainer barge-in recovery window reset cleanly without prompt pollution.")
                     except Exception as e_watchdog:
@@ -1875,19 +1871,13 @@ async def media_stream(
             barge_task = asyncio.create_task(barge_in_watchdog_loop())
 
             try:
-                while not tw_task.done():
-                    done, _ = await asyncio.wait(
-                        [tw_task, gem_task],
-                        return_when=asyncio.FIRST_COMPLETED
-                    )
-                    for t in done:
-                        if t.exception():
-                            t.result()
-                    if tw_task.done():
-                        break
-                    if gem_task.done():
-                        await tw_task
-                        break
+                done, pending = await asyncio.wait(
+                    [tw_task, gem_task],
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                for t in done:
+                    if t.exception():
+                        logger.error("Media stream task completed with error: %s", t.exception())
             finally:
                 call_active = False
                 for t in [tw_task, gem_task, barge_task]:

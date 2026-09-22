@@ -920,7 +920,10 @@ class TestTrainerVoiceV2(unittest.IsolatedAsyncioTestCase):
         mock_get.return_value = mock_response
 
         # Mock evaluate_session_task to avoid running actual evaluation
-        with patch("app.services.trainer_service.TrainerService.evaluate_session_task") as mock_eval:
+        from app.routers import trainer_voice as tv_mod
+        with patch.object(tv_mod.settings, "twilio_account_sid", "ACmock"), \
+             patch.object(tv_mod.settings, "twilio_auth_token", "AUTSmock"), \
+             patch("app.services.trainer_service.TrainerService.evaluate_session_task") as mock_eval:
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
                 res = await ac.post("/bm/trainer/phone/sessions/reconcile")
                 self.assertEqual(res.status_code, 200)

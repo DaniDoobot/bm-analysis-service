@@ -447,9 +447,7 @@ async def verify_simulation_dtmf(request: Request, agent_id: str = Query(...), c
         host = request.headers.get("x-forwarded-host") or request.headers.get("host") or "localhost"
         await redirect_trainer_call(call_sid, host, agent_id, sim.simulation_id)
         return Response(content="""<?xml version="1.0" encoding="UTF-8"?>
-        <Response>
-            <Say language="es-ES">Código verificado. Iniciando simulación.</Say>
-        </Response>
+        <Response/>
         """, media_type="application/xml")
     elif val_res["status"] == "service_mismatch":
         logger.warning("Simulation code entered via DTMF belongs to another service: code=%s, agent_id=%s", digits, agent_id)

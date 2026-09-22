@@ -261,7 +261,8 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
                 req = self.mock_request(form_data={"Digits": "SIM101"}, headers={"host": "test-host.com"})
                 resp = await verify_simulation_dtmf(req, agent_id="7777", call_sid="call_123", db=db)
                 body = resp.body.decode("utf-8")
-                self.assertIn("Código verificado. Iniciando simulación", body)
+                self.assertIn("<Response/>", body)
+                self.assertNotIn("<Say", body)
                 mock_redirect.assert_called_once_with("call_123", "test-host.com", "7777", 1)
 
     async def test_verify_simulation_dtmf_failure(self):

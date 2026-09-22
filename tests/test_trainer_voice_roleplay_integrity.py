@@ -132,24 +132,26 @@ class TestTrainerVoiceRoleplayIntegrity(unittest.IsolatedAsyncioTestCase):
         self.assertIn("¿En qué le puedo ayudar?", SPANISH_VOICE_RULES)
         self.assertIn("Sí, aquí estoy. ¿En qué puedo ayudarte?", SPANISH_VOICE_RULES)
         self.assertIn("¿Está ahí?", SPANISH_VOICE_RULES)
+        self.assertIn("¿Está ahí, Pedro?", SPANISH_VOICE_RULES)
+        self.assertIn("Pedro, ¿puede oírme?", SPANISH_VOICE_RULES)
         self.assertIn("¿Sigues ahí?", SPANISH_VOICE_RULES)
         self.assertIn("¿Me escucha?", SPANISH_VOICE_RULES)
-        self.assertIn("Responde SIEMPRE DENTRO DEL PERSONAJE", SPANISH_VOICE_RULES)
+        self.assertIn("Responde SIEMPRE 100% DENTRO DEL PERSONAJE", SPANISH_VOICE_RULES)
         self.assertIn("Una pausa o silencio del agente NO significa que el roleplay haya terminado", SPANISH_VOICE_RULES)
 
         # 2. Check HEALTHCARE_VOICE_RULES
         self.assertIn("NUNCA actúes como asistente médico ni digas \"¿En qué puedo ayudarte?\"", HEALTHCARE_VOICE_RULES)
-        self.assertIn("Si hay silencios o el agente pregunta si estás ahí, responde siempre como paciente", HEALTHCARE_VOICE_RULES)
+        self.assertIn("Si hay silencios o el agente pregunta si estás ahí", HEALTHCARE_VOICE_RULES)
 
         # 3. Check build_turn_discipline
         discipline = build_turn_discipline(is_healthcare=False, interlocutor_role="cliente")
         self.assertIn("Control de silencios y presencia", discipline)
-        self.assertIn("¿está ahí?", discipline)
-        self.assertIn("NUNCA digas '¿En qué puedo ayudarte?'", discipline)
+        self.assertIn("¿está ahí, Pedro?", discipline)
+        self.assertIn("NUNCA digas 'Sí, aquí estoy. ¿En qué puedo ayudarte?'", discipline)
 
     @patch("app.routers.trainer_voice.TrainerService.start_phone_session", new_callable=AsyncMock)
-    async def test_3_start_roleplay_twiml_says_greeting_before_stream(self, mock_start_session):
-        """start_roleplay endpoint must render verification greeting via Twilio <Say> before connecting <Stream>."""
+    async def test_3_start_roleplay_twiml_connects_immediately_without_spoken_greeting(self, mock_start_session):
+        """start_roleplay endpoint must directly connect to <Stream> without any spoken <Say> confirmation."""
         mock_db = AsyncMock()
         mock_setting = MagicMock(agent_name="Laura Martinez", training_code="LM01")
         mock_sim = MagicMock(simulation_id=5, code="SIM05")
@@ -174,14 +176,10 @@ class TestTrainerVoiceRoleplayIntegrity(unittest.IsolatedAsyncioTestCase):
         )
         content = response.body.decode("utf-8")
 
-        # Must include <Say> with verification and Laura's first name
-        self.assertIn("<Say language=\"es-ES\">Perfecto Laura, se ha verificado el código de la simulación. Iniciamos el roleplay. Prepárate.</Say>", content)
+        # Must NOT include <Say> with verification or greeting
+        self.assertNotIn("<Say", content, "<Say> element must be eliminated to ensure silent stream connection")
         # Must include <Stream>
         self.assertIn("<Stream url=\"wss://test-service.com/bm/trainer/phone/media-stream?session_id=88&amp;flow=session\">", content)
-        # Ensure <Say> appears before <Connect>
-        say_idx = content.find("<Say")
-        connect_idx = content.find("<Connect")
-        self.assertTrue(0 <= say_idx < connect_idx, "<Say> must appear before <Connect> so greeting happens outside Gemini roleplay context")
 
     @patch("app.routers.trainer_voice.AsyncSessionLocal")
     @patch("app.routers.trainer_voice.websockets.connect")
@@ -446,3 +444,113 @@ class TestTrainerVoiceRoleplayIntegrity(unittest.IsolatedAsyncioTestCase):
                 pass
 
         self.assertEqual(len(nudge_turns), 0, "Watchdog must not inject synthetic role: user prompts into roleplay!")
+
+    @patch("app.routers.trainer_voice.encode_gemini_to_twilio", return_value=("FORWARDED_MULAW", None))
+    @patch("app.routers.trainer_voice.AsyncSessionLocal")
+    @patch("app.routers.trainer_voice.websockets.connect")
+    async def test_7_after_barge_in_next_turn_is_forwarded_and_not_discarded(self, mock_ws_connect, mock_session_local, mock_encode):
+        """CRITICAL: After an interruption / barge-in, subsequent Gemini turns MUST NOT be discarded."""
+        mock_db = AsyncMock()
+        mock_session_local.return_value.__aenter__.return_value = mock_db
+        fake_sim = MagicMock(simulation_id=10, code="V1", name="V", roleplay_prompt="Eres un cliente.", company_id=1)
+        fake_sess = MagicMock(session_id=10, agent_id="101", simulation_id=10, simulation_version_id=None, simulation=fake_sim)
+        res_sess = MagicMock()
+        res_sess.scalars.return_value.first.return_value = fake_sess
+        res_comp = MagicMock()
+        res_comp.scalars.return_value.first.return_value = None
+        mock_db.execute.side_effect = [res_sess, res_comp]
+
+        mock_tw_ws = AsyncMockWs(messages=[
+            json.dumps({"event": "start", "start": {"streamSid": "STR_777", "callSid": "CA_777"}})
+        ])
+
+        # Gemini sequence:
+        # 1. setupComplete
+        # 2. First turn
+        # 3. Interrupted (barge-in)
+        # 4. Second turn with new audio (MUST be forwarded to Twilio, NEVER discarded!)
+        mock_gem_ws = AsyncMockWs(messages=[
+            json.dumps({"setupComplete": {}}),
+            json.dumps({
+                "serverContent": {
+                    "modelTurn": {"parts": [{"inlineData": {"data": "TURN_1_AUDIO"}}]},
+                    "turnComplete": True
+                }
+            }),
+            json.dumps({
+                "serverContent": {
+                    "interrupted": True
+                }
+            }),
+            json.dumps({
+                "serverContent": {
+                    "modelTurn": {"parts": [{"inlineData": {"data": "TURN_2_POST_BARGE_IN"}}]},
+                    "turnComplete": True
+                }
+            }),
+        ])
+        mock_ws_connect.return_value.__aenter__.return_value = mock_gem_ws
+
+        task = asyncio.create_task(
+            media_stream(websocket=mock_tw_ws, flow="session", session_id=10, db=mock_db)
+        )
+        await asyncio.sleep(0.1)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # 1. Twilio must have received clear event upon interrupted
+        clears = [json.loads(m) for m in mock_tw_ws.sent_messages if "clear" in m]
+        self.assertEqual(len(clears), 1, "Expected exactly 1 clear event sent to Twilio on interruption")
+        self.assertEqual(clears[0]["streamSid"], "STR_777")
+
+        # 2. Twilio must have received media packets for BOTH turns (turn 2 must NOT be discarded!)
+        media_packets = [json.loads(m) for m in mock_tw_ws.sent_messages if "media" in m and "payload" in m]
+        self.assertGreaterEqual(len(media_packets), 2, "Turn 2 after barge-in was erroneously discarded!")
+
+    @patch("app.routers.trainer_voice.encode_gemini_to_twilio", return_value=("VALID_MULAW", None))
+    @patch("app.routers.trainer_voice.AsyncSessionLocal")
+    @patch("app.routers.trainer_voice.websockets.connect")
+    async def test_8_malformed_message_does_not_break_loops(self, mock_ws_connect, mock_session_local, mock_encode):
+        """A single malformed JSON message or frame error must be caught gracefully and not kill the call."""
+        mock_db = AsyncMock()
+        mock_session_local.return_value.__aenter__.return_value = mock_db
+        fake_sim = MagicMock(simulation_id=10, code="V1", name="V", roleplay_prompt="Eres un cliente.", company_id=1)
+        fake_sess = MagicMock(session_id=10, agent_id="101", simulation_id=10, simulation_version_id=None, simulation=fake_sim)
+        res_sess = MagicMock()
+        res_sess.scalars.return_value.first.return_value = fake_sess
+        res_comp = MagicMock()
+        res_comp.scalars.return_value.first.return_value = None
+        mock_db.execute.side_effect = [res_sess, res_comp]
+
+        # Injects malformed JSON in Gemini WS, followed by valid message
+        mock_gem_ws = AsyncMockWs(messages=[
+            json.dumps({"setupComplete": {}}),
+            "NOT_VALID_JSON{:::broken",
+            json.dumps({
+                "serverContent": {
+                    "modelTurn": {"parts": [{"inlineData": {"data": "AUDIO_AFTER_ERROR"}}]},
+                    "turnComplete": True
+                }
+            }),
+        ])
+        mock_tw_ws = AsyncMockWs(messages=[
+            json.dumps({"event": "start", "start": {"streamSid": "STR_888", "callSid": "CA_888"}})
+        ])
+        mock_ws_connect.return_value.__aenter__.return_value = mock_gem_ws
+
+        task = asyncio.create_task(
+            media_stream(websocket=mock_tw_ws, flow="session", session_id=10, db=mock_db)
+        )
+        await asyncio.sleep(0.1)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Verify that the valid message after the error was processed successfully
+        media_packets = [json.loads(m) for m in mock_tw_ws.sent_messages if "media" in m and "payload" in m]
+        self.assertGreaterEqual(len(media_packets), 1, "Loop died on malformed message instead of continuing!")
