@@ -229,6 +229,19 @@ async def _resolve_training_agent_scope(
         target_filter_set = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=company_id)
     elif service_id is not None:
         target_filter_set = await get_service_assigned_owner_ids(db, service_id=service_id, context=context, company_id=company_id)
+    elif company_id is not None:
+        stmt_c = (
+            select(User.hubspot_owner_id)
+            .where(
+                User.company_id == company_id,
+                User.is_active == True,
+                func.lower(User.role).in_(["agent", "agente"]),
+                User.hubspot_owner_id != None,
+                User.hubspot_owner_id != "",
+            )
+        )
+        res_c = await db.execute(stmt_c)
+        target_filter_set = set(res_c.scalars().all())
 
     if base_role_set is not None and target_filter_set is not None:
         return list(base_role_set.intersection(target_filter_set))
@@ -247,6 +260,7 @@ async def list_agent_settings(
     team_id: Annotated[Optional[int], Query(description="Filter by team ID")] = None,
     is_enabled: Annotated[Optional[bool], Query(description="Filter by is_enabled")] = None,
     include_in_scheduler: Annotated[Optional[bool], Query(description="Filter by include_in_scheduler")] = None,
+    for_manual: Annotated[Optional[bool], Query(description="If true, returns active agents for manual cycle creation regardless of is_enabled")] = None,
     db: AsyncSession = Depends(get_db)
 ):
     """List all personalized training settings for agents (Admin/Company Admin/Service Manager/Team Coordinator)."""
@@ -269,11 +283,13 @@ async def list_agent_settings(
         db, context=context, service_id=service_id, team_id=team_id, company_id=eff_company_id
     )
 
+    effective_is_enabled = is_enabled if not for_manual else None
+
     return await PersonalizedTrainingService.get_agent_settings(
         db,
         company_ids=company_ids,
         allowed_agent_ids=allowed_agent_ids,
-        is_enabled=is_enabled,
+        is_enabled=effective_is_enabled,
         include_in_scheduler=include_in_scheduler
     )
 
@@ -923,7 +939,7 @@ async def trigger_manual_generation(
                         detail="Acceso denegado: Uno o más agentes pertenecen a otra empresa."
                     )
 
-    company_ids = context.allowed_company_ids if not context.is_super_admin else None
+    company_ids = context.allowed_company_ids if not context.is_super_admin else ([payload.company_id] if payload.company_id is not None else None)
     allowed_agent_ids = context.allowed_agent_ids if not context.is_super_admin else None
 
     try:
