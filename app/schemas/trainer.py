@@ -45,7 +45,7 @@ class TrainerEvaluationConfigResponse(BaseModel):
 
 class TrainerSimulationCreate(BaseModel):
     name: str = Field(..., description="Nombre de la simulación de roleplay")
-    code: str = Field(..., description="Código único global para iniciarla por teléfono")
+    code: Optional[str] = Field(None, description="Código único global para iniciarla por teléfono")
     service_id: int = Field(..., description="ID del servicio asociado")
     roleplay_prompt: str = Field(..., description="Instrucciones de roleplay/personaje para Gemini Live")
     evaluation_config_id: Optional[int] = Field(None, description="ID de la configuración de evaluación asociada")

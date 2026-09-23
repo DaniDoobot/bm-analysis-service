@@ -255,10 +255,10 @@ class TestDemoSimulationCodes(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sim_ok.code, "ATEN03")
             self.assertTrue(TrainerService.is_valid_demo_simulation_code(sim_ok.code))
 
-            # 2. Auto-generation when code is legacy format (e.g. SIM-DEMO-NEW)
+            # 2. Auto-generation when code is empty/None
             payload_auto = TrainerSimulationCreate(
                 name="Simulación Demo Auto",
-                code="SIM-DEMO-NEW",
+                code=None,
                 service_id=21,
                 roleplay_prompt="Test roleplay prompt",
             )
@@ -266,16 +266,15 @@ class TestDemoSimulationCodes(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(sim_auto.code.startswith("VENT"))
             self.assertTrue(TrainerService.is_valid_demo_simulation_code(sim_auto.code))
 
-            # 3. Invalid manual code rejected with clear ValueError
-            payload_bad = TrainerSimulationCreate(
-                name="Simulación Invalida",
-                code="INV-CODE-WITH-HYPHEN",
+            # 3. Custom code with hyphens/special format is preserved, not rejected
+            payload_custom = TrainerSimulationCreate(
+                name="Simulación Personalizada",
+                code="VENTAS-001",
                 service_id=20,
                 roleplay_prompt="Test roleplay prompt",
             )
-            with self.assertRaises(ValueError) as ctx:
-                await TrainerService.create_simulation(db, payload_bad)
-            self.assertIn("no es válido para la Empresa Demo", str(ctx.exception))
+            sim_custom = await TrainerService.create_simulation(db, payload_custom)
+            self.assertEqual(sim_custom.code, "VENTAS-001")
 
             # 4. Boston Medical simulation creation is NOT blocked by Demo rules
             payload_bm = TrainerSimulationCreate(

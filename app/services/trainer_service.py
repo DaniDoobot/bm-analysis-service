@@ -253,18 +253,12 @@ class TrainerService:
 
         is_demo = await TrainerService.is_demo_company(db, company_id)
         code_input = payload.code.strip() if payload.code else ""
-        if is_demo:
-            norm_code = TrainerService.normalize_simulation_code(code_input)
-            if not norm_code or norm_code.startswith("SIMDEMO") or norm_code.startswith("SIM"):
-                norm_code = await TrainerService.generate_demo_simulation_code(db, payload.service_id)
-            elif not TrainerService.is_valid_demo_simulation_code(norm_code):
-                raise ValueError(
-                    f"El código de simulación '{payload.code}' no es válido para la Empresa Demo. "
-                    "Debe tener entre 6 y 8 caracteres alfanuméricos sin espacios ni guiones (ej. ATEN01, VENT01)."
-                )
-            code_final = norm_code
-        else:
+        if code_input:
+            # Preserve user-entered code explicitly
             code_final = code_input
+        else:
+            # Auto-generate code when user did not provide one
+            code_final = await TrainerService.generate_demo_simulation_code(db, payload.service_id)
 
         # Check code uniqueness
         stmt_check = select(TrainerSimulation).where(TrainerSimulation.code == code_final)
@@ -301,16 +295,9 @@ class TrainerService:
 
         # If code changed, check uniqueness
         if payload.code is not None and payload.code.strip() != sim.code:
-            is_demo = await TrainerService.is_demo_company(db, sim.company_id)
-            if is_demo:
-                code_clean = TrainerService.normalize_simulation_code(payload.code)
-                if not TrainerService.is_valid_demo_simulation_code(code_clean):
-                    raise ValueError(
-                        f"El código de simulación '{payload.code}' no es válido para la Empresa Demo. "
-                        "Debe tener entre 6 y 8 caracteres alfanuméricos sin espacios ni guiones (ej. ATEN01, VENT01)."
-                    )
-            else:
-                code_clean = payload.code.strip()
+            code_clean = payload.code.strip()
+            if not code_clean:
+                raise ValueError("El código de simulación no puede estar vacío.")
 
             if code_clean != sim.code:
                 stmt_check = select(TrainerSimulation).where(TrainerSimulation.code == code_clean)
@@ -459,8 +446,7 @@ class TrainerService:
             raise ValueError("La simulación original no existe.")
 
         # Find unique code for duplicated simulation
-        is_demo = await TrainerService.is_demo_company(db, sim.company_id)
-        if is_demo or TrainerService.is_valid_demo_simulation_code(sim.code):
+        if TrainerService.is_valid_demo_simulation_code(sim.code):
             m = re.match(r"^([A-Z0-9]{2,6}?)(\d{2})$", sim.code)
             if m:
                 prefix = m.group(1)
