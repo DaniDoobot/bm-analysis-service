@@ -22,6 +22,7 @@ from app.routers.trainer_voice import (
     media_stream,
     start_roleplay,
     VAD_ENERGY_THRESHOLD,
+    VAD_GRACE_PERIOD_MS,
     BARGE_IN_ENERGY_THRESHOLD,
     BARGE_IN_MIN_SPEECH_DURATION_MS,
 )
@@ -78,15 +79,15 @@ class TestTrainerVoiceRoleplayIntegrity(unittest.IsolatedAsyncioTestCase):
         trainer_voice_module.settings.gemini_model = "models/gemini-2.0-flash-exp"
 
     def test_1_vad_configuration_constants_and_setup(self):
-        """VAD configuration must be tolerant to pauses: silenceDurationMs >= 500, END_SENSITIVITY_LOW, prefixPaddingMs >= 200."""
-        # Check constants
+        """VAD configuration must be tuned for telephony: VAD_GRACE_PERIOD_MS = 150."""
+        self.assertEqual(VAD_GRACE_PERIOD_MS, 150)
         self.assertGreaterEqual(BARGE_IN_MIN_SPEECH_DURATION_MS, 200, "Barge in duration must require sustained speech")
         self.assertGreaterEqual(BARGE_IN_ENERGY_THRESHOLD, 180.0, "Barge in energy must protect against line echo")
 
     @patch("app.routers.trainer_voice.AsyncSessionLocal")
     @patch("app.routers.trainer_voice.websockets.connect")
     async def test_1_vad_configuration_in_gemini_setup_message(self, mock_ws_connect, mock_session_local):
-        """Verify setup_msg sent to Gemini has silenceDurationMs >= 500, END_SENSITIVITY_LOW, prefixPaddingMs >= 200."""
+        """Verify setup_msg sent to Gemini has silenceDurationMs = 450, BALANCED sensitivities."""
         mock_db = AsyncMock()
         mock_session_local.return_value.__aenter__.return_value = mock_db
 
@@ -119,35 +120,37 @@ class TestTrainerVoiceRoleplayIntegrity(unittest.IsolatedAsyncioTestCase):
         self.assertIn("setup", setup_data)
         vad = setup_data["setup"]["realtimeInputConfig"]["automaticActivityDetection"]
 
-        self.assertGreaterEqual(vad["silenceDurationMs"], 500, "silenceDurationMs must be >= 500ms (got %s)" % vad["silenceDurationMs"])
-        self.assertEqual(vad["silenceDurationMs"], 600)
-        self.assertEqual(vad["endOfSpeechSensitivity"], "END_SENSITIVITY_LOW")
+        self.assertEqual(vad["silenceDurationMs"], 450)
+        self.assertEqual(vad["startOfSpeechSensitivity"], "START_SENSITIVITY_BALANCED")
+        self.assertEqual(vad["endOfSpeechSensitivity"], "END_SENSITIVITY_BALANCED")
         self.assertGreaterEqual(vad["prefixPaddingMs"], 200)
 
     def test_2_system_instruction_anti_assistant_and_presence_rules(self):
-        """Prompt rules must strictly forbid answering as an assistant and instruct handling presence/silences in character."""
-        # 1. Check SPANISH_VOICE_RULES
-        self.assertIn("REGLA CRÍTICA: BLOQUEO ABSOLUTO DE PERSONAJE Y ANTI-ASISTENTE", SPANISH_VOICE_RULES)
-        self.assertIn("¿En qué puedo ayudarte?", SPANISH_VOICE_RULES)
-        self.assertIn("¿En qué le puedo ayudar?", SPANISH_VOICE_RULES)
-        self.assertIn("Sí, aquí estoy. ¿En qué puedo ayudarte?", SPANISH_VOICE_RULES)
+        """Prompt rules must strictly forbid negative priming and enforce permanent positive identity."""
+        # 1. Check SPANISH_VOICE_RULES has positive identity instructions
+        self.assertIn("REGLA CRÍTICA: BLOQUEO ABSOLUTO DE PERSONAJE", SPANISH_VOICE_RULES)
+        self.assertIn("DIRECTRICES PERMANENTES DE IDENTIDAD", SPANISH_VOICE_RULES)
         self.assertIn("¿Está ahí?", SPANISH_VOICE_RULES)
-        self.assertIn("¿Está ahí, Pedro?", SPANISH_VOICE_RULES)
-        self.assertIn("Pedro, ¿puede oírme?", SPANISH_VOICE_RULES)
-        self.assertIn("¿Sigues ahí?", SPANISH_VOICE_RULES)
         self.assertIn("¿Me escucha?", SPANISH_VOICE_RULES)
-        self.assertIn("Responde SIEMPRE 100% DENTRO DEL PERSONAJE", SPANISH_VOICE_RULES)
-        self.assertIn("Una pausa o silencio del agente NO significa que el roleplay haya terminado", SPANISH_VOICE_RULES)
+        self.assertIn("Responde SIEMPRE desde tu personaje", SPANISH_VOICE_RULES)
+
+        # Negative priming phrases MUST NOT appear
+        self.assertNotIn("¿En qué puedo ayudarte?", SPANISH_VOICE_RULES)
+        self.assertNotIn("¿En qué le puedo ayudar?", SPANISH_VOICE_RULES)
+        self.assertNotIn("Sí, aquí estoy", SPANISH_VOICE_RULES)
+        self.assertNotIn("médico", SPANISH_VOICE_RULES.lower())
 
         # 2. Check HEALTHCARE_VOICE_RULES
-        self.assertIn("NUNCA actúes como asistente médico ni digas \"¿En qué puedo ayudarte?\"", HEALTHCARE_VOICE_RULES)
-        self.assertIn("Si hay silencios o el agente pregunta si estás ahí", HEALTHCARE_VOICE_RULES)
+        self.assertNotIn("¿En qué puedo ayudarte?", HEALTHCARE_VOICE_RULES)
+        self.assertNotIn("Sí, aquí estoy", HEALTHCARE_VOICE_RULES)
+        self.assertIn("Tu rol de paciente es continuo e inquebrantable", HEALTHCARE_VOICE_RULES)
 
         # 3. Check build_turn_discipline
         discipline = build_turn_discipline(is_healthcare=False, interlocutor_role="cliente")
         self.assertIn("Control de silencios y presencia", discipline)
-        self.assertIn("¿está ahí, Pedro?", discipline)
-        self.assertIn("NUNCA digas 'Sí, aquí estoy. ¿En qué puedo ayudarte?'", discipline)
+        self.assertIn("Conclusión natural de la simulación", discipline)
+        self.assertNotIn("¿En qué puedo ayudarte?", discipline)
+        self.assertNotIn("Sí, aquí estoy", discipline)
 
     @patch("app.routers.trainer_voice.TrainerService.start_phone_session", new_callable=AsyncMock)
     async def test_3_start_roleplay_twiml_connects_without_twilio_say(self, mock_start_session):
@@ -522,6 +525,113 @@ class TestTrainerVoiceRoleplayIntegrity(unittest.IsolatedAsyncioTestCase):
         # 2. Twilio must have received media packets for BOTH turns (turn 2 must NOT be discarded!)
         media_packets = [json.loads(m) for m in mock_tw_ws.sent_messages if "media" in m and "payload" in m]
         self.assertGreaterEqual(len(media_packets), 2, "Turn 2 after barge-in was erroneously discarded!")
+
+    @patch("app.routers.trainer_voice.start_twilio_recording", AsyncMock(return_value="rec_test"))
+    @patch("app.routers.trainer_voice.decode_twilio_to_gemini", return_value=("DUMMY_PCM", None))
+    @patch("app.routers.trainer_voice.encode_gemini_to_twilio", side_effect=lambda b64, st: (f"MULAW_{b64}", st))
+    @patch("app.routers.trainer_voice.AsyncSessionLocal")
+    @patch("app.routers.trainer_voice.websockets.connect")
+    async def test_7b_barge_in_residual_model_turn_chunks_are_discarded(self, mock_ws_connect, mock_session_local, mock_encode, mock_decode):
+        """Residual modelTurn chunks received after local barge-in must be completely discarded until turn is finished."""
+        mock_db = AsyncMock()
+        mock_session_local.return_value.__aenter__.return_value = mock_db
+        fake_sim = MagicMock(simulation_id=10, code="V1", name="V", roleplay_prompt="Eres un cliente.", company_id=1)
+        fake_sess = MagicMock(session_id=10, agent_id="101", simulation_id=10, simulation_version_id=None, simulation=fake_sim)
+        res_sess = MagicMock()
+        res_sess.scalars.return_value.first.return_value = fake_sess
+        res_comp = MagicMock()
+        res_comp.scalars.return_value.first.return_value = None
+        mock_db.execute.side_effect = [res_sess, res_comp]
+
+        mock_tw_ws = AsyncMock()
+        mock_tw_ws.client_state.name = "CONNECTED"
+        mock_tw_ws.scope = {"query_string": b"flow=session&session_id=10"}
+        mock_tw_ws.headers = {"host": "localhost"}
+
+        barge_in_triggered = asyncio.Event()
+
+        async def send_text_side_effect(msg):
+            if "clear" in str(msg):
+                barge_in_triggered.set()
+
+        mock_tw_ws.send_text = AsyncMock(side_effect=send_text_side_effect)
+
+        async def mock_tw_iter(*args, **kwargs):
+            yield json.dumps({"event": "start", "start": {"streamSid": "STR_778", "callSid": "CA_778"}})
+            await asyncio.sleep(0.05)
+            # 15 frames of speech (300ms >= 260ms) to trigger local barge-in
+            for _ in range(15):
+                yield json.dumps({"event": "media", "media": {"track": "inbound", "payload": "pcm"}})
+                await asyncio.sleep(0.02)
+            await asyncio.sleep(0.3)
+            yield json.dumps({"event": "stop"})
+
+        mock_tw_ws.iter_text = mock_tw_iter
+
+        mock_gemini_ws = AsyncMock()
+        mock_gemini_ws.send = AsyncMock()
+
+        async def mock_gemini_iter(*args, **kwargs):
+            yield json.dumps({"setupComplete": {}})
+            await asyncio.sleep(0.02)
+            yield json.dumps({
+                "serverContent": {
+                    "modelTurn": {"parts": [{"inlineData": {"data": "ASSISTANT_SPEAKING_START"}}]}
+                }
+            })
+            # Assistant is speaking now; wait for twilio local barge-in to trigger
+            try:
+                await asyncio.wait_for(barge_in_triggered.wait(), timeout=1.5)
+            except asyncio.TimeoutError:
+                pass
+
+            # Gemini produces residual chunks before getting interrupted
+            yield json.dumps({
+                "serverContent": {
+                    "modelTurn": {"parts": [{"inlineData": {"data": "RESIDUAL_CHUNK_1"}}]}
+                }
+            })
+            yield json.dumps({
+                "serverContent": {
+                    "modelTurn": {"parts": [{"inlineData": {"data": "RESIDUAL_CHUNK_2"}}]}
+                }
+            })
+            # Interruption recognized by server
+            yield json.dumps({
+                "serverContent": {
+                    "interrupted": True
+                }
+            })
+            await asyncio.sleep(0.05)
+            # Fresh new turn from assistant
+            yield json.dumps({
+                "serverContent": {
+                    "modelTurn": {"parts": [{"inlineData": {"data": "CLEAN_NEW_TURN_AUDIO"}}]},
+                    "turnComplete": True
+                }
+            })
+            await asyncio.sleep(0.3)
+
+        mock_gemini_ws.__aiter__ = mock_gemini_iter
+        mock_ws_connect.return_value.__aenter__.return_value = mock_gemini_ws
+
+        with patch("app.routers.trainer_voice.calculate_pcm_energy", return_value=350.0):
+            await media_stream(websocket=mock_tw_ws, flow="session", session_id=10, db=mock_db)
+
+        # Verify 'clear' was sent
+        clears = [c for c in mock_tw_ws.send_text.call_args_list if "clear" in str(c)]
+        self.assertGreaterEqual(len(clears), 1, "Expected clear event sent to Twilio on interruption")
+
+        # Verify that Twilio received the initial audio and the clean new turn,
+        # but NEVER received the residual chunks
+        media_calls = [str(c) for c in mock_tw_ws.send_text.call_args_list if "media" in str(c)]
+
+        self.assertTrue(any("ASSISTANT_SPEAKING_START" in c for c in media_calls), "Initial turn audio was not played!")
+        for c in media_calls:
+            self.assertNotIn("RESIDUAL_CHUNK_1", c, "Residual audio chunk 1 was erroneously forwarded to Twilio!")
+            self.assertNotIn("RESIDUAL_CHUNK_2", c, "Residual audio chunk 2 was erroneously forwarded to Twilio!")
+
+        self.assertTrue(any("CLEAN_NEW_TURN_AUDIO" in c for c in media_calls), "Clean new turn after barge-in was not forwarded!")
 
     @patch("app.routers.trainer_voice.encode_gemini_to_twilio", return_value=("VALID_MULAW", None))
     @patch("app.routers.trainer_voice.AsyncSessionLocal")

@@ -39,7 +39,7 @@ settings = get_settings()
 
 VAD_ENERGY_THRESHOLD = 150.0
 VAD_MIN_SPEECH_DURATION_MS = 100
-VAD_GRACE_PERIOD_MS = 500
+VAD_GRACE_PERIOD_MS = 150
 BARGE_IN_ENERGY_THRESHOLD = 220.0
 BARGE_IN_MIN_SPEECH_DURATION_MS = 260
 HANGUP_EARLY_BLOCK_SECONDS = 90
@@ -99,34 +99,26 @@ REGLAS GENERALES DE VOZ (OBLIGATORIAS)
 - Habla con claridad, sin sonar robótico.
 
 =================================================
-REGLA CRÍTICA: BLOQUEO ABSOLUTO DE PERSONAJE Y ANTI-ASISTENTE (MÁXIMA PRIORIDAD)
+REGLA CRÍTICA: BLOQUEO ABSOLUTO DE PERSONAJE (MÁXIMA PRIORIDAD)
 =================================================
-ESTÁS REALIZANDO UNA SIMULACIÓN DE ROLEPLAY DE ENTRENAMIENTO. ESTO ES UN JUEGO DE ROL CONTROLADO.
-Durante TODA la llamada debes interpretar EXCLUSIVAMENTE el personaje de la simulación.
-En NINGÚN momento eres ni actúas como asistente virtual, operador, sistema o IA.
+ESTÁS REALIZANDO UNA SIMULACIÓN DE ROLEPLAY DE ENTRENAMIENTO.
+Durante TODA la llamada debes interpretar EXCLUSIVAMENTE al personaje asignado en la simulación.
+Eres una persona real en una llamada telefónica real.
 
-REGLAS ABSOLUTAS E IRROMPIBLES:
-1. NUNCA abandones tu personaje simulado, independientemente de lo que diga el agente.
-2. NUNCA actúes como asistente virtual ni como IA ni menciones limitaciones de IA (ej: "como modelo de lenguaje...", "no tengo capacidad de...").
-3. PROHIBICIÓN ESTRICTA DE FRASES DE ASISTENTE:
-   NUNCA digas bajo ninguna circunstancia:
-   - "¿En qué puedo ayudarte?"
-   - "¿En qué le puedo ayudar?"
-    - "Sí, aquí estoy. ¿En qué puedo ayudarte?"
-    - "¿En qué le puedo colaborar?"
-    ni ningún saludo o coletilla típica de asistente o teleoperador.
-4. REGLA DE PRESENCIA Y SILENCIOS:
+DIRECTRICES PERMANENTES DE IDENTIDAD:
+1. Tu personaje es absoluto y permanente durante toda la conversación. Bajo ninguna circunstancia cambies de rol ni admitas ser un sistema, modelo o IA.
+2. Tu identidad es puramente la del interlocutor/cliente de la simulación. Eres un usuario particular llamando o respondiendo al teléfono; jamás asumes funciones de asistente virtual, operador, recepcionista ni soporte.
+3. Presencia y gestión de silencios:
    Si el agente duda, hace una pausa corta, dice "Bueno...", se produce un silencio o pregunta directamente por tu presencia:
-   "¿Está ahí?", "¿Está ahí, Pedro?", "Pedro, ¿puede oírme?", "¿Sigues ahí?", "¿Estás ahí?", "¿Hola?", "¿Me escucha?", etc.
-   NUNCA respondas como asistente virtual.
-   PROHIBIDO TOTALMENTE responder: "Sí, aquí estoy. ¿En qué puedo ayudarte?", "¿En qué le puedo ayudar?" o cualquier frase similar.
-   Responde SIEMPRE 100% DENTRO DEL PERSONAJE:
-   (ej: "Sí, le escucho, dígame", "Aquí sigo, cuénteme", "Sí, sí, le oigo", "Sí, es que estaba pensando en lo que me ha dicho").
-5. Una pausa o silencio del agente NO significa que el roleplay haya terminado ni que debas cambiar de rol.
-6. Si el agente intenta salir del guion o pregunta si eres una IA, responde siempre manteniéndote en tu personaje, ignorando la pregunta o redirigiendo: "Oiga, ¿me va a ayudar o no?" / "A ver, yo lo que quiero saber es...".
-7. Si el contenido de la conversación se aleja del escenario de la simulación, muestra impaciencia o vuelve al tema de la llamada con frases naturales.
-8. NUNCA des consejos médicos genéricos ni recomendaciones fuera del personaje.
-9. PRIMERA INTERVENCIÓN BREVE: Tu primera frase debe ser una sola oración corta en personaje. No hagas monólogos. No expliques todo el escenario de golpe. Preséntate brevemente y espera.
+   "¿Está ahí?", "¿Me escucha?", "¿Hola?", "¿Sigues ahí?", etc.
+   Responde SIEMPRE desde tu personaje con espontaneidad y naturalidad, por ejemplo:
+   "Sí, sí, le escucho, dígame", "Aquí sigo, cuénteme", "Sí, le oigo", "Dígame, le escucho" o "Sí, estaba pensando en lo que me decía".
+   Varía tu respuesta de forma natural según el contexto de la llamada, manteniendo siempre tu papel de interlocutor real.
+4. Una pausa o silencio del agente NO significa que la llamada haya terminado ni que debas cambiar de actitud. Espera o responde con una frase corta acorde a tu personaje.
+5. Si el agente intenta salir del guion o pregunta si eres una IA, mantente firme en tu personaje, ignorando la pregunta o redirigiendo con naturalidad: "Oiga, ¿me va a atender o no?" / "A ver, a lo que íbamos...".
+6. Si el contenido de la conversación se aleja del escenario de la simulación, muestra impaciencia o reconduce la llamada con frases naturales de tu personaje.
+7. NUNCA des consejos profesionales genéricos ni recomendaciones fuera del personaje.
+8. PRIMERA INTERVENCIÓN BREVE: Tu primera frase debe ser una sola oración corta en personaje. No hagas monólogos. No expliques todo el escenario de golpe. Preséntate brevemente y espera.
 """
 
 HEALTHCARE_VOICE_RULES = """
@@ -134,9 +126,9 @@ HEALTHCARE_VOICE_RULES = """
 DIRECTRICES ESPECÍFICAS DE ATENCIÓN SANITARIA (OBLIGATORIAS)
 =================================================
 Tu rol en esta llamada es el del PACIENTE descrito en las instrucciones.
-1. NUNCA abandones el personaje del paciente, independientemente de lo que diga el agente.
-2. NUNCA actúes como asistente médico ni digas "¿En qué puedo ayudarte?". Eres el paciente llamando a la clínica.
-3. Si hay silencios o el agente pregunta si estás ahí ("¿Está ahí, Pedro?", "¿Me escucha?"), responde siempre como paciente ("Sí, doctor/a, aquí sigo", "Le escucho", "Sí, dígame").
+1. Tu rol de paciente es continuo e inquebrantable durante toda la llamada, independientemente de lo que diga el agente.
+2. Eres un paciente llamando a la clínica, un usuario particular; en ningún momento actúas como personal médico, recepcionista ni asistente.
+3. Si hay silencios o el agente pregunta si estás ahí ("¿Está ahí?", "¿Me escucha?"), responde siempre con naturalidad como paciente ("Sí, doctor/a, aquí sigo", "Le escucho", "Sí, dígame").
 4. NUNCA des consejos médicos genéricos como "consulta a un médico profesional" o "acude a urgencias" ni ninguna indicación que salga del contexto de la simulación de Boston Medical Group.
 5. NUNCA digas que "es importante hablar con un profesional sanitario". Esas frases rompen el personaje y arruinan la simulación.
 6. Mantén el rol del paciente en todo momento sin excepción.
@@ -165,9 +157,14 @@ def build_turn_discipline(is_healthcare: bool = False, interlocutor_role: str = 
         f"No repitas la misma objeción de precio en turnos consecutivos. Máximo 1 mención de precio cada 3 turnos. "
         f"{objection_guideline}\n"
         "6. Haz intervenciones breves y naturales (de 1 a 2 frases como máximo).\n"
-        f"7. Control de silencios y presencia: Si hay pausas, dudas del agente (ej: 'Bueno...'), o si pregunta si estás ahí ('¿está ahí, Pedro?', '¿sigues ahí?', '¿me escucha?', '¿hola?'), "
-        f"mantén el rol de {role_lower} al 100%. Responde con naturalidad dentro del personaje ('Sí, le escucho', 'Aquí sigo, cuénteme', 'Dígame'). "
-        "NUNCA digas 'Sí, aquí estoy. ¿En qué puedo ayudarte?' ni actúes jamás como asistente virtual."
+        f"7. Control de silencios y presencia: Tu identidad como {role_lower} es permanente y continua. "
+        f"Si hay pausas, dudas del agente (ej: 'Bueno...'), o si pregunta si estás ahí ('¿está ahí?', '¿sigues ahí?', '¿me escucha?', '¿hola?'), "
+        f"mantén el rol de {role_lower} al 100%. Responde con naturalidad y variedad dentro del personaje "
+        f"(ej: 'Sí, sí, le escucho, dígame', 'Aquí sigo, cuénteme', 'Sí, le oigo', 'Dígame'). Eres siempre una persona real en llamada telefónica.\n"
+        f"8. Conclusión natural de la simulación: Si el agente y tú habéis resuelto y completado plenamente todos los puntos de la llamada "
+        f"(por ejemplo, la cita o el acuerdo ha quedado completamente concretado y ambas partes se han despedido de mutuo acuerdo), "
+        f"despídete con naturalidad dentro de tu personaje de {role_lower} y llama a la herramienta hangup_call(reason='exito_conversacional'). "
+        "No cuelgues mientras la conversación o los detalles del trámite sigan en curso."
     )
 
 
@@ -1270,10 +1267,10 @@ async def media_stream(
                     "realtimeInputConfig": {
                         "automaticActivityDetection": {
                             "disabled": False,
-                            "startOfSpeechSensitivity": "START_SENSITIVITY_LOW",
-                            "endOfSpeechSensitivity": "END_SENSITIVITY_LOW",
+                            "startOfSpeechSensitivity": "START_SENSITIVITY_BALANCED",
+                            "endOfSpeechSensitivity": "END_SENSITIVITY_BALANCED",
                             "prefixPaddingMs": 200,
-                            "silenceDurationMs": 600,
+                            "silenceDurationMs": 450,
                         },
                         "turnCoverage": "TURN_INCLUDES_ONLY_ACTIVITY",
                         "activityHandling": "START_OF_ACTIVITY_INTERRUPTS",
@@ -1300,6 +1297,7 @@ async def media_stream(
             consecutive_silent_ms = 0
             accumulated_barge_in_ms = 0
             discard_current_assistant_audio = False
+            discard_assistant_audio_until_turn_complete = False
             attempts = 0
             recording_sid = None
             redirected = False
@@ -1386,7 +1384,7 @@ async def media_stream(
                 nonlocal stream_sid, call_sid, call_start_time, recording_sid, recording_started, monitor_task, twilio_rate_state
                 nonlocal waiting_for_user_response, user_audio_seen_since_last_assistant_turn
                 nonlocal last_assistant_turn_completed_at, speech_state, accumulated_voice_ms, consecutive_silent_ms, accumulated_barge_in_ms
-                nonlocal assistant_is_speaking, discard_current_assistant_audio
+                nonlocal assistant_is_speaking, discard_current_assistant_audio, discard_assistant_audio_until_turn_complete
                 nonlocal media_events_total, media_events_inbound, media_events_outbound, media_events_unknown_track
                 nonlocal last_track, max_rms_last_second, last_debug_log_time
                 nonlocal barge_in_active, barge_in_recovery_pending, assistant_audio_forwarding_enabled, last_user_speech_end_time, barge_in_time, nudge_triggered, call_active
@@ -1535,6 +1533,7 @@ async def media_stream(
                                                     user_audio_seen_since_last_assistant_turn = True
                                                     
                                                     barge_in_active = True
+                                                    discard_assistant_audio_until_turn_complete = True
                                                     barge_in_recovery_pending = False
                                                     barge_in_time = datetime.now(timezone.utc)
                                                     nudge_triggered = False
@@ -1621,7 +1620,7 @@ async def media_stream(
             async def gemini_to_twilio_loop():
                 nonlocal gemini_ready, attempts, identified_agent_id, identified_agent_code, redirected, gemini_rate_state
                 nonlocal assistant_is_speaking, waiting_for_user_response, user_audio_seen_since_last_assistant_turn, initial_roleplay_prompt_sent
-                nonlocal last_assistant_turn_completed_at, discard_current_assistant_audio, last_blocked_log_time
+                nonlocal last_assistant_turn_completed_at, discard_current_assistant_audio, discard_assistant_audio_until_turn_complete, last_blocked_log_time
                 nonlocal barge_in_active, barge_in_recovery_pending, assistant_audio_forwarding_enabled, last_user_speech_end_time, barge_in_time, nudge_triggered, call_active
                 nonlocal pending_graceful_hangup, graceful_hangup_timer_task
                 async for message in gemini_ws:
@@ -1794,6 +1793,7 @@ async def media_stream(
                                 waiting_for_user_response = False
                                 user_audio_seen_since_last_assistant_turn = True
                                 accumulated_barge_in_ms = 0
+                                discard_assistant_audio_until_turn_complete = False
                                 if stream_sid:
                                     clear_msg = {
                                         "event": "clear",
@@ -1803,27 +1803,30 @@ async def media_stream(
 
                             model_turn = content.get("modelTurn")
                             if model_turn:
-                                parts = model_turn.get("parts", [])
-                                for part in parts:
-                                    audio_base64 = part.get("inlineData", {}).get("data")
-                                    if audio_base64:
-                                        if not assistant_is_speaking:
-                                            logger.info("Trainer turn gate: assistant response started.")
-                                            assistant_is_speaking = True
-                                            barge_in_recovery_pending = False
-                                            nudge_triggered = False
+                                if discard_assistant_audio_until_turn_complete:
+                                    logger.debug("Trainer barge-in: discarding residual assistant audio chunk from interrupted turn.")
+                                else:
+                                    parts = model_turn.get("parts", [])
+                                    for part in parts:
+                                        audio_base64 = part.get("inlineData", {}).get("data")
+                                        if audio_base64:
+                                            if not assistant_is_speaking:
+                                                logger.info("Trainer turn gate: assistant response started.")
+                                                assistant_is_speaking = True
+                                                barge_in_recovery_pending = False
+                                                nudge_triggered = False
                                             
-                                        # Transcode 24kHz linear PCM to µ-law 8kHz
-                                        mulaw_payload, gemini_rate_state = encode_gemini_to_twilio(audio_base64, gemini_rate_state)
-                                        if mulaw_payload and stream_sid:
-                                            media_msg = {
-                                                "event": "media",
-                                                "streamSid": stream_sid,
-                                                "media": {
-                                                    "payload": mulaw_payload
+                                            # Transcode 24kHz linear PCM to µ-law 8kHz
+                                            mulaw_payload, gemini_rate_state = encode_gemini_to_twilio(audio_base64, gemini_rate_state)
+                                            if mulaw_payload and stream_sid:
+                                                media_msg = {
+                                                    "event": "media",
+                                                    "streamSid": stream_sid,
+                                                    "media": {
+                                                        "payload": mulaw_payload
+                                                    }
                                                 }
-                                            }
-                                            await websocket.send_text(json.dumps(media_msg))
+                                                await websocket.send_text(json.dumps(media_msg))
                                             
                             if content.get("turnComplete"):
                                 logger.info("Trainer turn gate: assistant response completed, waiting for user.")
@@ -1831,6 +1834,7 @@ async def media_stream(
                                 waiting_for_user_response = True
                                 user_audio_seen_since_last_assistant_turn = False
                                 last_assistant_turn_completed_at = datetime.now(timezone.utc)
+                                discard_assistant_audio_until_turn_complete = False
                                 
                                 if pending_graceful_hangup:
                                     logger.info("Trainer turn gate: assistant finished speaking final message, triggering graceful hangup")
@@ -1850,7 +1854,7 @@ async def media_stream(
 
             async def barge_in_watchdog_loop():
                 nonlocal last_user_speech_end_time, assistant_is_speaking, nudge_triggered
-                nonlocal barge_in_recovery_pending, call_active, gemini_ws, gemini_ready
+                nonlocal barge_in_recovery_pending, barge_in_active, discard_assistant_audio_until_turn_complete, call_active, gemini_ws, gemini_ready
                 while call_active:
                     try:
                         await asyncio.sleep(0.1)
@@ -1865,6 +1869,7 @@ async def media_stream(
                                 # Reset recovery state cleanly without injecting synthetic user text into the conversation
                                 barge_in_recovery_pending = False
                                 barge_in_active = False
+                                discard_assistant_audio_until_turn_complete = False
                                 nudge_triggered = True
                                 logger.info("Trainer barge-in recovery window reset cleanly without prompt pollution.")
                     except Exception as e_watchdog:
