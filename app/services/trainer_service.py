@@ -977,6 +977,7 @@ class TrainerService:
             simulation_version_id=active_version_id,
             agent_id=agent["agent_id"],
             agent_code=agent_code.replace(" ", "").upper(),
+            company_id=sim.company_id,
             service_id=sim.service_id,
             call_id=call_id,
             external_call_sid=external_call_sid or call_id,
@@ -1256,27 +1257,123 @@ class TrainerService:
                 )
             example_evals_str = ",\n".join(example_evals)
 
-            # 4. Build system prompt
-            system_prompt = f"""Estás evaluando una simulación de entrenamiento telefónico (roleplay) realizada por un agente de Boston Medical Group.
+            # 4. Build system prompt with strict company isolation
+            from app.models.companies import Company
+            company = getattr(sim, "company", None) or getattr(sess, "company", None) or getattr(cfg, "company", None)
+            comp_id = getattr(sim, "company_id", None) or getattr(sess, "company_id", None) or getattr(cfg, "company_id", None)
 
-=== CONTEXTO DE ROLES ===
-- La llamada es entre UN AGENTE HUMANO de BMG y UN PACIENTE SIMULADO por IA.
-- El AGENTE HUMANO es quien se identifica como representante de Boston Medical Group, inicia la llamada, presenta servicios y maneja objeciones.
-- El PACIENTE SIMULADO es quien hace preguntas, pone objeciones y actúa como cliente potencial.
+            if isinstance(comp_id, int) and (not company or not getattr(company, "company_name", None)):
+                try:
+                    stmt_c = select(Company).where(Company.company_id == comp_id)
+                    res_c = await db.execute(stmt_c)
+                    resolved_c = res_c.scalars().first()
+                    if resolved_c:
+                        company = resolved_c
+                except Exception as e_c:
+                    logger.debug("Could not resolve Company entity for evaluation: %s", e_c)
+
+            is_demo = False
+            is_healthcare = False
+
+            if company:
+                c_is_demo = getattr(company, "is_demo", None)
+                c_key = getattr(company, "company_key", None)
+                if c_is_demo is True or c_key == "empresa-demo" or getattr(company, "company_id", None) == 7:
+                    is_demo = True
+            else:
+                if comp_id == 7:
+                    is_demo = True
+                elif isinstance(getattr(sim, "code", None), str) and any(sim.code.startswith(p) for p in ("ATEN", "VENT", "SIM-DEMO")):
+                    is_demo = True
+
+            if is_demo:
+                is_healthcare = False
+            elif company:
+                c_sector = (getattr(company, "sector", "") or "").lower() if isinstance(getattr(company, "sector", None), str) else ""
+                c_name = (getattr(company, "company_name", "") or "").lower() if isinstance(getattr(company, "company_name", None), str) else ""
+                c_key = (getattr(company, "company_key", "") or "").lower() if isinstance(getattr(company, "company_key", None), str) else ""
+                if c_sector in ("healthcare", "salud", "medico", "médico", "clinica", "clínica"):
+                    is_healthcare = True
+                elif "boston" in c_name or "boston" in c_key or getattr(company, "company_id", None) == 1:
+                    is_healthcare = True
+            elif comp_id == 1:
+                is_healthcare = True
+
+            # Resolve service name if available
+            svc_name = None
+            if sim and getattr(sim, "service", None) and isinstance(getattr(sim.service, "service_name", None), str):
+                svc_name = sim.service.service_name
+            elif cfg and getattr(cfg, "service", None) and isinstance(getattr(cfg.service, "service_name", None), str):
+                svc_name = cfg.service.service_name
+
+            if is_healthcare:
+                company_display = (getattr(company, "brand_name", None) or getattr(company, "company_name", None)) if company and (isinstance(getattr(company, "brand_name", None), str) or isinstance(getattr(company, "company_name", None), str)) else "Boston Medical Group"
+                system_intro = f"Estás evaluando una simulación de entrenamiento telefónico (roleplay) realizada por un agente de {company_display}."
+                roles_context = f"""=== CONTEXTO DE ROLES ===
+- La llamada es entre UN AGENTE HUMANO de {company_display} y UN PACIENTE SIMULADO por IA.
+- El AGENTE HUMANO es quien se identifica como representante de {company_display}, inicia la llamada, presenta servicios y maneja objeciones.
+- El PACIENTE SIMULADO es quien hace preguntas, pone objeciones y actúa como cliente o paciente potencial.
 - Ignora cualquier frase introductoria del sistema como 'Perfecto, [nombre]...' o 'Iniciamos el roleplay' — estas NO son parte de la conversación real.
-- Evalúa ÚNICAMENTE al agente humano. No penalices al agente por frases dichas por el paciente simulado.
+- Evalúa ÚNICAMENTE al agente humano. No penalices al agente por frases dichas por el paciente simulado."""
+                scenario_desc = f"- Escenario/Personaje del paciente simulado: {roleplay_prompt}"
+                extra_instructions_text = cfg.extra_instructions or ""
+                isolation_rule = ""
+            elif is_demo:
+                svc_display = svc_name or "Atención al Cliente"
+                company_display = "Empresa Demo"
+                system_intro = f"Estás evaluando una simulación de entrenamiento telefónico (roleplay) de {svc_display} realizada por un agente de {company_display}."
+                roles_context = f"""=== CONTEXTO DE ROLES ===
+- La llamada es entre UN AGENTE HUMANO de {company_display} ({svc_display}) y UN CLIENTE SIMULADO por IA.
+- El AGENTE HUMANO es quien atiende o inicia la llamada, se identifica cordialmente con su nombre y servicio/empresa ({company_display}), asiste al interlocutor, presenta soluciones y maneja consultas, quejas u objeciones.
+- El CLIENTE SIMULADO es quien hace preguntas, expone su caso, duda o reclamación y actúa como usuario o cliente.
+- Ignora cualquier frase introductoria del sistema como 'Perfecto, [nombre]...' o 'Iniciamos el roleplay' — estas NO son parte de la conversación real.
+- Evalúa ÚNICAMENTE al agente humano. No penalices al agente por frases dichas por el cliente simulado.
+- AISLAMIENTO CORPORATIVO ESTRICTO: Esta simulación pertenece exclusivamente a {company_display} ({svc_display}). La evaluación debe realizarse únicamente conforme al estándar y contexto de atención y soporte corporativo general. En los criterios de 'Saludo e Identificación' y 'Cierre y Despedida', el agente debe identificarse y despedirse de forma cordial y profesional conforme a {company_display} o su servicio corporativo; bajo ninguna circunstancia se debe exigir marcas ajenas ni protocolos de otros sectores o empresas."""
+                scenario_desc = f"- Escenario/Personaje del cliente simulado: {roleplay_prompt}"
+
+                # Sanitize accidental Boston Medical / clinical references if present in legacy templates
+                if "boston medical" in prompt_content.lower() or "bmg" in prompt_content.lower():
+                    prompt_content = re.sub(r"(?i)boston\s+medical(\s+group)?", "Empresa Demo", prompt_content)
+                    prompt_content = re.sub(r"\bBMG\b", "Empresa Demo", prompt_content)
+                extra_raw = cfg.extra_instructions or ""
+                if "boston medical" in extra_raw.lower() or "bmg" in extra_raw.lower():
+                    extra_raw = re.sub(r"(?i)boston\s+medical(\s+group)?", "Empresa Demo", extra_raw)
+                    extra_raw = re.sub(r"\bBMG\b", "Empresa Demo", extra_raw)
+                extra_instructions_text = extra_raw
+                isolation_rule = (
+                    f"\n7. DIRECTRIZ CORPORATIVA: Para {company_display}, las recomendaciones y conductas esperadas "
+                    "('expected_behavior', 'improvement_tip') deben referirse exclusivamente al estándar de atención al cliente "
+                    f"y a {company_display}. En ningún caso exijas marcas o protocolos de otras organizaciones."
+                )
+            else:
+                comp_name = getattr(company, "company_name", None) if company and isinstance(getattr(company, "company_name", None), str) else "la organización"
+                svc_display = svc_name or "Atención al Cliente"
+                system_intro = f"Estás evaluando una simulación de entrenamiento telefónico (roleplay) realizada por un agente de {comp_name} ({svc_display})."
+                roles_context = f"""=== CONTEXTO DE ROLES ===
+- La llamada es entre UN AGENTE HUMANO de {comp_name} y UN CLIENTE SIMULADO por IA.
+- El AGENTE HUMANO es quien se identifica como representante del servicio ({svc_display}), inicia o atiende la llamada, presenta soluciones y maneja objeciones.
+- El CLIENTE SIMULADO es quien hace preguntas, expone su caso y actúa como usuario o cliente.
+- Ignora cualquier frase introductoria del sistema como 'Perfecto, [nombre]...' o 'Iniciamos el roleplay' — estas NO son parte de la conversación real.
+- Evalúa ÚNICAMENTE al agente humano. No penalices al agente por frases dichas por el paciente simulado."""
+                scenario_desc = f"- Escenario/Personaje del cliente simulado: {roleplay_prompt}"
+                extra_instructions_text = cfg.extra_instructions or ""
+                isolation_rule = ""
+
+            system_prompt = f"""{system_intro}
+
+{roles_context}
 
 === INFORMACIÓN DE LA SIMULACIÓN ===
 - Nombre: {sim.name}
 - Objetivo: {sim.objective or 'No especificado'}
 - Dificultad: {sim.difficulty or 'media'}
-- Escenario/Personaje del paciente simulado: {roleplay_prompt}
+{scenario_desc}
 
 === ESTRUCTURA BASE DE EVALUACIÓN ===
 \"\"\"{prompt_content}\"\"\"
 
 === INSTRUCCIONES ADICIONALES DEL MÓDULO TRAINER ===
-\"\"\"{cfg.extra_instructions or ''}\"\"\"
+\"\"\"{extra_instructions_text}\"\"\"
 
 === CRITERIOS OBLIGATORIOS A EVALUAR ===
 Debes auditar individualmente CADA UNO de los siguientes criterios activos de la estructura:
@@ -1299,7 +1396,7 @@ Debes auditar individualmente CADA UNO de los siguientes criterios activos de la
    - 'evidence_quote': cita textual literal de la llamada que demuestra el comportamiento (o 'Sin evidencia suficiente en la conversación').
    - 'relevant_turns': lista de enteros con números de turno de la evidencia.
    - 'reasoning': justificación breve y objetiva de la nota en este criterio.
-   - 'improvement_tip': recomendación accionable de mejora para este criterio.
+   - 'improvement_tip': recomendación accionable de mejora para este criterio.{isolation_rule}
 
 === FORMATO DE SALIDA ESTRICTO ===
 Devuelve EXCLUSIVAMENTE un objeto JSON válido (sin markdown ```json ni texto adicional):
