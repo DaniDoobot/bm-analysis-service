@@ -1162,6 +1162,115 @@ class PersonalizedTrainingService:
 
         return matched_results
 
+    CRITERION_NAME_PRETTIFY_MAP: dict[str, str] = {
+        # Demo & contact center criteria (snake_case keys)
+        "resolucion_primera_llamada": "Resolución en primera llamada",
+        "escucha_activa": "Escucha activa",
+        "empatia": "Empatía",
+        "empathy_shown": "Empatía",
+        "claridad_comunicacion": "Claridad de comunicación",
+        "gestion_emocional": "Gestión emocional",
+        "cierre_estructurado": "Cierre estructurado",
+        "compromiso_documentado": "Compromiso documentado",
+        "protocolo_bienvenida": "Protocolo de bienvenida",
+        "siguientes_pasos_claros": "Siguientes pasos claros",
+        "agendar_cita": "Agendar cita",
+        "manejo_objeciones": "Manejo de objeciones",
+        "objetivos_cumplidos": "Objetivos cumplidos",
+        "explicacion_servicios": "Explicación de servicios",
+        "objectives_met": "Objetivos cumplidos",
+        "call_flow_followed": "Flujo de llamada",
+        "information_gathered": "Recopilación de información",
+        "next_steps_explained": "Explicación de siguientes pasos",
+        "control_tiempo": "Control de tiempo",
+        "gestion_conversacion": "Gestión de la conversación",
+        "eficiencia": "Eficiencia",
+        "documentacion_crm": "Documentación CRM",
+        "calidad_registro": "Calidad de registro",
+        "trazabilidad": "Trazabilidad",
+        "deteccion_incidencias": "Detección de incidencias",
+        "escalada": "Escalada",
+        "protocolo_derivacion": "Protocolo de derivación",
+        "tono_marca": "Tono de marca",
+        "imagen_corporativa": "Imagen corporativa",
+        "argumentacion": "Argumentación",
+        "resolucion_conflicto": "Resolución de conflictos",
+        "cierre_satisfaccion": "Cierre con satisfacción",
+        "confirmacion_resolucion": "Confirmación de resolución",
+        "experiencia_cliente": "Experiencia del cliente",
+        "desmontaje_dudas": "Resolución de dudas",
+        "cierre_consultivo": "Cierre consultivo",
+        "posicionamiento": "Posicionamiento",
+        "argumentacion_diferencial": "Argumentación diferencial",
+        "etica_comercial": "Ética comercial",
+        "urgencia_valor": "Generación de valor y urgencia",
+        "cierre_temporal": "Cierre temporal",
+        "naturalidad_comercial": "Naturalidad comercial",
+        "upselling": "Venta incremental (upselling)",
+        "cross_selling": "Venta cruzada (cross-selling)",
+        "deteccion_oportunidades": "Detección de oportunidades",
+        "cierre": "Cierre",
+        "compromiso_cliente": "Compromiso del cliente",
+        "seguimiento_agenda": "Seguimiento de agenda",
+        "defensa_margen": "Defensa de margen",
+        "objecion_precio": "Objeción de precio",
+        "negociacion": "Negociación",
+        "saludo_cordial": "Saludo cordial",
+        "saludo_inicial": "Saludo inicial",
+        "saludo_identificacion": "Saludo e identificación",
+        "cierre_cita": "Cierre de cita",
+        "cierre_formal": "Cierre formal y despedida",
+        "sondeo_necesidades": "Sondeo y detección de necesidades",
+        "sondeo_activo": "Sondeo activo",
+        "sondeo_de_necesidad": "Sondeo de necesidad",
+        "identificacion_y_saludo": "Identificación y saludo",
+        "cierre_de_llamada": "Cierre de llamada",
+        "cierre_de_cita": "Cierre de cita",
+        "saludo_profesional": "Saludo profesional",
+        "verificacion_dni": "Verificación DNI",
+        "verificacion_datos": "Verificación de datos",
+        "protocolo_fcr_general": "Protocolo FCR general",
+    }
+
+    _ACRONYMS: set[str] = {"CRM", "FCR", "IA", "DNI", "B2B", "NPS", "IVR", "KPI", "VOIP", "ERP", "SLA", "RRHH"}
+
+    @staticmethod
+    def format_criterion_name(name_or_key: Optional[str]) -> str:
+        """
+        Normaliza el nombre de un criterio para una presentación visual homogénea y profesional.
+        - Aplica 'Sentence case' (primera palabra con mayúscula inicial, resto en minúsculas).
+        - Conserva y destaca acrónimos técnicos en mayúsculas (CRM, FCR, DNI, IA, etc.).
+        - Mapea identificadores snake_case conocidos a etiquetas elegantes con acentos.
+        - No modifica claves técnicas subyacentes ni lógica de evaluación.
+        """
+        if not name_or_key:
+            return ""
+
+        raw = str(name_or_key).strip()
+        if not raw:
+            return ""
+
+        slug = raw.lower().replace("-", "_").strip()
+        if slug in PersonalizedTrainingService.CRITERION_NAME_PRETTIFY_MAP:
+            return PersonalizedTrainingService.CRITERION_NAME_PRETTIFY_MAP[slug]
+
+        text = raw.replace("_", " ").replace("-", " ")
+        words = text.split()
+        if not words:
+            return ""
+
+        formatted_words = []
+        for idx, w in enumerate(words):
+            w_upper = w.upper()
+            if w_upper in PersonalizedTrainingService._ACRONYMS:
+                formatted_words.append(w_upper)
+            elif idx == 0:
+                formatted_words.append(w[0].upper() + w[1:].lower())
+            else:
+                formatted_words.append(w.lower())
+
+        return " ".join(formatted_words)
+
     @staticmethod
     def _extract_strengths_weaknesses(res_json: dict) -> tuple[List[str], List[str]]:
         strengths = []
@@ -1204,31 +1313,16 @@ class PersonalizedTrainingService:
             fallback_strengths = []
             fallback_weaknesses = []
             
-            prettify_map = {
-                "agendar_cita": "Agendar cita",
-                "manejo_objeciones": "Manejo de objeciones",
-                "objetivos_cumplidos": "Objetivos cumplidos",
-                "claridad_comunicacion": "Claridad de comunicación",
-                "explicacion_servicios": "Explicación de servicios",
-                "empathy_shown": "Empatía",
-                "objectives_met": "Objetivos cumplidos",
-                "call_flow_followed": "Flujo de llamada",
-                "information_gathered": "Recopilación de información",
-                "next_steps_explained": "Explicación de siguientes pasos"
-            }
-            
             for k, v in criteria_dict.items():
+                label = PersonalizedTrainingService.format_criterion_name(k)
                 if isinstance(v, bool):
-                    label = prettify_map.get(k, k.replace("_", " ").capitalize())
                     if v:
                         fallback_strengths.append(label)
                     else:
                         fallback_weaknesses.append(label)
                 elif isinstance(v, str) and v.lower() in ["true", "yes", "completed"]:
-                    label = prettify_map.get(k, k.replace("_", " ").capitalize())
                     fallback_strengths.append(label)
                 elif isinstance(v, str) and v.lower() in ["false", "no", "failed"]:
-                    label = prettify_map.get(k, k.replace("_", " ").capitalize())
                     fallback_weaknesses.append(label)
                     
             if not strengths:
@@ -1385,6 +1479,26 @@ class PersonalizedTrainingService:
                                 for item in crit_evals
                                 if isinstance(item, dict) and (item.get("criterion_name") or item.get("criterion_key"))
                             }
+
+                    # Normalize presentation of criteria checklist
+                    if criteria:
+                        criteria = {
+                            PersonalizedTrainingService.format_criterion_name(k): v
+                            for k, v in criteria.items()
+                        }
+
+                    # Normalize presentation of criteria_evaluations items
+                    if criteria_evaluations:
+                        normalized_evals = []
+                        for item in criteria_evaluations:
+                            if isinstance(item, dict):
+                                item_copy = dict(item)
+                                raw_n = item_copy.get("criterion_name") or item_copy.get("criterion_key") or ""
+                                item_copy["criterion_name"] = PersonalizedTrainingService.format_criterion_name(raw_n)
+                                normalized_evals.append(item_copy)
+                            else:
+                                normalized_evals.append(item)
+                        criteria_evaluations = normalized_evals
                 
                 # Extract strengths & weaknesses from evaluation result_json
                 if result_json_extracted:

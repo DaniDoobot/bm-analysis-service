@@ -1405,6 +1405,26 @@ async def get_evaluation_detail(
         if isinstance(crit_evals, list):
             criteria_evaluations = crit_evals
 
+    # Normalize presentation of criteria checklist
+    if criteria:
+        criteria = {
+            PersonalizedTrainingService.format_criterion_name(k): v
+            for k, v in criteria.items()
+        }
+
+    # Normalize presentation of criteria_evaluations items
+    if criteria_evaluations:
+        normalized_evals = []
+        for item in criteria_evaluations:
+            if isinstance(item, dict):
+                item_copy = dict(item)
+                raw_n = item_copy.get("criterion_name") or item_copy.get("criterion_key") or ""
+                item_copy["criterion_name"] = PersonalizedTrainingService.format_criterion_name(raw_n)
+                normalized_evals.append(item_copy)
+            else:
+                normalized_evals.append(item)
+        criteria_evaluations = normalized_evals
+
     strengths, weaknesses = PersonalizedTrainingService._extract_strengths_weaknesses(ev.result_json or {})
 
     return {

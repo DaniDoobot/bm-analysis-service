@@ -471,6 +471,83 @@ class TestTrainerSimulationEvaluation(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(turns[1]["role"], "patient")
             self.assertEqual(turns[2]["role"], "agent")
 
+    def test_criteria_name_formatting_and_presentation_normalization(self):
+        """Verifica que format_criterion_name normalice a Sentence case, preserve acrónimos y acentos."""
+        # 1. Mapeo específico de criterios conocidos de demo / contact center
+        self.assertEqual(PersonalizedTrainingService.format_criterion_name("resolucion_primera_llamada"), "Resolución en primera llamada")
+        self.assertEqual(PersonalizedTrainingService.format_criterion_name("documentacion_crm"), "Documentación CRM")
+        self.assertEqual(PersonalizedTrainingService.format_criterion_name("escucha_activa"), "Escucha activa")
+        self.assertEqual(PersonalizedTrainingService.format_criterion_name("gestion_emocional"), "Gestión emocional")
+        self.assertEqual(PersonalizedTrainingService.format_criterion_name("cierre_estructurado"), "Cierre estructurado")
+
+        # 2. Normalización de textos con mayúsculas/minúsculas irregulares a Sentence case
+        self.assertEqual(PersonalizedTrainingService.format_criterion_name("Cierre de Cita"), "Cierre de cita")
+        self.assertEqual(PersonalizedTrainingService.format_criterion_name("Saludo e Identificación"), "Saludo e identificación")
+        self.assertEqual(PersonalizedTrainingService.format_criterion_name("Empatía Front"), "Empatía front")
+        self.assertEqual(PersonalizedTrainingService.format_criterion_name("Claridad De Comunicación"), "Claridad de comunicación")
+
+        # 3. Preservación de acrónimos en mayúsculas
+        self.assertEqual(PersonalizedTrainingService.format_criterion_name("protocolo_fcr_general"), "Protocolo FCR general")
+        self.assertEqual(PersonalizedTrainingService.format_criterion_name("verificacion_dni"), "Verificación DNI")
+
+        # 4. _map_completion_to_dict normaliza la presentación de criteria y criteria_evaluations
+        eval_with_irregular_criteria = type("MockEval", (), {
+            "score": Decimal("8.0"),
+            "feedback": "Bien.",
+            "transcription": None,
+            "result_json": {
+                "result_json": {
+                    "resolucion_primera_llamada": True,
+                    "Cierre De Cita": False,
+                },
+                "criteria_evaluations": [
+                    {
+                        "criterion_key": "resolucion_primera_llamada",
+                        "criterion_name": "resolucion_primera_llamada",
+                        "score": 8.0,
+                        "passed": True,
+                    },
+                    {
+                        "criterion_key": "cierre_de_cita",
+                        "criterion_name": "Cierre De Cita",
+                        "score": 5.0,
+                        "passed": False,
+                    }
+                ]
+            }
+        })()
+
+        mock_comp = type("MockComp", (), {
+            "completion_id": 99,
+            "training_report_id": 10,
+            "simulation_prompt_id": 101,
+            "hubspot_owner_id": "demo_01",
+            "status": "completed",
+            "completed_at": datetime.now(timezone.utc),
+            "evaluation_id": 99,
+            "call_session_id": 99,
+            "training_call_id": None,
+            "training_phone_number": None,
+            "notes": None,
+            "prompt": None,
+            "evaluation": eval_with_irregular_criteria,
+            "created_at": datetime.now(timezone.utc),
+        })()
+
+        slot = PersonalizedTrainingService._map_completion_to_dict(mock_comp)
+        # Nombres en checklist están normalizados
+        self.assertIn("Resolución en primera llamada", slot["criteria"])
+        self.assertIn("Cierre de cita", slot["criteria"])
+        self.assertTrue(slot["criteria"]["Resolución en primera llamada"])
+        self.assertFalse(slot["criteria"]["Cierre de cita"])
+
+        # En criteria_evaluations, criterion_name está normalizado pero criterion_key técnico se conserva intacto
+        crit_evals = slot["criteria_evaluations"]
+        self.assertEqual(crit_evals[0]["criterion_name"], "Resolución en primera llamada")
+        self.assertEqual(crit_evals[0]["criterion_key"], "resolucion_primera_llamada")
+        self.assertEqual(crit_evals[1]["criterion_name"], "Cierre de cita")
+        self.assertEqual(crit_evals[1]["criterion_key"], "cierre_de_cita")
+
 
 if __name__ == "__main__":
     unittest.main()
