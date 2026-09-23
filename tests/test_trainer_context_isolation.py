@@ -535,20 +535,36 @@ class TestTrainerEvaluationContextIsolation(unittest.IsolatedAsyncioTestCase):
 
         crit1 = self._make_criterion(1, "Saludo Clínico", "saludo_clinico", "saludo_clinico_score", "El agente se identifica como Boston Medical.")
 
-        def make_exec(value=None, scalars_list=None):
+        def make_exec_dispatch(stmt):
+            s = str(stmt).lower()
             r = MagicMock()
-            r.scalars.return_value.first.return_value = value
-            r.scalars.return_value.all.return_value = scalars_list if scalars_list is not None else []
+            if "bm_trainer_sessions" in s:
+                r.scalars.return_value.first.return_value = mock_sess
+                r.scalars.return_value.all.return_value = [mock_sess]
+            elif "bm_trainer_simulations" in s:
+                r.scalars.return_value.first.return_value = mock_sim
+                r.scalars.return_value.all.return_value = [mock_sim]
+            elif "bm_trainer_evaluation_configs" in s:
+                r.scalars.return_value.first.return_value = mock_cfg
+                r.scalars.return_value.all.return_value = [mock_cfg]
+            elif "bm_prompt_versions" in s:
+                r.scalars.return_value.first.return_value = mock_pv
+                r.scalars.return_value.all.return_value = [mock_pv]
+            elif "bm_prompt_criteria" in s:
+                r.scalars.return_value.first.return_value = crit1
+                r.scalars.return_value.all.return_value = [crit1]
+            elif "bm_services" in s:
+                r.scalars.return_value.first.return_value = bm_svc
+                r.scalars.return_value.all.return_value = [bm_svc]
+            elif "bm_companies" in s:
+                r.scalars.return_value.first.return_value = bm_comp
+                r.scalars.return_value.all.return_value = [bm_comp]
+            else:
+                r.scalars.return_value.first.return_value = None
+                r.scalars.return_value.all.return_value = []
             return r
 
-        execute_calls = iter([
-            make_exec(mock_sess),
-            make_exec(mock_sim),
-            make_exec(mock_cfg),
-            make_exec(mock_pv),
-            make_exec(scalars_list=[crit1]),
-        ])
-        mock_db.execute = AsyncMock(side_effect=lambda stmt: next(execute_calls))
+        mock_db.execute = AsyncMock(side_effect=make_exec_dispatch)
 
         captured_messages = []
         async def fake_complete(messages, response_format=None):
@@ -610,20 +626,33 @@ class TestTrainerEvaluationContextIsolation(unittest.IsolatedAsyncioTestCase):
 
         crit1 = self._make_criterion(1, "Saludo", "saludo", "saludo_score", "Saludo")
 
-        def make_exec(value=None, scalars_list=None):
+        def make_exec_dispatch(stmt):
+            s = str(stmt).lower()
             r = MagicMock()
-            r.scalars.return_value.first.return_value = value
-            r.scalars.return_value.all.return_value = scalars_list if scalars_list is not None else []
+            if "bm_trainer_sessions" in s:
+                r.scalars.return_value.first.return_value = mock_sess
+                r.scalars.return_value.all.return_value = [mock_sess]
+            elif "bm_trainer_simulations" in s:
+                r.scalars.return_value.first.return_value = mock_sim
+                r.scalars.return_value.all.return_value = [mock_sim]
+            elif "bm_trainer_evaluation_configs" in s:
+                r.scalars.return_value.first.return_value = mock_cfg
+                r.scalars.return_value.all.return_value = [mock_cfg]
+            elif "bm_prompt_versions" in s:
+                r.scalars.return_value.first.return_value = mock_pv
+                r.scalars.return_value.all.return_value = [mock_pv]
+            elif "bm_prompt_criteria" in s:
+                r.scalars.return_value.first.return_value = crit1
+                r.scalars.return_value.all.return_value = [crit1]
+            elif "bm_companies" in s:
+                r.scalars.return_value.first.return_value = demo_comp
+                r.scalars.return_value.all.return_value = [demo_comp]
+            else:
+                r.scalars.return_value.first.return_value = None
+                r.scalars.return_value.all.return_value = []
             return r
 
-        execute_calls = iter([
-            make_exec(mock_sess),
-            make_exec(mock_sim),
-            make_exec(mock_cfg),
-            make_exec(mock_pv),
-            make_exec(scalars_list=[crit1]),
-        ])
-        mock_db.execute = AsyncMock(side_effect=lambda stmt: next(execute_calls))
+        mock_db.execute = AsyncMock(side_effect=make_exec_dispatch)
 
         captured_messages = []
         async def fake_complete(messages, response_format=None):
@@ -694,20 +723,36 @@ class TestTrainerEvaluationContextIsolation(unittest.IsolatedAsyncioTestCase):
 
         crit1 = self._make_criterion(1, "Saludo", "saludo", "saludo_score", "Saludo")
 
-        def make_exec(value=None, scalars_list=None):
+        def make_exec_dispatch(stmt):
+            s = str(stmt).lower()
             r = MagicMock()
-            r.scalars.return_value.first.return_value = value
-            r.scalars.return_value.all.return_value = scalars_list if scalars_list is not None else []
+            if "bm_trainer_sessions" in s:
+                r.scalars.return_value.first.return_value = mock_sess
+                r.scalars.return_value.all.return_value = [mock_sess]
+            elif "bm_trainer_simulations" in s:
+                r.scalars.return_value.first.return_value = mock_sim
+                r.scalars.return_value.all.return_value = [mock_sim]
+            elif "bm_trainer_evaluation_configs" in s:
+                r.scalars.return_value.first.return_value = mock_cfg
+                r.scalars.return_value.all.return_value = [mock_cfg]
+            elif "bm_prompt_versions" in s:
+                r.scalars.return_value.first.return_value = mock_pv
+                r.scalars.return_value.all.return_value = [mock_pv]
+            elif "bm_prompt_criteria" in s:
+                r.scalars.return_value.first.return_value = crit1
+                r.scalars.return_value.all.return_value = [crit1]
+            elif "bm_services" in s:
+                r.scalars.return_value.first.return_value = acme_svc
+                r.scalars.return_value.all.return_value = [acme_svc]
+            elif "bm_companies" in s:
+                r.scalars.return_value.first.return_value = acme_comp
+                r.scalars.return_value.all.return_value = [acme_comp]
+            else:
+                r.scalars.return_value.first.return_value = None
+                r.scalars.return_value.all.return_value = []
             return r
 
-        execute_calls = iter([
-            make_exec(mock_sess),
-            make_exec(mock_sim),
-            make_exec(mock_cfg),
-            make_exec(mock_pv),
-            make_exec(scalars_list=[crit1]),
-        ])
-        mock_db.execute = AsyncMock(side_effect=lambda stmt: next(execute_calls))
+        mock_db.execute = AsyncMock(side_effect=make_exec_dispatch)
 
         captured_messages = []
         async def fake_complete(messages, response_format=None):
@@ -722,6 +767,378 @@ class TestTrainerEvaluationContextIsolation(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Empresa Demo", sys_prompt)
         self.assertNotIn("Boston Medical Group", sys_prompt)
         self.assertIn("Acme Telecom", sys_prompt)
+
+
+
+class TestTrainerEvaluationMissingGreenletAvoidance(unittest.IsolatedAsyncioTestCase):
+    """Specific integration tests reproducing real SQLAlchemy AsyncSession environment.
+
+    Guarantees that evaluate_session_task NEVER accesses lazy-loaded ORM relationships
+    synchronously, preventing sqlalchemy.exc.MissingGreenlet exceptions in production.
+    """
+
+    async def asyncSetUp(self):
+        from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+        from sqlalchemy.orm import sessionmaker
+        from app.db import Base
+
+        self.engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+        self.async_session_factory = sessionmaker(
+            self.engine, class_=AsyncSession, expire_on_commit=False
+        )
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+    async def asyncTearDown(self):
+        await self.engine.dispose()
+
+    async def test_real_sqlalchemy_async_demo_evaluation_no_missing_greenlet(self):
+        """A real Empresa Demo simulation session (ATEN04) evaluates without MissingGreenlet.
+
+        Verifies:
+        1. Context is strictly Empresa Demo / CLIENTE SIMULADO.
+        2. Prompt construction completes without lazy-loading failure.
+        3. LLM completion is called and evaluation score is persisted.
+        """
+        from app.models.prompts import Prompt
+
+        async with self.async_session_factory() as db:
+            comp = Company(
+                company_id=7,
+                company_name="Empresa Demo",
+                company_key="empresa-demo",
+                is_demo=True,
+                sector="customer_service",
+            )
+            svc = Service(
+                service_id=10,
+                company_id=7,
+                service_key="atencion-cliente-demo",
+                service_name="Atención al Cliente Demo",
+            )
+            prompt = Prompt(
+                prompt_id=70,
+                company_id=7,
+                service_id=10,
+                prompt_name="EE Att Cliente Demo1",
+                prompt_type="standard",
+            )
+            pv = PromptVersion(
+                id=1,
+                prompt_id=70,
+                version_label="v1",
+                prompt="Estructura base de atención Empresa Demo.",
+                is_current=True,
+                is_archived=False,
+            )
+            crit1 = PromptCriterion(
+                criterion_id=1,
+                prompt_id=70,
+                criterion_name="Saludo e Identificación",
+                criterion_key="saludo",
+                output_key="saludo_score",
+                is_active=True,
+            )
+            cfg = TrainerEvaluationConfig(
+                config_id=7,
+                company_id=7,
+                service_id=10,
+                name="Eval demo1 Trainer",
+                speech_structure_id=70,
+                is_active=True,
+            )
+            sim = TrainerSimulation(
+                simulation_id=14,
+                company_id=7,
+                service_id=10,
+                name="Simulación demo 2",
+                code="ATEN04",
+                roleplay_prompt="Cliente reclamando por cobro duplicado.",
+                evaluation_config_id=7,
+                status="published",
+            )
+            sess = TrainerSession(
+                session_id=141,
+                simulation_id=14,
+                company_id=7,
+                service_id=10,
+                agent_id="demo_owner_01",
+                agent_code="AG14",
+                call_id="trainer_call_1774436587222_AG14",
+                transcript="Agente: Buenos días, le atiende Juan de Empresa Demo. Cliente: Hola, tengo una consulta de facturación.",
+                status="completed",
+                evaluation_status="started",
+            )
+            db.add_all([comp, svc, prompt, pv, crit1, cfg, sim, sess])
+            await db.commit()
+
+        captured_messages = []
+        async def fake_complete(messages, response_format=None):
+            captured_messages.extend(messages)
+            return (
+                '{"score": 8.5, "feedback": "Atención adecuada", "strengths": ["Saludo correcto"], '
+                '"improvement_points": [], "result_json": {"saludo_score": 8.5}, "criteria_evaluations": []}'
+            )
+
+        async with self.async_session_factory() as db:
+            with patch("app.services.trainer_service.openai_service.complete_text", new=fake_complete):
+                await TrainerService.evaluate_session_task(db, 141)
+
+        # 1. LLM was successfully reached
+        self.assertEqual(len(captured_messages), 2)
+        sys_prompt = captured_messages[0]["content"]
+
+        # 2. Company isolation checks: Empresa Demo context only
+        self.assertIn("Empresa Demo", sys_prompt)
+        self.assertIn("CLIENTE SIMULADO", sys_prompt)
+        self.assertNotIn("Boston Medical Group", sys_prompt)
+        self.assertNotIn("PACIENTE SIMULADO", sys_prompt)
+
+        # 3. DB status updated to evaluated without errors
+        async with self.async_session_factory() as db:
+            stmt_sess = select(TrainerSession).where(TrainerSession.session_id == 141)
+            res_sess = await db.execute(stmt_sess)
+            s_record = res_sess.scalars().first()
+            self.assertEqual(s_record.evaluation_status, "evaluated")
+
+            stmt_eval = select(TrainerEvaluation).where(TrainerEvaluation.session_id == 141)
+            res_eval = await db.execute(stmt_eval)
+            e_record = res_eval.scalars().first()
+            self.assertIsNotNone(e_record)
+            self.assertEqual(float(e_record.score), 8.5)
+            self.assertIsNone(e_record.error_message)
+
+    async def test_real_sqlalchemy_async_boston_medical_evaluation_no_missing_greenlet(self):
+        """A real Boston Medical simulation session (MED01) evaluates with clinical context without MissingGreenlet."""
+        from app.models.prompts import Prompt
+
+        async with self.async_session_factory() as db:
+            bm_comp = Company(
+                company_id=1,
+                company_name="Boston Medical Group",
+                company_key="boston-medical",
+                is_demo=False,
+                sector="healthcare",
+            )
+            bm_svc = Service(
+                service_id=2,
+                company_id=1,
+                service_key="atencion-clinica",
+                service_name="Atención Clínica",
+            )
+            prompt = Prompt(
+                prompt_id=10,
+                company_id=1,
+                service_id=2,
+                prompt_name="EE BMG Clínica",
+                prompt_type="standard",
+            )
+            pv = PromptVersion(
+                id=2,
+                prompt_id=10,
+                version_label="v1",
+                prompt="Estructura base de atención clínica Boston Medical Group.",
+                is_current=True,
+                is_archived=False,
+            )
+            crit1 = PromptCriterion(
+                criterion_id=2,
+                prompt_id=10,
+                criterion_name="Identificación Clínica",
+                criterion_key="id_clinica",
+                output_key="id_clinica_score",
+                is_active=True,
+            )
+            cfg = TrainerEvaluationConfig(
+                config_id=1,
+                company_id=1,
+                service_id=2,
+                name="Eval BMG Trainer",
+                speech_structure_id=10,
+                is_active=True,
+            )
+            sim = TrainerSimulation(
+                simulation_id=1,
+                company_id=1,
+                service_id=2,
+                name="Primera Consulta Médica",
+                code="MED01",
+                roleplay_prompt="Paciente con dudas sobre el tratamiento.",
+                evaluation_config_id=1,
+                status="published",
+            )
+            sess = TrainerSession(
+                session_id=101,
+                simulation_id=1,
+                company_id=1,
+                service_id=2,
+                agent_id="bm_agent_01",
+                agent_code="BM01",
+                call_id="trainer_call_bm_101",
+                transcript="Agente: Boston Medical Group, buenos días. Paciente: Hola, quería saber de un tratamiento.",
+                status="completed",
+                evaluation_status="started",
+            )
+            db.add_all([bm_comp, bm_svc, prompt, pv, crit1, cfg, sim, sess])
+            await db.commit()
+
+        captured_messages = []
+        async def fake_complete(messages, response_format=None):
+            captured_messages.extend(messages)
+            return (
+                '{"score": 9.2, "feedback": "Excelente atención clínica", "strengths": ["Protocolo médico"], '
+                '"improvement_points": [], "result_json": {"id_clinica_score": 9.2}, "criteria_evaluations": []}'
+            )
+
+        async with self.async_session_factory() as db:
+            with patch("app.services.trainer_service.openai_service.complete_text", new=fake_complete):
+                await TrainerService.evaluate_session_task(db, 101)
+
+        # 1. LLM was reached
+        self.assertEqual(len(captured_messages), 2)
+        sys_prompt = captured_messages[0]["content"]
+
+        # 2. Healthcare context preserved
+        self.assertIn("Boston Medical Group", sys_prompt)
+        self.assertIn("PACIENTE SIMULADO", sys_prompt)
+        self.assertNotIn("Empresa Demo", sys_prompt)
+
+        # 3. DB status updated to evaluated
+        async with self.async_session_factory() as db:
+            stmt_sess = select(TrainerSession).where(TrainerSession.session_id == 101)
+            res_sess = await db.execute(stmt_sess)
+            s_record = res_sess.scalars().first()
+            self.assertEqual(s_record.evaluation_status, "evaluated")
+
+            stmt_eval = select(TrainerEvaluation).where(TrainerEvaluation.session_id == 101)
+            res_eval = await db.execute(stmt_eval)
+            e_record = res_eval.scalars().first()
+            self.assertIsNotNone(e_record)
+            self.assertEqual(float(e_record.score), 9.2)
+            self.assertIsNone(e_record.error_message)
+
+    async def test_lazy_relationship_trap_raises_if_touched(self):
+        """Active trap: if evaluate_session_task attempts to read sim.company or sess.company, MissingGreenlet is raised."""
+        from sqlalchemy.exc import MissingGreenlet
+
+        class GreenletTrappingProxy:
+            def __init__(self, target):
+                object.__setattr__(self, "_target", target)
+
+            def __getattr__(self, name):
+                if name in ("company", "service"):
+                    raise MissingGreenlet(
+                        f"Trapped lazy load: {name} was accessed synchronously on AsyncSession!"
+                    )
+                return getattr(object.__getattribute__(self, "_target"), name)
+
+            def __setattr__(self, name, value):
+                setattr(object.__getattribute__(self, "_target"), name, value)
+
+        mock_db = AsyncMock()
+        mock_db.add = MagicMock()
+        mock_db.commit = AsyncMock()
+
+        demo_comp = Company(
+            company_id=7,
+            company_name="Empresa Demo",
+            company_key="empresa-demo",
+            is_demo=True,
+            sector="customer_service",
+        )
+        demo_svc = Service(
+            service_id=10,
+            company_id=7,
+            service_key="demo-svc",
+            service_name="Atención Demo",
+        )
+
+        mock_sim = MagicMock()
+        mock_sim.simulation_id = 14
+        mock_sim.company_id = 7
+        mock_sim.service_id = 10
+        mock_sim.name = "Simulación demo 2"
+        mock_sim.code = "ATEN04"
+        mock_sim.objective = "Reclamación"
+        mock_sim.difficulty = "media"
+        mock_sim.roleplay_prompt = "Cliente enojado"
+        mock_sim.evaluation_config_id = 7
+
+        mock_sess = MagicMock()
+        mock_sess.session_id = 141
+        mock_sess.simulation_id = 14
+        mock_sess.simulation_version_id = None
+        mock_sess.company_id = 7
+        mock_sess.service_id = 10
+        mock_sess.transcript = "Hola"
+        mock_sess.recording_url = None
+        mock_sess.evaluation_status = "started"
+
+        mock_cfg = MagicMock()
+        mock_cfg.config_id = 7
+        mock_cfg.company_id = 7
+        mock_cfg.service_id = 10
+        mock_cfg.speech_structure_id = 70
+        mock_cfg.extra_instructions = ""
+
+        mock_pv = MagicMock()
+        mock_pv.prompt = "Estructura demo"
+
+        crit1 = MagicMock()
+        crit1.output_key = "saludo_score"
+        crit1.criterion_key = "saludo"
+        crit1.criterion_name = "Saludo"
+        crit1.criterion_description = "Saludo inicial"
+        crit1.criterion_type = "score_1_10"
+
+        # Wrap in GreenletTrappingProxy: any access to .company or .service triggers MissingGreenlet!
+        trapped_sim = GreenletTrappingProxy(mock_sim)
+        trapped_sess = GreenletTrappingProxy(mock_sess)
+        trapped_cfg = GreenletTrappingProxy(mock_cfg)
+
+        def make_exec_dispatch(stmt):
+            s = str(stmt).lower()
+            r = MagicMock()
+            if "bm_trainer_sessions" in s:
+                r.scalars.return_value.first.return_value = trapped_sess
+                r.scalars.return_value.all.return_value = [trapped_sess]
+            elif "bm_trainer_simulations" in s:
+                r.scalars.return_value.first.return_value = trapped_sim
+                r.scalars.return_value.all.return_value = [trapped_sim]
+            elif "bm_trainer_evaluation_configs" in s:
+                r.scalars.return_value.first.return_value = trapped_cfg
+                r.scalars.return_value.all.return_value = [trapped_cfg]
+            elif "bm_prompt_versions" in s:
+                r.scalars.return_value.first.return_value = mock_pv
+                r.scalars.return_value.all.return_value = [mock_pv]
+            elif "bm_prompt_criteria" in s:
+                r.scalars.return_value.first.return_value = crit1
+                r.scalars.return_value.all.return_value = [crit1]
+            elif "bm_services" in s:
+                r.scalars.return_value.first.return_value = demo_svc
+                r.scalars.return_value.all.return_value = [demo_svc]
+            elif "bm_companies" in s:
+                r.scalars.return_value.first.return_value = demo_comp
+                r.scalars.return_value.all.return_value = [demo_comp]
+            else:
+                r.scalars.return_value.first.return_value = None
+                r.scalars.return_value.all.return_value = []
+            return r
+
+        mock_db.execute = AsyncMock(side_effect=make_exec_dispatch)
+
+        captured_messages = []
+        async def fake_complete(messages, response_format=None):
+            captured_messages.extend(messages)
+            return '{"score": 8.0, "feedback": "Ok", "strengths": [], "improvement_points": [], "result_json": {"saludo_score": 8.0}, "criteria_evaluations": []}'
+
+        with patch("app.services.trainer_service.openai_service.complete_text", new=fake_complete):
+            await TrainerService.evaluate_session_task(mock_db, 141)
+
+        # Must reach LLM without raising MissingGreenlet!
+        self.assertEqual(len(captured_messages), 2)
+        sys_prompt = captured_messages[0]["content"]
+        self.assertIn("Empresa Demo", sys_prompt)
 
 
 if __name__ == "__main__":

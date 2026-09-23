@@ -1258,19 +1258,45 @@ class TrainerService:
             example_evals_str = ",\n".join(example_evals)
 
             # 4. Build system prompt with strict company isolation
+            # Resolve company strictly via scalar foreign keys to prevent SQLAlchemy MissingGreenlet lazy-loading errors
             from app.models.companies import Company
-            company = getattr(sim, "company", None) or getattr(sess, "company", None) or getattr(cfg, "company", None)
-            comp_id = getattr(sim, "company_id", None) or getattr(sess, "company_id", None) or getattr(cfg, "company_id", None)
+            from app.models.services import Service
 
-            if isinstance(comp_id, int) and (not company or not getattr(company, "company_name", None)):
+            comp_id = (
+                getattr(sim, "company_id", None)
+                or getattr(sess, "company_id", None)
+                or getattr(cfg, "company_id", None)
+            )
+
+            # Resolve service name via scalar foreign keys without touching un-eager-loaded relationships
+            svc_name = None
+            svc_id = (
+                getattr(sim, "service_id", None)
+                or getattr(sess, "service_id", None)
+                or getattr(cfg, "service_id", None)
+            )
+            if isinstance(svc_id, int):
+                try:
+                    stmt_s = select(Service).where(Service.service_id == svc_id)
+                    res_s = await db.execute(stmt_s)
+                    svc_entity = res_s.scalars().first()
+                    if svc_entity:
+                        if svc_entity.service_name:
+                            svc_name = svc_entity.service_name
+                        if comp_id is None and svc_entity.company_id:
+                            comp_id = svc_entity.company_id
+                except Exception as e_s:
+                    logger.debug("Could not resolve Service entity for evaluation (svc_id=%s): %s", svc_id, e_s)
+
+            # Resolve Company entity asynchronously if comp_id is available
+            company = None
+            if isinstance(comp_id, int):
                 try:
                     stmt_c = select(Company).where(Company.company_id == comp_id)
                     res_c = await db.execute(stmt_c)
-                    resolved_c = res_c.scalars().first()
-                    if resolved_c:
-                        company = resolved_c
+                    company = res_c.scalars().first()
                 except Exception as e_c:
-                    logger.debug("Could not resolve Company entity for evaluation: %s", e_c)
+                    logger.debug("Could not resolve Company entity for evaluation (comp_id=%s): %s", comp_id, e_c)
 
             is_demo = False
             is_healthcare = False
@@ -1298,13 +1324,6 @@ class TrainerService:
                     is_healthcare = True
             elif comp_id == 1:
                 is_healthcare = True
-
-            # Resolve service name if available
-            svc_name = None
-            if sim and getattr(sim, "service", None) and isinstance(getattr(sim.service, "service_name", None), str):
-                svc_name = sim.service.service_name
-            elif cfg and getattr(cfg, "service", None) and isinstance(getattr(cfg.service, "service_name", None), str):
-                svc_name = cfg.service.service_name
 
             if is_healthcare:
                 company_display = (getattr(company, "brand_name", None) or getattr(company, "company_name", None)) if company and (isinstance(getattr(company, "brand_name", None), str) or isinstance(getattr(company, "company_name", None), str)) else "Boston Medical Group"
