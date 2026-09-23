@@ -229,3 +229,5 @@ class TrainerChatResponse(BaseModel):
     user_query: str
     input_type: str  # "text" | "audio"
     sources: List[ChatSourceDocument] = []
+    agent_id: Optional[str] = None
+    company_id: Optional[int] = None

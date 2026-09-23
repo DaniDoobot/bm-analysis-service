@@ -143,6 +143,14 @@ class TrainerChatbotService:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Tu cuenta de usuario no está asociada a ningún HubSpot Owner ID.",
                 )
+            if requested_agent_id and requested_agent_id.strip() and requested_agent_id.strip() != current_user.hubspot_owner_id:
+                logger.warning(
+                    "Security notice: Agent user %s (%s) passed agent_id '%s' differing from authenticated identity '%s'. Overriding with authenticated identity.",
+                    current_user.user_id,
+                    current_user.email,
+                    requested_agent_id.strip(),
+                    current_user.hubspot_owner_id,
+                )
             return current_user.hubspot_owner_id
 
         # Supervisors, coordinators, and admins
@@ -213,6 +221,25 @@ class TrainerChatbotService:
 
         res = await db.execute(stmt)
         return list(res.scalars().all())
+
+    @staticmethod
+    def get_storage_key(
+        company_id: Optional[Any],
+        user_identifier: Optional[Any],
+        key_type: str = "text",
+        target_agent_id: Optional[Any] = None,
+    ) -> str:
+        """
+        Generates the standard isolated storage key for client persistence.
+        Guarantees that history is strictly partitioned by (company_id, user/agent_identity).
+        If a supervisor is viewing a specific target agent, includes target_agent_id in key.
+        """
+        clean_company = str(company_id) if company_id is not None else "unknown_company"
+        clean_user = str(user_identifier) if user_identifier is not None else "unknown_user"
+        if target_agent_id is not None and str(target_agent_id).strip() and str(target_agent_id).strip() != clean_user:
+            clean_target = str(target_agent_id).strip()
+            return f"trainer_chat_{clean_company}_{clean_user}_target_{clean_target}_{key_type}"
+        return f"trainer_chat_{clean_company}_{clean_user}_{key_type}"
 
     @staticmethod
     def sanitize_history(conversation_history_raw: Any) -> List[dict[str, str]]:
@@ -379,4 +406,6 @@ class TrainerChatbotService:
             "user_query": query_text,
             "input_type": input_type,
             "sources": sources,
+            "agent_id": target_agent_id,
+            "company_id": context.company_id,
         }
