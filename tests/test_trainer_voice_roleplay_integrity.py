@@ -689,6 +689,330 @@ class TestTrainerVoiceRoleplayIntegrity(unittest.IsolatedAsyncioTestCase):
         media_packets = [json.loads(m) for m in mock_tw_ws.sent_messages if "media" in m and "payload" in m]
         self.assertGreaterEqual(len(media_packets), 1, "Loop died on malformed message instead of continuing!")
 
+    @patch("app.routers.trainer_voice.hangup_twilio_call", new_callable=AsyncMock)
+    @patch("app.routers.trainer_voice.handle_roleplay_hangup", new_callable=AsyncMock)
+    @patch("app.routers.trainer_voice.AsyncSessionLocal")
+    @patch("app.routers.trainer_voice.websockets.connect")
+    async def test_8b_graceful_hangup_plays_full_audio_and_aborts_if_client_speaks(
+        self, mock_ws_connect, mock_session_local, mock_roleplay_hangup, mock_hangup_twilio
+    ):
+        """Scenario A: Closing initiated -> audio plays -> client speaks during grace window -> hangup cancelled, call continues."""
+        mock_db = AsyncMock()
+        mock_session_local.return_value.__aenter__.return_value = mock_db
+        fake_sim = MagicMock(simulation_id=10, code="V1", name="V", roleplay_prompt="Eres un cliente.", company_id=1)
+        fake_sess = MagicMock(session_id=10, agent_id="101", simulation_id=10, simulation_version_id=None, simulation=fake_sim)
+        res_sess = MagicMock()
+        res_sess.scalars.return_value.first.return_value = fake_sess
+        res_comp = MagicMock()
+        res_comp.scalars.return_value.first.return_value = None
+        mock_db.execute.side_effect = [res_sess, res_comp]
+
+        # 160 bytes base64 mulaw audio = 20ms of audio
+        dummy_mulaw_b64 = base64.b64encode(b"\xff" * 160).decode("utf-8")
+
+        mock_gem_ws = AsyncMockWs(messages=[
+            json.dumps({"setupComplete": {}}),
+            json.dumps({
+                "toolCall": {
+                    "functionCalls": [{"id": "call_1", "name": "hangup_call", "args": {"reason": "exito_conversacional"}}]
+                }
+            }),
+            json.dumps({
+                "serverContent": {
+                    "modelTurn": {"parts": [{"inlineData": {"data": dummy_mulaw_b64}}]},
+                    "turnComplete": True
+                }
+            }),
+        ])
+
+        # Twilio sends start, then waits 0.1s, then user speaks with energy > VAD threshold
+        mock_tw_ws = AsyncMock()
+        mock_tw_ws.client_state.name = "CONNECTED"
+        mock_tw_ws.scope = {"query_string": b"flow=session&session_id=10"}
+        mock_tw_ws.headers = {"host": "localhost"}
+        mock_tw_ws.send_text = AsyncMock()
+
+        async def mock_tw_iter(*args, **kwargs):
+            yield json.dumps({"event": "start", "start": {"streamSid": "STR_8B", "callSid": "CA_8B"}})
+            # Wait for Gemini turnComplete to happen
+            await asyncio.sleep(0.08)
+            # User speaks (7 frames * 20ms = 140ms >= 100ms VAD threshold)
+            for _ in range(7):
+                yield json.dumps({"event": "media", "media": {"track": "inbound", "payload": "pcm"}})
+                await asyncio.sleep(0.02)
+            await asyncio.sleep(0.3)
+            yield json.dumps({"event": "stop"})
+
+        mock_tw_ws.iter_text = mock_tw_iter
+        mock_ws_connect.return_value.__aenter__.return_value = mock_gem_ws
+
+        with patch("app.routers.trainer_voice.GRACEFUL_HANGUP_GRACE_WINDOW_SECONDS", 0.5), \
+             patch("app.routers.trainer_voice.calculate_pcm_energy", return_value=300.0), \
+             patch("app.routers.trainer_voice.decode_twilio_to_gemini", return_value=("DUMMY_PCM", None)):
+            task = asyncio.create_task(
+                media_stream(websocket=mock_tw_ws, flow="session", session_id=10, db=mock_db)
+            )
+            await asyncio.sleep(0.35)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        # Since user spoke during the grace window, Twilio hangup must NOT have been called!
+        mock_hangup_twilio.assert_not_called()
+
+    @patch("app.routers.trainer_voice.start_twilio_recording", AsyncMock(return_value="rec_test"))
+    @patch("app.routers.trainer_voice.encode_gemini_to_twilio", side_effect=lambda b64, st: (b64, st))
+    @patch("app.routers.trainer_voice.hangup_twilio_call", new_callable=AsyncMock)
+    @patch("app.routers.trainer_voice.handle_roleplay_hangup", new_callable=AsyncMock)
+    @patch("app.routers.trainer_voice.AsyncSessionLocal")
+    @patch("app.routers.trainer_voice.websockets.connect")
+    async def test_8c_graceful_hangup_hangs_up_after_grace_window_if_client_silent(
+        self, mock_ws_connect, mock_session_local, mock_roleplay_hangup, mock_hangup_twilio, mock_encode=None, mock_rec=None
+    ):
+        """Scenario B: Closing initiated -> audio plays -> client silent -> hangup executed after grace window."""
+        mock_db = AsyncMock()
+        mock_session_local.return_value.__aenter__.return_value = mock_db
+        fake_sim = MagicMock(simulation_id=10, code="V1", name="V", roleplay_prompt="Eres un cliente.", company_id=1)
+        fake_sess = MagicMock(session_id=10, agent_id="101", simulation_id=10, simulation_version_id=None, simulation=fake_sim)
+        res_sess = MagicMock()
+        res_sess.scalars.return_value.first.return_value = fake_sess
+        res_comp = MagicMock()
+        res_comp.scalars.return_value.first.return_value = None
+        mock_db.execute.side_effect = [res_sess, res_comp]
+
+        dummy_mulaw_b64 = base64.b64encode(b"\xff" * 160).decode("utf-8")
+
+        mock_gem_ws = AsyncMockWs(messages=[
+            json.dumps({"setupComplete": {}}),
+            json.dumps({
+                "toolCall": {
+                    "functionCalls": [{"id": "call_2", "name": "hangup_call", "args": {"reason": "normal"}}]
+                }
+            }),
+            json.dumps({
+                "serverContent": {
+                    "modelTurn": {"parts": [{"inlineData": {"data": dummy_mulaw_b64}}]},
+                    "turnComplete": True
+                }
+            }),
+        ])
+
+        mock_tw_ws = AsyncMock()
+        mock_tw_ws.client_state.name = "CONNECTED"
+        mock_tw_ws.scope = {"query_string": b"flow=session&session_id=10"}
+        mock_tw_ws.headers = {"host": "localhost"}
+        mock_tw_ws.send_text = AsyncMock()
+
+        async def mock_tw_iter(*args, **kwargs):
+            yield json.dumps({"event": "start", "start": {"streamSid": "STR_8C", "callSid": "CA_8C"}})
+            await asyncio.sleep(1.0)
+
+        mock_tw_ws.iter_text = mock_tw_iter
+
+        mock_gem_ws = AsyncMock()
+        mock_gem_ws.send = AsyncMock()
+
+        async def mock_gem_iter(*args, **kwargs):
+            yield json.dumps({"setupComplete": {}})
+            yield json.dumps({
+                "toolCall": {
+                    "functionCalls": [{"id": "call_2", "name": "hangup_call", "args": {"reason": "normal"}}]
+                }
+            })
+            yield json.dumps({
+                "serverContent": {
+                    "modelTurn": {"parts": [{"inlineData": {"data": dummy_mulaw_b64}}]},
+                    "turnComplete": True
+                }
+            })
+            await asyncio.sleep(1.0)
+
+        mock_gem_ws.__aiter__ = mock_gem_iter
+        mock_ws_connect.return_value.__aenter__.return_value = mock_gem_ws
+
+        with patch("app.routers.trainer_voice.GRACEFUL_HANGUP_GRACE_WINDOW_SECONDS", 0.1):
+            task = asyncio.create_task(
+                media_stream(websocket=mock_tw_ws, flow="session", session_id=10, db=mock_db)
+            )
+            # Allow turnComplete (instant), audio playback wait (~20ms), and grace window (100ms) to elapse
+            await asyncio.sleep(0.3)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        # Since user remained silent, hangup_twilio_call must have been executed with call_sid
+        mock_hangup_twilio.assert_called_once_with("CA_8C")
+        mock_roleplay_hangup.assert_called_once()
+
+    @patch("app.routers.trainer_voice.start_twilio_recording", AsyncMock(return_value="rec_test"))
+    @patch("app.routers.trainer_voice.encode_gemini_to_twilio", side_effect=lambda b64, st: (b64, st))
+    @patch("app.routers.trainer_voice.hangup_twilio_call", new_callable=AsyncMock)
+    @patch("app.routers.trainer_voice.handle_roleplay_hangup", new_callable=AsyncMock)
+    @patch("app.routers.trainer_voice.AsyncSessionLocal")
+    @patch("app.routers.trainer_voice.websockets.connect")
+    async def test_8d_graceful_hangup_via_gemini_tool_call(
+        self, mock_ws_connect, mock_session_local, mock_roleplay_hangup, mock_hangup_twilio, mock_encode=None, mock_rec=None
+    ):
+        """Scenario C: Gemini invokes hangup_call -> sends toolResponse, closing message, waits for playback and grace window."""
+        mock_db = AsyncMock()
+        mock_session_local.return_value.__aenter__.return_value = mock_db
+        fake_sim = MagicMock(simulation_id=10, code="V1", name="V", roleplay_prompt="Eres un cliente.", company_id=1)
+        fake_sess = MagicMock(session_id=10, agent_id="101", simulation_id=10, simulation_version_id=None, simulation=fake_sim)
+        res_sess = MagicMock()
+        res_sess.scalars.return_value.first.return_value = fake_sess
+        res_comp = MagicMock()
+        res_comp.scalars.return_value.first.return_value = None
+        mock_db.execute.side_effect = [res_sess, res_comp]
+
+        dummy_mulaw_b64 = base64.b64encode(b"\xff" * 320).decode("utf-8")  # 40ms
+
+        mock_tw_ws = AsyncMock()
+        mock_tw_ws.client_state.name = "CONNECTED"
+        mock_tw_ws.scope = {"query_string": b"flow=session&session_id=10"}
+        mock_tw_ws.headers = {"host": "localhost"}
+        mock_tw_ws.send_text = AsyncMock()
+
+        async def mock_tw_iter(*args, **kwargs):
+            yield json.dumps({"event": "start", "start": {"streamSid": "STR_8D", "callSid": "CA_8D"}})
+            await asyncio.sleep(1.0)
+
+        mock_tw_ws.iter_text = mock_tw_iter
+
+        mock_gem_ws = AsyncMock()
+        sent_to_gemini = []
+
+        async def gem_send(msg):
+            sent_to_gemini.append(msg)
+
+        mock_gem_ws.send = AsyncMock(side_effect=gem_send)
+
+        async def mock_gem_iter(*args, **kwargs):
+            yield json.dumps({"setupComplete": {}})
+            yield json.dumps({
+                "toolCall": {
+                    "functionCalls": [{"id": "tool_close_1", "name": "hangup_call", "args": {"reason": "exito_conversacional"}}]
+                }
+            })
+            yield json.dumps({
+                "serverContent": {
+                    "modelTurn": {"parts": [{"inlineData": {"data": dummy_mulaw_b64}}]},
+                    "turnComplete": True
+                }
+            })
+            await asyncio.sleep(1.0)
+
+        mock_gem_ws.__aiter__ = mock_gem_iter
+        mock_ws_connect.return_value.__aenter__.return_value = mock_gem_ws
+
+        with patch("app.routers.trainer_voice.GRACEFUL_HANGUP_GRACE_WINDOW_SECONDS", 0.1):
+            task = asyncio.create_task(
+                media_stream(websocket=mock_tw_ws, flow="session", session_id=10, db=mock_db)
+            )
+            await asyncio.sleep(0.3)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        # 1. Verify Gemini received functionResponse for hangup_call
+        function_responses = []
+        for msg in sent_to_gemini:
+            try:
+                data = json.loads(msg)
+                if "toolResponse" in data:
+                    for resp in data["toolResponse"].get("functionResponses", []):
+                        if resp.get("name") == "hangup_call":
+                            function_responses.append(resp)
+            except Exception:
+                pass
+
+        self.assertEqual(len(function_responses), 1)
+        self.assertEqual(function_responses[0]["response"]["result"], "graceful_hangup_pending")
+
+        # 2. Verify Twilio hangup was executed cleanly
+        mock_hangup_twilio.assert_called_once_with("CA_8D")
+
+    @patch("app.routers.trainer_voice.start_twilio_recording", AsyncMock(return_value="rec_test"))
+    @patch("app.routers.trainer_voice.encode_gemini_to_twilio", side_effect=lambda b64, st: (b64, st))
+    @patch("app.routers.trainer_voice.hangup_twilio_call", new_callable=AsyncMock)
+    @patch("app.routers.trainer_voice.handle_roleplay_hangup", new_callable=AsyncMock)
+    @patch("app.routers.trainer_voice.AsyncSessionLocal")
+    @patch("app.routers.trainer_voice.websockets.connect")
+    async def test_8e_graceful_hangup_no_race_condition_or_double_hangup(
+        self, mock_ws_connect, mock_session_local, mock_roleplay_hangup, mock_hangup_twilio, mock_encode=None, mock_rec=None
+    ):
+        """Scenario D: No double hangup or race condition between turn gate and fallback mechanisms."""
+        mock_db = AsyncMock()
+        mock_session_local.return_value.__aenter__.return_value = mock_db
+        fake_sim = MagicMock(simulation_id=10, code="V1", name="V", roleplay_prompt="Eres un cliente.", company_id=1)
+        fake_sess = MagicMock(session_id=10, agent_id="101", simulation_id=10, simulation_version_id=None, simulation=fake_sim)
+        res_sess = MagicMock()
+        res_sess.scalars.return_value.first.return_value = fake_sess
+        res_comp = MagicMock()
+        res_comp.scalars.return_value.first.return_value = None
+        mock_db.execute.side_effect = [res_sess, res_comp]
+
+        dummy_mulaw_b64 = base64.b64encode(b"\xff" * 160).decode("utf-8")
+
+        mock_tw_ws = AsyncMock()
+        mock_tw_ws.client_state.name = "CONNECTED"
+        mock_tw_ws.scope = {"query_string": b"flow=session&session_id=10"}
+        mock_tw_ws.headers = {"host": "localhost"}
+        mock_tw_ws.send_text = AsyncMock()
+
+        async def mock_tw_iter(*args, **kwargs):
+            yield json.dumps({"event": "start", "start": {"streamSid": "STR_8E", "callSid": "CA_8E"}})
+            await asyncio.sleep(1.0)
+
+        mock_tw_ws.iter_text = mock_tw_iter
+
+        mock_gem_ws = AsyncMock()
+        mock_gem_ws.send = AsyncMock()
+
+        async def mock_gem_iter(*args, **kwargs):
+            yield json.dumps({"setupComplete": {}})
+            yield json.dumps({
+                "toolCall": {
+                    "functionCalls": [{"id": "tool_dup_1", "name": "hangup_call", "args": {"reason": "exito_conversacional"}}]
+                }
+            })
+            yield json.dumps({
+                "serverContent": {
+                    "modelTurn": {"parts": [{"inlineData": {"data": dummy_mulaw_b64}}]},
+                    "turnComplete": True
+                }
+            })
+            # Duplicate turnComplete
+            yield json.dumps({
+                "serverContent": {
+                    "turnComplete": True
+                }
+            })
+            await asyncio.sleep(1.0)
+
+        mock_gem_ws.__aiter__ = mock_gem_iter
+        mock_ws_connect.return_value.__aenter__.return_value = mock_gem_ws
+
+        with patch("app.routers.trainer_voice.GRACEFUL_HANGUP_GRACE_WINDOW_SECONDS", 0.1):
+            task = asyncio.create_task(
+                media_stream(websocket=mock_tw_ws, flow="session", session_id=10, db=mock_db)
+            )
+            await asyncio.sleep(0.3)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        # Exactly 1 hangup call must be made
+        self.assertEqual(mock_hangup_twilio.call_count, 1)
+        self.assertEqual(mock_roleplay_hangup.call_count, 1)
+
 
 class TestDTMFSimulationValidation(unittest.IsolatedAsyncioTestCase):
     """
