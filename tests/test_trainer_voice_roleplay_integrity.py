@@ -121,9 +121,20 @@ class TestTrainerVoiceRoleplayIntegrity(unittest.IsolatedAsyncioTestCase):
         vad = setup_data["setup"]["realtimeInputConfig"]["automaticActivityDetection"]
 
         self.assertEqual(vad["silenceDurationMs"], 450)
-        self.assertEqual(vad["startOfSpeechSensitivity"], "START_SENSITIVITY_BALANCED")
-        self.assertEqual(vad["endOfSpeechSensitivity"], "END_SENSITIVITY_BALANCED")
         self.assertGreaterEqual(vad["prefixPaddingMs"], 200)
+
+        # Gemini Live API strictly requires START_SENSITIVITY_HIGH / LOW and END_SENSITIVITY_HIGH / LOW.
+        # BALANCED is not supported by Gemini Live and causes WebSocket 1007 rejection.
+        valid_start_sensitivities = {"START_SENSITIVITY_HIGH", "START_SENSITIVITY_LOW"}
+        valid_end_sensitivities = {"END_SENSITIVITY_HIGH", "END_SENSITIVITY_LOW"}
+
+        self.assertIn(vad["startOfSpeechSensitivity"], valid_start_sensitivities, "startOfSpeechSensitivity must be a valid Gemini Live enum")
+        self.assertIn(vad["endOfSpeechSensitivity"], valid_end_sensitivities, "endOfSpeechSensitivity must be a valid Gemini Live enum")
+        self.assertNotIn("BALANCED", vad["startOfSpeechSensitivity"], "BALANCED is invalid for Gemini Live startOfSpeechSensitivity")
+        self.assertNotIn("BALANCED", vad["endOfSpeechSensitivity"], "BALANCED is invalid for Gemini Live endOfSpeechSensitivity")
+
+        self.assertEqual(vad["startOfSpeechSensitivity"], "START_SENSITIVITY_LOW")
+        self.assertEqual(vad["endOfSpeechSensitivity"], "END_SENSITIVITY_LOW")
 
     def test_2_system_instruction_anti_assistant_and_presence_rules(self):
         """Prompt rules must strictly forbid negative priming and enforce permanent positive identity."""

@@ -1267,8 +1267,8 @@ async def media_stream(
                     "realtimeInputConfig": {
                         "automaticActivityDetection": {
                             "disabled": False,
-                            "startOfSpeechSensitivity": "START_SENSITIVITY_BALANCED",
-                            "endOfSpeechSensitivity": "END_SENSITIVITY_BALANCED",
+                            "startOfSpeechSensitivity": "START_SENSITIVITY_LOW",
+                            "endOfSpeechSensitivity": "END_SENSITIVITY_LOW",
                             "prefixPaddingMs": 200,
                             "silenceDurationMs": 450,
                         },
