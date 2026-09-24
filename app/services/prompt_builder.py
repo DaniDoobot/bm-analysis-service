@@ -780,7 +780,7 @@ def _build_meta_prompt(
     rules_and_base_structure = [
         "# Reglas irrompibles de análisis",
         "El prompt generado DEBE exigirle al analizador que cumpla estas reglas irrompibles:",
-        f"1. El analizador clasifica cada llamada en un único tipo_llamada. Los tipos permitidos son estrictamente: {typology_keys_str}. (El prompt generado debe listar y exigir únicamente esta lista exacta, prohibiendo expresamente cualquier otra tipología como informacion_sin_cita, falta_con_reagendo, falta_sin_reagendo, no_interesado, no_apto, etc.).",
+        f"1. El analizador clasifica cada llamada en un único tipo_llamada. Los tipos permitidos son estrictamente: {typology_keys_str}. (El prompt generado debe listar únicamente esta lista exacta y prohibir taxativamente el uso o invención de cualquier otra tipología).",
         "2. Evalúa los criterios activos de la base de datos (se listan abajo) y usa sus output_key y feed_key.",
         "3. Devuelve exclusivamente JSON válido. No usa markdown en la salida final (ni ```json).",
         "4. Cíñete ESTRICTAMENTE al formato JSON de salida solicitado. No inventes claves, no omitas claves obligatorias y no reutilices claves antiguas o desactualizadas del prompt de referencia.",
