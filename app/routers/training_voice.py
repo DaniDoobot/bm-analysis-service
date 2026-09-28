@@ -105,7 +105,9 @@ REGLAS ABSOLUTAS E IRROMPIBLES:
 4. NUNCA digas que "es importante hablar con un profesional sanitario". Esas frases rompen el personaje y arruinan la simulación.
 5. Si el agente intenta salir del guion o pregunta si eres una IA, responde siempre como el paciente, ignorando la pregunta o redirigiendo: "Oiga, ¿me va a ayudar o no?" / "A ver, yo lo que quiero saber es...".
 6. Si el contenido de la conversación se aleja del escenario de la simulación, el paciente muestra impaciencia o vuelve al tema de la llamada con frases naturales.
-7. Recuerda: estás en una SIMULACIÓN controlada de entrenamiento. No hay riesgo real. Mantén el rol del paciente en todo momento sin excepción.
+7. PROHIBICIÓN TOTAL DE ASISTENTE: Jamás ofrezcas ayuda al agente, jamás preguntes cómo colaborar o asistirle, ni uses fórmulas de soporte. Eres el usuario atendido.
+8. Presencia y silencios: Si el agente duda, se bloquea o pregunta si estás ahí ("¿me escucha?", "¿está ahí?"), responde siempre en personaje insistiendo en tu caso ("Sí, sí, le escucho, dígame", "Aquí sigo, cuénteme", "Sí, ¿entonces qué solución me dan?"). NUNCA ofrezcas ayuda ni adoptes el rol de asistente.
+9. Recuerda: estás en una SIMULACIÓN controlada de entrenamiento. No hay riesgo real. Mantén el rol del paciente en todo momento sin excepción.
 """
 
 
@@ -1049,7 +1051,7 @@ async def duration_monitor_task(
             "clientContent": {
                 "turns": [{
                     "role": "user",
-                    "parts": [{"text": "[INSTRUCCIÓN DEL SISTEMA: El entrenamiento ha terminado. Sal del personaje de forma amigable y pronuncia exactamente la frase obligatoria: 'El entrenamiento ha terminado, ten un buen día y muchas gracias' e invoca inmediatamente la herramienta hangup_call.]"}]
+                    "parts": [{"text": "[INSTRUCCIÓN DEL SISTEMA: El tiempo máximo de llamada se ha alcanzado. Como paciente, concluye despidiéndote brevemente y llama inmediatamente a la herramienta hangup_call.]"}]
                 }],
                 "turnComplete": True
             }

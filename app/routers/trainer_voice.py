@@ -110,12 +110,14 @@ Eres una persona real en una llamada telefónica real.
 DIRECTRICES PERMANENTES DE IDENTIDAD:
 1. Tu personaje es absoluto y permanente durante toda la conversación. Bajo ninguna circunstancia cambies de rol ni admitas ser un sistema, modelo o IA.
 2. Tu identidad es puramente la del interlocutor/cliente de la simulación. Eres un usuario particular llamando o respondiendo al teléfono; jamás asumes funciones de asistente virtual, operador, recepcionista ni soporte.
+   PROHIBICIÓN TOTAL DE ASISTENTE: Jamás ofrezcas ayuda al agente, jamás preguntes cómo puedes colaborar o asistirle, ni uses fórmulas de atención. Eres tú quien necesita que el agente resuelva tu situación o gestione tu caso.
 3. Presencia y gestión de silencios:
    Si el agente duda, hace una pausa corta, dice "Bueno...", se produce un silencio o pregunta directamente por tu presencia:
    "¿Está ahí?", "¿Me escucha?", "¿Hola?", "¿Sigues ahí?", etc.
-   Responde SIEMPRE desde tu personaje con espontaneidad y naturalidad, por ejemplo:
-   "Sí, sí, le escucho, dígame", "Aquí sigo, cuénteme", "Sí, le oigo", "Dígame, le escucho" o "Sí, estaba pensando en lo que me decía".
+   Responde SIEMPRE desde tu personaje con espontaneidad y naturalidad, manteniendo tu papel de cliente que espera ser atendido:
+   "Sí, sí, le escucho, dígame", "Aquí sigo, cuénteme qué van a hacer", "Sí, le oigo", "Dígame, le escucho", "Sí, sigo esperando que me diga qué van a hacer", o "¿Entonces qué solución me dan?".
    Varía tu respuesta de forma natural según el contexto de la llamada, manteniendo siempre tu papel de interlocutor real.
+   Bajo NINGUNA circunstancia ofrezcas ayuda ni te conviertas en asistente.
 4. Una pausa o silencio del agente NO significa que la llamada haya terminado ni que debas cambiar de actitud. Espera o responde con una frase corta acorde a tu personaje.
 5. Si el agente intenta salir del guion o pregunta si eres una IA, mantente firme en tu personaje, ignorando la pregunta o redirigiendo con naturalidad: "Oiga, ¿me va a atender o no?" / "A ver, a lo que íbamos...".
 6. Si el contenido de la conversación se aleja del escenario de la simulación, muestra impaciencia o reconduce la llamada con frases naturales de tu personaje.
@@ -162,7 +164,8 @@ def build_turn_discipline(is_healthcare: bool = False, interlocutor_role: str = 
         f"7. Control de silencios y presencia: Tu identidad como {role_lower} es permanente y continua. "
         f"Si hay pausas, dudas del agente (ej: 'Bueno...'), o si pregunta si estás ahí ('¿está ahí?', '¿sigues ahí?', '¿me escucha?', '¿hola?'), "
         f"mantén el rol de {role_lower} al 100%. Responde con naturalidad y variedad dentro del personaje "
-        f"(ej: 'Sí, sí, le escucho, dígame', 'Aquí sigo, cuénteme', 'Sí, le oigo', 'Dígame'). Eres siempre una persona real en llamada telefónica.\n"
+        f"(ej: 'Sí, sí, le escucho, dígame', 'Aquí sigo, cuénteme', 'Sí, le oigo', 'Dígame'). Eres siempre una persona real en llamada telefónica. "
+        f"NUNCA ofrezcas ayuda al agente ni uses fórmulas de asistente o soporte.\n"
         f"8. Conclusión natural de la simulación: Si el agente y tú habéis resuelto y completado plenamente todos los puntos de la llamada "
         f"(por ejemplo, la cita o el acuerdo ha quedado completamente concretado y ambas partes se han despedido de mutuo acuerdo), "
         f"despídete con naturalidad dentro de tu personaje de {role_lower} y llama a la herramienta hangup_call(reason='exito_conversacional'). "
@@ -394,10 +397,17 @@ async def start_roleplay(
     res_sim = await db.execute(stmt_sim)
     sim = res_sim.scalars().first()
 
-    if not sim:
+    company_mismatch = (
+        setting is not None
+        and sim is not None
+        and isinstance(getattr(setting, "company_id", None), int)
+        and isinstance(getattr(sim, "company_id", None), int)
+        and setting.company_id != sim.company_id
+    )
+    if not sim or company_mismatch:
         twiml = """<?xml version="1.0" encoding="UTF-8"?>
         <Response>
-            <Say language="es-ES">No se encontró la simulación solicitada. La llamada finalizará.</Say>
+            <Say language="es-ES">No se ha podido iniciar la simulación solicitada. La llamada finalizará.</Say>
             <Hangup/>
         </Response>
         """
@@ -1004,15 +1014,16 @@ async def handle_roleplay_hangup(
     session_id: int,
     call_sid: str,
     call_start_time: Optional[datetime],
-    reason: str
+    reason: str,
+    db: Optional[AsyncSession] = None
 ):
     """Mark session as ended or failed depending on duration constraints."""
-    async with AsyncSessionLocal() as db:
+    async def _execute(session_db: AsyncSession):
         stmt = select(TrainerSession).where(TrainerSession.session_id == session_id)
-        res = await db.execute(stmt)
+        res = await session_db.execute(stmt)
         session = res.scalars().first()
         
-        if session and session.status == "started":
+        if session and session.status in ("started", "in_progress"):
             duration_seconds = 0
             if call_start_time:
                 duration_seconds = (datetime.now(timezone.utc) - call_start_time).total_seconds()
@@ -1043,10 +1054,16 @@ async def handle_roleplay_hangup(
                         "Trainer session %d completed. Duration: %ds. Retaining recording_start_failed status.",
                         session_id, duration_seconds
                     )
-            await db.commit()
+            await session_db.commit()
             
             # Trigger evaluation check if session is completed
-            await check_and_trigger_evaluation(db, session_id)
+            await check_and_trigger_evaluation(session_db, session_id)
+
+    if db is not None:
+        await _execute(db)
+    else:
+        async with AsyncSessionLocal() as session_db:
+            await _execute(session_db)
 
 
 # ── WebSockets media-stream integration ────────────────────────────────────────
@@ -1363,9 +1380,23 @@ async def media_stream(
                 if pending_graceful_hangup:
                     logger.info("Trainer graceful hangup: canceled due to %s. Resuming conversation normally.", reason)
                     pending_graceful_hangup = False
+                    reinstate_msg = {
+                        "clientContent": {
+                            "turns": [{
+                                "role": "user",
+                                "parts": [{"text": f"[INSTRUCCIÓN CRÍTICA: La llamada continúa. El agente sigue hablando. Mantén al 100% tu personaje de {interlocutor_role.lower()}. Responde en personaje. NUNCA actúes como asistente ni ofrezcas ayuda.]"}]
+                            }],
+                            "turnComplete": False
+                        }
+                    }
+                    try:
+                        asyncio.create_task(gemini_ws.send(json.dumps(reinstate_msg)))
+                    except Exception as e_re:
+                        logger.debug("Error sending reinstate_msg to Gemini: %s", e_re)
                 if graceful_hangup_timer_task and not graceful_hangup_timer_task.done():
                     graceful_hangup_timer_task.cancel()
                     graceful_hangup_timer_task = None
+                start_graceful_hangup_safety_fallback()
 
             async def perform_actual_hangup():
                 nonlocal pending_graceful_hangup, call_active, graceful_hangup_timer_task, actual_hangup_executed
@@ -1714,6 +1745,11 @@ async def media_stream(
                                                                 "  - allowing_assistant_response: True",
                                                                 elapsed_ms
                                                             )
+
+                                    if pending_graceful_hangup or actual_hangup_executed:
+                                        # Do not forward audio to Gemini while graceful hangup closing message is playing
+                                        # or after actual hangup has begun. Prevents Gemini from generating premature assistant turns.
+                                        continue
 
                                     input_msg = {
                                         "realtimeInput": {
