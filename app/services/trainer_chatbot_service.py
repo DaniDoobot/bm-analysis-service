@@ -10,14 +10,17 @@ from typing import Any, List, Optional, Tuple
 from fastapi import HTTPException, UploadFile, status
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from sqlalchemy import and_, desc, select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.roles import InternalRole, normalize_role
 from app.core.tenant_context import TenantContext
-from app.models.personalized_training import TrainingKnowledgeDocument
+from app.models.personalized_training import TrainingAgentReport, TrainingKnowledgeDocument
+from app.models.trainer import TrainerSession
 from app.models.users import User
 from app.routers.personalized_training import enforce_agent_or_admin_ownership
 from app.services import openai_service
+from app.services.dashboard_service import get_agent_evolution
 
 logger = logging.getLogger(__name__)
 
@@ -276,30 +279,388 @@ class TrainerChatbotService:
 
         return cleaned[-MAX_HISTORY_MESSAGES:]
 
+    @classmethod
+    async def build_agent_historical_profile(
+        cls,
+        db: AsyncSession,
+        context: TenantContext,
+        target_agent_id: str,
+    ) -> str:
+        """
+        Builds a compact, structured historical profile covering the agent's entire available
+        history: real calls evaluations, criteria trends, past training cycles with objectives
+        (achieved/unachieved), and roleplay simulations feedback.
+        """
+        evolution_all: Optional[dict[str, Any]] = None
+        evolution_recent: Optional[dict[str, Any]] = None
+        try:
+            evolution_all = await get_agent_evolution(
+                db=db,
+                hubspot_owner_id=target_agent_id,
+                period="all",
+                company_id=context.company_id,
+                context=context,
+            )
+        except Exception as e:
+            logger.warning("Error fetching complete agent evolution for %s: %s", target_agent_id, e)
+
+        try:
+            evolution_recent = await get_agent_evolution(
+                db=db,
+                hubspot_owner_id=target_agent_id,
+                period="30d",
+                company_id=context.company_id,
+                context=context,
+            )
+        except Exception as e:
+            logger.warning("Error fetching recent agent evolution for %s: %s", target_agent_id, e)
+
+        reports: list[TrainingAgentReport] = []
+        try:
+            stmt_rep = select(TrainingAgentReport).where(
+                TrainingAgentReport.hubspot_owner_id == target_agent_id
+            )
+            if context.company_id is not None:
+                stmt_rep = stmt_rep.where(TrainingAgentReport.company_id == context.company_id)
+            elif not context.is_super_admin and context.allowed_company_ids:
+                stmt_rep = stmt_rep.where(TrainingAgentReport.company_id.in_(context.allowed_company_ids))
+            stmt_rep = stmt_rep.order_by(TrainingAgentReport.created_at.asc())
+            res_rep = await db.execute(stmt_rep)
+            reports = list(res_rep.scalars().all())
+        except Exception as e:
+            logger.warning("Error fetching training reports for %s: %s", target_agent_id, e)
+
+        sessions: list[TrainerSession] = []
+        try:
+            stmt_sess = select(TrainerSession).options(
+                selectinload(TrainerSession.evaluation)
+            ).where(
+                TrainerSession.agent_id == target_agent_id,
+                TrainerSession.status == "completed",
+            )
+            if context.company_id is not None:
+                stmt_sess = stmt_sess.where(TrainerSession.company_id == context.company_id)
+            elif not context.is_super_admin and context.allowed_company_ids:
+                stmt_sess = stmt_sess.where(TrainerSession.company_id.in_(context.allowed_company_ids))
+            stmt_sess = stmt_sess.order_by(TrainerSession.created_at.asc())
+            res_sess = await db.execute(stmt_sess)
+            sessions = list(res_sess.scalars().all())
+        except Exception as e:
+            logger.warning("Error fetching trainer sessions for %s: %s", target_agent_id, e)
+
+        summary_all = evolution_all.get("summary") if evolution_all and isinstance(evolution_all.get("summary"), dict) else {}
+        trend_all = evolution_all.get("trend") if evolution_all and isinstance(evolution_all.get("trend"), dict) else {}
+        total_calls = int(summary_all.get("total_analyses", 0))
+
+        if total_calls == 0 and not reports and not sessions:
+            return (
+                "--- PERFIL HISTÓRICO Y EVOLUCIÓN COMPLETA DEL AGENTE ---\n"
+                "No existen evaluaciones históricas de llamadas reales, ciclos formativos ni simulaciones registradas para este agente en la empresa.\n"
+                "--------------------------------------------------------"
+            )
+
+        sections = ["--- PERFIL HISTÓRICO Y EVOLUCIÓN COMPLETA DEL AGENTE ---"]
+
+        # 1. Resumen general de llamadas reales
+        if total_calls > 0:
+            avg_all = summary_all.get("avg_evaluacion_global")
+            delta_val = trend_all.get("evaluacion_global_delta_first_last", 0.0) or 0.0
+            delta_pct = trend_all.get("evaluacion_global_delta_pct", 0.0) or 0.0
+            direction = trend_all.get("evaluacion_global_direction", "stable")
+            interpretation = trend_all.get("interpretation", "")
+
+            summary_recent = evolution_recent.get("summary") if evolution_recent and isinstance(evolution_recent.get("summary"), dict) else {}
+            recent_calls = int(summary_recent.get("total_analyses", 0))
+            recent_avg = summary_recent.get("avg_evaluacion_global")
+
+            sections.append("#### 1. Resumen de Evaluaciones en Llamadas Reales")
+            sections.append(f"- Total histórico de llamadas evaluadas: {total_calls} llamadas (todo el histórico disponible sin restricción de 90 días).")
+            avg_all_str = f"{avg_all:.2f}/10" if avg_all is not None else "Sin nota"
+            sections.append(f"- Puntuación media histórica global: {avg_all_str}.")
+
+            if recent_calls > 0 and recent_avg is not None:
+                sections.append(f"- Puntuación media en los últimos 30 días: {recent_avg:.2f}/10 ({recent_calls} llamadas recientes).")
+
+            sign = "+" if delta_val > 0 else ""
+            sections.append(f"- Tendencia global: {direction} ({sign}{delta_val:.1f} puntos / {sign}{delta_pct:.1f}%). {interpretation}")
+
+            # 2. Fortalezas consistentes
+            strengths = evolution_all.get("strengths", [])
+            if strengths:
+                sections.append("\n#### 2. Fortalezas Recurrentes y Consistentes (Criterios con mejor desempeño)")
+                for s in strengths[:4]:
+                    crit_name = s.get("criterion_name") or s.get("criterion_key", "")
+                    sc = s.get("score")
+                    cnt = s.get("count", 0)
+                    sc_str = f"{sc:.1f}/10" if sc is not None else "N/A"
+                    sections.append(f"- [Fortaleza] {crit_name}: nota media {sc_str} ({cnt} llamadas evaluadas).")
+
+            # 3. Áreas de mejora recurrentes
+            weaknesses = evolution_all.get("weaknesses", [])
+            if weaknesses:
+                sections.append("\n#### 3. Errores y Criterios Recurrentes con Mayor Dificultad (Foco de mejora)")
+                for w in weaknesses[:4]:
+                    crit_name = w.get("criterion_name") or w.get("criterion_key", "")
+                    sc = w.get("score")
+                    cnt = w.get("count", 0)
+                    sc_str = f"{sc:.1f}/10" if sc is not None else "N/A"
+                    sections.append(f"- [Área de mejora recurrente] {crit_name}: nota media {sc_str} ({cnt} llamadas evaluadas).")
+
+            # 4. Evolución por criterios
+            criteria_ev = evolution_all.get("criteria_evolution", [])
+            if criteria_ev:
+                sections.append("\n#### 4. Evolución Temporal por Criterios (Trayectoria completa)")
+                for c in criteria_ev:
+                    crit_name = c.get("criterion_name") or c.get("criterion_key", "")
+                    f_avg = c.get("first_avg")
+                    l_avg = c.get("last_avg")
+                    cd = c.get("delta", 0.0)
+                    cd_sign = "+" if cd > 0 else ""
+                    c_dir = c.get("direction", "stable")
+                    dir_label = "mejora" if c_dir == "up" else ("empeoramiento" if c_dir == "down" else "estable")
+                    if f_avg is not None and l_avg is not None:
+                        sections.append(
+                            f"- {crit_name}: inicial {f_avg:.1f} -> reciente {l_avg:.1f} ({cd_sign}{cd:.1f}, {dir_label})."
+                        )
+        else:
+            sections.append("#### 1. Evaluaciones de Llamadas Reales")
+            sections.append("- No constan llamadas reales auditadas en el sistema para este agente.")
+
+        # 5. Ciclos de formación y objetivos (Histórico Completo)
+        if reports:
+            total_cycles = len(reports)
+            completed_cycles = sum(1 for r in reports if r.status == "completed")
+            active_cycles = sum(1 for r in reports if r.status in ("in_progress", "pending_approval", "pending"))
+
+            # Chronological order for trajectory
+            reports_chrono = sorted(
+                reports,
+                key=lambda r: (r.period_start or r.created_at or datetime.min.replace(tzinfo=timezone.utc))
+            )
+
+            cycle_scores = [float(r.avg_evaluacion_global) for r in reports_chrono if r.avg_evaluacion_global is not None]
+            evolution_str = ""
+            if len(cycle_scores) >= 2:
+                first_s = cycle_scores[0]
+                last_s = cycle_scores[-1]
+                delta_s = round(last_s - first_s, 2)
+                d_sign = "+" if delta_s > 0 else ""
+                s_dir = "mejora" if delta_s > 0.2 else ("caída" if delta_s < -0.2 else "estable")
+                evolution_str = f"- Evolución media en ciclos: de {first_s:.1f}/10 (primeros ciclos) a {last_s:.1f}/10 (últimos ciclos) ({d_sign}{delta_s:.1f}, {s_dir})."
+            elif cycle_scores:
+                evolution_str = f"- Nota media global en ciclos formativos: {sum(cycle_scores)/len(cycle_scores):.1f}/10."
+
+            superados_count = 0
+            no_superados_count = 0
+            failed_objs_freq: dict[str, int] = {}
+            passed_objs_freq: dict[str, int] = {}
+            accumulated_recommendations: list[str] = []
+
+            for r in reports_chrono:
+                final_json = r.final_report_json if isinstance(r.final_report_json, dict) else {}
+                objs_status = final_json.get("objectives_status")
+
+                if objs_status and isinstance(objs_status, list):
+                    for obj in objs_status:
+                        if not isinstance(obj, dict):
+                            continue
+                        o_title = (obj.get("title") or "Objetivo").strip()
+                        o_status = (obj.get("status") or "").upper()
+                        if "SUPERADO" in o_status and "NO" not in o_status:
+                            superados_count += 1
+                            passed_objs_freq[o_title] = passed_objs_freq.get(o_title, 0) + 1
+                        elif "NO SUPERADO" in o_status or "FALLIDO" in o_status:
+                            no_superados_count += 1
+                            failed_objs_freq[o_title] = failed_objs_freq.get(o_title, 0) + 1
+                else:
+                    gen_objs = r.general_objectives_json if isinstance(r.general_objectives_json, list) else []
+                    spec_objs = r.specific_objectives_json if isinstance(r.specific_objectives_json, list) else []
+                    for g in gen_objs:
+                        if isinstance(g, dict) and g.get("title"):
+                            t = g.get("title").strip()
+                            passed_objs_freq[t] = passed_objs_freq.get(t, 0) + 1
+                    for s in spec_objs:
+                        if isinstance(s, dict) and s.get("title"):
+                            t = s.get("title").strip()
+                            passed_objs_freq[t] = passed_objs_freq.get(t, 0) + 1
+
+                recs = final_json.get("recommendations") or final_json.get("conclusions")
+                if recs:
+                    if isinstance(recs, list):
+                        accumulated_recommendations.extend([str(item).strip() for item in recs if str(item).strip()])
+                    elif isinstance(recs, str) and recs.strip():
+                        accumulated_recommendations.append(recs.strip()[:180])
+                elif r.evolution_summary:
+                    accumulated_recommendations.append(r.evolution_summary.strip()[:180])
+
+            sections.append(f"\n#### 5. Histórico de Ciclos de Formación ({total_cycles} ciclos registrados)")
+            sections.append(f"- Resumen de ciclos: {total_cycles} ciclos analizados ({completed_cycles} completados, {active_cycles} en curso/pendientes).")
+            if evolution_str:
+                sections.append(evolution_str)
+            sections.append(f"- Balance global de objetivos: {superados_count} superados acumulados | {no_superados_count} no superados acumulados.")
+
+            if failed_objs_freq:
+                sorted_failed = sorted(failed_objs_freq.items(), key=lambda x: x[1], reverse=True)
+                sections.append("- Objetivos no superados y áreas recurrentes de dificultad en ciclos:")
+                for o_name, count in sorted_failed[:4]:
+                    repeat_note = f" (no superado en {count} ciclos)" if count > 1 else ""
+                    sections.append(f"  * [NO SUPERADO]{repeat_note} {o_name}")
+
+            if passed_objs_freq:
+                sorted_passed = sorted(passed_objs_freq.items(), key=lambda x: x[1], reverse=True)
+                sections.append("- Objetivos consolidados y superados con consistencia:")
+                for o_name, count in sorted_passed[:3]:
+                    repeat_note = f" (superado en {count} ciclos)" if count > 1 else ""
+                    sections.append(f"  * [SUPERADO]{repeat_note} {o_name}")
+
+            if accumulated_recommendations:
+                rec_freq: dict[str, int] = {}
+                for rec in accumulated_recommendations:
+                    rec_freq[rec] = rec_freq.get(rec, 0) + 1
+                sorted_recs = sorted(rec_freq.keys(), key=lambda k: (rec_freq[k], accumulated_recommendations.index(k)), reverse=True)
+                sections.append("\n* Recomendaciones pedagógicas de ciclos anteriores:")
+                for rec in sorted_recs[:4]:
+                    sections.append(f"  - {rec}")
+
+            # Detalle específico de los ciclos más recientes (máx 3) para contexto detallado sin sobrecargar tokens
+            recent_reports = sorted(
+                reports,
+                key=lambda r: (r.period_end or r.created_at or datetime.min.replace(tzinfo=timezone.utc)),
+                reverse=True
+            )[:3]
+            sections.append("\n* Detalle de los ciclos formativos más recientes:")
+            for idx, r in enumerate(recent_reports, 1):
+                p_start = r.period_start.strftime("%d/%m/%Y") if r.period_start else "Inicio N/A"
+                p_end = r.period_end.strftime("%d/%m/%Y") if r.period_end else "Fin N/A"
+                r_score = f"{r.avg_evaluacion_global:.1f}/10" if r.avg_evaluacion_global is not None else "N/A"
+                sections.append(f"  - Ciclo #{idx} (Periodo {p_start} a {p_end}, Estado: {r.status}, Nota media: {r_score}):")
+                final_json = r.final_report_json if isinstance(r.final_report_json, dict) else {}
+                objs_status = final_json.get("objectives_status") or []
+                for obj in objs_status[:3]:
+                    if isinstance(obj, dict):
+                        o_title = obj.get("title", "Objetivo")
+                        o_st = obj.get("status", "EVALUADO")
+                        o_sc = obj.get("score")
+                        o_bs = obj.get("base_score")
+                        o_just = obj.get("justification", "")
+                        sc_info = f" (nota {o_sc:.1f} vs base {o_bs:.1f})" if (o_sc is not None and o_bs is not None) else ""
+                        j_compact = f" — {o_just[:100]}..." if len(o_just) > 100 else (f" — {o_just}" if o_just else "")
+                        sections.append(f"    * [{o_st}] {o_title}{sc_info}{j_compact}")
+
+        # 6. Histórico de Simulaciones de Roleplay (Histórico Completo)
+        if sessions:
+            total_sims = len(sessions)
+            scores = []
+            improvement_freq: dict[str, int] = {}
+            strengths_freq: dict[str, int] = {}
+            recent_feedback: list[str] = []
+
+            sessions_chrono = sorted(
+                sessions,
+                key=lambda s: s.created_at or datetime.min.replace(tzinfo=timezone.utc)
+            )
+
+            for s in sessions_chrono:
+                ev = s.evaluation
+                if not ev:
+                    continue
+                if ev.score is not None:
+                    scores.append(float(ev.score))
+
+                imp = ev.improvement_points
+                if isinstance(imp, list):
+                    for p in imp:
+                        if isinstance(p, str) and p.strip():
+                            clean_p = p.strip()
+                            improvement_freq[clean_p] = improvement_freq.get(clean_p, 0) + 1
+                elif isinstance(imp, dict):
+                    for k, v in imp.items():
+                        if isinstance(v, str) and v.strip():
+                            clean_p = f"{k}: {v.strip()}"
+                            improvement_freq[clean_p] = improvement_freq.get(clean_p, 0) + 1
+
+                st = ev.strengths
+                if isinstance(st, list):
+                    for p in st:
+                        if isinstance(p, str) and p.strip():
+                            clean_s = p.strip()
+                            strengths_freq[clean_s] = strengths_freq.get(clean_s, 0) + 1
+                elif isinstance(st, dict):
+                    for k, v in st.items():
+                        if isinstance(v, str) and v.strip():
+                            clean_s = f"{k}: {v.strip()}"
+                            strengths_freq[clean_s] = strengths_freq.get(clean_s, 0) + 1
+
+                if ev.summary and ev.summary.strip():
+                    recent_feedback.append(ev.summary.strip())
+
+            sections.append(f"\n#### 6. Histórico de Simulaciones de Roleplay ({total_sims} completadas)")
+            if scores:
+                avg_sim = sum(scores) / len(scores)
+                sim_eval_str = f"- Puntuación media en simulaciones: {avg_sim:.1f}/10 (basada en {len(scores)} simulaciones evaluadas)."
+                if len(scores) >= 4:
+                    mid = len(scores) // 2
+                    first_avg = sum(scores[:mid]) / mid
+                    second_avg = sum(scores[mid:]) / (len(scores) - mid)
+                    sim_delta = round(second_avg - first_avg, 2)
+                    sim_sign = "+" if sim_delta > 0 else ""
+                    sim_dir = "mejora" if sim_delta > 0.2 else ("caída" if sim_delta < -0.2 else "estable")
+                    sim_eval_str += f" Evolución: {first_avg:.1f} (inicial) -> {second_avg:.1f} (reciente) ({sim_sign}{sim_delta:.1f}, {sim_dir})."
+                sections.append(sim_eval_str)
+
+            if strengths_freq:
+                sorted_str = sorted(strengths_freq.items(), key=lambda x: x[1], reverse=True)
+                sections.append("- Fortalezas recurrentes demostradas en simulaciones:")
+                for st_name, count in sorted_str[:3]:
+                    repeat_note = f" (demostrado en {count} simulaciones)" if count > 1 else ""
+                    sections.append(f"  * {st_name}{repeat_note}")
+
+            if improvement_freq:
+                sorted_imp = sorted(improvement_freq.items(), key=lambda x: x[1], reverse=True)
+                sections.append("- Puntos de mejora señalados en simulaciones:")
+                for imp_name, count in sorted_imp[:4]:
+                    repeat_note = f" (señalado en {count} simulaciones)" if count > 1 else ""
+                    sections.append(f"  * {imp_name}{repeat_note}")
+
+            if recent_feedback:
+                sections.append("- Feedback recibido en simulaciones recientes:")
+                for fb in recent_feedback[-2:]:
+                    sections.append(f"  * {fb[:150]}")
+
+        sections.append("--------------------------------------------------------")
+        return "\n".join(sections)
+
     @staticmethod
     def build_grounding_prompt(
         documents: List[TrainingKnowledgeDocument],
         target_agent_id: str,
+        historical_profile: Optional[str] = None,
     ) -> str:
         """
-        Builds the strict Grounding System Prompt incorporating available training knowledge documents.
+        Builds the strict Grounding System Prompt incorporating available training knowledge documents
+        and the full historical profile of the agent across calls, cycles, and simulations.
         Enforces factual fidelity, quotation of evidence, and transparency if info is missing.
         """
         lines = [
             "Eres el Asistente y Tutor de Formación de Trainer (Speech BM).",
-            "Tu misión es responder a las preguntas y dudas sobre el entrenamiento, simulaciones y desempeño "
-            f"del agente con ID '{target_agent_id}'.",
+            f"Tu misión es responder a las preguntas y dudas sobre el entrenamiento, simulaciones, evolución y desempeño del agente con ID '{target_agent_id}'.",
             "",
             "REGLAS OBLIGATORIAS DE COMPORTAMIENTO Y GROUNDING:",
-            "1. Responde ÚNICAMENTE basándote en los Documentos de Conocimiento oficiales proporcionados a continuación.",
-            "2. NUNCA inventes notas, puntuaciones, evidencias, transcripciones ni hechos que no consten en los documentos.",
-            "3. Si la respuesta a la pregunta no está registrada en los documentos o falta información, indícalo claramente con total honestidad.",
-            "4. Cuando analices una simulación o evaluación, identifica con precisión el Ciclo formativo, el número de Simulación, el título y el Criterio evaluado.",
-            "5. Cita textualmente las evidencias de la llamada ('evidencia textual') cuando justifiques un resultado o una recomendación.",
-            "6. Diferencia con claridad los hechos constatados (lo que ocurrió en la llamada) de las sugerencias o consejos pedagógicos de mejora.",
-            "7. Adopta siempre una actitud de tutor experto, analítica, constructiva, orientada a la mejora continua y empática.",
+            "1. Responde basándote en el Perfil Histórico Completo y en los Documentos de Conocimiento oficiales proporcionados a continuación.",
+            "2. Puedes y DEBES razonar sobre TODO el histórico disponible del agente: llamadas reales evaluadas, evolución temporal de criterios, objetivos de ciclos formativos (superados y no superados), simulaciones de roleplay y recomendaciones acumuladas.",
+            "3. Puedes contrastar la trayectoria global histórica con el periodo reciente (por ejemplo, últimos 30 días) para explicar la evolución y tendencia del agente.",
+            "4. Identifica con rigor y claridad qué datos provienen de llamadas reales masivas, cuáles de ciclos formativos y cuáles de simulaciones de roleplay.",
+            "5. Cita evidencias concretas, notas reales, nombres de criterios u objetivos cuando justifiques un resultado, fortaleza o área de mejora.",
+            "6. NUNCA inventes notas, puntuaciones, evidencias, transcripciones ni hechos que no consten en los datos proporcionados.",
+            "7. Si una pregunta versa sobre un criterio, fecha o aspecto sobre el que NO constan datos en el perfil ni en los documentos, indícalo claramente con total honestidad sin inventar datos ni hacer suposiciones infundadas.",
+            "8. Diferencia con claridad los hechos constatados (lo que ocurrió en la llamada o evaluación) de las sugerencias o consejos pedagógicos de mejora.",
+            "9. Adopta siempre una actitud de tutor experto, analítica, constructiva, orientada a la mejora continua y empática.",
             "",
         ]
+
+        if historical_profile and historical_profile.strip():
+            lines.append(historical_profile.strip())
+            lines.append("")
 
         if not documents:
             lines.append("--- BASE DE CONOCIMIENTO ---")
@@ -308,18 +669,17 @@ class TrainerChatbotService:
                 "en el contexto o ciclo especificado. Informa al usuario de que no hay datos disponibles sin inventar información."
             )
             lines.append("----------------------------")
-            return "\n".join(lines)
+        else:
+            lines.append(f"--- BASE DE CONOCIMIENTO DISPONIBLE ({len(documents)} DOCUMENTOS) ---")
+            for doc in documents:
+                lines.append(f"### [DOCUMENTO ID #{doc.id}] Título: {doc.title}")
+                lines.append(f"- Tipo: {doc.document_type} | Ciclo ID: {doc.cycle_id} | Simulación ID: {doc.simulation_id or 'N/A'}")
+                lines.append(f"- Metadatos: {json.dumps(doc.metadata_json, ensure_ascii=False)}")
+                lines.append("Contenido del Documento:")
+                lines.append(doc.content)
+                lines.append("---")
+            lines.append("FIN DE LA BASE DE CONOCIMIENTO.")
 
-        lines.append(f"--- BASE DE CONOCIMIENTO DISPONIBLE ({len(documents)} DOCUMENTOS) ---")
-        for doc in documents:
-            lines.append(f"### [DOCUMENTO ID #{doc.id}] Título: {doc.title}")
-            lines.append(f"- Tipo: {doc.document_type} | Ciclo ID: {doc.cycle_id} | Simulación ID: {doc.simulation_id or 'N/A'}")
-            lines.append(f"- Metadatos: {json.dumps(doc.metadata_json, ensure_ascii=False)}")
-            lines.append("Contenido del Documento:")
-            lines.append(doc.content)
-            lines.append("---")
-
-        lines.append("FIN DE LA BASE DE CONOCIMIENTO.")
         return "\n".join(lines)
 
     @classmethod
@@ -339,9 +699,10 @@ class TrainerChatbotService:
         1. Input validation & audio transcription (converges to query_text).
         2. Strict tenant security & target agent resolution.
         3. Scoped knowledge document retrieval.
-        4. Grounded system prompt & conversation history assembly.
-        5. AI Provider text completion.
-        6. Structured response payload.
+        4. Scoped full historical profile generation (all-time calls, cycles, simulations).
+        5. Grounded system prompt & conversation history assembly.
+        6. AI Provider text completion.
+        7. Structured response payload.
         """
         # 1. Validate & extract query text (audio or text)
         query_text, input_type = await cls.validate_and_extract_input(
@@ -364,10 +725,18 @@ class TrainerChatbotService:
             cycle_id=cycle_id,
         )
 
-        # 4. Build prompt and prepare message list
+        # 4. Build complete historical profile for target agent
+        historical_profile = await cls.build_agent_historical_profile(
+            db=db,
+            context=context,
+            target_agent_id=target_agent_id,
+        )
+
+        # 5. Build prompt and prepare message list
         system_instruction = cls.build_grounding_prompt(
             documents=documents,
             target_agent_id=target_agent_id,
+            historical_profile=historical_profile,
         )
 
         history = cls.sanitize_history(conversation_history)
@@ -376,7 +745,7 @@ class TrainerChatbotService:
         messages.extend(history)
         messages.append({"role": "user", "content": query_text})
 
-        # 5. Execute LLM completion via existing abstraction
+        # 6. Execute LLM completion via existing abstraction
         try:
             response_text = await openai_service.complete_text(
                 messages=messages,
@@ -390,7 +759,7 @@ class TrainerChatbotService:
                 detail=f"Error en el modelo de lenguaje del chatbot: {str(llm_err)}",
             )
 
-        # 6. Format sources
+        # 7. Format sources
         sources = [
             {
                 "document_id": doc.id,
