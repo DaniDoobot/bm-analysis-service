@@ -17,8 +17,9 @@ from app.services.dashboard_service import (
     get_objections_breakdown,
     get_mass_result_detail,
     get_agents_comparison,
+    get_dashboard_top_criteria,
 )
-from app.schemas.dashboard import AgentComparisonResponse, AgentEvolutionResponse
+from app.schemas.dashboard import AgentComparisonResponse, AgentEvolutionResponse, TopCriterionItem
 from app.utils.hubspot_owners import resolve_owner_id_by_email, resolve_owner_name
 from app.utils.normalizers import normalize_typology, normalize_direction, normalize_status
 
@@ -162,6 +163,138 @@ async def dashboard_summary(
         raise
     except Exception as e:
         logger.exception("Failed to retrieve dashboard summary")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/dashboard/top-criteria", response_model=list[TopCriterionItem])
+async def dashboard_top_criteria(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+    type: Annotated[str, Query(description="audio | text")] = "audio",
+    period: Annotated[str, Query(description="24h | 7d | 30d | all")] = "24h",
+    service_id: Annotated[int | None, Query(description="Filter by service ID")] = None,
+    service_key: Annotated[str | None, Query(description="Filter by service key")] = None,
+    service: Annotated[str | None, Query(description="Filter by service ID, key, or slug name")] = None,
+    hubspot_owner_ids: Annotated[str | None, Query(description="Comma-separated HubSpot owner IDs")] = None,
+    hubspot_owner_id: Annotated[str | None, Query(description="Filter by HubSpot owner ID")] = None,
+    agent_id: Annotated[str | None, Query(description="Alias for hubspot_owner_id")] = None,
+    agent_owner_id: Annotated[str | None, Query(description="Alias for hubspot_owner_id")] = None,
+    agent: Annotated[str | None, Query(description="Alias for hubspot_owner_id")] = None,
+    date_from: Annotated[str | None, Query(description="Custom start date (ISO or YYYY-MM-DD)")] = None,
+    date_to: Annotated[str | None, Query(description="Custom end date (ISO or YYYY-MM-DD)")] = None,
+    typology_ids: Annotated[str | None, Query(description="Comma-separated typology IDs")] = None,
+    typology: Annotated[str | None, Query(description="Filter by typology key/name")] = None,
+    typology_key: Annotated[str | None, Query(description="Filter by typology key")] = None,
+    tipo_llamada: Annotated[str | None, Query(description="Filter by call type")] = None,
+    call_type: Annotated[str | None, Query(description="Filter by call type")] = None,
+    selected_typology: Annotated[str | None, Query(description="Filter by selected typology")] = None,
+    typologies: Annotated[str | None, Query(description="Filter by typology")] = None,
+    direction: Annotated[str | None, Query(description="all | inbound | outbound")] = None,
+    call_direction: Annotated[str | None, Query(description="Filter by call direction")] = None,
+    inbound_outbound: Annotated[str | None, Query(description="Filter by inbound/outbound")] = None,
+    duration_min_seconds: Annotated[int | None, Query(description="Min duration in seconds")] = None,
+    duration_min: Annotated[int | None, Query(description="Alias for duration_min_seconds")] = None,
+    min_duration: Annotated[int | None, Query(description="Alias for duration_min_seconds")] = None,
+    duration_max_seconds: Annotated[int | None, Query(description="Max duration in seconds")] = None,
+    duration_max: Annotated[int | None, Query(description="Alias for duration_max_seconds")] = None,
+    max_duration: Annotated[int | None, Query(description="Alias for duration_max_seconds")] = None,
+    avg_score_min: Annotated[float | None, Query(description="Min average score")] = None,
+    score_min: Annotated[float | None, Query(description="Alias for avg_score_min")] = None,
+    eval_min: Annotated[float | None, Query(description="Alias for avg_score_min")] = None,
+    avg_score_max: Annotated[float | None, Query(description="Max average score")] = None,
+    score_max: Annotated[float | None, Query(description="Alias for avg_score_max")] = None,
+    eval_max: Annotated[float | None, Query(description="Alias for avg_score_max")] = None,
+    status: Annotated[str | None, Query(description="Filter by evaluation status: completed | failed | all")] = None,
+    result_status: Annotated[str | None, Query(description="Alias for status")] = None,
+    item_filters: Annotated[str | None, Query(description="JSON url-encoded item score filters")] = None,
+    criterion_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    item_score_filters: Annotated[str | None, Query(description="Alias for item_filters")] = None,
+    team_id: Annotated[int | None, Query(description="Filter by team ID")] = None,
+    company_id: Annotated[int | None, Query(description="Filter by company ID")] = None,
+    limit: Annotated[int, Query(description="Max criteria to return (default 4, max 10)")] = 4,
+):
+    """Get dynamic top aggregated criteria without time-series calculation."""
+    effective_item_filters = item_filters or criterion_filters or score_filters or item_score_filters
+    raw_status = status or result_status
+    norm_status = normalize_status(raw_status)
+
+    if service and not service_id and not service_key:
+        from app.utils.service_resolvers import resolve_service_id
+        resolved_id, resolved_key = await resolve_service_id(
+            db,
+            service_param=service,
+            company_ids=[company_id] if company_id is not None else (None if context.is_super_admin else context.allowed_company_ids)
+        )
+        service_id = resolved_id or service_id
+        service_key = resolved_key or service_key
+
+    raw_owner_id = hubspot_owner_id or agent_id or agent_owner_id or agent
+    owner_ids = None
+    if hubspot_owner_ids and hubspot_owner_ids.strip():
+        owner_ids = [oid.strip() for oid in hubspot_owner_ids.split(",") if oid.strip()]
+    elif raw_owner_id:
+        owner_ids = [raw_owner_id.strip()]
+
+    eff_score_min = avg_score_min if avg_score_min is not None else (score_min if score_min is not None else eval_min)
+    eff_score_max = avg_score_max if avg_score_max is not None else (score_max if score_max is not None else eval_max)
+    eff_dur_min = duration_min_seconds if duration_min_seconds is not None else (duration_min if duration_min is not None else min_duration)
+    eff_dur_max = duration_max_seconds if duration_max_seconds is not None else (duration_max if duration_max is not None else max_duration)
+
+    typo_ids = None
+    if typology_ids and typology_ids.strip():
+        typo_ids = [int(tid.strip()) for tid in typology_ids.split(",") if tid.strip().isdigit()]
+
+    raw_typology = typology or typology_key or tipo_llamada or call_type or selected_typology or typologies
+    norm_typology_key = normalize_typology(raw_typology)
+    analysis_type = type
+
+    if type and type not in ("audio", "text") and not raw_typology:
+        norm_typology_key = normalize_typology(type)
+        analysis_type = "audio"
+
+    raw_direction = direction or call_direction or inbound_outbound
+    norm_direction = normalize_direction(raw_direction)
+
+    if service_id is not None and not context.is_super_admin:
+        if context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
+            raise HTTPException(
+                status_code=403,
+                detail="Acceso denegado: No tienes permisos para este servicio."
+            )
+
+    safe_limit = min(max(1, limit), 10)
+
+    try:
+        data = await get_dashboard_top_criteria(
+            db,
+            analysis_type=analysis_type,
+            period=period,
+            service_id=service_id,
+            service_key=service_key,
+            date_from=date_from,
+            date_to=date_to,
+            typology_ids=typo_ids,
+            typology_key=norm_typology_key,
+            direction=norm_direction,
+            duration_min_seconds=eff_dur_min,
+            duration_max_seconds=eff_dur_max,
+            avg_score_min=eff_score_min,
+            avg_score_max=eff_score_max,
+            hubspot_owner_id=raw_owner_id,
+            hubspot_owner_ids=owner_ids,
+            item_filters=effective_item_filters,
+            status=norm_status,
+            context=context,
+            team_id=team_id,
+            company_id=company_id,
+            limit=safe_limit,
+        )
+        return data
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to retrieve dashboard top criteria")
         raise HTTPException(status_code=500, detail=str(e))
 
 

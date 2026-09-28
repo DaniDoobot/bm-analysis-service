@@ -507,6 +507,77 @@ def _get_objection_metrics_mass(rows: list[Any]) -> tuple[int, int]:
     return calls, items
 
 
+async def compute_top_criteria_from_analyses(
+    db: AsyncSession,
+    analysis_ids: list[int],
+    max_items: int = 4,
+) -> list[dict[str, Any]]:
+    """
+    Compute up to `max_items` top dynamic criteria by coverage (total_applicable)
+    with aggregated average score, strictly on numeric criteria.
+    Direct SQL aggregation with zero time series overhead.
+    """
+    if not analysis_ids:
+        return []
+
+    target_ids = analysis_ids[:5000] if len(analysis_ids) > 5000 else analysis_ids
+
+    numeric_val_expr = func.coalesce(
+        MassEvaluationCriterionResult.numeric_value,
+        MassEvaluationCriterionResult.percentage_value,
+    )
+    stmt = (
+        select(
+            MassEvaluationCriterionResult.criterion_key,
+            func.max(MassEvaluationCriterionResult.criterion_name).label("criterion_name"),
+            func.max(MassEvaluationCriterionResult.criterion_type).label("criterion_type"),
+            func.count(MassEvaluationCriterionResult.id).label("total_applicable"),
+            func.avg(numeric_val_expr).label("raw_avg"),
+        )
+        .where(
+            MassEvaluationCriterionResult.mass_analysis_id.in_(target_ids),
+            MassEvaluationCriterionResult.is_applicable == True,
+            MassEvaluationCriterionResult.not_applicable == False,
+            numeric_val_expr.is_not(None),
+            or_(
+                MassEvaluationCriterionResult.criterion_type.is_(None),
+                func.lower(MassEvaluationCriterionResult.criterion_type).notin_(["text", "category", "string"]),
+            ),
+        )
+        .group_by(MassEvaluationCriterionResult.criterion_key)
+        .having(func.count(MassEvaluationCriterionResult.id) > 0)
+        .order_by(
+            func.count(MassEvaluationCriterionResult.id).desc(),
+            func.avg(numeric_val_expr).desc(),
+        )
+        .limit(max_items)
+    )
+    res = await db.execute(stmt)
+    rows = res.all()
+    results = []
+    for r in rows:
+        raw_type = (r.criterion_type or "").strip().lower()
+        if raw_type in ("score", "number", "numeric", "score_1_10"):
+            c_type = "score_1_10"
+        elif raw_type in ("percentage", "percent"):
+            c_type = "percentage"
+        elif raw_type:
+            c_type = raw_type
+        else:
+            c_type = "score_1_10"
+
+        c_name = r.criterion_name or CRITERIA_NAMES.get(r.criterion_key, r.criterion_key)
+        avg_v = to_float(round(r.raw_avg, 1)) if r.raw_avg is not None else 0.0
+        results.append({
+            "criterion_key": r.criterion_key,
+            "criterion_name": c_name,
+            "criterion_type": c_type,
+            "avg_value": avg_v,
+            "total_applicable": int(r.total_applicable),
+        })
+    return results
+
+
 # ── Existing dashboard summary ────────────────────────────────────────────────
 async def get_dashboard_summary(
     db: AsyncSession,
@@ -531,6 +602,7 @@ async def get_dashboard_summary(
     team_id: int | None = None,
     granularity: str = "auto",
     company_id: int | None = None,
+    include_top_criteria: bool = False,
 ) -> dict[str, Any]:
     from app.utils.item_score_filters import parse_item_score_filters_detailed, apply_item_score_filters_sql_or_python
     t_start = time.perf_counter()
@@ -1160,6 +1232,16 @@ async def get_dashboard_summary(
             "execution_source": r.execution_source
         })
 
+    # ── Top criteria calculation (Empresa Demo or explicit opt-in) ─────────────
+    top_criteria = []
+    if effective_company_id == 7 or include_top_criteria:
+        current_analysis_ids = [
+            r.mass_analysis_id for r in actual_rows
+            if getattr(r, "mass_analysis_id", None) is not None
+        ]
+        if current_analysis_ids:
+            top_criteria = await compute_top_criteria_from_analyses(db, current_analysis_ids, max_items=4)
+
     t_end = time.perf_counter()
     total_processing_ms = round((t_end - t_start) * 1000.0, 1)
     aggregation_ms = round(max(0.0, total_processing_ms - db_query_ms - item_filter_ms), 1)
@@ -1209,8 +1291,61 @@ async def get_dashboard_summary(
         "sentiment_evolution": sentiment_evolution,
         "agent_ranking": agent_ranking,
         "latest_analyses": latest_analyses,
+        "top_criteria": top_criteria,
         "processing_ms": total_processing_ms,
     }
+
+
+async def get_dashboard_top_criteria(
+    db: AsyncSession,
+    analysis_type: str = "audio",
+    period: str = "24h",
+    service_id: int | None = None,
+    service_key: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    typology_ids: list[int] | None = None,
+    typology_key: str | None = None,
+    direction: str | None = None,
+    duration_min_seconds: int | None = None,
+    duration_max_seconds: int | None = None,
+    avg_score_min: float | None = None,
+    avg_score_max: float | None = None,
+    hubspot_owner_id: str | None = None,
+    hubspot_owner_ids: list[str] | None = None,
+    item_filters: str | list | dict | None = None,
+    status: str | None = None,
+    context: TenantContext | None = None,
+    team_id: int | None = None,
+    company_id: int | None = None,
+    limit: int = 4,
+) -> list[dict[str, Any]]:
+    """Lightweight endpoint service to get top dynamic aggregated criteria."""
+    summary = await get_dashboard_summary(
+        db,
+        analysis_type=analysis_type,
+        period=period,
+        service_id=service_id,
+        service_key=service_key,
+        date_from=date_from,
+        date_to=date_to,
+        typology_ids=typology_ids,
+        typology_key=typology_key,
+        direction=direction,
+        duration_min_seconds=duration_min_seconds,
+        duration_max_seconds=duration_max_seconds,
+        avg_score_min=avg_score_min,
+        avg_score_max=avg_score_max,
+        hubspot_owner_id=hubspot_owner_id,
+        hubspot_owner_ids=hubspot_owner_ids,
+        item_filters=item_filters,
+        status=status,
+        context=context,
+        team_id=team_id,
+        company_id=company_id,
+        include_top_criteria=True,
+    )
+    return summary.get("top_criteria", [])[:limit]
 
 
 

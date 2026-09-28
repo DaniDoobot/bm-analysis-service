@@ -246,3 +246,11 @@ class AgentEvolutionResponse(BaseModel):
     strengths: list[AgentStrengthWeaknessItem]
     weaknesses: list[AgentStrengthWeaknessItem]
     latest_analyses: list[AgentLatestAnalysisItem]
+
+
+class TopCriterionItem(BaseModel):
+    criterion_key: str
+    criterion_name: str
+    criterion_type: str = "score_1_10"
+    avg_value: float
+    total_applicable: int
