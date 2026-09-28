@@ -337,7 +337,6 @@ class TrainerChatbotService:
                 selectinload(TrainerSession.evaluation)
             ).where(
                 TrainerSession.agent_id == target_agent_id,
-                TrainerSession.status == "completed",
             )
             if context.company_id is not None:
                 stmt_sess = stmt_sess.where(TrainerSession.company_id == context.company_id)
@@ -550,23 +549,39 @@ class TrainerChatbotService:
 
         # 6. Histórico de Simulaciones de Roleplay (Histórico Completo)
         if sessions:
-            total_sims = len(sessions)
-            scores = []
+            all_sessions = sessions
+            completed_sessions = [s for s in all_sessions if s.status == "completed"]
+            evaluated_sessions = [
+                s for s in completed_sessions
+                if s.evaluation and s.evaluation.score is not None
+            ]
+            total_simulations = len(all_sessions)
+            completed_simulations = len(completed_sessions)
+            evaluated_simulations = len(evaluated_sessions)
+            incomplete_simulations = total_simulations - completed_simulations
+
+            scores: list[float] = []
             improvement_freq: dict[str, int] = {}
             strengths_freq: dict[str, int] = {}
             recent_feedback: list[str] = []
 
-            sessions_chrono = sorted(
-                sessions,
+            # RENDIMIENTO: Las sesiones incompletas NO deben participar en métricas de rendimiento
+            # (medias de puntuación, evolución, fortalezas, debilidades, patrones cualitativos ni feedback).
+            # Solo iteramos sobre completed_sessions.
+            completed_chrono = sorted(
+                completed_sessions,
                 key=lambda s: s.created_at or datetime.min.replace(tzinfo=timezone.utc)
             )
 
-            for s in sessions_chrono:
+            for s in completed_chrono:
                 ev = s.evaluation
                 if not ev:
                     continue
                 if ev.score is not None:
-                    scores.append(float(ev.score))
+                    try:
+                        scores.append(float(ev.score))
+                    except (ValueError, TypeError):
+                        pass
 
                 imp = ev.improvement_points
                 if isinstance(imp, list):
@@ -595,7 +610,14 @@ class TrainerChatbotService:
                 if ev.summary and ev.summary.strip():
                     recent_feedback.append(ev.summary.strip())
 
-            sections.append(f"\n#### 6. Histórico de Simulaciones de Roleplay ({total_sims} completadas)")
+            sections.append(f"\n#### 6. Histórico de Simulaciones de Roleplay ({completed_simulations} completadas)")
+            sections.append(
+                "- Desglose de simulaciones:\n"
+                f"  * Simulaciones registradas/iniciadas: {total_simulations}\n"
+                f"  * Simulaciones completadas: {completed_simulations}\n"
+                f"  * Simulaciones evaluadas con nota: {evaluated_simulations}\n"
+                f"  * Simulaciones interrumpidas/no finalizadas: {incomplete_simulations}"
+            )
             if scores:
                 avg_sim = sum(scores) / len(scores)
                 sim_eval_str = f"- Puntuación media en simulaciones: {avg_sim:.1f}/10 (basada en {len(scores)} simulaciones evaluadas)."
@@ -722,6 +744,13 @@ class TrainerChatbotService:
             "",
             "8. REFERENCIA A SIMULACIONES Y DOCUMENTOS:",
             "   - Refiérete a los documentos y simulaciones por su temática o título natural (ej. 'la simulación de objeciones de facturación', 'el ciclo de atención'), NUNCA usando IDs numéricos ni referencias a bases de datos.",
+            "",
+            "9. DISTINCIÓN Y CONTEO DE SIMULACIONES:",
+            "   - Distingue con precisión entre simulaciones registradas (total iniciado), completadas, y evaluadas con nota:",
+            "     * Si el usuario pregunta de forma general '¿cuántas simulaciones tengo?' o '¿cuántas simulaciones he hecho?', responde con el total de simulaciones registradas o iniciadas, aclarando cuántas se completaron o si alguna quedó sin finalizar si aporta claridad (ej. 'Tienes 4 simulaciones registradas. De ellas, 3 se completaron y 1 quedó sin finalizar').",
+            "     * Si pregunta específicamente '¿cuántas he completado?' o '¿cuántas simulaciones completadas tengo?', responde con el número de completadas.",
+            "     * Si pregunta '¿cuántas tienen evaluación?' o '¿cuántas tienen nota?', responde con el número de evaluadas con nota.",
+            "   - NUNCA inventes notas o puntuaciones de simulaciones no evaluadas, y NUNCA uses simulaciones incompletas o interrumpidas para calcular medias, fortalezas o debilidades.",
             "",
         ])
 
