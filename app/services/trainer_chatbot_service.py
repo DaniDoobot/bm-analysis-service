@@ -83,6 +83,7 @@ class DetailedPeriodResult:
     raw_expression: Optional[str] = None
     blocking_message: Optional[str] = None
     clarification_needed: bool = False
+    is_fortnight: bool = False
 
 
 class TrainerChatbotService:
@@ -832,7 +833,8 @@ class TrainerChatbotService:
                     end_dt = datetime(year, month_num, last_day, 23, 59, 59, tzinfo=timezone.utc)
                     span_days = (end_dt.date() - start_dt.date()).days + 1
 
-                exceeds = span_days > 15
+                is_fortnight = True
+                exceeds = span_days > 15 and not is_fortnight
                 return DetailedPeriodResult(
                     is_detailed_period_request=True,
                     exceeds_limit=exceeds,
@@ -841,6 +843,7 @@ class TrainerChatbotService:
                     period_days=span_days,
                     raw_expression=m_quincena.group(0),
                     blocking_message=(ADMIN_BLOCKING_MSG if is_admin else AGENT_BLOCKING_MSG) if exceeds else None,
+                    is_fortnight=is_fortnight,
                 )
 
         # 3. Relative expressions: "últimos/as N días"
@@ -1071,7 +1074,7 @@ class TrainerChatbotService:
 
         lines = [
             f"--- ANÁLISIS DETALLADO DEL PERIODO SOLICITADO ({start_str} al {end_str}) ---",
-            f"- Tramo temporal analizado: del {start_str} al {end_str} (acotado a un máximo de 15 días).",
+            f"- Tramo temporal analizado: del {start_str} al {end_str}.",
         ]
 
         if total_calls == 0 and not simulations_in_period:
@@ -1112,8 +1115,6 @@ class TrainerChatbotService:
                         c_sum = ""
                         if isinstance(c.result_json, dict) and c.result_json.get("resumen"):
                             c_sum = str(c.result_json.get("resumen")).strip()
-                        elif c.summary:
-                            c_sum = str(c.summary).strip()
                         c_brief = f" — {c_sum[:100]}..." if len(c_sum) > 100 else (f" — {c_sum}" if c_sum else "")
                         lines.append(f"  * Llamada #{idx} ({c_date}, nota {c_sc}){c_brief}")
 
