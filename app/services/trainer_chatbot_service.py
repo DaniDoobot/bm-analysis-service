@@ -5,6 +5,7 @@ Supports both text and audio input through a single reasoning and retrieval pipe
 import io
 import json
 import logging
+import re
 from typing import Any, List, Optional, Tuple
 
 from fastapi import HTTPException, UploadFile, status
@@ -635,28 +636,94 @@ class TrainerChatbotService:
         documents: List[TrainingKnowledgeDocument],
         target_agent_id: str,
         historical_profile: Optional[str] = None,
+        is_admin: bool = False,
     ) -> str:
         """
-        Builds the strict Grounding System Prompt incorporating available training knowledge documents
-        and the full historical profile of the agent across calls, cycles, and simulations.
-        Enforces factual fidelity, quotation of evidence, and transparency if info is missing.
+        Builds the strict Grounding System Prompt incorporating available training knowledge documents,
+        the full historical profile of the agent across calls, cycles, and simulations, and behavioral boundaries.
+        Enforces factual fidelity, natural pedagogical tone (agent coaching vs admin supervision),
+        strict functional scope, and zero technical ID/table leakage.
         """
-        lines = [
-            "Eres el Asistente y Tutor de Formación de Trainer (Speech BM).",
-            f"Tu misión es responder a las preguntas y dudas sobre el entrenamiento, simulaciones, evolución y desempeño del agente con ID '{target_agent_id}'.",
+        lines = []
+
+        if is_admin:
+            lines.extend([
+                "Eres el Asistente y Tutor de Formación de Speech BM, enfocado en la supervisión pedagógica y análisis del desarrollo de los agentes.",
+                "Tu interlocutor es un supervisor o administrador del centro de formación.",
+                "Tu rol es proporcionarle un análisis formativo objetivo, constructivo y de alto valor sobre la trayectoria y desempeño del agente.",
+                "DIRÍGETE AL USUARIO EN TERCERA PERSONA ('este agente', 'se observa en sus evaluaciones', 'sus fortalezas consolidadas', 'el siguiente foco formativo'). Evita juicios absolutos o sentenciosos.",
+            ])
+        else:
+            lines.extend([
+                "Eres el Tutor y Mentor de Formación de Speech BM.",
+                "Tu interlocutor es el propio agente de contact center. Tu misión es acompañarle, guiarle y ayudarle en su desarrollo profesional.",
+                "DIRÍGETE AL AGENTE DE FORMA CERCANA, NATURAL, PEDAGÓGICA Y PROFESIONAL EN SEGUNDA PERSONA ('tú', 'en tus llamadas', 'has mejorado en...', 'te convendría practicar...').",
+                "Actúa como un formador o coach experto, constructivo, motivador y orientado a la mejora continua, NUNCA como un evaluador punitivo ni como un sistema robótico.",
+            ])
+
+        lines.extend([
+            f"[Referencia interna de contexto para grounding: {target_agent_id}]",
+            "NOTA DE CONFIDENCIALIDAD: La referencia anterior es exclusivamente para tu contexto interno. NUNCA menciones identificadores técnicos al usuario.",
             "",
-            "REGLAS OBLIGATORIAS DE COMPORTAMIENTO Y GROUNDING:",
-            "1. Responde basándote en el Perfil Histórico Completo y en los Documentos de Conocimiento oficiales proporcionados a continuación.",
-            "2. Puedes y DEBES razonar sobre TODO el histórico disponible del agente: llamadas reales evaluadas, evolución temporal de criterios, objetivos de ciclos formativos (superados y no superados), simulaciones de roleplay y recomendaciones acumuladas.",
-            "3. Puedes contrastar la trayectoria global histórica con el periodo reciente (por ejemplo, últimos 30 días) para explicar la evolución y tendencia del agente.",
-            "4. Identifica con rigor y claridad qué datos provienen de llamadas reales masivas, cuáles de ciclos formativos y cuáles de simulaciones de roleplay.",
-            "5. Cita evidencias concretas, notas reales, nombres de criterios u objetivos cuando justifiques un resultado, fortaleza o área de mejora.",
-            "6. NUNCA inventes notas, puntuaciones, evidencias, transcripciones ni hechos que no consten en los datos proporcionados.",
-            "7. Si una pregunta versa sobre un criterio, fecha o aspecto sobre el que NO constan datos en el perfil ni en los documentos, indícalo claramente con total honestidad sin inventar datos ni hacer suposiciones infundadas.",
-            "8. Diferencia con claridad los hechos constatados (lo que ocurrió en la llamada o evaluación) de las sugerencias o consejos pedagógicos de mejora.",
-            "9. Adopta siempre una actitud de tutor experto, analítica, constructiva, orientada a la mejora continua y empática.",
+            "REGLAS OBLIGATORIAS DE TONO Y COMPORTAMIENTO PEDAGÓGICO:",
+            "1. Tono humano y natural: Habla como un formador o tutor humano experto, no como un software o sistema informático.",
+            "   - Sé breve y directo cuando la consulta sea sencilla o puntual.",
+            "   - Sé explicativo, estructurado y formativo cuando se requiera comprender un patrón de error o una técnica de mejora.",
+            "2. Prohibición estricta de lenguaje robótico, burocrático o defensivo:",
+            "   - NUNCA uses fórmulas mecánicas como:",
+            "     * 'Según los datos suministrados por el sistema...'",
+            "     * 'El sistema ha determinado...'",
+            "     * 'El identificador del agente...'",
+            "     * 'No tengo permisos para...'",
+            "     * 'La tabla X indica...'",
+            "     * 'La consulta SQL...'",
+            "     * 'El backend...'",
+            "   - Usa siempre lenguaje natural de formación y coaching:",
+            "     * 'En tus últimas evaluaciones...' (o 'En las evaluaciones del agente...')",
+            "     * 'Hay un patrón que se repite...'",
+            "     * 'Aquí has mejorado...' (o 'Se observa un avance en...')",
+            "     * 'Te convendría trabajar...' (o 'Un posible foco de mejora sería...')",
+            "     * 'En las simulaciones se observa...'",
             "",
-        ]
+            "3. LÍMITES ESTRICTOS DE INFORMACIÓN TÉCNICA (CERO FUGAS):",
+            "   - NUNCA reveles ni menciones al usuario identificadores técnicos de base de datos (company_id, user_id, agent_id, hubspot_owner_id, service_id, cycle_id, simulation_id, ni IDs numéricos como ID 573, ID #12, etc.).",
+            "   - NUNCA menciones nombres de tablas (bm_users, trainer_sessions, etc.), nombres de modelos de datos, nombres de funciones, endpoints (/bm/...), roles técnicos internos (SUPER_ADMIN, COMPANY_ADMIN, etc.), trazas ni detalles de arquitectura.",
+            "   - NUNCA uses nombres de campos técnicos de base de datos (evaluacion_global, result_json, etc.); refiérete a ellos de forma natural ('evaluación global', 'resultados', 'criterios').",
+            "",
+            "4. PREGUNTAS SOBRE DATOS O FUNCIONAMIENTO INTERNO:",
+            "   - Si el usuario pregunta de dónde salen los datos, qué tabla se usa, qué endpoint se consulta, qué ID tiene, qué permisos tiene o cómo se sabe su empresa:",
+            "     * NO expliques implementación ni des identificadores técnicos.",
+            "     * Responde de forma funcional y natural:",
+            "       - Para agente: 'Uso la información de formación y evaluaciones disponible para tu perfil.'",
+            "       - Para admin: 'Uso la información de formación y evaluaciones registrada para el perfil del agente.'",
+            "",
+            "5. ÁMBITO FUNCIONAL EXCLUSIVO Y REDIRECCIÓN:",
+            "   - Tu labor se limita EXCLUSIVAMENTE a la formación del agente: evolución, fortalezas, debilidades, feedback, criterios, llamadas evaluadas, simulaciones, ciclos formativos, objetivos y técnicas de atención/venta/servicio.",
+            "   - Si el usuario pregunta sobre temas ajenos a la formación (deportes, Champions League, fútbol, programación o código Python, cultura general, capitales, etc.):",
+            "     * NO respondas conocimiento general ni código.",
+            "     * Redirige amablemente a tu función formativa:",
+            "       - Para agente: 'Puedo ayudarte con tu formación, evaluaciones y evolución como agente. Si quieres, podemos revisar tus puntos fuertes, áreas de mejora o simulaciones.'",
+            "       - Para admin: 'Puedo ayudarte con la supervisión formativa, evaluaciones y evolución pedagógica de los agentes. Si lo deseas, podemos analizar sus fortalezas, áreas de mejora o histórico de simulaciones.'",
+            "",
+            "6. MANEJO DE INCERTIDUMBRE Y RIGOR FACTUAL:",
+            "   - Si no constan datos suficientes sobre un criterio, fecha o aspecto consultado:",
+            "     * NUNCA inventes notas, hechos, llamadas ni simulaciones inexistentes.",
+            "     * Responde con honestidad y prudencia:",
+            "       'No tengo suficiente histórico para valorar todavía ese punto.' o",
+            "       'En las evaluaciones disponibles no aparece evidencia suficiente para sacar una conclusión.'",
+            "   - Distingue con rigor entre un hecho constatado (lo que ocurrió en una llamada), un patrón recurrente y una recomendación pedagógica. Nunca presentes una deducción como un hecho objetivo.",
+            "",
+            "7. ESTRUCTURA DE RESPUESTAS ÚTILES:",
+            "   - Cuando analices un error o punto de mejora, estructura de forma pedagógica y práctica:",
+            "     * Qué se observa (patrón o evidencia concreta de la interacción).",
+            "     * Ejemplo o situación donde ocurrió.",
+            "     * Qué hacer para mejorarlo (técnica práctica aplicable en el puesto).",
+            "   - No uses una plantilla rígida obligatoria; adapta la respuesta a la pregunta.",
+            "",
+            "8. REFERENCIA A SIMULACIONES Y DOCUMENTOS:",
+            "   - Refiérete a los documentos y simulaciones por su temática o título natural (ej. 'la simulación de objeciones de facturación', 'el ciclo de atención'), NUNCA usando IDs numéricos ni referencias a bases de datos.",
+            "",
+        ])
 
         if historical_profile and historical_profile.strip():
             lines.append(historical_profile.strip())
@@ -665,22 +732,150 @@ class TrainerChatbotService:
         if not documents:
             lines.append("--- BASE DE CONOCIMIENTO ---")
             lines.append(
-                "ADVERTENCIA CRÍTICA: No existen documentos de conocimiento ni evaluaciones registradas para este agente "
-                "en el contexto o ciclo especificado. Informa al usuario de que no hay datos disponibles sin inventar información."
+                "ADVERTENCIA FORMATIVA: No existen documentos de conocimiento ni evaluaciones registradas para este agente "
+                "en el contexto o ciclo especificado. Informa al usuario con amabilidad de que no hay datos disponibles sin inventar información."
             )
             lines.append("----------------------------")
         else:
             lines.append(f"--- BASE DE CONOCIMIENTO DISPONIBLE ({len(documents)} DOCUMENTOS) ---")
             for doc in documents:
-                lines.append(f"### [DOCUMENTO ID #{doc.id}] Título: {doc.title}")
-                lines.append(f"- Tipo: {doc.document_type} | Ciclo ID: {doc.cycle_id} | Simulación ID: {doc.simulation_id or 'N/A'}")
-                lines.append(f"- Metadatos: {json.dumps(doc.metadata_json, ensure_ascii=False)}")
-                lines.append("Contenido del Documento:")
+                lines.append(f"### [DOCUMENTO: {doc.title}]")
+                lines.append(f"- Tipo de documento: {doc.document_type}")
+                lines.append("Contenido formativo:")
                 lines.append(doc.content)
                 lines.append("---")
             lines.append("FIN DE LA BASE DE CONOCIMIENTO.")
 
         return "\n".join(lines)
+
+    @classmethod
+    def sanitize_response_text(
+        cls,
+        text: str,
+        is_admin: bool = False,
+        query_text: Optional[str] = None,
+    ) -> str:
+        """
+        Ensures zero leakage of technical identifiers (company_id, agent_id, user_id, internal IDs),
+        table names, endpoints, internal roles, and enforces natural redirection for out-of-scope queries
+        and functional responses for system inquiries.
+        """
+        if not text:
+            return ""
+
+        q_lower = (query_text or "").lower().strip()
+
+        # 1. Out-of-scope redirection check
+        out_of_scope_triggers = [
+            "champions", "champions league", "quién ganó", "quien gano", "partido de fútbol", "partido de futbol",
+            "código python", "codigo python", "escríbeme código", "escribeme codigo", "código en python", "codigo en python",
+            "script python", "script en python", "crea un script", "programa en python",
+            "capital de japón", "capital de japon", "capital de francia", "capital de italia", "capital de españa",
+            "cómo funciona la base de datos", "como funciona la base de datos", "dime cómo funciona la base de datos",
+            "muéstrame todos los usuarios", "muestrame todos los usuarios",
+            "datos internos del sistema",
+        ]
+        if any(trigger in q_lower for trigger in out_of_scope_triggers):
+            if "puedo ayudarte con tu formación" not in text.lower() and "puedo ayudarte con la supervisión" not in text.lower():
+                if is_admin:
+                    return "Puedo ayudarte con la supervisión formativa, evaluaciones y evolución pedagógica de los agentes. Si lo deseas, podemos analizar sus fortalezas, áreas de mejora o histórico de simulaciones."
+                return "Puedo ayudarte con tu formación, evaluaciones y evolución como agente. Si quieres, podemos revisar tus puntos fuertes, áreas de mejora o simulaciones."
+
+        # 2. Internal system query check (IDs, tables, endpoints, permissions)
+        internal_query_triggers = [
+            "de dónde sacas estos datos", "de donde sacas estos datos",
+            "qué tabla estás usando", "que tabla estas usando", "qué tabla usas", "que tabla usas", "qué tabla", "que tabla",
+            "qué endpoint", "que endpoint",
+            "qué id tengo", "que id tengo", "dime mi id", "cuál es mi id", "cual es mi id", "dime el id", "cuál es el id",
+            "hubspot_owner_id",
+            "qué permisos tengo", "que permisos tengo",
+            "cómo sabes mi empresa", "como sabes mi empresa",
+            "cómo funciona internamente el sistema", "como funciona internamente el sistema",
+            "enséñame cómo funciona internamente", "enseñame como funciona internamente",
+        ]
+        if any(trigger in q_lower for trigger in internal_query_triggers):
+            if is_admin:
+                return "Uso la información de formación y evaluaciones registrada para el perfil del agente."
+            return "Uso la información de formación y evaluaciones disponible para tu perfil."
+
+        # 3. Clean up any leaked technical ID patterns
+        # e.g., "(ID 573)" -> "", "ID #573" -> "", "ID: 573" -> ""
+        sanitized = re.sub(r"\s*\(?\b(?:ID|id)\s*[:#]?\s*\d+\)?", "", text)
+
+        # e.g., company_id=1, agent_id='agent_01', hubspot_owner_id: demo_owner_01
+        sanitized = re.sub(
+            r"\b(?:el\s+)?(?:agent_id|hubspot_owner_id)\s*(?:[:=]|es)?\s*['\"]?[a-zA-Z0-9_-]+['\"]?",
+            "el agente" if is_admin else "tu perfil",
+            sanitized,
+            flags=re.IGNORECASE,
+        )
+        sanitized = re.sub(
+            r"\b(?:company_id|user_id|service_id|cycle_id|simulation_id)\s*(?:[:=]|es)?\s*['\"]?[a-zA-Z0-9_-]+['\"]?",
+            "",
+            sanitized,
+            flags=re.IGNORECASE,
+        )
+        sanitized = re.sub(
+            r"\b(?:company_id|user_id|agent_id|hubspot_owner_id|service_id|cycle_id|simulation_id)\b",
+            "perfil",
+            sanitized,
+            flags=re.IGNORECASE,
+        )
+
+        # 4. Clean up any leaked database table names
+        sanitized = re.sub(
+            r"\b(?:bm_users|bm_services|bm_typologies|trainer_sessions|training_agent_reports|trainer_evaluations|mass_evaluation_results|training_knowledge_documents|prompt_base_structures|bm_companies)\b",
+            "el registro de formación",
+            sanitized,
+            flags=re.IGNORECASE,
+        )
+
+        # 5. Clean up any leaked endpoints
+        sanitized = re.sub(
+            r"(?:POST|GET|PUT|DELETE|PATCH)?\s*\/bm\/[a-zA-Z0-9_\/-]+",
+            "el entorno de formación",
+            sanitized,
+        )
+
+        # 6. Clean up internal roles
+        sanitized = re.sub(
+            r"\b(?:SUPER_ADMIN|COMPANY_ADMIN|TEAM_COORDINATOR|InternalRole)\b",
+            "administrador",
+            sanitized,
+        )
+
+        # 7. Clean up robotic boilerplate phrases
+        sanitized = re.sub(
+            r"[Ss]egún los datos suministrados por el sistema,?\s*",
+            "Según las evaluaciones registradas, " if is_admin else "Según tus evaluaciones registradas, ",
+            sanitized,
+        )
+        sanitized = re.sub(
+            r"[Ee]l sistema ha determinado que\s*",
+            "Se observa que ",
+            sanitized,
+        )
+        sanitized = re.sub(
+            r"[Ee]l identificador del agente\s*",
+            "El perfil del agente ",
+            sanitized,
+        )
+        sanitized = re.sub(
+            r"[Nn]o tengo permisos para\s*",
+            "No dispongo de información sobre ",
+            sanitized,
+        )
+        sanitized = re.sub(
+            r"\b[Ee]l backend\b\s*",
+            "el servicio de formación ",
+            sanitized,
+        )
+
+        # Normalize any resulting double spaces or empty formatting
+        sanitized = re.sub(r"  +", " ", sanitized)
+        sanitized = re.sub(r"\( *\)", "", sanitized)
+
+        return sanitized.strip()
 
     @classmethod
     async def process_chat(
@@ -702,7 +897,8 @@ class TrainerChatbotService:
         4. Scoped full historical profile generation (all-time calls, cycles, simulations).
         5. Grounded system prompt & conversation history assembly.
         6. AI Provider text completion.
-        7. Structured response payload.
+        7. Response post-processing & sanitization.
+        8. Structured response payload.
         """
         # 1. Validate & extract query text (audio or text)
         query_text, input_type = await cls.validate_and_extract_input(
@@ -732,11 +928,21 @@ class TrainerChatbotService:
             target_agent_id=target_agent_id,
         )
 
+        # Determine whether current_user is acting in an administrative role
+        norm_role = normalize_role(current_user.role)
+        is_admin = norm_role in (
+            InternalRole.SUPER_ADMIN,
+            InternalRole.COMPANY_ADMIN,
+            InternalRole.SERVICE_MANAGER,
+            InternalRole.TEAM_COORDINATOR,
+        )
+
         # 5. Build prompt and prepare message list
         system_instruction = cls.build_grounding_prompt(
             documents=documents,
             target_agent_id=target_agent_id,
             historical_profile=historical_profile,
+            is_admin=is_admin,
         )
 
         history = cls.sanitize_history(conversation_history)
@@ -759,7 +965,14 @@ class TrainerChatbotService:
                 detail=f"Error en el modelo de lenguaje del chatbot: {str(llm_err)}",
             )
 
-        # 7. Format sources
+        # 7. Post-process & sanitize response (zero leaks of technical IDs/tables, natural redirection)
+        sanitized_response = cls.sanitize_response_text(
+            text=response_text or "",
+            is_admin=is_admin,
+            query_text=query_text,
+        )
+
+        # 8. Format sources
         sources = [
             {
                 "document_id": doc.id,
@@ -771,7 +984,7 @@ class TrainerChatbotService:
         ]
 
         return {
-            "response": response_text or "",
+            "response": sanitized_response,
             "user_query": query_text,
             "input_type": input_type,
             "sources": sources,
