@@ -2,6 +2,9 @@
 Trainer Chatbot Service — Unified Scoped RAG for voice training knowledge.
 Supports both text and audio input through a single reasoning and retrieval pipeline.
 """
+import calendar
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
 import io
 import json
 import logging
@@ -16,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.roles import InternalRole, normalize_role
 from app.core.tenant_context import TenantContext
+from app.models.mass_evaluations import MassEvaluationResult
 from app.models.personalized_training import TrainingAgentReport, TrainingKnowledgeDocument
 from app.models.trainer import TrainerSession
 from app.models.users import User
@@ -30,6 +34,55 @@ MAX_AUDIO_SIZE_BYTES = 15 * 1024 * 1024  # 15 MB
 ALLOWED_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".webm", ".ogg", ".aac", ".flac"}
 MAX_HISTORY_MESSAGES = 8
 MAX_KNOWLEDGE_DOCUMENTS = 12
+
+SPANISH_MONTHS = {
+    "enero": 1, "febrero": 2, "marzo": 3, "abril": 4,
+    "mayo": 5, "junio": 6, "julio": 7, "agosto": 8,
+    "septiembre": 9, "setiembre": 9, "octubre": 10,
+    "noviembre": 11, "diciembre": 12,
+}
+
+SPANISH_WORDS_NUM = {
+    "un": 1, "una": 1, "uno": 1, "dos": 2, "tres": 3,
+    "cuatro": 4, "cinco": 5, "seis": 6, "siete": 7,
+    "ocho": 8, "nueve": 9, "diez": 10, "once": 11,
+    "doce": 12, "trece": 13, "catorce": 14, "quince": 15,
+    "dieciseis": 16, "dieciséis": 16, "veinte": 20,
+    "veintiuno": 21, "veinticinco": 25, "treinta": 30,
+}
+
+AGENT_BLOCKING_MSG = (
+    "Puedo analizar tus evaluaciones con detalle en periodos de hasta 15 días para poder profundizar bien en cada aspecto. "
+    "Si quieres, indícame una quincena o un rango de fechas concreto (por ejemplo, del 1 al 15 del mes) y lo revisamos a fondo."
+)
+
+ADMIN_BLOCKING_MSG = (
+    "Puedo analizar el desempeño del agente en detalle en periodos de hasta 15 días "
+    "para ofrecer un desglose pedagógico preciso. Por favor, acota la consulta a un intervalo "
+    "de máximo 15 días (por ejemplo, una quincena o dos semanas concretas)."
+)
+
+AGENT_CLARIFICATION_MSG = (
+    "Por favor, indícame las fechas o el tramo concreto que deseas analizar "
+    "(con un máximo de 15 días) para revisarlo en detalle."
+)
+
+ADMIN_CLARIFICATION_MSG = (
+    "Por favor, indica las fechas o el tramo concreto que deseas analizar para el agente "
+    "(con un intervalo máximo de 15 días)."
+)
+
+
+@dataclass
+class DetailedPeriodResult:
+    is_detailed_period_request: bool
+    exceeds_limit: bool = False
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    period_days: Optional[int] = None
+    raw_expression: Optional[str] = None
+    blocking_message: Optional[str] = None
+    clarification_needed: bool = False
 
 
 class TrainerChatbotService:
@@ -653,11 +706,432 @@ class TrainerChatbotService:
         sections.append("--------------------------------------------------------")
         return "\n".join(sections)
 
+    @classmethod
+    def detect_detailed_period_request(
+        cls,
+        query_text: str,
+        is_admin: bool = False,
+        reference_date: Optional[datetime] = None,
+    ) -> DetailedPeriodResult:
+        """
+        Deterministically detects whether the user query is asking for a detailed analysis
+        of evaluations / calls / simulations within an explicit temporal period.
+        Enforces a hard limit of 15 natural days.
+        Does NOT block general questions without explicit temporal periods
+        (e.g., '¿Cómo he evolucionado?', '¿En qué suelo fallar?').
+        """
+        if not query_text or not str(query_text).strip():
+            return DetailedPeriodResult(is_detailed_period_request=False)
+
+        ref_dt = reference_date or datetime.now(timezone.utc)
+        q = query_text.strip().lower()
+
+        # Helper to parse integers or Spanish number words
+        def _parse_num(val_str: Optional[str]) -> Optional[int]:
+            if not val_str:
+                return None
+            clean_str = val_str.strip().lower()
+            if clean_str.isdigit():
+                return int(clean_str)
+            return SPANISH_WORDS_NUM.get(clean_str)
+
+        # 1. Explicit ranges: "del X al Y de <mes>" or "entre el X y el Y de <mes>"
+        # Pattern A: same month: "del 1 al 15 de junio [de 2026]"
+        m_range = re.search(
+            r"\b(?:del?|desde\s+el)\s+(\d{1,2})\s+(?:al?|hasta\s+el)\s+(\d{1,2})\s+de\s+([a-záéíóú]+)(?:\s+(?:de\s+|del\s+)?(\d{4}))?\b",
+            q,
+        )
+        if not m_range:
+            m_range = re.search(
+                r"\bentre\s+el\s+(\d{1,2})\s+y\s+el\s+(\d{1,2})\s+de\s+([a-záéíóú]+)(?:\s+(?:de\s+|del\s+)?(\d{4}))?\b",
+                q,
+            )
+
+        if m_range:
+            d1 = int(m_range.group(1))
+            d2 = int(m_range.group(2))
+            month_name = m_range.group(3).lower()
+            year_str = m_range.group(4)
+            month_num = SPANISH_MONTHS.get(month_name)
+            if month_num:
+                year = int(year_str) if year_str else ref_dt.year
+                _, last_day = calendar.monthrange(year, month_num)
+                d1 = max(1, min(d1, last_day))
+                d2 = max(1, min(d2, last_day))
+                if d1 > d2:
+                    d1, d2 = d2, d1
+                start_dt = datetime(year, month_num, d1, 0, 0, 0, tzinfo=timezone.utc)
+                end_dt = datetime(year, month_num, d2, 23, 59, 59, tzinfo=timezone.utc)
+                span_days = (end_dt.date() - start_dt.date()).days + 1
+                exceeds = span_days > 15
+                return DetailedPeriodResult(
+                    is_detailed_period_request=True,
+                    exceeds_limit=exceeds,
+                    start_date=start_dt,
+                    end_date=end_dt,
+                    period_days=span_days,
+                    raw_expression=m_range.group(0),
+                    blocking_message=(ADMIN_BLOCKING_MSG if is_admin else AGENT_BLOCKING_MSG) if exceeds else None,
+                )
+
+        # Pattern B: cross months: "del 25 de mayo al 5 de junio"
+        m_cross = re.search(
+            r"\b(?:del?|desde\s+el)\s+(\d{1,2})\s+de\s+([a-záéíóú]+)\s+(?:al?|hasta\s+el)\s+(\d{1,2})\s+de\s+([a-záéíóú]+)(?:\s+(?:de\s+|del\s+)?(\d{4}))?\b",
+            q,
+        )
+        if not m_cross:
+            m_cross = re.search(
+                r"\bentre\s+el\s+(\d{1,2})\s+de\s+([a-záéíóú]+)\s+y\s+el\s+(\d{1,2})\s+de\s+([a-záéíóú]+)(?:\s+(?:de\s+|del\s+)?(\d{4}))?\b",
+                q,
+            )
+        if m_cross:
+            d1 = int(m_cross.group(1))
+            m1_name = m_cross.group(2).lower()
+            d2 = int(m_cross.group(3))
+            m2_name = m_cross.group(4).lower()
+            year_str = m_cross.group(5)
+            m1_num = SPANISH_MONTHS.get(m1_name)
+            m2_num = SPANISH_MONTHS.get(m2_name)
+            if m1_num and m2_num:
+                year = int(year_str) if year_str else ref_dt.year
+                start_dt = datetime(year, m1_num, d1, 0, 0, 0, tzinfo=timezone.utc)
+                end_dt = datetime(year, m2_num, d2, 23, 59, 59, tzinfo=timezone.utc)
+                if start_dt > end_dt:
+                    start_dt, end_dt = end_dt, start_dt
+                span_days = (end_dt.date() - start_dt.date()).days + 1
+                exceeds = span_days > 15
+                return DetailedPeriodResult(
+                    is_detailed_period_request=True,
+                    exceeds_limit=exceeds,
+                    start_date=start_dt,
+                    end_date=end_dt,
+                    period_days=span_days,
+                    raw_expression=m_cross.group(0),
+                    blocking_message=(ADMIN_BLOCKING_MSG if is_admin else AGENT_BLOCKING_MSG) if exceeds else None,
+                )
+
+        # 2. Quincenas: "primera / segunda quincena de <mes>"
+        m_quincena = re.search(
+            r"\b(?:la\s+)?(primera|segunda|1[aª]|2[aª])\s+quincena\s+(?:de\s+)?([a-záéíóú]+)(?:\s+(?:de\s+|del\s+)?(\d{4}))?\b",
+            q,
+        )
+        if m_quincena:
+            q_type = m_quincena.group(1).lower()
+            month_name = m_quincena.group(2).lower()
+            year_str = m_quincena.group(3)
+            month_num = SPANISH_MONTHS.get(month_name)
+            if month_num:
+                year = int(year_str) if year_str else ref_dt.year
+                _, last_day = calendar.monthrange(year, month_num)
+                if q_type in ("primera", "1a", "1ª"):
+                    start_dt = datetime(year, month_num, 1, 0, 0, 0, tzinfo=timezone.utc)
+                    end_dt = datetime(year, month_num, 15, 23, 59, 59, tzinfo=timezone.utc)
+                    span_days = 15
+                else:
+                    start_dt = datetime(year, month_num, 16, 0, 0, 0, tzinfo=timezone.utc)
+                    end_dt = datetime(year, month_num, last_day, 23, 59, 59, tzinfo=timezone.utc)
+                    span_days = (end_dt.date() - start_dt.date()).days + 1
+
+                exceeds = span_days > 15
+                return DetailedPeriodResult(
+                    is_detailed_period_request=True,
+                    exceeds_limit=exceeds,
+                    start_date=start_dt,
+                    end_date=end_dt,
+                    period_days=span_days,
+                    raw_expression=m_quincena.group(0),
+                    blocking_message=(ADMIN_BLOCKING_MSG if is_admin else AGENT_BLOCKING_MSG) if exceeds else None,
+                )
+
+        # 3. Relative expressions: "últimos/as N días"
+        m_days = re.search(
+            r"\b(?:[uú]ltimos?|anteriores?|pasados?)\s+(\d+|[a-záéíóú]+)\s+d[ií]as\b",
+            q,
+        )
+        if m_days:
+            n_days = _parse_num(m_days.group(1))
+            if n_days is not None:
+                end_dt = ref_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+                start_dt = (ref_dt - timedelta(days=n_days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+                exceeds = n_days > 15
+                return DetailedPeriodResult(
+                    is_detailed_period_request=True,
+                    exceeds_limit=exceeds,
+                    start_date=start_dt,
+                    end_date=end_dt,
+                    period_days=n_days,
+                    raw_expression=m_days.group(0),
+                    blocking_message=(ADMIN_BLOCKING_MSG if is_admin else AGENT_BLOCKING_MSG) if exceeds else None,
+                )
+
+        # 4. Relative expressions: "últimas/os N semanas" / "última semana" / "esta semana" / "la semana pasada"
+        m_weeks = re.search(
+            r"\b(?:[uú]ltimas?|anteriores?|pasadas?)\s+(\d+|[a-záéíóú]+)?\s*semanas?\b",
+            q,
+        )
+        if not m_weeks and re.search(r"\b(?:esta\s+semana|(?:la\s+)?semana\s+pasada)\b", q):
+            m_weeks = re.search(r"\b(?:esta\s+semana|(?:la\s+)?semana\s+pasada)\b", q)
+            n_weeks = 1
+        else:
+            num_word = m_weeks.group(1) if m_weeks else None
+            n_weeks = _parse_num(num_word) if num_word else 1
+            if n_weeks is None:
+                n_weeks = 1
+
+        if m_weeks:
+            n_days = n_weeks * 7
+            end_dt = ref_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+            start_dt = (ref_dt - timedelta(days=n_days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            exceeds = n_days > 15
+            return DetailedPeriodResult(
+                is_detailed_period_request=True,
+                exceeds_limit=exceeds,
+                start_date=start_dt,
+                end_date=end_dt,
+                period_days=n_days,
+                raw_expression=m_weeks.group(0),
+                blocking_message=(ADMIN_BLOCKING_MSG if is_admin else AGENT_BLOCKING_MSG) if exceeds else None,
+            )
+
+        # 5. Relative expressions: "último/s N meses" / "último mes" / "este mes" / "el mes pasado"
+        m_months = re.search(
+            r"\b(?:[uú]ltimos?|anteriores?|pasados?)\s+(\d+|[a-záéíóú]+)?\s*mes(?:es)?\b",
+            q,
+        )
+        if not m_months and re.search(r"\b(?:este\s+mes|(?:el\s+)?mes\s+pasado)\b", q):
+            m_months = re.search(r"\b(?:este\s+mes|(?:el\s+)?mes\s+pasado)\b", q)
+            n_months = 1
+        else:
+            num_word = m_months.group(1) if m_months else None
+            n_months = _parse_num(num_word) if num_word else 1
+            if n_months is None:
+                n_months = 1
+
+        if m_months:
+            n_days = n_months * 30
+            exceeds = n_days > 15
+            return DetailedPeriodResult(
+                is_detailed_period_request=True,
+                exceeds_limit=exceeds,
+                period_days=n_days,
+                raw_expression=m_months.group(0),
+                blocking_message=(ADMIN_BLOCKING_MSG if is_admin else AGENT_BLOCKING_MSG) if exceeds else None,
+            )
+
+        # 6. Multiple months: e.g. "junio y julio", "mayo a julio"
+        month_names_pattern = "|".join(SPANISH_MONTHS.keys())
+        m_multi_month = re.search(
+            rf"\b({month_names_pattern})\s+(?:y|e|a|hasta)\s+({month_names_pattern})\b",
+            q,
+        )
+        if m_multi_month:
+            return DetailedPeriodResult(
+                is_detailed_period_request=True,
+                exceeds_limit=True,
+                period_days=60,
+                raw_expression=m_multi_month.group(0),
+                blocking_message=ADMIN_BLOCKING_MSG if is_admin else AGENT_BLOCKING_MSG,
+            )
+
+        # 7. Full months: "todo junio", "en junio", "durante junio", "analízame junio", "analiza a este agente durante junio"
+        m_month_full = re.search(
+            rf"\b(?:todo\s+el\s+mes\s+de\s+|todo\s+|durante\s+|en\s+|el\s+mes\s+de\s+)?({month_names_pattern})\b",
+            q,
+        )
+        if m_month_full:
+            matched_month = m_month_full.group(1)
+            has_temporal_intent = (
+                f"todo {matched_month}" in q
+                or f"todo el mes de {matched_month}" in q
+                or f"durante {matched_month}" in q
+                or f"en {matched_month}" in q
+                or f"el mes de {matched_month}" in q
+                or any(w in q for w in ["analiza", "analízame", "analizame", "revisa", "revísame", "revisame", "llamadas de", "evaluaciones de"])
+            )
+            if has_temporal_intent:
+                m_num = SPANISH_MONTHS[matched_month]
+                year = ref_dt.year
+                _, last_day = calendar.monthrange(year, m_num)
+                return DetailedPeriodResult(
+                    is_detailed_period_request=True,
+                    exceeds_limit=True,
+                    period_days=last_day,
+                    raw_expression=matched_month,
+                    blocking_message=ADMIN_BLOCKING_MSG if is_admin else AGENT_BLOCKING_MSG,
+                )
+
+        # 8. Broad history analysis request: "todo mi histórico", "todas mis evaluaciones"
+        all_history_match = re.search(
+            r"\b(?:todo\s+(?:el\s+|mi\s+)?hist[oó]rico|todas\s+(?:las|mis)?\s*(?:evaluaciones|llamadas|simulaciones))\b",
+            q,
+        )
+        if all_history_match and any(w in q for w in ["análisis", "analisis", "analiza", "analízame", "analizame", "revisa", "revísame", "revisame", "detalle", "detallado", "detallada"]):
+            return DetailedPeriodResult(
+                is_detailed_period_request=True,
+                exceeds_limit=True,
+                period_days=999,
+                raw_expression=all_history_match.group(0),
+                blocking_message=ADMIN_BLOCKING_MSG if is_admin else AGENT_BLOCKING_MSG,
+            )
+
+        # 9. Ambiguous temporal expression without resolvable dates:
+        if any(p in q for p in ["ese periodo", "aquel periodo", "esas fechas", "aquellas fechas", "dicho periodo"]):
+            return DetailedPeriodResult(
+                is_detailed_period_request=True,
+                exceeds_limit=True,
+                clarification_needed=True,
+                raw_expression=q,
+                blocking_message=ADMIN_CLARIFICATION_MSG if is_admin else AGENT_CLARIFICATION_MSG,
+            )
+
+        # 10. General questions (no explicit temporal period):
+        # "¿cómo he evolucionado?", "¿en qué suelo fallar?", "¿cuáles son mis puntos fuertes?"
+        return DetailedPeriodResult(is_detailed_period_request=False)
+
+    @classmethod
+    async def build_detailed_period_summary(
+        cls,
+        db: AsyncSession,
+        context: TenantContext,
+        target_agent_id: str,
+        start_date: Optional[datetime],
+        end_date: Optional[datetime],
+        raw_expression: Optional[str] = None,
+    ) -> str:
+        """
+        Builds a compact, strictly aggregated synthesis of the agent's performance
+        for a specific requested temporal period (bounded to max 15 days).
+        Ensures prompt size does NOT grow linearly with the number of evaluations.
+        """
+        start_str = start_date.strftime("%d/%m/%Y") if start_date else "Inicio"
+        end_str = end_date.strftime("%d/%m/%Y") if end_date else "Fin"
+        date_from_iso = start_date.strftime("%Y-%m-%d") if start_date else None
+        date_to_iso = end_date.strftime("%Y-%m-%d") if end_date else None
+
+        period_evolution: Optional[dict[str, Any]] = None
+        try:
+            period_evolution = await get_agent_evolution(
+                db=db,
+                hubspot_owner_id=target_agent_id,
+                date_from=date_from_iso,
+                date_to=date_to_iso,
+                company_id=context.company_id,
+                context=context,
+            )
+        except Exception as e:
+            logger.warning("Error fetching period evolution for %s [%s to %s]: %s", target_agent_id, date_from_iso, date_to_iso, e)
+
+        summary = period_evolution.get("summary", {}) if period_evolution else {}
+        total_calls = int(summary.get("total_analyses", 0))
+        avg_score = summary.get("avg_evaluacion_global")
+        trend = period_evolution.get("trend", {}) if period_evolution else {}
+        strengths = period_evolution.get("strengths", []) if period_evolution else []
+        weaknesses = period_evolution.get("weaknesses", []) if period_evolution else []
+
+        simulations_in_period: list[TrainerSession] = []
+        try:
+            stmt_sim = select(TrainerSession).options(selectinload(TrainerSession.evaluation)).where(
+                TrainerSession.agent_id == target_agent_id,
+                TrainerSession.status == "completed",
+            )
+            if context.company_id is not None:
+                stmt_sim = stmt_sim.where(TrainerSession.company_id == context.company_id)
+            elif not context.is_super_admin and context.allowed_company_ids:
+                stmt_sim = stmt_sim.where(TrainerSession.company_id.in_(context.allowed_company_ids))
+            if start_date:
+                stmt_sim = stmt_sim.where(TrainerSession.created_at >= start_date)
+            if end_date:
+                stmt_sim = stmt_sim.where(TrainerSession.created_at <= end_date)
+            stmt_sim = stmt_sim.order_by(TrainerSession.created_at.desc())
+            res_sim = await db.execute(stmt_sim)
+            simulations_in_period = list(res_sim.scalars().all())
+        except Exception as e:
+            logger.warning("Error fetching period simulations for %s: %s", target_agent_id, e)
+
+        sample_calls: list[MassEvaluationResult] = []
+        if total_calls > 0:
+            try:
+                stmt_sample = select(MassEvaluationResult).where(
+                    MassEvaluationResult.hubspot_owner_id == target_agent_id,
+                    MassEvaluationResult.status == "completed",
+                )
+                if context.company_id is not None:
+                    stmt_sample = stmt_sample.where(MassEvaluationResult.company_id == context.company_id)
+                elif not context.is_super_admin and context.allowed_company_ids:
+                    stmt_sample = stmt_sample.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+                if start_date:
+                    stmt_sample = stmt_sample.where(MassEvaluationResult.call_timestamp >= start_date)
+                if end_date:
+                    stmt_sample = stmt_sample.where(MassEvaluationResult.call_timestamp <= end_date)
+                stmt_sample = stmt_sample.order_by(MassEvaluationResult.call_timestamp.desc()).limit(3)
+                res_samp = await db.execute(stmt_sample)
+                sample_calls = list(res_samp.scalars().all())
+            except Exception as e:
+                logger.warning("Error fetching sample calls for %s: %s", target_agent_id, e)
+
+        lines = [
+            f"--- ANÁLISIS DETALLADO DEL PERIODO SOLICITADO ({start_str} al {end_str}) ---",
+            f"- Tramo temporal analizado: del {start_str} al {end_str} (acotado a un máximo de 15 días).",
+        ]
+
+        if total_calls == 0 and not simulations_in_period:
+            lines.append(
+                "- No constan evaluaciones de llamadas reales ni simulaciones registradas para este agente dentro de este intervalo."
+            )
+        else:
+            if total_calls > 0:
+                lines.append(f"- Evaluaciones de llamadas en el periodo: {total_calls} llamadas evaluadas.")
+                score_str = f"{avg_score:.2f}/10" if avg_score is not None else "Sin nota"
+                lines.append(f"- Puntuación media en el periodo: {score_str}.")
+                direction = trend.get("evaluacion_global_direction", "stable")
+                delta_val = trend.get("evaluacion_global_delta_first_last", 0.0) or 0.0
+                sign = "+" if delta_val > 0 else ""
+                lines.append(f"- Tendencia dentro del tramo: {direction} ({sign}{delta_val:.1f} puntos).")
+
+                if strengths:
+                    lines.append("- Criterios con mejor desempeño en este tramo:")
+                    for st in strengths[:3]:
+                        c_name = st.get("criterion_name") or st.get("criterion_key", "")
+                        c_sc = st.get("score")
+                        sc_fmt = f"{c_sc:.1f}/10" if c_sc is not None else "N/A"
+                        lines.append(f"  * [Mejor resultado] {c_name}: nota media {sc_fmt}")
+
+                if weaknesses:
+                    lines.append("- Criterios con mayor margen de mejora en este tramo:")
+                    for wk in weaknesses[:3]:
+                        c_name = wk.get("criterion_name") or wk.get("criterion_key", "")
+                        c_sc = wk.get("score")
+                        sc_fmt = f"{c_sc:.1f}/10" if c_sc is not None else "N/A"
+                        lines.append(f"  * [Área a reforzar] {c_name}: nota media {sc_fmt}")
+
+                if sample_calls:
+                    lines.append("- Ejemplos destacados de llamadas del periodo (máximo 3):")
+                    for idx, c in enumerate(sample_calls, 1):
+                        c_date = c.call_timestamp.strftime("%d/%m/%Y") if c.call_timestamp else "Fecha N/A"
+                        c_sc = f"{c.evaluacion_global:.1f}/10" if c.evaluacion_global is not None else "N/A"
+                        c_sum = ""
+                        if isinstance(c.result_json, dict) and c.result_json.get("resumen"):
+                            c_sum = str(c.result_json.get("resumen")).strip()
+                        elif c.summary:
+                            c_sum = str(c.summary).strip()
+                        c_brief = f" — {c_sum[:100]}..." if len(c_sum) > 100 else (f" — {c_sum}" if c_sum else "")
+                        lines.append(f"  * Llamada #{idx} ({c_date}, nota {c_sc}){c_brief}")
+
+            if simulations_in_period:
+                sim_scores = [float(s.evaluation.score) for s in simulations_in_period if s.evaluation and s.evaluation.score is not None]
+                lines.append(f"- Simulaciones completadas en el periodo: {len(simulations_in_period)} simulaciones.")
+                if sim_scores:
+                    lines.append(f"- Media en simulaciones del periodo: {sum(sim_scores)/len(sim_scores):.1f}/10.")
+
+        lines.append("----------------------------------------------------------------------------")
+        return "\n".join(lines)
+
     @staticmethod
     def build_grounding_prompt(
         documents: List[TrainingKnowledgeDocument],
         target_agent_id: str,
         historical_profile: Optional[str] = None,
+        detailed_period_summary: Optional[str] = None,
         is_admin: bool = False,
     ) -> str:
         """
@@ -753,6 +1227,18 @@ class TrainerChatbotService:
             "   - NUNCA inventes notas o puntuaciones de simulaciones no evaluadas, y NUNCA uses simulaciones incompletas o interrumpidas para calcular medias, fortalezas o debilidades.",
             "",
         ])
+
+        if detailed_period_summary and detailed_period_summary.strip():
+            lines.append(detailed_period_summary.strip())
+            lines.append("")
+            lines.extend([
+                "INSTRUCCIÓN PARA CONSULTAS POR PERIODO TEMPORAL ESPECÍFICO:",
+                "- El usuario ha solicitado un análisis enfocado en un periodo temporal concreto (acotado a un máximo de 15 días).",
+                "- Utiliza como referencia principal los datos de la sección 'ANÁLISIS DETALLADO DEL PERIODO SOLICITADO' para responder sobre lo ocurrido en esas fechas.",
+                "- Si en ese periodo no constan evaluaciones o no hay datos suficientes, indícaselo con naturalidad y honestidad pedagógica.",
+                "- Puedes contrastar con el 'PERFIL HISTÓRICO' para dar contexto o perspectiva global si aporta valor formativo, pero prioriza el tramo temporal solicitado.",
+                "",
+            ])
 
         if historical_profile and historical_profile.strip():
             lines.append(historical_profile.strip())
@@ -942,21 +1428,6 @@ class TrainerChatbotService:
             context=context,
         )
 
-        # 3. Fetch knowledge documents
-        documents = await cls.fetch_knowledge_documents(
-            db=db,
-            context=context,
-            target_agent_id=target_agent_id,
-            cycle_id=cycle_id,
-        )
-
-        # 4. Build complete historical profile for target agent
-        historical_profile = await cls.build_agent_historical_profile(
-            db=db,
-            context=context,
-            target_agent_id=target_agent_id,
-        )
-
         # Determine whether current_user is acting in an administrative role
         norm_role = normalize_role(current_user.role)
         is_admin = norm_role in (
@@ -966,11 +1437,56 @@ class TrainerChatbotService:
             InternalRole.TEAM_COORDINATOR,
         )
 
-        # 5. Build prompt and prepare message list
+        # 3. Detect temporal period request and enforce 15-day limit
+        period_result = cls.detect_detailed_period_request(
+            query_text=query_text,
+            is_admin=is_admin,
+        )
+
+        # If user requests a detailed analysis over a period > 15 days, block mass evaluation:
+        if period_result.is_detailed_period_request and period_result.exceeds_limit:
+            return {
+                "response": period_result.blocking_message,
+                "user_query": query_text,
+                "input_type": input_type,
+                "sources": [],
+                "agent_id": target_agent_id,
+                "company_id": context.company_id,
+            }
+
+        # 4. Fetch knowledge documents
+        documents = await cls.fetch_knowledge_documents(
+            db=db,
+            context=context,
+            target_agent_id=target_agent_id,
+            cycle_id=cycle_id,
+        )
+
+        # 5. Build complete historical profile for target agent
+        historical_profile = await cls.build_agent_historical_profile(
+            db=db,
+            context=context,
+            target_agent_id=target_agent_id,
+        )
+
+        # 6. If within allowed 15-day period, build aggregated period summary
+        detailed_period_summary = None
+        if period_result.is_detailed_period_request and not period_result.exceeds_limit:
+            detailed_period_summary = await cls.build_detailed_period_summary(
+                db=db,
+                context=context,
+                target_agent_id=target_agent_id,
+                start_date=period_result.start_date,
+                end_date=period_result.end_date,
+                raw_expression=period_result.raw_expression,
+            )
+
+        # 7. Build prompt and prepare message list
         system_instruction = cls.build_grounding_prompt(
             documents=documents,
             target_agent_id=target_agent_id,
             historical_profile=historical_profile,
+            detailed_period_summary=detailed_period_summary,
             is_admin=is_admin,
         )
 
