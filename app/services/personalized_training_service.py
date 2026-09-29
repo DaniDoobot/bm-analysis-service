@@ -5,7 +5,7 @@ import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Set
 from sqlalchemy import select, and_, or_, desc, func, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_engine
@@ -137,6 +137,9 @@ class PersonalizedTrainingService:
         if all_hs_ids:
             from sqlalchemy.orm import joinedload
             from app.models.teams import Team
+            from app.models.services import Service
+            from app.services.users_service import get_user_services_info, get_user_teams_info
+
             stmt_u = (
                 select(User)
                 .options(
@@ -147,15 +150,114 @@ class PersonalizedTrainingService:
                 .where(User.hubspot_owner_id.in_(all_hs_ids))
             )
             res_u = await db.execute(stmt_u)
-            users_map = {u.hubspot_owner_id: u for u in res_u.scalars().all()}
+            users_list = list(res_u.scalars().all())
+            users_map = {u.hubspot_owner_id: u for u in users_list}
+            user_ids = [u.user_id for u in users_list if u.user_id is not None]
+
+            # Batch fetch standard user services and teams info
+            allowed_service_ids_map, allowed_services_map, primary_service_map = await get_user_services_info(
+                db, user_ids, users=users_list
+            )
+            allowed_team_ids_map, allowed_teams_map, primary_team_map = await get_user_teams_info(
+                db, user_ids, users=users_list
+            )
+
+            # Build in-memory service name lookup from loaded entities
+            known_services: Dict[int, str] = {}
+            for u in users_list:
+                if u.primary_service and u.primary_service.service_name:
+                    known_services[u.primary_service.service_id] = u.primary_service.service_name
+                if u.primary_team and u.primary_team.service and u.primary_team.service.service_name:
+                    known_services[u.primary_team.service.service_id] = u.primary_team.service.service_name
+            for svc_list in allowed_services_map.values():
+                for item in svc_list:
+                    if item.get("service_id") is not None and item.get("service_name"):
+                        known_services[item["service_id"]] = item["service_name"]
+
+            # Query any remaining missing service names in batch
+            team_svc_ids_needed = set()
+            for t_list in allowed_teams_map.values():
+                for t in t_list:
+                    s_id = t.get("service_id")
+                    if s_id is not None and s_id not in known_services:
+                        team_svc_ids_needed.add(s_id)
+            if team_svc_ids_needed:
+                svc_stmt = select(Service).where(Service.service_id.in_(team_svc_ids_needed))
+                svc_res = await db.execute(svc_stmt)
+                for svc_row in svc_res.scalars().all():
+                    known_services[svc_row.service_id] = svc_row.service_name
+
             for s in settings_list:
                 u = users_map.get(s.hubspot_owner_id)
                 if u:
-                    svc = u.primary_service or (u.primary_team.service if u.primary_team else None)
-                    s.service_id = svc.service_id if svc else u.primary_service_id
-                    s.service_name = svc.service_name if svc else None
-                    s.team_id = u.primary_team_id
-                    s.team_name = u.primary_team.team_name if u.primary_team else None
+                    uid = u.user_id
+
+                    # ─────────────────────────────────────────────────────────────
+                    # 5.1. TEAM RESOLUTION
+                    # A. Si User.primary_team válido existe: usarlo
+                    p_team_id, p_team_name = primary_team_map.get(uid, (None, None))
+                    if p_team_id is None and u.primary_team_id is not None:
+                        p_team_id = u.primary_team_id
+                        p_team_name = u.primary_team.team_name if u.primary_team else None
+
+                    resolved_team_id: Optional[int] = None
+                    resolved_team_name: Optional[str] = None
+                    resolved_team_service_id: Optional[int] = None
+
+                    if p_team_id is not None:
+                        resolved_team_id = p_team_id
+                        resolved_team_name = p_team_name
+                        if u.primary_team and u.primary_team.service_id is not None:
+                            resolved_team_service_id = u.primary_team.service_id
+                    else:
+                        # B. Si no: consultar asociaciones N:M reales
+                        user_teams = allowed_teams_map.get(uid, [])
+                        if len(user_teams) == 1:
+                            # C. Si existe EXACTAMENTE un equipo: devolverlo
+                            resolved_team_id = user_teams[0]["team_id"]
+                            resolved_team_name = user_teams[0]["team_name"]
+                            resolved_team_service_id = user_teams[0].get("service_id")
+                        else:
+                            # D. Múltiples o ninguno: no elegir arbitrariamente
+                            resolved_team_id = None
+                            resolved_team_name = None
+                            resolved_team_service_id = None
+
+                    # ─────────────────────────────────────────────────────────────
+                    # 5.2. SERVICE RESOLUTION
+                    # A. Si User.primary_service válido existe: usarlo
+                    p_svc_id, p_svc_name = primary_service_map.get(uid, (None, None))
+                    if p_svc_id is None and u.primary_service_id is not None:
+                        p_svc_id = u.primary_service_id
+                        p_svc_name = u.primary_service.service_name if u.primary_service else None
+
+                    resolved_service_id: Optional[int] = None
+                    resolved_service_name: Optional[str] = None
+
+                    if p_svc_id is not None:
+                        resolved_service_id = p_svc_id
+                        resolved_service_name = p_svc_name
+                    else:
+                        # B. Si no: consultar asociaciones N:M reales
+                        user_services = allowed_services_map.get(uid, [])
+                        if len(user_services) == 1:
+                            # C. Si existe EXACTAMENTE un servicio asignado: devolverlo
+                            resolved_service_id = user_services[0]["service_id"]
+                            resolved_service_name = user_services[0]["service_name"]
+                        elif len(user_services) == 0:
+                            # D. Si no hay servicio directo pero existe EXACTAMENTE un equipo resoluble con servicio
+                            if resolved_team_service_id is not None:
+                                resolved_service_id = resolved_team_service_id
+                                resolved_service_name = known_services.get(resolved_team_service_id)
+                        else:
+                            # E. Múltiples servicios válidos y NO existe primary_service: no elegir arbitrariamente
+                            resolved_service_id = None
+                            resolved_service_name = None
+
+                    s.service_id = resolved_service_id
+                    s.service_name = resolved_service_name
+                    s.team_id = resolved_team_id
+                    s.team_name = resolved_team_name
                     s.company_name = (u.company.company_name if u.company else None) or (s.company.company_name if s.company else None)
                     s.name = u.name or s.agent_name
                     s.agent_code = u.username
@@ -169,6 +271,10 @@ class PersonalizedTrainingService:
                     s.company_name = s.company.company_name if s.company else None
                     s.name = s.agent_name
                     s.agent_code = None
+
+        # 6. Final strict guard against cross-company leakage
+        if company_ids is not None:
+            settings_list = [s for s in settings_list if s.company_id in company_ids]
 
         return settings_list
 

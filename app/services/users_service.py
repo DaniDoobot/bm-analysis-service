@@ -193,7 +193,12 @@ async def get_user_services_info(
             if row.company_id not in fallback_service_map:
                 fallback_service_map[row.company_id] = (row.service_id, row.service_name)
 
-    all_service_ids = primary_service_ids | {sa.service_id for sa in assocs} | {fb[0] for fb in fallback_service_map.values()}
+    all_service_ids = (
+        primary_service_ids
+        | {sa.service_id for sa in assocs}
+        | {s_id for s_set in user_assoc_ids.values() for s_id in s_set}
+        | {fb[0] for fb in fallback_service_map.values()}
+    )
 
     service_name_map = {}
     if all_service_ids:

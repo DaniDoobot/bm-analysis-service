@@ -229,13 +229,12 @@ async def _resolve_training_agent_scope(
         target_filter_set = await get_team_assigned_owner_ids(db, team_id=team_id, context=context, company_id=company_id)
     elif service_id is not None:
         target_filter_set = await get_service_assigned_owner_ids(db, service_id=service_id, context=context, company_id=company_id)
-    elif company_id is not None:
+    elif company_id is not None and base_role_set is not None:
         stmt_c = (
             select(User.hubspot_owner_id)
             .where(
                 User.company_id == company_id,
                 User.is_active == True,
-                func.lower(User.role).in_(["agent", "agente"]),
                 User.hubspot_owner_id != None,
                 User.hubspot_owner_id != "",
             )
