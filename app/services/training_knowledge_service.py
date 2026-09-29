@@ -449,10 +449,32 @@ class TrainingKnowledgeService:
             logger.warning("generate_simulation_knowledge_document: Prompt %d not found for eval %d.", evaluation.conversation_id, evaluation_id)
             return None
 
+        # Resolve company_id deterministically:
+        # report.company_id -> session.company_id -> User.company_id
+        effective_company_id = report.company_id
+        if effective_company_id is None and evaluation.session_id:
+            from app.models.trainer import TrainerSession
+            stmt_ts = select(TrainerSession.company_id).where(TrainerSession.session_id == evaluation.session_id)
+            res_ts = await db.execute(stmt_ts)
+            ts_cid = res_ts.scalar()
+            if ts_cid is not None:
+                effective_company_id = ts_cid
+
+        if effective_company_id is None:
+            stmt_u = select(User.company_id).where(User.hubspot_owner_id == report.hubspot_owner_id)
+            res_u = await db.execute(stmt_u)
+            user_company_ids = [cid for cid in res_u.scalars().all() if cid is not None]
+            unique_cids = list(set(user_company_ids))
+            if len(unique_cids) == 1:
+                effective_company_id = unique_cids[0]
+
+        if report.company_id is None and effective_company_id is not None:
+            report.company_id = effective_company_id
+
         # Fetch Company name
-        company_name = f"Empresa ID {report.company_id}"
-        if report.company_id:
-            stmt_comp = select(Company.company_name).where(Company.company_id == report.company_id)
+        company_name = f"Empresa ID {effective_company_id}"
+        if effective_company_id:
+            stmt_comp = select(Company.company_name).where(Company.company_id == effective_company_id)
             res_comp = await db.execute(stmt_comp)
             c_name = res_comp.scalar()
             if c_name:
@@ -483,7 +505,7 @@ class TrainingKnowledgeService:
         )
 
         metadata_json = {
-            "company_id": report.company_id,
+            "company_id": effective_company_id,
             "company_name": company_name,
             "hubspot_owner_id": report.hubspot_owner_id,
             "agent_name": report.agent_name,
@@ -515,7 +537,7 @@ class TrainingKnowledgeService:
         existing_doc = res_existing.scalars().first()
 
         if existing_doc:
-            existing_doc.company_id = report.company_id
+            existing_doc.company_id = effective_company_id
             existing_doc.hubspot_owner_id = report.hubspot_owner_id
             existing_doc.service_id = report.service_id
             existing_doc.team_id = team_id
@@ -528,7 +550,7 @@ class TrainingKnowledgeService:
             logger.info("Updated existing simulation knowledge document ID %d for eval %d.", doc.id, evaluation_id)
         else:
             doc = TrainingKnowledgeDocument(
-                company_id=report.company_id,
+                company_id=effective_company_id,
                 hubspot_owner_id=report.hubspot_owner_id,
                 service_id=report.service_id,
                 team_id=team_id,
@@ -648,10 +670,32 @@ class TrainingKnowledgeService:
         if not report:
             return generated_docs
 
+        # Resolve company_id deterministically
+        effective_company_id = report.company_id
+        if effective_company_id is None:
+            stmt_u = select(User.company_id).where(User.hubspot_owner_id == report.hubspot_owner_id)
+            res_u = await db.execute(stmt_u)
+            user_company_ids = [cid for cid in res_u.scalars().all() if cid is not None]
+            unique_cids = list(set(user_company_ids))
+            if len(unique_cids) == 1:
+                effective_company_id = unique_cids[0]
+                report.company_id = effective_company_id
+                logger.info(
+                    "Self-repaired report.company_id to %d for cycle %d from User.",
+                    effective_company_id, cycle_id
+                )
+
+        if effective_company_id is None:
+            logger.warning(
+                "Cannot resolve deterministic company_id for cycle %d (agent %s). Aborting cycle knowledge document generation to prevent orphan RAG documents.",
+                cycle_id, report.hubspot_owner_id
+            )
+            return generated_docs
+
         # Resolve Company, Service, Team, Cycle Number
-        company_name = f"Empresa ID {report.company_id}"
-        if report.company_id:
-            stmt_comp_name = select(Company.company_name).where(Company.company_id == report.company_id)
+        company_name = f"Empresa ID {effective_company_id}"
+        if effective_company_id:
+            stmt_comp_name = select(Company.company_name).where(Company.company_id == effective_company_id)
             res_comp_name = await db.execute(stmt_comp_name)
             c_name = res_comp_name.scalar()
             if c_name:
@@ -679,7 +723,7 @@ class TrainingKnowledgeService:
         )
 
         cycle_metadata_json = {
-            "company_id": report.company_id,
+            "company_id": effective_company_id,
             "company_name": company_name,
             "hubspot_owner_id": report.hubspot_owner_id,
             "agent_name": report.agent_name,
@@ -712,7 +756,7 @@ class TrainingKnowledgeService:
         existing_cycle_doc = res_existing_cycle.scalars().first()
 
         if existing_cycle_doc:
-            existing_cycle_doc.company_id = report.company_id
+            existing_cycle_doc.company_id = effective_company_id
             existing_cycle_doc.hubspot_owner_id = report.hubspot_owner_id
             existing_cycle_doc.service_id = report.service_id
             existing_cycle_doc.team_id = team_id
@@ -724,7 +768,7 @@ class TrainingKnowledgeService:
             logger.info("Updated existing cycle knowledge document ID %d for cycle %d.", cycle_doc.id, cycle_id)
         else:
             cycle_doc = TrainingKnowledgeDocument(
-                company_id=report.company_id,
+                company_id=effective_company_id,
                 hubspot_owner_id=report.hubspot_owner_id,
                 service_id=report.service_id,
                 team_id=team_id,

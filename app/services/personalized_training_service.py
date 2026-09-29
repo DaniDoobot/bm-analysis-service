@@ -3026,6 +3026,7 @@ class PersonalizedTrainingService:
         Idempotent by period/agent.
         """
         logger.info("[training] start generate agent")
+        resolved_cid: Optional[int] = None
         
         # Fetch agent settings
         stmt_set = select(TrainingAgentSetting).where(TrainingAgentSetting.hubspot_owner_id == hubspot_owner_id)
@@ -3651,6 +3652,7 @@ class PersonalizedTrainingService:
             try:
                 failed_report = TrainingAgentReport(
                     training_run_id=run_id,
+                    company_id=resolved_cid,
                     hubspot_owner_id=hubspot_owner_id,
                     agent_name=agent_name,
                     agent_initials=agent_initials,
@@ -3876,6 +3878,8 @@ class PersonalizedTrainingService:
             stmt_u = select(User.company_id).where(User.hubspot_owner_id == report.hubspot_owner_id)
             res_u = await db.execute(stmt_u)
             resolved_cid = res_u.scalar()
+            if resolved_cid is not None:
+                report.company_id = resolved_cid
 
         is_demo = False
         company_name = None
