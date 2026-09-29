@@ -193,3 +193,11 @@ class TrainerEvaluation(Base):
 
     session = relationship("TrainerSession", back_populates="evaluation")
     evaluation_config = relationship("TrainerEvaluationConfig")
+
+
+from app.models.trainer_tasks import (
+    TrainerTask,
+    TrainerTaskItem,
+    TrainerTaskAssignee,
+    TrainerTaskAttemptAllocation,
+)

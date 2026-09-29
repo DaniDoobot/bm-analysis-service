@@ -1572,6 +1572,13 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido (sin markdown ```json ni texto ad
             sess.updated_at = datetime.now(timezone.utc)
             await db.commit()
 
+            # Hook Trainer Task attempt allocation
+            try:
+                from app.services.trainer_task_service import TrainerTaskService
+                await TrainerTaskService.allocate_completed_attempt(db, session_id=session_id)
+            except Exception as e_alloc:
+                logger.exception("Failed to allocate task attempt for trainer session %d: %s", session_id, e_alloc)
+
         except Exception as e:
             logger.exception("Evaluation execution failed for session %d: %s", session_id, e)
             sess.evaluation_status = "evaluation_error"
