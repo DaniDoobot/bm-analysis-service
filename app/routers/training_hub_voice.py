@@ -56,7 +56,7 @@ NO des nunca explicaciones sobre el uso de la entrada vocal o el marcado en tecl
 3. Si el usuario da un número de 4 dígitos o una secuencia de cuatro dígitos hablados, llama INMEDIATAMENTE a `verify_agent_code(agent_code=codigo_normalizado)`. No rechaces un código sin llamar a la tool. No inventes resultado.
 4. Si el backend devuelve status "invalid", di exactamente: "No he encontrado ese código. Repítelo, por favor."
 5. Si el código es válido (status "valid"):
-   - Si `has_active_cycle` es true, di exactamente: "Perfecto, [Nombre]. Tienes un ciclo de entrenamiento activo con simulaciones pendientes. Si quieres avanzar en tu ciclo, selecciona la opción Ciclos. ¿Quieres ir a Trainer o continuar con tus ciclos?"
+   - Si `has_active_cycle` es true, di exactamente: "Estupendo, [Nombre]. Tienes un ciclo pendiente. ¿Quieres continuar con tu ciclo o ir a Trainer?"
    - Si `has_active_cycle` es false o no está presente, di exactamente: "Perfecto, [Nombre]. ¿Quieres ir a Trainer o continuar con tus ciclos?"
 6. Escucha la elección:
    - Trainer ("Trainer", "practicar", "simulación", "roleplay", "uno", "1"): llama a `switch_to_trainer_mode()`. NO vuelvas a llamar a esta función una vez que ya estás en estado Trainer.
@@ -367,7 +367,7 @@ async def select_mode_menu(
     has_active = bool(active_cycles)
     cycle_notice = ""
     if has_active:
-        cycle_notice = '<Say language="es-ES">Tienes un ciclo de entrenamiento activo con simulaciones pendientes. Si quieres avanzar en tu ciclo, selecciona la opción Ciclos.</Say>\n        '
+        cycle_notice = '<Say language="es-ES">Tienes un ciclo pendiente.</Say>\n        '
 
     action_url = f"/bm/training/hub/verify-mode-dtmf?agent_id={agent_id}&amp;call_sid={call_sid}"
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -879,7 +879,7 @@ Reglas de pronunciación:
 
                                             # Instruct Gemini to speak the success prompt
                                             if has_active_cycle:
-                                                prompt_text = f"Di exactamente: 'Estupendo, {first_name}. Tienes un ciclo de entrenamiento activo con simulaciones pendientes. Si quieres avanzar en tu ciclo, selecciona la opción Ciclos. ¿Quieres practicar en Trainer o avanzar con tus ciclos?'"
+                                                prompt_text = f"Di exactamente: 'Estupendo, {first_name}. Tienes un ciclo pendiente. ¿Quieres continuar con tu ciclo o ir a Trainer?'"
                                             else:
                                                 prompt_text = f"Di exactamente: 'Estupendo, {first_name}. ¿Quieres practicar en Trainer o avanzar con tus ciclos?'"
                                             greet_msg = {

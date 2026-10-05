@@ -1552,7 +1552,7 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
         from app.routers.training_hub_voice import HUB_SYSTEM_INSTRUCTION
         self.assertIn("has_active_cycle", HUB_SYSTEM_INSTRUCTION)
         self.assertIn(
-            "Tienes un ciclo de entrenamiento activo con simulaciones pendientes. Si quieres avanzar en tu ciclo, selecciona la opción Ciclos.",
+            "Tienes un ciclo pendiente. ¿Quieres continuar con tu ciclo o ir a Trainer?",
             HUB_SYSTEM_INSTRUCTION
         )
 
@@ -1568,7 +1568,7 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
             req = self.mock_request()
             resp = await select_mode_menu(req, agent_id="7777", call_sid="call_c1", db=db)
             body = resp.body.decode("utf-8")
-            self.assertNotIn("Tienes un ciclo de entrenamiento activo", body)
+            self.assertNotIn("Tienes un ciclo pendiente", body)
             self.assertIn("Pulsa 1 para Trainer o pulsa 2 para continuar con tus ciclos asignados.", body)
 
     async def test_condition_2_agent_with_pending_approval_cycle(self):
@@ -1584,7 +1584,7 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
             req = self.mock_request()
             resp = await select_mode_menu(req, agent_id="7777", call_sid="call_c2", db=db)
             body = resp.body.decode("utf-8")
-            self.assertNotIn("Tienes un ciclo de entrenamiento activo", body)
+            self.assertNotIn("Tienes un ciclo pendiente", body)
             self.assertIn("Pulsa 1 para Trainer o pulsa 2 para continuar", body)
 
     async def test_condition_3_agent_with_active_cycle_pending_simulations(self):
@@ -1601,7 +1601,7 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
             resp = await select_mode_menu(req, agent_id="7777", call_sid="call_c3", db=db)
             body = resp.body.decode("utf-8")
             self.assertIn(
-                "<Say language=\"es-ES\">Tienes un ciclo de entrenamiento activo con simulaciones pendientes. Si quieres avanzar en tu ciclo, selecciona la opción Ciclos.</Say>",
+                "<Say language=\"es-ES\">Tienes un ciclo pendiente.</Say>",
                 body
             )
             self.assertIn("Pulsa 1 para Trainer o pulsa 2 para continuar", body)
@@ -1619,7 +1619,7 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
             req = self.mock_request()
             resp = await select_mode_menu(req, agent_id="7777", call_sid="call_c4", db=db)
             body = resp.body.decode("utf-8")
-            self.assertNotIn("Tienes un ciclo de entrenamiento activo", body)
+            self.assertNotIn("Tienes un ciclo pendiente", body)
             self.assertIn("Pulsa 1 para Trainer o pulsa 2 para continuar", body)
 
     async def test_condition_5_active_cycle_can_select_trainer(self):
