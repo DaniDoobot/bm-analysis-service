@@ -51,6 +51,75 @@ SPANISH_WORDS_NUM = {
     "veintiuno": 21, "veinticinco": 25, "treinta": 30,
 }
 
+CONCEPTS_CATALOG = [
+    {
+        "concept": "empatia",
+        "terms": [
+            "empatia", "empatía", "empatico", "empático", "empática", "empatica",
+            "conexion emocional", "conexión emocional"
+        ],
+        "default_key": "empatia",
+        "label": "Empatía",
+    },
+    {
+        "concept": "claridad",
+        "terms": [
+            "claridad", "claro", "clara", "claramente", "explicacion clara", "explicación clara"
+        ],
+        "default_key": "claridad",
+        "label": "Claridad",
+    },
+    {
+        "concept": "precio",
+        "terms": [
+            "precio", "precios", "explicacion economica", "explicación económica",
+            "explicacion del precio", "explicación del precio", "económica", "economica",
+            "presupuesto", "tarifa", "coste", "costo", "dinero"
+        ],
+        "default_key": "claridad_explicacion_economica",
+        "label": "Explicación precio consulta",
+    },
+    {
+        "concept": "objeciones",
+        "terms": [
+            "objecion", "objeción", "objeciones", "gestion de objeciones", "gestión de objeciones",
+            "rebates", "rebate"
+        ],
+        "default_key": "gestion_objeciones",
+        "label": "Gestión de objeciones",
+    },
+    {
+        "concept": "cierre",
+        "terms": ["cierre de cita", "cierre", "agendar cita", "conseguir cita"],
+        "default_key": "cierre_cita",
+        "label": "Cierre de Cita",
+    },
+    {
+        "concept": "saludo",
+        "terms": ["saludo", "saludo de inicio", "saludo inicial"],
+        "default_key": "saludo_inicio",
+        "label": "Saludo de Inicio",
+    },
+    {
+        "concept": "procedimiento",
+        "terms": ["procedimiento", "protocolo"],
+        "default_key": "procedimiento",
+        "label": "Procedimiento",
+    },
+]
+
+CRITERIA_POSITIVE_WORDS = [
+    "bueno", "buena", "buenos", "buenas", "bien", "alto", "alta", "altos", "altas",
+    "positivo", "positiva", "correcta", "correcto", "destacada", "destacado",
+    "favorable", "alta nota", "buen", "sí", "si"
+]
+
+CRITERIA_NEGATIVE_WORDS = [
+    "malo", "mala", "malos", "malas", "mal", "bajo", "baja", "bajos", "bajas",
+    "negativo", "negativa", "incorrecta", "incorrecto", "baja nota", "pésimo", "pesimo",
+    "deficiente", "no"
+]
+
 AGENT_BLOCKING_MSG = (
     "Puedo analizar tus evaluaciones con detalle en periodos de hasta 15 días para poder profundizar bien en cada aspecto. "
     "Si quieres, indícame una quincena o un rango de fechas concreto (por ejemplo, del 1 al 15 del mes) y lo revisamos a fondo."
@@ -708,6 +777,362 @@ class TrainerChatbotService:
         return "\n".join(sections)
 
     @classmethod
+    def detect_call_ids(cls, query_text: str) -> List[str]:
+        """
+        Deterministically detects explicit call/conversation identifiers from user queries.
+        Requires contextual keywords (llamada, conversación, conversacion, id de llamada, código, etc.).
+        Avoids matching phones, dates, scores, percentages or numbers without context.
+        """
+        if not query_text or not str(query_text).strip():
+            return []
+        q = query_text.strip()
+        stop_words = {
+            "de", "del", "en", "con", "sin", "por", "para", "sobre", "entre", "hacia", "hasta", "desde",
+            "corta", "cortas", "larga", "largas", "buena", "buenas", "mala", "malas", "regular", "regulares",
+            "ayer", "hoy", "manana", "mañana", "reciente", "recientes", "pasada", "pasadas", "anterior", "anteriores",
+            "que", "los", "las", "el", "la", "un", "una", "unos", "unas", "uno",
+            "mis", "tus", "sus", "nuestras", "nuestros", "otra", "otro", "otras", "otros",
+            "donde", "cuando", "como", "cual", "cuales", "cuya", "cuyo", "cuyas", "cuyos",
+            "si", "no", "mas", "más", "pero", "sino", "aunque", "porque",
+            "ejemplo", "ejemplos", "muestra", "muestras", "detalle", "detalles",
+        }
+
+        # 1. Comparison / multi-call pattern:
+        # e.g., 'llamada 123456 con la 789012', 'conversación 123456 y la 789012', 'llamada 123456 o 789012'
+        two_call_pat = re.compile(
+            r"\b(?:(?:id|c[oó]digo)\s+(?:de\s+)?(?:la\s+)?(?:llamada|conversaci[oó]n)|(?:la\s+)?(?:llamada|conversaci[oó]n)(?:\s+(?:con\s+)?(?:id|c[oó]digo|n[uú]mero|num|#))?)\s*[:#]?\s*([a-zA-Z0-9_-]+)"
+            r"\s+(?:y|e|con|o|a|vs\.?|frente\s+a)\s+"
+            r"(?:(?:la\s+)?(?:llamada|conversaci[oó]n)\s*(?:con\s+)?(?:id|c[oó]digo|n[uú]mero|num|#)?\s*[:#]?|(?:la\s+|el\s+))?"
+            r"([a-zA-Z0-9_-]+)\b",
+            re.IGNORECASE,
+        )
+        m = two_call_pat.search(q)
+        if m:
+            id1, id2 = m.group(1).strip(), m.group(2).strip()
+            if id1.lower() not in stop_words and id2.lower() not in stop_words and len(id1) >= 2 and len(id2) >= 2:
+                return [id1, id2]
+
+        # 2. General single call pattern:
+        call_pat = re.compile(
+            r"\b(?:(?:id|c[oó]digo)\s+(?:de\s+)?(?:la\s+)?(?:llamada|conversaci[oó]n)|(?:la\s+)?(?:llamada|conversaci[oó]n)(?:\s+(?:con\s+)?(?:id|c[oó]digo|n[uú]mero|num|#))?)\s*[:#]?\s*([a-zA-Z0-9_-]+)\b",
+            re.IGNORECASE,
+        )
+        found: List[str] = []
+        for match in call_pat.finditer(q):
+            val = match.group(1).strip()
+            if val.lower() not in stop_words and len(val) >= 2:
+                if val not in found:
+                    found.append(val)
+
+        return found
+
+    @classmethod
+    async def fetch_scoped_call(
+        cls,
+        db: AsyncSession,
+        context: TenantContext,
+        target_agent_id: str,
+        call_id: str,
+    ) -> Optional[MassEvaluationResult]:
+        """
+        Retrieves a single MassEvaluationResult by call_id strictly scoped to:
+        - hubspot_owner_id == target_agent_id (for the authorized agent)
+        - company_id == context.company_id (or in allowed_company_ids)
+        Returns None if not found or unauthorized, preventing data leaks across tenants or agents.
+        """
+        clean_id = str(call_id).strip()
+        if not clean_id:
+            return None
+
+        stmt = select(MassEvaluationResult).where(
+            MassEvaluationResult.call_id == clean_id,
+            MassEvaluationResult.hubspot_owner_id == target_agent_id,
+        )
+
+        if context.company_id is not None:
+            stmt = stmt.where(MassEvaluationResult.company_id == context.company_id)
+        elif not context.is_super_admin and context.allowed_company_ids:
+            stmt = stmt.where(MassEvaluationResult.company_id.in_(context.allowed_company_ids))
+
+        res = await db.execute(stmt)
+        return res.scalars().first()
+
+    @classmethod
+    def format_call_detail(
+        cls,
+        call: MassEvaluationResult,
+        header_title: Optional[str] = None,
+    ) -> str:
+        """
+        Formats a single call evaluation into clean pedagogical markdown for grounding.
+        Includes only helpful pedagogical data (scores, criteria justifications, summary).
+        Strictly excludes technical internal IDs, table names, URLs and database tokens.
+        """
+        title = header_title or f"CONVERSACIÓN: {call.call_id}"
+        lines = [f"--- {title} ---"]
+
+        date_str = call.call_timestamp.strftime("%d/%m/%Y %H:%M") if call.call_timestamp else "Fecha N/A"
+        lines.append(f"- Fecha y hora: {date_str}")
+
+        if call.call_duration_seconds is not None:
+            mins = call.call_duration_seconds // 60
+            secs = call.call_duration_seconds % 60
+            lines.append(f"- Duración: {call.call_duration_seconds} segundos ({mins}m {secs:02d}s)")
+
+        dir_str = "Entrante" if call.direction == "inbound" else ("Saliente" if call.direction == "outbound" else (call.direction or "N/A"))
+        lines.append(f"- Dirección: {dir_str}")
+
+        tipo_str = call.typology_name or call.typology_key or (call.result_json.get("tipo_llamada") if isinstance(call.result_json, dict) else None)
+        if tipo_str:
+            lines.append(f"- Tipología detectada: {tipo_str}")
+
+        score_str = f"{call.evaluacion_global:.1f}/10" if call.evaluacion_global is not None else "Sin nota"
+        lines.append(f"- Evaluación Global: {score_str}")
+
+        # Summary
+        summary = ""
+        if isinstance(call.result_json, dict) and call.result_json.get("resumen"):
+            summary = str(call.result_json.get("resumen")).strip()
+        if summary:
+            lines.append(f"- Resumen de la interacción:\n  {summary}")
+
+        # Criteria breakdown
+        items = call.items_json
+        if isinstance(items, dict):
+            items = items.get("items") or []
+        if isinstance(items, list) and items:
+            lines.append("- Desglose de criterios evaluados:")
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                c_name = it.get("name") or it.get("label") or it.get("criterion_name") or it.get("criterion_key") or it.get("output_key") or "Criterio"
+                val = it.get("value")
+                disp_val = it.get("display_value")
+                if disp_val is None:
+                    if isinstance(val, bool):
+                        disp_val = "Sí" if val else "No"
+                    elif isinstance(val, (int, float)):
+                        disp_val = f"{val}/10"
+                    else:
+                        disp_val = str(val) if val is not None else "N/A"
+                just = it.get("feedback") or it.get("justification") or it.get("justificacion") or it.get("motivo") or ""
+                j_str = f" — {just.strip()}" if just and str(just).strip() else ""
+                lines.append(f"  * {c_name}: {disp_val}{j_str}")
+        elif isinstance(call.result_json, dict) and isinstance(call.result_json.get("criterios"), dict):
+            lines.append("- Desglose de criterios evaluados:")
+            for c_k, c_v in call.result_json.get("criterios", {}).items():
+                if isinstance(c_v, dict):
+                    s_val = c_v.get("nota") or c_v.get("score") or c_v.get("valor") or "N/A"
+                    s_mot = c_v.get("justificacion") or c_v.get("motivo") or c_v.get("feedback") or ""
+                    j_str = f" — {s_mot.strip()}" if s_mot and str(s_mot).strip() else ""
+                    lines.append(f"  * {c_k}: {s_val}{j_str}")
+
+        # Objections
+        if isinstance(call.result_json, dict) and call.result_json.get("objeciones"):
+            objs = call.result_json.get("objeciones")
+            if isinstance(objs, list) and objs:
+                lines.append("- Objeciones detectadas:")
+                for o in objs:
+                    lines.append(f"  * {str(o).strip()}")
+            elif isinstance(objs, str) and objs.strip():
+                lines.append(f"- Objeciones detectadas: {objs.strip()}")
+
+        # Alarma
+        if call.alarma:
+            lines.append("- Alerta de calidad: Esta llamada activó una alerta de atención/seguimiento.")
+
+        # Transcript / fragment excerpt if present
+        if isinstance(call.result_json, dict):
+            trans = call.result_json.get("transcripcion") or call.result_json.get("fragmentos") or call.result_json.get("transcription")
+            if trans and isinstance(trans, str) and trans.strip():
+                lines.append(f"- Fragmentos relevantes de la transcripción:\n  {trans.strip()[:1000]}")
+
+        lines.append("------------------------------------------")
+        return "\n".join(lines)
+
+    @classmethod
+    def detect_criterion_search_intent(cls, query_text: str) -> bool:
+        """
+        Checks whether the query is seeking examples of conversations based on qualitative/evaluative criteria.
+        """
+        if not query_text or not str(query_text).strip():
+            return False
+        q = query_text.lower()
+
+        # Must contain an action verb/phrase requesting examples or searching
+        action_pat = re.search(
+            r"\b(?:dame|busca|buscar|busco|encuentra|encontrar|mu[eé]strame|ens[eé][ñn]ame|ejemplos?\s+de|algunas?\s+de|hay|tienes|ver|dime|quiero)\b",
+            q,
+        )
+        # Must refer to calls / conversations (singular or plural)
+        target_pat = re.search(r"\b(?:conversaci[oó]n(?:es)?|llamadas?|ejemplos?)\b", q)
+        # Or 'llamada donde...', 'conversaciones en las que...'
+        rel_pat = re.search(r"\b(?:conversaci[oó]n(?:es)?|llamadas?)\s+(?:donde|en\s+(?:las?\s+|los?\s+)?que|con)\b", q)
+
+        return bool((action_pat and target_pat) or rel_pat)
+
+    @classmethod
+    async def parse_criteria_query(
+        cls,
+        query_text: str,
+        db: AsyncSession,
+        context: TenantContext,
+        target_agent_id: str,
+    ) -> List[dict]:
+        """
+        Parses criteria mentions and polarities (good / bad / true / false) from query_text
+        resolving dynamically against available criteria in the catalog.
+        Enforces maximum of 3 criteria.
+        """
+        from app.utils.item_score_filters import get_evaluation_item_filter_options
+
+        q = query_text.lower()
+
+        # Fetch available catalog for tenant and agent
+        catalog = await get_evaluation_item_filter_options(
+            db=db,
+            company_ids=[context.company_id] if context.company_id is not None else None,
+            agent_id=target_agent_id,
+        )
+        if not catalog:
+            return []
+
+        cat_by_key = {it["key"]: it for it in catalog}
+        cat_keys = set(cat_by_key.keys())
+
+        matched_filters: List[dict] = []
+        seen_keys = set()
+
+        for c_def in CONCEPTS_CATALOG:
+            # Check if concept terms appear in query
+            matched_term = None
+            for term in sorted(c_def["terms"], key=len, reverse=True):
+                if re.search(r"\b" + re.escape(term) + r"\b", q):
+                    matched_term = term
+                    break
+            if not matched_term:
+                continue
+
+            # Resolve against catalog
+            resolved_key = None
+            resolved_item = None
+            if c_def["default_key"] in cat_keys:
+                resolved_key = c_def["default_key"]
+                resolved_item = cat_by_key[resolved_key]
+            else:
+                for k, it in cat_by_key.items():
+                    lbl = it.get("label", "").lower()
+                    if any(t in lbl for t in c_def["terms"]) or any(t in k for t in c_def["terms"]):
+                        resolved_key = k
+                        resolved_item = it
+                        break
+
+            if not resolved_key or not resolved_item or resolved_key in seen_keys:
+                continue
+
+            seen_keys.add(resolved_key)
+
+            # Polarity detection near the term
+            term_pos = q.find(matched_term)
+            window = q[max(0, term_pos - 45):min(len(q), term_pos + len(matched_term) + 45)]
+
+            is_neg = any(re.search(r"\b" + re.escape(w) + r"\b", window) for w in CRITERIA_NEGATIVE_WORDS)
+            is_pos = any(re.search(r"\b" + re.escape(w) + r"\b", window) for w in CRITERIA_POSITIVE_WORDS)
+
+            polarity = "positive"
+            if is_neg and not is_pos:
+                polarity = "negative"
+            elif is_neg and is_pos:
+                mid_win = min(term_pos, 45)
+                neg_dist = min([abs(m.start() - mid_win) for w in CRITERIA_NEGATIVE_WORDS for m in re.finditer(r"\b" + re.escape(w) + r"\b", window)] or [999])
+                pos_dist = min([abs(m.start() - mid_win) for w in CRITERIA_POSITIVE_WORDS for m in re.finditer(r"\b" + re.escape(w) + r"\b", window)] or [999])
+                polarity = "negative" if neg_dist < pos_dist else "positive"
+
+            is_bool = resolved_item.get("type") == "boolean"
+            label = resolved_item.get("label") or resolved_key
+            if is_bool:
+                val_bool = (polarity == "positive")
+                matched_filters.append({
+                    "key": resolved_key,
+                    "label": label,
+                    "type": "boolean",
+                    "value": val_bool,
+                    "expected_bool": val_bool,
+                    "polarity": polarity,
+                })
+            else:
+                min_val = 7.0 if polarity == "positive" else 0.0
+                max_val = 10.0 if polarity == "positive" else 4.0
+                matched_filters.append({
+                    "key": resolved_key,
+                    "label": label,
+                    "type": "score",
+                    "min": min_val,
+                    "max": max_val,
+                    "polarity": polarity,
+                })
+
+            if len(matched_filters) >= 3:
+                break
+
+        return matched_filters
+
+    @classmethod
+    def extract_search_quantity(cls, query_text: str) -> int:
+        """Extracts requested number of call examples (1 to 5, default 2)."""
+        q = query_text.lower()
+        words_map = {
+            "un": 1, "una": 1, "uno": 1, "1": 1,
+            "dos": 2, "2": 2,
+            "tres": 3, "3": 3,
+            "cuatro": 4, "4": 4,
+            "cinco": 5, "5": 5,
+        }
+        m = re.search(
+            r"\b(?:dame|busca|buscar|busco|encuentra|encontrar|mu[eé]strame|ens[eé][ñn]ame|ver|dime|quiero)\s+(?:al\s+menos\s+|unos?\s+|unas?\s+)?(un|una|uno|dos|tres|cuatro|cinco|\d+)\b",
+            q,
+        )
+        if m:
+            w = m.group(1)
+            if w in words_map:
+                return words_map[w]
+            if w.isdigit():
+                return max(1, min(int(w), 5))
+
+        m2 = re.search(
+            r"\b(un|una|uno|dos|tres|cuatro|cinco|\d+)\s+(?:ejemplos?|conversaci[oó]n(?:es)?|llamadas?)\b",
+            q,
+        )
+        if m2:
+            w = m2.group(1)
+            if w in words_map:
+                return words_map[w]
+            if w.isdigit():
+                return max(1, min(int(w), 5))
+
+        return 2
+
+    @classmethod
+    def extract_search_period(cls, query_text: str, ref_dt: datetime) -> Tuple[datetime, datetime, str]:
+        """
+        Extracts temporal period for example searches.
+        If user explicitly specified a period, uses it; otherwise defaults to last 30 days.
+        """
+        period_res = cls.detect_detailed_period_request(query_text, is_admin=False, reference_date=ref_dt)
+        if period_res.is_detailed_period_request:
+            if period_res.start_date and period_res.end_date:
+                lbl = period_res.raw_expression or f"{period_res.start_date.strftime('%d/%m/%Y')} al {period_res.end_date.strftime('%d/%m/%Y')}"
+                return period_res.start_date, period_res.end_date, lbl
+            if period_res.period_days:
+                s_dt = ref_dt - timedelta(days=period_res.period_days)
+                lbl = period_res.raw_expression or f"los últimos {period_res.period_days} días"
+                return s_dt, ref_dt, lbl
+
+        # Default: last 30 days
+        s_dt = ref_dt - timedelta(days=30)
+        return s_dt, ref_dt, "los últimos 30 días"
+
+    @classmethod
     def detect_detailed_period_request(
         cls,
         query_text: str,
@@ -1133,6 +1558,9 @@ class TrainerChatbotService:
         target_agent_id: str,
         historical_profile: Optional[str] = None,
         detailed_period_summary: Optional[str] = None,
+        conversation_detail: Optional[str] = None,
+        conversation_comparison: Optional[str] = None,
+        criterion_examples: Optional[str] = None,
         is_admin: bool = False,
     ) -> str:
         """
@@ -1186,6 +1614,7 @@ class TrainerChatbotService:
             "   - NUNCA reveles ni menciones al usuario identificadores técnicos de base de datos (company_id, user_id, agent_id, hubspot_owner_id, service_id, cycle_id, simulation_id, ni IDs numéricos como ID 573, ID #12, etc.).",
             "   - NUNCA menciones nombres de tablas (bm_users, trainer_sessions, etc.), nombres de modelos de datos, nombres de funciones, endpoints (/bm/...), roles técnicos internos (SUPER_ADMIN, COMPANY_ADMIN, etc.), trazas ni detalles de arquitectura.",
             "   - NUNCA uses nombres de campos técnicos de base de datos (evaluacion_global, result_json, etc.); refiérete a ellos de forma natural ('evaluación global', 'resultados', 'criterios').",
+            "   - EXCEPCIÓN PERMITIDA: Si se analiza o compara una llamada específica solicitada por el usuario (o ejemplos de llamadas encontrados), es correcto y deseable citar el identificador público de la llamada (ej. 'Llamada 123456') para que el usuario sepa a qué llamada te refieres, pero NUNCA reveles IDs técnicos internos de la base de datos ni URLs de grabaciones.",
             "",
             "4. PREGUNTAS SOBRE DATOS O FUNCIONAMIENTO INTERNO:",
             "   - Si el usuario pregunta de dónde salen los datos, qué tabla se usa, qué endpoint se consulta, qué ID tiene, qué permisos tiene o cómo se sabe su empresa:",
@@ -1229,6 +1658,43 @@ class TrainerChatbotService:
             "",
         ])
 
+        if conversation_detail and conversation_detail.strip():
+            lines.append(conversation_detail.strip())
+            lines.append("")
+            lines.extend([
+                "INSTRUCCIÓN PARA ANÁLISIS DE LLAMADA CONCRETA:",
+                "- El usuario ha solicitado analizar una llamada específica.",
+                "- Utiliza los datos detallados de la sección 'DETALLE DE LA LLAMADA' para ofrecer un análisis pedagógico, constructivo y profundo.",
+                "- Destaca los puntos fuertes demostrados en la llamada, las áreas donde se presentaron dificultades y consejos prácticos para futuras llamadas.",
+                "- Cita la llamada por su identificador público (ej. 'Llamada <id>') para que el usuario tenga clara la referencia.",
+                "",
+            ])
+
+        if conversation_comparison and conversation_comparison.strip():
+            lines.append(conversation_comparison.strip())
+            lines.append("")
+            lines.extend([
+                "INSTRUCCIÓN PARA COMPARACIÓN DE LLAMADAS:",
+                "- El usuario ha solicitado comparar dos llamadas concretas.",
+                "- Utiliza los datos de la sección 'COMPARATIVA DE LLAMADAS' para contrastar de manera pedagógica ambas interacciones.",
+                "- Analiza qué diferencias hubo en el desempeño, qué aspectos mejoraron o empeoraron entre una y otra, cómo se gestionaron los criterios clave y qué aprendizajes prácticos se desprenden.",
+                "- Cita ambas llamadas por su identificador público para diferenciar claramente los ejemplos.",
+                "",
+            ])
+
+        if criterion_examples and criterion_examples.strip():
+            lines.append(criterion_examples.strip())
+            lines.append("")
+            lines.extend([
+                "INSTRUCCIÓN PARA BÚSQUEDA DE EJEMPLOS POR CRITERIOS:",
+                "- El usuario ha solicitado ejemplos de llamadas que cumplan con criterios cualitativos específicos.",
+                "- Si se han localizado llamadas, utiliza los datos de la sección 'EJEMPLOS DE LLAMADAS LOCALIZADOS' para ilustrar tu respuesta formativa.",
+                "- Explica qué ocurrió en cada llamada respecto a los criterios consultados (por qué fue positiva o negativa la valoración en cada caso) y extrae lecciones pedagógicas prácticas.",
+                "- Si no se han localizado llamadas que cumplan simultáneamente todos los criterios, explícalo de forma pedagógica y sugiere ampliar el periodo de búsqueda o evaluar los criterios por separado.",
+                "- Cita las llamadas localizadas por su identificador público.",
+                "",
+            ])
+
         if detailed_period_summary and detailed_period_summary.strip():
             lines.append(detailed_period_summary.strip())
             lines.append("")
@@ -1270,11 +1736,13 @@ class TrainerChatbotService:
         text: str,
         is_admin: bool = False,
         query_text: Optional[str] = None,
+        allowed_call_ids: Optional[set[str]] = None,
     ) -> str:
         """
         Ensures zero leakage of technical identifiers (company_id, agent_id, user_id, internal IDs),
         table names, endpoints, internal roles, and enforces natural redirection for out-of-scope queries
         and functional responses for system inquiries.
+        Allows citing explicitly authorized call_ids.
         """
         if not text:
             return ""
@@ -1313,6 +1781,19 @@ class TrainerChatbotService:
             if is_admin:
                 return "Uso la información de formación y evaluaciones registrada para el perfil del agente."
             return "Uso la información de formación y evaluaciones disponible para tu perfil."
+
+        # Protect allowed_call_ids from being stripped by technical ID regexes
+        token_map: dict[str, str] = {}
+        if allowed_call_ids:
+            for idx, cid in enumerate(sorted(allowed_call_ids, key=len, reverse=True)):
+                if not cid or not str(cid).strip():
+                    continue
+                c_str = str(cid).strip()
+                token = f"__TOKEN_ALLOWED_CALL_ID_{idx}__"
+                token_map[token] = c_str
+                # Normalize '(ID 12345)' or 'ID: 12345' or 'ID 12345' or raw cid to token
+                text = re.sub(rf"\(?\b(?:ID|id)\s*[:#]?\s*{re.escape(c_str)}\)?", token, text)
+                text = text.replace(c_str, token)
 
         # 3. Clean up any leaked technical ID patterns
         # e.g., "(ID 573)" -> "", "ID #573" -> "", "ID: 573" -> ""
@@ -1391,6 +1872,11 @@ class TrainerChatbotService:
         sanitized = re.sub(r"  +", " ", sanitized)
         sanitized = re.sub(r"\( *\)", "", sanitized)
 
+        # Restore allowed call IDs
+        if token_map:
+            for token, c_str in token_map.items():
+                sanitized = sanitized.replace(token, c_str)
+
         return sanitized.strip()
 
     @classmethod
@@ -1409,12 +1895,17 @@ class TrainerChatbotService:
         Executes the full unified Chatbot pipeline:
         1. Input validation & audio transcription (converges to query_text).
         2. Strict tenant security & target agent resolution.
-        3. Scoped knowledge document retrieval.
-        4. Scoped full historical profile generation (all-time calls, cycles, simulations).
-        5. Grounded system prompt & conversation history assembly.
-        6. AI Provider text completion.
-        7. Response post-processing & sanitization.
-        8. Structured response payload.
+        3. Intent & call_id routing:
+           - Flow A: Call comparison (>= 2 call_ids detected)
+           - Flow B: Call detail (1 call_id detected)
+           - Flow C: Qualitative criteria search (search intent)
+           - Flow D: General queries & detailed period analysis (max 15 days)
+        4. Scoped knowledge document retrieval.
+        5. Scoped full historical profile generation (all-time calls, cycles, simulations).
+        6. Grounded system prompt & conversation history assembly.
+        7. AI Provider text completion.
+        8. Response post-processing & sanitization.
+        9. Structured response payload.
         """
         # 1. Validate & extract query text (audio or text)
         query_text, input_type = await cls.validate_and_extract_input(
@@ -1438,22 +1929,180 @@ class TrainerChatbotService:
             InternalRole.TEAM_COORDINATOR,
         )
 
-        # 3. Detect temporal period request and enforce 15-day limit
-        period_result = cls.detect_detailed_period_request(
-            query_text=query_text,
-            is_admin=is_admin,
-        )
+        # 3. Check for specific conversation inquiries (Flows A and B) or criteria search (Flow C)
+        detected_call_ids = cls.detect_call_ids(query_text)
+        is_search_intent = cls.detect_criterion_search_intent(query_text)
 
-        # If user requests a detailed analysis over a period > 15 days, block mass evaluation:
-        if period_result.is_detailed_period_request and period_result.exceeds_limit:
-            return {
-                "response": period_result.blocking_message,
-                "user_query": query_text,
-                "input_type": input_type,
-                "sources": [],
-                "agent_id": target_agent_id,
-                "company_id": context.company_id,
-            }
+        conversation_detail: Optional[str] = None
+        conversation_comparison: Optional[str] = None
+        criterion_examples: Optional[str] = None
+        detailed_period_summary: Optional[str] = None
+        allowed_call_ids: set[str] = set()
+
+        if len(detected_call_ids) >= 2:
+            # Flow A: Comparison between two specific calls
+            cid1, cid2 = detected_call_ids[0], detected_call_ids[1]
+            call1 = await cls.fetch_scoped_call(db, context, target_agent_id, cid1)
+            call2 = await cls.fetch_scoped_call(db, context, target_agent_id, cid2)
+
+            missing = []
+            if not call1:
+                missing.append(cid1)
+            if not call2:
+                missing.append(cid2)
+
+            if missing:
+                if len(missing) == 2:
+                    missing_msg = (
+                        f"No he localizado las llamadas {cid1} y {cid2} entre las evaluaciones registradas del agente."
+                        if is_admin else
+                        f"No he localizado las llamadas {cid1} y {cid2} entre las evaluaciones registradas de tu perfil."
+                    )
+                else:
+                    m_id = missing[0]
+                    f_id = cid2 if m_id == cid1 else cid1
+                    missing_msg = (
+                        f"He localizado la llamada {f_id}, pero no encuentro la llamada {m_id} entre las evaluaciones registradas del agente para poder realizar la comparativa."
+                        if is_admin else
+                        f"He localizado la llamada {f_id}, pero no encuentro la llamada {m_id} entre las evaluaciones registradas de tu perfil para poder realizar la comparativa."
+                    )
+                return {
+                    "response": missing_msg,
+                    "user_query": query_text,
+                    "input_type": input_type,
+                    "sources": [],
+                    "agent_id": target_agent_id,
+                    "company_id": context.company_id,
+                }
+
+            c1_fmt = cls.format_call_detail(call1, header_title=f"LLAMADA A COMPARAR (1): {call1.call_id}")
+            c2_fmt = cls.format_call_detail(call2, header_title=f"LLAMADA A COMPARAR (2): {call2.call_id}")
+            conversation_comparison = f"--- COMPARATIVA DE LLAMADAS ---\n\n{c1_fmt}\n\n{c2_fmt}\n------------------------------"
+            allowed_call_ids = {cid1, cid2}
+
+        elif len(detected_call_ids) == 1:
+            # Flow B: Single specific call detail
+            cid = detected_call_ids[0]
+            call = await cls.fetch_scoped_call(db, context, target_agent_id, cid)
+            if not call:
+                missing_msg = (
+                    f"No he localizado la llamada {cid} entre las evaluaciones registradas del agente."
+                    if is_admin else
+                    f"No he localizado la llamada {cid} entre las evaluaciones registradas de tu perfil."
+                )
+                return {
+                    "response": missing_msg,
+                    "user_query": query_text,
+                    "input_type": input_type,
+                    "sources": [],
+                    "agent_id": target_agent_id,
+                    "company_id": context.company_id,
+                }
+
+            conversation_detail = cls.format_call_detail(call, header_title=f"DETALLE DE LA LLAMADA: {call.call_id}")
+            allowed_call_ids = {cid}
+
+        elif is_search_intent:
+            # Flow C: Search examples of conversations by qualitative criteria
+            filters = await cls.parse_criteria_query(query_text, db, context, target_agent_id)
+            if not filters:
+                no_criteria_msg = (
+                    "Puede solicitar ejemplos de conversaciones indicando criterios específicos de evaluación (por ejemplo: empatía, claridad, explicación de precio o gestión de objeciones) y el desempeño deseado."
+                    if is_admin else
+                    "Puedes pedirme ejemplos de llamadas indicando criterios como empatía, claridad, explicación de condiciones o manejo de objeciones (por ejemplo: 'dame dos llamadas donde la empatía haya sido buena pero la gestión del precio regular')."
+                )
+                return {
+                    "response": no_criteria_msg,
+                    "user_query": query_text,
+                    "input_type": input_type,
+                    "sources": [],
+                    "agent_id": target_agent_id,
+                    "company_id": context.company_id,
+                }
+
+            quantity = cls.extract_search_quantity(query_text)
+            ref_dt = datetime.now(timezone.utc)
+            start_dt, end_dt, period_label = cls.extract_search_period(query_text, ref_dt)
+
+            from app.services.mass_evaluation_service import MassEvaluationService
+            try:
+                comp_ids = [context.company_id] if context.company_id is not None else (
+                    context.allowed_company_ids if not context.is_super_admin and context.allowed_company_ids else None
+                )
+                call_results = await MassEvaluationService.list_results(
+                    db=db,
+                    company_ids=comp_ids,
+                    agent_owner_id=target_agent_id,
+                    status="completed",
+                    date_from=start_dt,
+                    date_to=end_dt,
+                    item_filters=filters,
+                    limit=quantity,
+                )
+            except Exception as e:
+                logger.warning("Error fetching criteria example calls for %s: %s", target_agent_id, e)
+                call_results = []
+
+            if call_results:
+                for c in call_results:
+                    if c.call_id:
+                        allowed_call_ids.add(c.call_id)
+
+                ex_lines = [
+                    f"--- EJEMPLOS DE LLAMADAS LOCALIZADOS ({len(call_results)} LLAMADAS ENCONTRADAS) ---",
+                    f"Periodo de búsqueda: {period_label}.",
+                    "Criterios aplicados en la búsqueda:",
+                ]
+                for f in filters:
+                    pol_str = "positivo / alto / sí" if f["polarity"] == "positive" else "negativo / bajo / no"
+                    ex_lines.append(f"- {f['label']}: foco en desempeño {pol_str}")
+                ex_lines.append("")
+                for idx, c in enumerate(call_results, 1):
+                    c_fmt = cls.format_call_detail(c, header_title=f"EJEMPLO #{idx}: LLAMADA {c.call_id}")
+                    ex_lines.append(c_fmt)
+                    ex_lines.append("")
+                ex_lines.append("---------------------------------------------------------------")
+                criterion_examples = "\n".join(ex_lines)
+            else:
+                ex_lines = [
+                    "--- RESULTADO DE BÚSQUEDA DE EJEMPLOS POR CRITERIOS ---",
+                    f"Periodo de búsqueda analizado: {period_label}.",
+                    "Criterios solicitados:",
+                ]
+                for f in filters:
+                    pol_str = "positivo / alto / sí" if f["polarity"] == "positive" else "negativo / bajo / no"
+                    ex_lines.append(f"- {f['label']}: {pol_str}")
+                ex_lines.append(
+                    "No se han encontrado llamadas registradas para este agente que cumplan simultáneamente con todos estos criterios en el periodo indicado."
+                )
+                ex_lines.append("------------------------------------------------------")
+                criterion_examples = "\n".join(ex_lines)
+
+        else:
+            # Flow D: General queries & detailed period analysis (capped to 15 days)
+            period_result = cls.detect_detailed_period_request(
+                query_text=query_text,
+                is_admin=is_admin,
+            )
+            if period_result.is_detailed_period_request and period_result.exceeds_limit:
+                return {
+                    "response": period_result.blocking_message,
+                    "user_query": query_text,
+                    "input_type": input_type,
+                    "sources": [],
+                    "agent_id": target_agent_id,
+                    "company_id": context.company_id,
+                }
+
+            if period_result.is_detailed_period_request and not period_result.exceeds_limit:
+                detailed_period_summary = await cls.build_detailed_period_summary(
+                    db=db,
+                    context=context,
+                    target_agent_id=target_agent_id,
+                    start_date=period_result.start_date,
+                    end_date=period_result.end_date,
+                    raw_expression=period_result.raw_expression,
+                )
 
         # 4. Fetch knowledge documents
         documents = await cls.fetch_knowledge_documents(
@@ -1470,24 +2119,15 @@ class TrainerChatbotService:
             target_agent_id=target_agent_id,
         )
 
-        # 6. If within allowed 15-day period, build aggregated period summary
-        detailed_period_summary = None
-        if period_result.is_detailed_period_request and not period_result.exceeds_limit:
-            detailed_period_summary = await cls.build_detailed_period_summary(
-                db=db,
-                context=context,
-                target_agent_id=target_agent_id,
-                start_date=period_result.start_date,
-                end_date=period_result.end_date,
-                raw_expression=period_result.raw_expression,
-            )
-
-        # 7. Build prompt and prepare message list
+        # 6. Build prompt and prepare message list
         system_instruction = cls.build_grounding_prompt(
             documents=documents,
             target_agent_id=target_agent_id,
             historical_profile=historical_profile,
             detailed_period_summary=detailed_period_summary,
+            conversation_detail=conversation_detail,
+            conversation_comparison=conversation_comparison,
+            criterion_examples=criterion_examples,
             is_admin=is_admin,
         )
 
@@ -1497,7 +2137,7 @@ class TrainerChatbotService:
         messages.extend(history)
         messages.append({"role": "user", "content": query_text})
 
-        # 6. Execute LLM completion via existing abstraction
+        # 7. Execute LLM completion via existing abstraction
         try:
             response_text = await openai_service.complete_text(
                 messages=messages,
@@ -1511,14 +2151,15 @@ class TrainerChatbotService:
                 detail=f"Error en el modelo de lenguaje del chatbot: {str(llm_err)}",
             )
 
-        # 7. Post-process & sanitize response (zero leaks of technical IDs/tables, natural redirection)
+        # 8. Post-process & sanitize response (zero leaks of technical IDs/tables, natural redirection)
         sanitized_response = cls.sanitize_response_text(
             text=response_text or "",
             is_admin=is_admin,
             query_text=query_text,
+            allowed_call_ids=allowed_call_ids,
         )
 
-        # 8. Format sources
+        # 9. Format sources
         sources = [
             {
                 "document_id": doc.id,
