@@ -55,7 +55,9 @@ NO des nunca explicaciones sobre el uso de la entrada vocal o el marcado en tecl
 2. Cuando pidas o recibas códigos de agente, pide que se digan dígito a dígito si es necesario.
 3. Si el usuario da un número de 4 dígitos o una secuencia de cuatro dígitos hablados, llama INMEDIATAMENTE a `verify_agent_code(agent_code=codigo_normalizado)`. No rechaces un código sin llamar a la tool. No inventes resultado.
 4. Si el backend devuelve status "invalid", di exactamente: "No he encontrado ese código. Repítelo, por favor."
-5. Si el código es válido (status "valid"), di exactamente: "Perfecto, [Nombre]. ¿Quieres ir a Trainer o continuar con tus ciclos?"
+5. Si el código es válido (status "valid"):
+   - Si `has_active_cycle` es true, di exactamente: "Perfecto, [Nombre]. Tienes un ciclo de entrenamiento activo con simulaciones pendientes. Si quieres avanzar en tu ciclo, selecciona la opción Ciclos. ¿Quieres ir a Trainer o continuar con tus ciclos?"
+   - Si `has_active_cycle` es false o no está presente, di exactamente: "Perfecto, [Nombre]. ¿Quieres ir a Trainer o continuar con tus ciclos?"
 6. Escucha la elección:
    - Trainer ("Trainer", "practicar", "simulación", "roleplay", "uno", "1"): llama a `switch_to_trainer_mode()`. NO vuelvas a llamar a esta función una vez que ya estás en estado Trainer.
    - Ciclos ("ciclos", "mis ciclos", "continuar", "dos", "2"): llama a `select_cycles_mode()`.
@@ -346,12 +348,31 @@ async def verify_agent_dtmf(request: Request, call_sid: str = Query(...), db: As
 
 
 @router.post("/select-mode-menu")
-async def select_mode_menu(request: Request, agent_id: str = Query(...), call_sid: str = Query(...)):
+async def select_mode_menu(
+    request: Request,
+    agent_id: str = Query(...),
+    call_sid: str = Query(...),
+    db: Optional[AsyncSession] = Depends(get_db),
+):
     """Keypad menu fallback to select between Trainer and Cycles."""
+    from app.routers.training_voice import get_active_cycles_for_agent
+
+    session = db if isinstance(db, AsyncSession) else None
+    if session is not None:
+        active_cycles = await get_active_cycles_for_agent(session, agent_id)
+    else:
+        async with AsyncSessionLocal() as sub_db:
+            active_cycles = await get_active_cycles_for_agent(sub_db, agent_id)
+
+    has_active = bool(active_cycles)
+    cycle_notice = ""
+    if has_active:
+        cycle_notice = '<Say language="es-ES">Tienes un ciclo de entrenamiento activo con simulaciones pendientes. Si quieres avanzar en tu ciclo, selecciona la opción Ciclos.</Say>\n        '
+
     action_url = f"/bm/training/hub/verify-mode-dtmf?agent_id={agent_id}&amp;call_sid={call_sid}"
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
-        <Gather numDigits="1" timeout="10" action="{action_url}">
+        {cycle_notice}<Gather numDigits="1" timeout="10" action="{action_url}">
             <Say language="es-ES">Pulsa 1 para Trainer o pulsa 2 para continuar con tus ciclos asignados.</Say>
         </Gather>
         <Say language="es-ES">No he recibido ninguna selección. La llamada finalizará.</Say>
@@ -359,6 +380,7 @@ async def select_mode_menu(request: Request, agent_id: str = Query(...), call_si
     </Response>
     """
     return Response(content=twiml, media_type="application/xml")
+
 
 
 @router.post("/verify-mode-dtmf")
@@ -684,6 +706,7 @@ Reglas de pronunciación:
             redirected = False
             identified_agent_id = agent_id
             identified_agent_name = agent_name
+            identified_active_cycles = None
             dtmf_buffer = ""
             current_state = "awaiting_agent_code" if flow == "hub" else "trainer_code"
             trainer_prompt_sent = False
@@ -782,7 +805,7 @@ Reglas de pronunciación:
                             await gemini_ws.send(json.dumps(err_msg))
             
             async def receive_from_twilio():
-                nonlocal call_sid, stream_sid, redirected, dtmf_buffer, current_state, identified_agent_id, identified_agent_name, attempts
+                nonlocal call_sid, stream_sid, redirected, dtmf_buffer, current_state, identified_agent_id, identified_agent_name, identified_active_cycles, attempts
                 try:
                     async for message in websocket.iter_text():
                         if redirected:
@@ -849,12 +872,21 @@ Reglas de pronunciación:
                                             current_state = "awaiting_mode"
                                             dtmf_buffer = ""
                                             
+                                            from app.routers.training_voice import get_active_cycles_for_agent
+                                            active_cycles = await get_active_cycles_for_agent(sub_db, identified_agent_id)
+                                            identified_active_cycles = active_cycles
+                                            has_active_cycle = bool(active_cycles)
+
                                             # Instruct Gemini to speak the success prompt
+                                            if has_active_cycle:
+                                                prompt_text = f"Di exactamente: 'Estupendo, {first_name}. Tienes un ciclo de entrenamiento activo con simulaciones pendientes. Si quieres avanzar en tu ciclo, selecciona la opción Ciclos. ¿Quieres practicar en Trainer o avanzar con tus ciclos?'"
+                                            else:
+                                                prompt_text = f"Di exactamente: 'Estupendo, {first_name}. ¿Quieres practicar en Trainer o avanzar con tus ciclos?'"
                                             greet_msg = {
                                                 "clientContent": {
                                                     "turns": [{
                                                         "role": "user",
-                                                        "parts": [{"text": f"Di exactamente: 'Estupendo, {first_name}. ¿Quieres practicar en Trainer o avanzar con tus ciclos?'"}]
+                                                        "parts": [{"text": prompt_text}]
                                                     }],
                                                     "turnComplete": True
                                                 }
@@ -916,7 +948,7 @@ Reglas de pronunciación:
                     logger.error("Error in receive_from_twilio: %s", e)
 
             async def send_to_twilio():
-                nonlocal call_sid, stream_sid, attempts, redirected, identified_agent_id, identified_agent_name, current_state
+                nonlocal call_sid, stream_sid, attempts, redirected, identified_agent_id, identified_agent_name, identified_active_cycles, current_state
                 proto_http = websocket.headers.get("x-forwarded-proto", "http")
                 scheme_http = "https" if proto_http == "https" or "localhost" not in (websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost") else "http"
                 logged_initial_greeting_sent = False
@@ -976,7 +1008,15 @@ Reglas de pronunciación:
                                             current_state = "awaiting_mode"
                                             logger.info("Training Hub agent validation success: agent_id=%s, initials=%s, name=%s", 
                                                         agent["agent_id"], agent["agent_initials"], agent["agent_name"])
-                                            result_val = {"status": "valid", "agent_name": agent["agent_name"]}
+                                            from app.routers.training_voice import get_active_cycles_for_agent
+                                            active_cycles = await get_active_cycles_for_agent(sub_db, identified_agent_id)
+                                            identified_active_cycles = active_cycles
+                                            has_active_cycle = bool(active_cycles)
+                                            result_val = {
+                                                "status": "valid",
+                                                "agent_name": agent["agent_name"],
+                                                "has_active_cycle": has_active_cycle,
+                                            }
                                         else:
                                             logger.warning("Training Hub agent validation failed: normalized=%r, reason=\"not_found\"", normalized)
                                             attempts += 1
@@ -1038,9 +1078,12 @@ Reglas de pronunciación:
 
                                 elif name == "select_cycles_mode" and current_state == "awaiting_mode":
                                     if identified_agent_id:
-                                        from app.routers.training_voice import get_active_cycles_for_agent
-                                        async with AsyncSessionLocal() as sub_db:
-                                            active_cycles = await get_active_cycles_for_agent(sub_db, identified_agent_id)
+                                        if identified_active_cycles is not None:
+                                            active_cycles = identified_active_cycles
+                                        else:
+                                            async with AsyncSessionLocal() as sub_db:
+                                                active_cycles = await get_active_cycles_for_agent(sub_db, identified_agent_id)
+                                                identified_active_cycles = active_cycles
                                         
                                         if active_cycles:
                                             host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or "localhost"

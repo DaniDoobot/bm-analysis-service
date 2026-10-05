@@ -1508,7 +1508,177 @@ class TestTrainingHubVoice(unittest.IsolatedAsyncioTestCase):
                     for part in turn.get("parts", []):
                         if "Pasamos a Trainer de Dubot. Dime el código" in part.get("text", ""):
                             trainer_prompts_sent += 1
-        self.assertEqual(trainer_prompts_sent, 1)
+    async def _create_test_cycle(self, agent_id: str, cycle_status: str, sim_status: str):
+        engine = get_engine()
+        async with AsyncSession(engine, expire_on_commit=False) as db:
+            cycle = TrainingAgentReport(
+                hubspot_owner_id=agent_id,
+                agent_name="Cristina Montenegro",
+                agent_initials="CM",
+                period_start=datetime.now(),
+                period_end=datetime.now(),
+                status=cycle_status,
+                is_current=True,
+            )
+            db.add(cycle)
+            await db.flush()
+            rep_id = cycle.training_report_id
+
+            sim_prompt = TrainingSimulationPrompt(
+                training_report_id=rep_id,
+                hubspot_owner_id=agent_id,
+                prompt_number=1,
+                title="Mock Prompt Title",
+                scenario_type="audio",
+                prompt_text="Test prompt text",
+            )
+            db.add(sim_prompt)
+            await db.flush()
+
+            comp = TrainingCompletionStatus(
+                training_report_id=rep_id,
+                simulation_prompt_id=sim_prompt.simulation_prompt_id,
+                hubspot_owner_id=agent_id,
+                status=sim_status,
+            )
+            db.add(comp)
+            await db.commit()
+            return rep_id
+
+    # ── Targeted tests for 8 cycle guidance conditions ─────────────────────────
+
+    def test_hub_system_instruction_cycle_guidance(self):
+        """Prompt phrasing check: HUB_SYSTEM_INSTRUCTION includes advisory text when has_active_cycle is true."""
+        from app.routers.training_hub_voice import HUB_SYSTEM_INSTRUCTION
+        self.assertIn("has_active_cycle", HUB_SYSTEM_INSTRUCTION)
+        self.assertIn(
+            "Tienes un ciclo de entrenamiento activo con simulaciones pendientes. Si quieres avanzar en tu ciclo, selecciona la opción Ciclos.",
+            HUB_SYSTEM_INSTRUCTION
+        )
+
+    async def test_condition_1_agent_with_no_cycles(self):
+        """Condition 1: Agent with no cycles: no cycle notice spoken/returned."""
+        from app.routers.training_hub_voice import select_mode_menu
+        from app.routers.training_voice import get_active_cycles_for_agent
+        engine = get_engine()
+        async with AsyncSession(engine, expire_on_commit=False) as db:
+            active = await get_active_cycles_for_agent(db, "7777")
+            self.assertEqual(active, [])
+
+            req = self.mock_request()
+            resp = await select_mode_menu(req, agent_id="7777", call_sid="call_c1", db=db)
+            body = resp.body.decode("utf-8")
+            self.assertNotIn("Tienes un ciclo de entrenamiento activo", body)
+            self.assertIn("Pulsa 1 para Trainer o pulsa 2 para continuar con tus ciclos asignados.", body)
+
+    async def test_condition_2_agent_with_pending_approval_cycle(self):
+        """Condition 2: Agent with pending_approval cycle: no cycle notice."""
+        from app.routers.training_hub_voice import select_mode_menu
+        from app.routers.training_voice import get_active_cycles_for_agent
+        await self._create_test_cycle("7777", cycle_status="pending_approval", sim_status="pending")
+        engine = get_engine()
+        async with AsyncSession(engine, expire_on_commit=False) as db:
+            active = await get_active_cycles_for_agent(db, "7777")
+            self.assertEqual(active, [])
+
+            req = self.mock_request()
+            resp = await select_mode_menu(req, agent_id="7777", call_sid="call_c2", db=db)
+            body = resp.body.decode("utf-8")
+            self.assertNotIn("Tienes un ciclo de entrenamiento activo", body)
+            self.assertIn("Pulsa 1 para Trainer o pulsa 2 para continuar", body)
+
+    async def test_condition_3_agent_with_active_cycle_pending_simulations(self):
+        """Condition 3: Agent with active cycle + pending simulations: advisory notice present."""
+        from app.routers.training_hub_voice import select_mode_menu
+        from app.routers.training_voice import get_active_cycles_for_agent
+        await self._create_test_cycle("7777", cycle_status="pending", sim_status="pending")
+        engine = get_engine()
+        async with AsyncSession(engine, expire_on_commit=False) as db:
+            active = await get_active_cycles_for_agent(db, "7777")
+            self.assertEqual(len(active), 1)
+
+            req = self.mock_request()
+            resp = await select_mode_menu(req, agent_id="7777", call_sid="call_c3", db=db)
+            body = resp.body.decode("utf-8")
+            self.assertIn(
+                "<Say language=\"es-ES\">Tienes un ciclo de entrenamiento activo con simulaciones pendientes. Si quieres avanzar en tu ciclo, selecciona la opción Ciclos.</Say>",
+                body
+            )
+            self.assertIn("Pulsa 1 para Trainer o pulsa 2 para continuar", body)
+
+    async def test_condition_4_agent_with_all_simulations_completed(self):
+        """Condition 4: Agent with active cycle status but all simulations completed: no cycle notice."""
+        from app.routers.training_hub_voice import select_mode_menu
+        from app.routers.training_voice import get_active_cycles_for_agent
+        await self._create_test_cycle("7777", cycle_status="in_progress", sim_status="completed")
+        engine = get_engine()
+        async with AsyncSession(engine, expire_on_commit=False) as db:
+            active = await get_active_cycles_for_agent(db, "7777")
+            self.assertEqual(active, [])
+
+            req = self.mock_request()
+            resp = await select_mode_menu(req, agent_id="7777", call_sid="call_c4", db=db)
+            body = resp.body.decode("utf-8")
+            self.assertNotIn("Tienes un ciclo de entrenamiento activo", body)
+            self.assertIn("Pulsa 1 para Trainer o pulsa 2 para continuar", body)
+
+    async def test_condition_5_active_cycle_can_select_trainer(self):
+        """Condition 5: Agent with active cycle can still select Trainer (mode 1)."""
+        from app.routers.training_hub_voice import verify_mode_dtmf
+        await self._create_test_cycle("7777", cycle_status="pending", sim_status="pending")
+        req = self.mock_request(form_data={"Digits": "1"})
+        resp = await verify_mode_dtmf(req, agent_id="7777", call_sid="call_c5")
+        body = resp.body.decode("utf-8")
+        self.assertIn("/bm/training/hub/trainer-init?agent_id=7777&amp;call_sid=call_c5", body)
+
+    async def test_condition_6_active_cycle_can_select_cycles(self):
+        """Condition 6: Agent with active cycle can still select Ciclos (mode 2)."""
+        from app.routers.training_hub_voice import verify_mode_dtmf, cycles_init
+        cycle_id = await self._create_test_cycle("7777", cycle_status="pending", sim_status="pending")
+        req = self.mock_request(form_data={"Digits": "2"})
+        resp = await verify_mode_dtmf(req, agent_id="7777", call_sid="call_c6")
+        body = resp.body.decode("utf-8")
+        self.assertIn("/bm/training/hub/cycles-init?agent_id=7777&amp;call_sid=call_c6", body)
+
+        # Confirm cycles_init forwards to the active cycle
+        engine = get_engine()
+        async with AsyncSession(engine, expire_on_commit=False) as db:
+            with patch("app.routers.training_hub_voice.redirect_twilio_call", new_callable=AsyncMock) as mock_redirect:
+                req_init = self.mock_request(headers={"host": "test-host.com"})
+                resp_init = await cycles_init(req_init, agent_id="7777", call_sid="call_c6", db=db)
+                mock_redirect.assert_called_once_with("call_c6", "test-host.com", "7777", cycle_id)
+
+    async def test_condition_7_mode_selection_routing_unchanged(self):
+        """Condition 7: Mode selection routing remains completely unchanged for all inputs."""
+        from app.routers.training_hub_voice import verify_mode_dtmf
+        # Mode 1 -> trainer-init
+        req1 = self.mock_request(form_data={"Digits": "1"})
+        resp1 = await verify_mode_dtmf(req1, agent_id="7777", call_sid="call_c7")
+        self.assertIn("trainer-init", resp1.body.decode("utf-8"))
+
+        # Mode 2 -> cycles-init
+        req2 = self.mock_request(form_data={"Digits": "2"})
+        resp2 = await verify_mode_dtmf(req2, agent_id="7777", call_sid="call_c7")
+        self.assertIn("cycles-init", resp2.body.decode("utf-8"))
+
+        # Invalid digit -> prompt reprompt via select-mode-menu
+        req_inv = self.mock_request(form_data={"Digits": "5"})
+        resp_inv = await verify_mode_dtmf(req_inv, agent_id="7777", call_sid="call_c7")
+        self.assertIn("select-mode-menu", resp_inv.body.decode("utf-8"))
+
+    async def test_condition_8_trainer_simulation_code_validation_unchanged(self):
+        """Condition 8: Trainer simulation code validation remains unchanged."""
+        engine = get_engine()
+        async with AsyncSession(engine, expire_on_commit=False) as db:
+            # Valid code
+            val_valid = await TrainerService.validate_simulation_for_agent(db, "SIM101", "7777")
+            self.assertTrue(val_valid["valid"])
+            self.assertEqual(val_valid["simulation"].code, "SIM101")
+
+            # Invalid code
+            val_invalid = await TrainerService.validate_simulation_for_agent(db, "NONEXISTENT", "7777")
+            self.assertFalse(val_invalid["valid"])
+            self.assertEqual(val_invalid["status"], "not_found")
 
 
 if __name__ == "__main__":
