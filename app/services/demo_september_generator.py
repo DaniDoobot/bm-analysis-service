@@ -58,6 +58,10 @@ DEMO_COMPANY_ID = 7
 SEPTEMBER_2026_START = datetime(2026, 9, 1, 0, 0, 0, tzinfo=timezone.utc)
 SEPTEMBER_2026_END = datetime(2026, 9, 23, 23, 59, 59, tzinfo=timezone.utc)
 
+# Calendar definition for October 2026 batch (2026-09-24 to 2026-10-08)
+OCTOBER_2026_START = datetime(2026, 9, 24, 0, 0, 0, tzinfo=timezone.utc)
+OCTOBER_2026_END = datetime(2026, 10, 8, 23, 59, 59, tzinfo=timezone.utc)
+
 # 17 working days (Monday-Friday) between Sep 1 and Sep 23, 2026
 WORKING_DAYS_SEP_2026: List[date] = [
     date(2026, 9, 1),   # Tue - W1
@@ -77,6 +81,21 @@ WORKING_DAYS_SEP_2026: List[date] = [
     date(2026, 9, 21),  # Mon - W4
     date(2026, 9, 22),  # Tue - W4
     date(2026, 9, 23),  # Wed - W4
+]
+
+# 11 working days (Monday-Friday) between Sep 24 and Oct 8, 2026
+WORKING_DAYS_OCT_2026: List[date] = [
+    date(2026, 9, 24),  # Thu - W4 Sep
+    date(2026, 9, 25),  # Fri - W4 Sep
+    date(2026, 9, 28),  # Mon - W5 Sep
+    date(2026, 9, 29),  # Tue - W5 Sep
+    date(2026, 9, 30),  # Wed - W5 Sep
+    date(2026, 10, 1),  # Thu - W1 Oct
+    date(2026, 10, 2),  # Fri - W1 Oct
+    date(2026, 10, 5),  # Mon - W2 Oct
+    date(2026, 10, 6),  # Tue - W2 Oct
+    date(2026, 10, 7),  # Wed - W2 Oct
+    date(2026, 10, 8),  # Thu - W2 Oct
 ]
 
 PILOT_AGENT_INDICES = [
@@ -105,38 +124,56 @@ class AgentShiftConfig:
     team_offset: float
 
 
-def build_agent_schedule(agent_index: int) -> AgentShiftConfig:
+def build_agent_schedule(agent_index: int, month: str = "september") -> AgentShiftConfig:
     """
     Deterministically assign shift pattern, working days, and call targets
-    for each of the 60 Demo agents.
+    for each of the 60 Demo agents for September or October 2026.
     """
+    is_october = (month.lower().strip() == "october")
+
     # 1. Determine Team, Service, Base Call Targets and Shift Hours
     if 1 <= agent_index <= 10:
         team_name = "Front Atención"
         service_key = "atencion-al-cliente"
         agent_code = f"AC-F{agent_index:02d}"
-        min_c, max_c, mean_c, std_c = 55, 65, 60.0, 2.5
+        if is_october:
+            # Calibrated October volume: 18-25 calls/day (mean 21.0)
+            min_c, max_c, mean_c, std_c = 18, 25, 21.0, 1.5
+        else:
+            min_c, max_c, mean_c, std_c = 55, 65, 60.0, 2.5
         team_offset = 0.35
         shift_start = 8  # 08:00 to 16:30
     elif 11 <= agent_index <= 30:
         team_name = "Backoffice Atención"
         service_key = "atencion-al-cliente"
         agent_code = f"AC-B{agent_index - 10:02d}"
-        min_c, max_c, mean_c, std_c = 45, 55, 50.0, 2.5
+        if is_october:
+            # Calibrated October volume: 15-22 calls/day (mean 18.0)
+            min_c, max_c, mean_c, std_c = 15, 22, 18.0, 1.5
+        else:
+            min_c, max_c, mean_c, std_c = 45, 55, 50.0, 2.5
         team_offset = 0.05
         shift_start = 9  # 09:00 to 17:30
     elif 31 <= agent_index <= 40:
         team_name = "Equipo Comercial"
         service_key = "ventas"
         agent_code = f"VT-C{agent_index - 30:02d}"
-        min_c, max_c, mean_c, std_c = 50, 60, 55.0, 2.5
+        if is_october:
+            # Calibrated October volume: 17-24 calls/day (mean 20.0)
+            min_c, max_c, mean_c, std_c = 17, 24, 20.0, 1.5
+        else:
+            min_c, max_c, mean_c, std_c = 50, 60, 55.0, 2.5
         team_offset = 0.15
         shift_start = 9  # 09:00 to 17:30
     else:
         team_name = "Equipo Retención"
         service_key = "ventas"
         agent_code = f"VT-R{agent_index - 40:02d}"
-        min_c, max_c, mean_c, std_c = 40, 50, 45.0, 2.5
+        if is_october:
+            # Calibrated October volume: 14-20 calls/day (mean 16.5)
+            min_c, max_c, mean_c, std_c = 14, 20, 16.5, 1.5
+        else:
+            min_c, max_c, mean_c, std_c = 40, 50, 45.0, 2.5
         team_offset = -0.40
         shift_start = 10  # 10:00 to 18:30
 
@@ -153,49 +190,71 @@ def build_agent_schedule(agent_index: int) -> AgentShiftConfig:
         archetype = "new_hire"
 
     # 3. Determine Working Days Pattern
-    all_days = set(WORKING_DAYS_SEP_2026)
+    if is_october:
+        all_days = set(WORKING_DAYS_OCT_2026)
 
-    # Pattern A: Vacation / Multi-day leave in Week 1 & 2 (Sep 1 to Sep 11 off)
-    if agent_index in (9, 26):
-        # Starts working on Sep 14 (Week 3 & 4 only)
-        active = {d for d in all_days if d >= date(2026, 9, 14)}
-
-    # Pattern B: Medical leave / Leave in Week 3 & 4 (Sep 14 to Sep 23 off)
-    elif agent_index in (27, 57):
-        # Works only Sep 1 to Sep 11 (Week 1 & 2 only)
-        active = {d for d in all_days if d <= date(2026, 9, 11)}
-
-    # Pattern C: One full week leave (Week 2, Sep 7 to Sep 11 off)
-    elif agent_index in (39, 58):
-        active = {d for d in all_days if not (date(2026, 9, 7) <= d <= date(2026, 9, 11))}
-
-    # Pattern D: Late New Hire (starts Monday Sep 14, zero calls before)
-    elif agent_index in (10, 29, 60):
-        active = {d for d in all_days if d >= date(2026, 9, 14)}
-
-    # Pattern E: Rotating weekly day off (e.g. 4-day workweek)
-    elif agent_index == 8:
-        # Off every Wednesday (Sep 2, 9, 16, 23)
-        active = {d for d in all_days if d.weekday() != 2}
-    elif agent_index == 24:
-        # Off every Monday (Sep 7, 14, 21)
-        active = {d for d in all_days if d.weekday() != 0}
-    elif agent_index in (25, 38):
-        # Off every Friday (Sep 4, 11, 18)
-        active = {d for d in all_days if d.weekday() != 4}
-    elif agent_index == 54:
-        # Off every Tuesday (Sep 1, 8, 15, 22)
-        active = {d for d in all_days if d.weekday() != 1}
-    elif agent_index == 55:
-        # Off every Thursday (Sep 3, 10, 17)
-        active = {d for d in all_days if d.weekday() != 3}
-    elif agent_index == 56:
-        # Off alternating Fridays (Sep 4, 18)
-        active = {d for d in all_days if d not in (date(2026, 9, 4), date(2026, 9, 18))}
-
-    # Pattern F: Standard Full Monday-to-Friday (all 17 working days)
+        # October Absenteeism & Leave Patterns:
+        # Agent 27: Medical leave extension until Sep 30, returns on Oct 1
+        if agent_index == 27:
+            active = {d for d in all_days if d >= date(2026, 10, 1)}
+        # Agent 57: Medical recovery leave during first week of October (Sep 28 to Oct 2 off)
+        elif agent_index == 57:
+            active = {d for d in all_days if not (date(2026, 9, 28) <= d <= date(2026, 10, 2))}
+        # Agent 30: Short personal leave on Oct 5-6
+        elif agent_index == 30:
+            active = {d for d in all_days if d not in (date(2026, 10, 5), date(2026, 10, 6))}
+        # Rotating days off (intercalated):
+        elif agent_index == 8:
+            # Off every Wednesday (Sep 30, Oct 7)
+            active = {d for d in all_days if d.weekday() != 2}
+        elif agent_index == 24:
+            # Off every Monday (Sep 28, Oct 5)
+            active = {d for d in all_days if d.weekday() != 0}
+        elif agent_index in (25, 38):
+            # Off every Friday (Sep 25, Oct 2)
+            active = {d for d in all_days if d.weekday() != 4}
+        elif agent_index == 54:
+            # Off every Tuesday (Sep 29, Oct 6)
+            active = {d for d in all_days if d.weekday() != 1}
+        elif agent_index == 55:
+            # Off every Thursday (Sep 24, Oct 1, Oct 8)
+            active = {d for d in all_days if d.weekday() != 3}
+        elif agent_index == 56:
+            # Off alternating Fridays (Sep 25)
+            active = {d for d in all_days if d != date(2026, 9, 25)}
+        else:
+            active = set(all_days)
     else:
-        active = set(all_days)
+        all_days = set(WORKING_DAYS_SEP_2026)
+
+        # Pattern A: Vacation / Multi-day leave in Week 1 & 2 (Sep 1 to Sep 11 off)
+        if agent_index in (9, 26):
+            active = {d for d in all_days if d >= date(2026, 9, 14)}
+        # Pattern B: Medical leave / Leave in Week 3 & 4 (Sep 14 to Sep 23 off)
+        elif agent_index in (27, 57):
+            active = {d for d in all_days if d <= date(2026, 9, 11)}
+        # Pattern C: One full week leave (Week 2, Sep 7 to Sep 11 off)
+        elif agent_index in (39, 58):
+            active = {d for d in all_days if not (date(2026, 9, 7) <= d <= date(2026, 9, 11))}
+        # Pattern D: Late New Hire (starts Monday Sep 14, zero calls before)
+        elif agent_index in (10, 29, 60):
+            active = {d for d in all_days if d >= date(2026, 9, 14)}
+        # Pattern E: Rotating weekly day off (e.g. 4-day workweek)
+        elif agent_index == 8:
+            active = {d for d in all_days if d.weekday() != 2}
+        elif agent_index == 24:
+            active = {d for d in all_days if d.weekday() != 0}
+        elif agent_index in (25, 38):
+            active = {d for d in all_days if d.weekday() != 4}
+        elif agent_index == 54:
+            active = {d for d in all_days if d.weekday() != 1}
+        elif agent_index == 55:
+            active = {d for d in all_days if d.weekday() != 3}
+        elif agent_index == 56:
+            active = {d for d in all_days if d not in (date(2026, 9, 4), date(2026, 9, 18))}
+        # Pattern F: Standard Full Monday-to-Friday (all 17 working days)
+        else:
+            active = set(all_days)
 
     return AgentShiftConfig(
         agent_index=agent_index,
@@ -240,14 +299,20 @@ def resolve_batch_scope(
             list(range(1, 61)),
         )
     elif batch == "all":
-        # Full month (all 17 working days), all 60 agents
+        # Full September month (all 17 working days), all 60 agents
         return (
             list(WORKING_DAYS_SEP_2026),
             list(range(1, 61)),
         )
+    elif batch in ("october", "oct"):
+        # 11 working days (Sep 24 to Oct 8, 2026), all 60 agents
+        return (
+            list(WORKING_DAYS_OCT_2026),
+            list(range(1, 61)),
+        )
     else:
         raise ValueError(
-            f"Unknown batch '{batch_name}'. Supported: 'pilot', 'scale', 'final', 'all'."
+            f"Unknown batch '{batch_name}'. Supported: 'pilot', 'scale', 'final', 'all', 'october'."
         )
 
 
@@ -282,16 +347,26 @@ class DemoSeptemberGenerator:
         """
         target_days, target_agent_indices = resolve_batch_scope(batch_name)
         planned_calls: List[Dict[str, Any]] = []
+        is_oct = batch_name.lower() in ("october", "oct")
+
+        # Build schedules for the batch scope (October vs September)
+        schedules = (
+            {i: build_agent_schedule(i, month="october") for i in target_agent_indices}
+            if is_oct
+            else self._schedules
+        )
+        call_id_prefix = "demo_oct26" if is_oct else "demo_sep26"
+        base_seed = (self.seed + 100) if is_oct else self.seed
 
         for agent_idx in sorted(target_agent_indices):
-            config = self._schedules[agent_idx]
+            config = schedules[agent_idx]
             for day in sorted(target_days):
                 if day not in config.active_days:
                     continue  # Agent not working on this day
 
                 # Deterministic seed per agent + day for reproducible variability
                 day_seed = (
-                    self.seed
+                    base_seed
                     + (agent_idx * 1000)
                     + (day.year * 10000)
                     + (day.month * 100)
@@ -329,7 +404,7 @@ class DemoSeptemberGenerator:
                         current_sec_offset += rng.randint(1800, 2700)
 
                     call_ts = shift_start_dt + timedelta(seconds=current_sec_offset)
-                    call_id = f"demo_sep26_{config.agent_code}_{day.strftime('%Y%m%d')}_{seq:03d}"
+                    call_id = f"{call_id_prefix}_{config.agent_code}_{day.strftime('%Y%m%d')}_{seq:03d}"
 
                     planned_calls.append({
                         "call_id": call_id,
@@ -597,6 +672,7 @@ class DemoSeptemberGenerator:
             select(User).where(User.company_id == self.company_id, User.role == "agent")
         )
         agents_by_code = {u.agent_initials: u for u in users_res.scalars().all()}
+        is_oct = batch_name.lower() in ("october", "oct")
 
         # Build payload rows
         full_records: List[Dict[str, Any]] = []
@@ -626,13 +702,20 @@ class DemoSeptemberGenerator:
             # Compute realistic score & criteria
             from scripts.seed_demo_data import build_agent_profile
             prof = build_agent_profile(p["agent_index"], tm)
+            if is_oct:
+                day_offset = (p["call_date"] - date(2026, 9, 24)).days
+                total_days = 15
+            else:
+                day_offset = (p["call_date"] - date(2026, 9, 1)).days
+                total_days = 23
+
             eval_data = compute_call_evaluation(
                 prof,
-                day_offset=(p["call_date"] - date(2026, 9, 1)).days,
+                day_offset=day_offset,
                 chosen_typo=chosen_typo,
                 struct=struct,
                 rng=rng,
-                total_days=23,
+                total_days=total_days,
             )
 
             # Direction

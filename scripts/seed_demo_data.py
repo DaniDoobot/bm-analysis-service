@@ -1903,7 +1903,7 @@ def parse_args():
     parser.add_argument("--company-id", type=int, default=None, help="Target demo company ID (defaults to finding 'empresa-demo')")
     parser.add_argument("--dry-run", action="store_true", default=False, help="Roll back transaction without committing changes (default for --batch)")
     parser.add_argument("--apply", action="store_true", default=False, help="Commit generated data to database")
-    parser.add_argument("--batch", choices=["pilot", "scale", "final", "all"], default=None, help="Execute September 2026 shift-based batch: pilot, scale, final, all")
+    parser.add_argument("--batch", choices=["pilot", "scale", "final", "all", "october"], default=None, help="Execute September/October 2026 shift-based batch: pilot, scale, final, all, october")
     parser.add_argument("--chunk-size", type=int, default=600, help="Batch chunk size for bulk database inserts (default: 600)")
     parser.add_argument("--only", choices=["analytics", "training", "trainer", "all"], default="all", help="Subset of demo data to seed (legacy mode)")
     parser.add_argument("--validate", action="store_true", default=False, help="Run validation assertions after seeding (legacy mode)")
@@ -1912,9 +1912,10 @@ def parse_args():
 
 
 def print_batch_dry_run_report(summary: Dict[str, Any]):
-    """Format and display detailed statistical dry-run report for September 2026 batches."""
+    """Format and display detailed statistical dry-run report for September/October 2026 batches."""
+    b_name = summary['batch'].upper()
     print("\n" + "=" * 80)
-    print(f"SEPTEMBER 2026 BATCH DRY RUN: '{summary['batch'].upper()}'")
+    print(f"DEMO DATA BATCH DRY RUN: '{b_name}'")
     print(f"Target Company ID: {summary['company_id']} (Empresa Demo)")
     print("=" * 80)
     dr = summary.get("date_range", {})
