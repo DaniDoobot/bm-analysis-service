@@ -279,6 +279,102 @@ class TestServiceScopedAnalysisRegressions(unittest.IsolatedAsyncioTestCase):
             s_keys = [s["criterion_key"] for s in strengths]
             self.assertIn("score_paciente", s_keys)
             self.assertNotIn("empatia", s_keys)
+            self.assertEqual(strengths[0]["score"], 8.5)
+            self.assertEqual(strengths[0]["avg_score"], 8.5)
+            self.assertEqual(strengths[0]["count"], 2)
+            self.assertEqual(strengths[0]["analysis_count"], 2)
+
+    async def test_get_agent_evolution_expac_strengths_weaknesses_schema_serialization(self):
+        """12. AgentStrengthWeaknessItem serializes avg_score, score, count and analysis_count without 'Sin datos'."""
+        from app.schemas.dashboard import AgentStrengthWeaknessItem
+
+        mock_db = AsyncMock(spec=AsyncSession)
+
+        row = MagicMock()
+        row.is_evaluable = True
+        row.call_timestamp = None
+        row.analysis_timestamp = None
+        row.result_json = {
+            "palabras_minuto_agente": 130.0,
+            "velocidad_hablando_agente": 8.0,
+            "claridad": 7.0,
+            "satisfaccion_final": 8.0,
+            "siguiente_paso": 8.0,
+        }
+        row.items_json = [
+            {"criterion_key": "palabras_minuto_agente", "numeric_value": 130.0},
+            {"criterion_key": "velocidad_hablando_agente", "value": 8.0},
+            {"criterion_key": "claridad", "value": 7.0},
+            {"criterion_key": "satisfaccion_final", "score": 8.0},
+            {"criterion_key": "siguiente_paso", "valor": 8.0},
+        ]
+        row.evaluacion_global = 8.0
+        row.agent_name = "Agente EXPAC"
+
+        exec_mock = MagicMock()
+        exec_mock.scalars.return_value.all.return_value = [row]
+        mock_db.execute.return_value = exec_mock
+
+        expac_options = [
+            {"key": "palabras_minuto_agente", "label": "Palabras minuto agente", "type": "number"},
+            {"key": "velocidad_hablando_agente", "label": "Velocidad hablando Agente", "type": "score"},
+            {"key": "claridad", "label": "Claridad", "type": "score"},
+            {"key": "satisfaccion_final", "label": "Satisfacción final", "type": "score"},
+            {"key": "siguiente_paso", "label": "Siguiente paso", "type": "score"},
+        ]
+        with patch("app.utils.item_score_filters.get_evaluation_item_filter_options", new=AsyncMock(return_value=expac_options)), \
+             patch("app.utils.service_resolvers.resolve_service_id", new=AsyncMock(return_value=(2, "expac"))), \
+             patch("app.utils.agent_resolvers.resolve_agent_identifiers_to_owner_ids", new=AsyncMock(return_value=["12345"])):
+
+            res = await get_agent_evolution(
+                db=mock_db,
+                hubspot_owner_id="12345",
+                service_id=2,
+                company_id=1,
+            )
+
+            strengths = res.get("strengths", [])
+            self.assertEqual(len(strengths), 5)
+            for s in strengths:
+                self.assertIsNotNone(s.get("avg_score"))
+                self.assertIsNotNone(s.get("score"))
+                self.assertEqual(s.get("avg_score"), s.get("score"))
+                self.assertEqual(s.get("analysis_count"), 1)
+                self.assertEqual(s.get("count"), 1)
+
+                pydantic_item = AgentStrengthWeaknessItem(**s)
+                self.assertIsNotNone(pydantic_item.avg_score)
+                self.assertIsNotNone(pydantic_item.score)
+                self.assertEqual(pydantic_item.analysis_count, 1)
+                self.assertEqual(pydantic_item.count, 1)
+
+    async def test_extract_score_from_mass_preserves_zero_and_numeric_value(self):
+        """13. extract_score_from_mass correctly extracts 0.0 scores, numeric_value, and case-insensitive keys."""
+        from app.services.dashboard_service import extract_score_from_mass
+
+        # 1. Zero score preserved (not converted to None via truthy checks)
+        score_zero = extract_score_from_mass(
+            result_json={},
+            items_json=[{"criterion_key": "claridad", "value": 0.0}],
+            key="claridad"
+        )
+        self.assertEqual(score_zero, 0.0)
+
+        # 2. numeric_value field preserved
+        score_num = extract_score_from_mass(
+            result_json={},
+            items_json=[{"criterion_key": "palabras_minuto_agente", "numeric_value": 142.5}],
+            key="palabras_minuto_agente"
+        )
+        self.assertEqual(score_num, 142.5)
+
+        # 3. Case-insensitive key matching
+        score_case = extract_score_from_mass(
+            result_json={"Palabras_Minuto_Agente": 135.0},
+            items_json=[],
+            key="palabras_minuto_agente"
+        )
+        self.assertEqual(score_case, 135.0)
 
     async def test_get_analytics_items_service_scoping(self):
         """11. get_analytics_items in analytics_service injects CRITERIA_NAMES only for Front (service_id=1/None)."""

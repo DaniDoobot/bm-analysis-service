@@ -212,7 +212,9 @@ class AgentStrengthWeaknessItem(BaseModel):
     criterion_key: str
     criterion_name: str
     avg_score: float | None = None
+    score: float | None = None
     analysis_count: int = 0
+    count: int = 0
 
 
 class AgentLatestAnalysisItem(BaseModel):

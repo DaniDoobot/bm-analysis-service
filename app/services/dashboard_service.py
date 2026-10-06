@@ -306,6 +306,12 @@ def extract_score_from_mass(result_json: Any, items_json: Any, key: str, is_fall
     val = None
     if result_json and isinstance(result_json, dict):
         val = result_json.get(key)
+        if val is None:
+            k_lower = key.lower()
+            for rk, rv in result_json.items():
+                if isinstance(rk, str) and rk.lower() == k_lower:
+                    val = rv
+                    break
         if val is None and key == "sentiment":
             val = result_json.get("sentimiento") or result_json.get("evaluacion_sentimiento")
         if val is None and key == "procedimiento":
@@ -318,7 +324,7 @@ def extract_score_from_mass(result_json: Any, items_json: Any, key: str, is_fall
                 val = 10.0 if val else 0.0
             try:
                 if isinstance(val, dict):
-                    for sk in ["score", "valor", "value", "puntuacion"]:
+                    for sk in ["score", "valor", "value", "puntuacion", "numeric_value", "val"]:
                         v_sub = val.get(sk)
                         if v_sub is not None:
                             if isinstance(v_sub, bool):
@@ -348,8 +354,12 @@ def extract_score_from_mass(result_json: Any, items_json: Any, key: str, is_fall
             if not isinstance(item, dict):
                 continue
             item_key = item.get("key") or item.get("criterion_key") or item.get("output_key")
-            if item_key == key:
-                v = item.get("value") or item.get("score") or item.get("valor")
+            if item_key and str(item_key).strip().lower() == str(key).strip().lower():
+                v = item.get("numeric_value") if item.get("numeric_value") is not None else (
+                    item.get("value") if item.get("value") is not None else (
+                        item.get("score") if item.get("score") is not None else item.get("valor")
+                    )
+                )
                 if v is not None:
                     if isinstance(v, bool):
                         return 10.0 if v else 0.0
@@ -2006,17 +2016,20 @@ async def get_agent_evolution(
         if key in ["evaluacion_global", "sentiment"]:
             continue
         av, av_count = get_avg_score_and_count_mass(rows, key)
-        if av is not None:
+        if av is not None and av_count > 0:
+            score_val = to_float(av)
             criteria_scores.append({
                 "criterion_key": key,
                 "criterion_name": name,
-                "score": to_float(av),
+                "score": score_val,
+                "avg_score": score_val,
                 "count": av_count,
-                "type": "strength" if av >= 7.0 else ("weakness" if av < 5.0 else "neutral"),
+                "analysis_count": av_count,
+                "type": "strength" if score_val >= 7.0 else ("weakness" if score_val < 5.0 else "neutral"),
             })
 
-    strengths  = sorted(criteria_scores, key=lambda x: x["score"], reverse=True)[:5]
-    weaknesses = sorted(criteria_scores, key=lambda x: x["score"])[:5]
+    strengths  = sorted(criteria_scores, key=lambda x: x["avg_score"], reverse=True)[:5]
+    weaknesses = sorted(criteria_scores, key=lambda x: x["avg_score"])[:5]
 
     # ── Latest 10 analyses ────────────────────────────────────────────────────
     sorted_desc = sorted(rows, key=lambda r: _effective_ts(r) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
