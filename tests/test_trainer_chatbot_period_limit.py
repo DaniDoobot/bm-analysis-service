@@ -293,7 +293,7 @@ class TestTrainerChatbotPeriodLimit(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(mock_llm.called)
             called_messages = mock_llm.call_args[1]["messages"]
             system_prompt = next(m["content"] for m in called_messages if m["role"] == "system")
-            self.assertIn("PERFIL HISTÓRICO Y EVOLUCIÓN COMPLETA DEL AGENTE", system_prompt)
+            self.assertIn("PERFIL HISTÓRICO Y EVOLUCIÓN DEL AGENTE (ÚLTIMOS 30 DÍAS)", system_prompt)
 
     # 12. Admin respeta la misma lógica
     async def test_12_admin_mode_logic(self):

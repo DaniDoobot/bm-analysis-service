@@ -13,7 +13,7 @@ from typing import Any, List, Optional, Tuple
 
 from fastapi import HTTPException, UploadFile, status
 from starlette.datastructures import UploadFile as StarletteUploadFile
-from sqlalchemy import and_, desc, select
+from sqlalchemy import and_, desc, or_, select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -131,6 +131,14 @@ ADMIN_BLOCKING_MSG = (
     "de máximo 15 días (por ejemplo, una quincena o dos semanas concretas)."
 )
 
+AGENT_GLOBAL_PERIOD_BLOCKING_MSG = (
+    "Puedo analizar periodos de hasta 30 días. Indícame un periodo más corto, por ejemplo los últimos 7, 15 o 30 días."
+)
+
+ADMIN_GLOBAL_PERIOD_BLOCKING_MSG = (
+    "Puedo analizar periodos de hasta 30 días para el agente. Por favor, acota la consulta a un intervalo de máximo 30 días (por ejemplo, los últimos 7, 15 o 30 días)."
+)
+
 AGENT_CLARIFICATION_MSG = (
     "Por favor, indícame las fechas o el tramo concreto que deseas analizar "
     "(con un máximo de 15 días) para revisarlo en detalle."
@@ -153,6 +161,7 @@ class DetailedPeriodResult:
     blocking_message: Optional[str] = None
     clarification_needed: bool = False
     is_fortnight: bool = False
+    is_global_limit: bool = False
 
 
 class TrainerChatbotService:
@@ -411,23 +420,12 @@ class TrainerChatbotService:
         target_agent_id: str,
     ) -> str:
         """
-        Builds a compact, structured historical profile covering the agent's entire available
-        history: real calls evaluations, criteria trends, past training cycles with objectives
-        (achieved/unachieved), and roleplay simulations feedback.
+        Builds a compact, structured historical profile covering the agent's performance
+        strictly bounded to the last 30 days: real calls evaluations, criteria trends,
+        recent training cycles with objectives, and roleplay simulations feedback.
+        Guarantees that period="all" is never called for general historical queries.
         """
-        evolution_all: Optional[dict[str, Any]] = None
         evolution_recent: Optional[dict[str, Any]] = None
-        try:
-            evolution_all = await get_agent_evolution(
-                db=db,
-                hubspot_owner_id=target_agent_id,
-                period="all",
-                company_id=context.company_id,
-                context=context,
-            )
-        except Exception as e:
-            logger.warning("Error fetching complete agent evolution for %s: %s", target_agent_id, e)
-
         try:
             evolution_recent = await get_agent_evolution(
                 db=db,
@@ -437,18 +435,24 @@ class TrainerChatbotService:
                 context=context,
             )
         except Exception as e:
-            logger.warning("Error fetching recent agent evolution for %s: %s", target_agent_id, e)
+            logger.warning("Error fetching 30d agent evolution for %s: %s", target_agent_id, e)
+
+        cutoff_30d = datetime.now(timezone.utc) - timedelta(days=30)
 
         reports: list[TrainingAgentReport] = []
         try:
             stmt_rep = select(TrainingAgentReport).where(
-                TrainingAgentReport.hubspot_owner_id == target_agent_id
+                TrainingAgentReport.hubspot_owner_id == target_agent_id,
+                or_(
+                    TrainingAgentReport.period_end >= cutoff_30d,
+                    and_(TrainingAgentReport.period_end.is_(None), TrainingAgentReport.created_at >= cutoff_30d),
+                ),
             )
             if context.company_id is not None:
                 stmt_rep = stmt_rep.where(TrainingAgentReport.company_id == context.company_id)
             elif not context.is_super_admin and context.allowed_company_ids:
                 stmt_rep = stmt_rep.where(TrainingAgentReport.company_id.in_(context.allowed_company_ids))
-            stmt_rep = stmt_rep.order_by(TrainingAgentReport.created_at.asc())
+            stmt_rep = stmt_rep.order_by(TrainingAgentReport.created_at.asc()).limit(20)
             res_rep = await db.execute(stmt_rep)
             reports = list(res_rep.scalars().all())
         except Exception as e:
@@ -460,57 +464,51 @@ class TrainerChatbotService:
                 selectinload(TrainerSession.evaluation)
             ).where(
                 TrainerSession.agent_id == target_agent_id,
+                TrainerSession.created_at >= cutoff_30d,
             )
             if context.company_id is not None:
                 stmt_sess = stmt_sess.where(TrainerSession.company_id == context.company_id)
             elif not context.is_super_admin and context.allowed_company_ids:
                 stmt_sess = stmt_sess.where(TrainerSession.company_id.in_(context.allowed_company_ids))
-            stmt_sess = stmt_sess.order_by(TrainerSession.created_at.asc())
+            stmt_sess = stmt_sess.order_by(TrainerSession.created_at.asc()).limit(50)
             res_sess = await db.execute(stmt_sess)
             sessions = list(res_sess.scalars().all())
         except Exception as e:
             logger.warning("Error fetching trainer sessions for %s: %s", target_agent_id, e)
 
-        summary_all = evolution_all.get("summary") if evolution_all and isinstance(evolution_all.get("summary"), dict) else {}
-        trend_all = evolution_all.get("trend") if evolution_all and isinstance(evolution_all.get("trend"), dict) else {}
-        total_calls = int(summary_all.get("total_analyses", 0))
+        summary = evolution_recent.get("summary") if evolution_recent and isinstance(evolution_recent.get("summary"), dict) else {}
+        trend = evolution_recent.get("trend") if evolution_recent and isinstance(evolution_recent.get("trend"), dict) else {}
+        total_calls = int(summary.get("total_analyses", 0))
 
         if total_calls == 0 and not reports and not sessions:
             return (
-                "--- PERFIL HISTÓRICO Y EVOLUCIÓN COMPLETA DEL AGENTE ---\n"
-                "No existen evaluaciones históricas de llamadas reales, ciclos formativos ni simulaciones registradas para este agente en la empresa.\n"
-                "--------------------------------------------------------"
+                "--- PERFIL HISTÓRICO Y EVOLUCIÓN DEL AGENTE (ÚLTIMOS 30 DÍAS) ---\n"
+                "No existen evaluaciones de llamadas reales, ciclos formativos ni simulaciones registradas para este agente en los últimos 30 días.\n"
+                "-----------------------------------------------------------------"
             )
 
-        sections = ["--- PERFIL HISTÓRICO Y EVOLUCIÓN COMPLETA DEL AGENTE ---"]
+        sections = ["--- PERFIL HISTÓRICO Y EVOLUCIÓN DEL AGENTE (ÚLTIMOS 30 DÍAS) ---"]
 
         # 1. Resumen general de llamadas reales
         if total_calls > 0:
-            avg_all = summary_all.get("avg_evaluacion_global")
-            delta_val = trend_all.get("evaluacion_global_delta_first_last", 0.0) or 0.0
-            delta_pct = trend_all.get("evaluacion_global_delta_pct", 0.0) or 0.0
-            direction = trend_all.get("evaluacion_global_direction", "stable")
-            interpretation = trend_all.get("interpretation", "")
+            avg_score = summary.get("avg_evaluacion_global")
+            delta_val = trend.get("evaluacion_global_delta_first_last", 0.0) or 0.0
+            delta_pct = trend.get("evaluacion_global_delta_pct", 0.0) or 0.0
+            direction = trend.get("evaluacion_global_direction", "stable")
+            interpretation = trend.get("interpretation", "")
 
-            summary_recent = evolution_recent.get("summary") if evolution_recent and isinstance(evolution_recent.get("summary"), dict) else {}
-            recent_calls = int(summary_recent.get("total_analyses", 0))
-            recent_avg = summary_recent.get("avg_evaluacion_global")
-
-            sections.append("#### 1. Resumen de Evaluaciones en Llamadas Reales")
-            sections.append(f"- Total histórico de llamadas evaluadas: {total_calls} llamadas (todo el histórico disponible sin restricción de 90 días).")
-            avg_all_str = f"{avg_all:.2f}/10" if avg_all is not None else "Sin nota"
-            sections.append(f"- Puntuación media histórica global: {avg_all_str}.")
-
-            if recent_calls > 0 and recent_avg is not None:
-                sections.append(f"- Puntuación media en los últimos 30 días: {recent_avg:.2f}/10 ({recent_calls} llamadas recientes).")
+            sections.append("#### 1. Resumen de Evaluaciones en Llamadas Reales (Últimos 30 días)")
+            sections.append(f"- Total de llamadas evaluadas en los últimos 30 días: {total_calls} llamadas.")
+            avg_score_str = f"{avg_score:.2f}/10" if avg_score is not None else "Sin nota"
+            sections.append(f"- Puntuación media en los últimos 30 días: {avg_score_str}.")
 
             sign = "+" if delta_val > 0 else ""
-            sections.append(f"- Tendencia global: {direction} ({sign}{delta_val:.1f} puntos / {sign}{delta_pct:.1f}%). {interpretation}")
+            sections.append(f"- Tendencia en el periodo: {direction} ({sign}{delta_val:.1f} puntos / {sign}{delta_pct:.1f}%). {interpretation}")
 
             # 2. Fortalezas consistentes
-            strengths = evolution_all.get("strengths", [])
+            strengths = evolution_recent.get("strengths", [])
             if strengths:
-                sections.append("\n#### 2. Fortalezas Recurrentes y Consistentes (Criterios con mejor desempeño)")
+                sections.append("\n#### 2. Fortalezas Recurrentes en el Periodo (Criterios con mejor desempeño)")
                 for s in strengths[:4]:
                     crit_name = s.get("criterion_name") or s.get("criterion_key", "")
                     sc = s.get("score")
@@ -519,9 +517,9 @@ class TrainerChatbotService:
                     sections.append(f"- [Fortaleza] {crit_name}: nota media {sc_str} ({cnt} llamadas evaluadas).")
 
             # 3. Áreas de mejora recurrentes
-            weaknesses = evolution_all.get("weaknesses", [])
+            weaknesses = evolution_recent.get("weaknesses", [])
             if weaknesses:
-                sections.append("\n#### 3. Errores y Criterios Recurrentes con Mayor Dificultad (Foco de mejora)")
+                sections.append("\n#### 3. Errores y Criterios con Mayor Dificultad (Foco de mejora)")
                 for w in weaknesses[:4]:
                     crit_name = w.get("criterion_name") or w.get("criterion_key", "")
                     sc = w.get("score")
@@ -530,9 +528,9 @@ class TrainerChatbotService:
                     sections.append(f"- [Área de mejora recurrente] {crit_name}: nota media {sc_str} ({cnt} llamadas evaluadas).")
 
             # 4. Evolución por criterios
-            criteria_ev = evolution_all.get("criteria_evolution", [])
+            criteria_ev = evolution_recent.get("criteria_evolution", [])
             if criteria_ev:
-                sections.append("\n#### 4. Evolución Temporal por Criterios (Trayectoria completa)")
+                sections.append("\n#### 4. Evolución Temporal por Criterios en el Periodo")
                 for c in criteria_ev:
                     crit_name = c.get("criterion_name") or c.get("criterion_key", "")
                     f_avg = c.get("first_avg")
@@ -547,15 +545,14 @@ class TrainerChatbotService:
                         )
         else:
             sections.append("#### 1. Evaluaciones de Llamadas Reales")
-            sections.append("- No constan llamadas reales auditadas en el sistema para este agente.")
+            sections.append("- No constan llamadas reales auditadas en los últimos 30 días para este agente.")
 
-        # 5. Ciclos de formación y objetivos (Histórico Completo)
+        # 5. Ciclos de formación y objetivos
         if reports:
             total_cycles = len(reports)
             completed_cycles = sum(1 for r in reports if r.status == "completed")
             active_cycles = sum(1 for r in reports if r.status in ("in_progress", "pending_approval", "pending"))
 
-            # Chronological order for trajectory
             reports_chrono = sorted(
                 reports,
                 key=lambda r: (r.period_start or r.created_at or datetime.min.replace(tzinfo=timezone.utc))
@@ -569,7 +566,7 @@ class TrainerChatbotService:
                 delta_s = round(last_s - first_s, 2)
                 d_sign = "+" if delta_s > 0 else ""
                 s_dir = "mejora" if delta_s > 0.2 else ("caída" if delta_s < -0.2 else "estable")
-                evolution_str = f"- Evolución media en ciclos: de {first_s:.1f}/10 (primeros ciclos) a {last_s:.1f}/10 (últimos ciclos) ({d_sign}{delta_s:.1f}, {s_dir})."
+                evolution_str = f"- Evolución media en ciclos: de {first_s:.1f}/10 (primeros ciclos del periodo) a {last_s:.1f}/10 (últimos ciclos) ({d_sign}{delta_s:.1f}, {s_dir})."
             elif cycle_scores:
                 evolution_str = f"- Nota media global en ciclos formativos: {sum(cycle_scores)/len(cycle_scores):.1f}/10."
 
@@ -616,22 +613,22 @@ class TrainerChatbotService:
                 elif r.evolution_summary:
                     accumulated_recommendations.append(r.evolution_summary.strip()[:180])
 
-            sections.append(f"\n#### 5. Histórico de Ciclos de Formación ({total_cycles} ciclos registrados)")
-            sections.append(f"- Resumen de ciclos: {total_cycles} ciclos analizados ({completed_cycles} completados, {active_cycles} en curso/pendientes).")
+            sections.append(f"\n#### 5. Ciclos de Formación en el Periodo ({total_cycles} ciclos registrados)")
+            sections.append(f"- Resumen de ciclos en los últimos 30 días: {total_cycles} ciclos analizados ({completed_cycles} completados, {active_cycles} en curso/pendientes).")
             if evolution_str:
                 sections.append(evolution_str)
-            sections.append(f"- Balance global de objetivos: {superados_count} superados acumulados | {no_superados_count} no superados acumulados.")
+            sections.append(f"- Balance de objetivos en el periodo: {superados_count} superados acumulados | {no_superados_count} no superados acumulados.")
 
             if failed_objs_freq:
                 sorted_failed = sorted(failed_objs_freq.items(), key=lambda x: x[1], reverse=True)
-                sections.append("- Objetivos no superados y áreas recurrentes de dificultad en ciclos:")
+                sections.append("- Objetivos no superados y áreas de dificultad en ciclos:")
                 for o_name, count in sorted_failed[:4]:
                     repeat_note = f" (no superado en {count} ciclos)" if count > 1 else ""
                     sections.append(f"  * [NO SUPERADO]{repeat_note} {o_name}")
 
             if passed_objs_freq:
                 sorted_passed = sorted(passed_objs_freq.items(), key=lambda x: x[1], reverse=True)
-                sections.append("- Objetivos consolidados y superados con consistencia:")
+                sections.append("- Objetivos consolidados y superados en el periodo:")
                 for o_name, count in sorted_passed[:3]:
                     repeat_note = f" (superado en {count} ciclos)" if count > 1 else ""
                     sections.append(f"  * [SUPERADO]{repeat_note} {o_name}")
@@ -670,7 +667,7 @@ class TrainerChatbotService:
                         j_compact = f" — {o_just[:100]}..." if len(o_just) > 100 else (f" — {o_just}" if o_just else "")
                         sections.append(f"    * [{o_st}] {o_title}{sc_info}{j_compact}")
 
-        # 6. Histórico de Simulaciones de Roleplay (Histórico Completo)
+        # 6. Histórico de Simulaciones de Roleplay en el Periodo
         if sessions:
             all_sessions = sessions
             completed_sessions = [s for s in all_sessions if s.status == "completed"]
@@ -688,9 +685,6 @@ class TrainerChatbotService:
             strengths_freq: dict[str, int] = {}
             recent_feedback: list[str] = []
 
-            # RENDIMIENTO: Las sesiones incompletas NO deben participar en métricas de rendimiento
-            # (medias de puntuación, evolución, fortalezas, debilidades, patrones cualitativos ni feedback).
-            # Solo iteramos sobre completed_sessions.
             completed_chrono = sorted(
                 completed_sessions,
                 key=lambda s: s.created_at or datetime.min.replace(tzinfo=timezone.utc)
@@ -733,9 +727,9 @@ class TrainerChatbotService:
                 if ev.summary and ev.summary.strip():
                     recent_feedback.append(ev.summary.strip())
 
-            sections.append(f"\n#### 6. Histórico de Simulaciones de Roleplay ({completed_simulations} completadas)")
+            sections.append(f"\n#### 6. Simulaciones de Roleplay en el Periodo ({completed_simulations} completadas)")
             sections.append(
-                "- Desglose de simulaciones:\n"
+                "- Desglose de simulaciones en los últimos 30 días:\n"
                 f"  * Simulaciones registradas/iniciadas: {total_simulations}\n"
                 f"  * Simulaciones completadas: {completed_simulations}\n"
                 f"  * Simulaciones evaluadas con nota: {evaluated_simulations}\n"
@@ -1178,8 +1172,86 @@ class TrainerChatbotService:
                 return int(clean_str)
             return SPANISH_WORDS_NUM.get(clean_str)
 
+        def _has_detailed_intent(text: str) -> bool:
+            patterns = [
+                r"\b(?:en\s+detalle|con\s+detalle|al\s+detalle|detallad[oa]s?|detalles?)\b",
+                r"\b(?:todas\s+(?:las|mis)\s+llamadas|cada\s+llamada|llamada\s+por\s+llamada)\b",
+                r"\b(?:revisa\s+(?:mis\s+|las\s+)?llamadas|analiza\s+(?:mis\s+|las\s+)?llamadas)\b",
+                r"\b(?:audita|auditor[ií]a|desglosa|desglose)\b",
+                r"\b(?:profundizar|a\s+fondo|uno\s+a\s+uno|una\s+a\s+una)\b",
+            ]
+            return any(re.search(pat, text) for pat in patterns)
+
+        # 0. Global 30-day hard limit checks (unequivocally > 30 days)
+        # Broad history or starting point: "todo mi histórico", "desde que empecé", "desde el inicio", etc.
+        all_history_match = re.search(
+            r"\b(?:todo\s+(?:el\s+|mi\s+)?hist[oó]rico|todas\s+(?:las|mis)?\s*(?:evaluaciones|llamadas|simulaciones)|desde\s+que\s+(?:empec[eé]|entr[eé])|desde\s+el\s+(?:inicio|principio)|desde\s+mis\s+inicios)\b",
+            q,
+        )
+        if all_history_match:
+            return DetailedPeriodResult(
+                is_detailed_period_request=True,
+                exceeds_limit=True,
+                is_global_limit=True,
+                period_days=999,
+                raw_expression=all_history_match.group(0),
+                blocking_message=ADMIN_GLOBAL_PERIOD_BLOCKING_MSG if is_admin else AGENT_GLOBAL_PERIOD_BLOCKING_MSG,
+            )
+
+        # Year expressions: "este año", "el año pasado", "último año", "año 2025", etc.
+        year_match = re.search(
+            r"\b(?:este\s+año|el\s+año\s+pasado|el\s+[uú]ltimo\s+año|[uú]ltimo\s+año|año\s+\d{4})\b",
+            q,
+        )
+        if year_match:
+            return DetailedPeriodResult(
+                is_detailed_period_request=True,
+                exceeds_limit=True,
+                is_global_limit=True,
+                period_days=365,
+                raw_expression=year_match.group(0),
+                blocking_message=ADMIN_GLOBAL_PERIOD_BLOCKING_MSG if is_admin else AGENT_GLOBAL_PERIOD_BLOCKING_MSG,
+            )
+
+        # "desde <mes>" (e.g. "desde enero"): calculate days between month start and ref_dt
+        desde_month_match = re.search(
+            r"\bdesde\s+([a-záéíóú]+)\b",
+            q,
+        )
+        if desde_month_match:
+            dm_name = desde_month_match.group(1).lower()
+            if dm_name in SPANISH_MONTHS:
+                dm_num = SPANISH_MONTHS[dm_name]
+                dm_year = ref_dt.year if dm_num <= ref_dt.month else (ref_dt.year - 1)
+                dm_start = datetime(dm_year, dm_num, 1, 0, 0, 0, tzinfo=timezone.utc)
+                diff_days = (ref_dt.date() - dm_start.date()).days + 1
+                if diff_days > 30:
+                    return DetailedPeriodResult(
+                        is_detailed_period_request=True,
+                        exceeds_limit=True,
+                        is_global_limit=True,
+                        period_days=diff_days,
+                        raw_expression=desde_month_match.group(0),
+                        blocking_message=ADMIN_GLOBAL_PERIOD_BLOCKING_MSG if is_admin else AGENT_GLOBAL_PERIOD_BLOCKING_MSG,
+                    )
+
+        # Multiple months: e.g. "junio y julio", "mayo a julio" (> 30 days)
+        month_names_pattern = "|".join(SPANISH_MONTHS.keys())
+        m_multi_month = re.search(
+            rf"\b({month_names_pattern})\s+(?:y|e|a|hasta)\s+({month_names_pattern})\b",
+            q,
+        )
+        if m_multi_month:
+            return DetailedPeriodResult(
+                is_detailed_period_request=True,
+                exceeds_limit=True,
+                is_global_limit=True,
+                period_days=60,
+                raw_expression=m_multi_month.group(0),
+                blocking_message=ADMIN_GLOBAL_PERIOD_BLOCKING_MSG if is_admin else AGENT_GLOBAL_PERIOD_BLOCKING_MSG,
+            )
+
         # 1. Explicit ranges: "del X al Y de <mes>" or "entre el X y el Y de <mes>"
-        # Pattern A: same month: "del 1 al 15 de junio [de 2026]"
         m_range = re.search(
             r"\b(?:del?|desde\s+el)\s+(\d{1,2})\s+(?:al?|hasta\s+el)\s+(\d{1,2})\s+de\s+([a-záéíóú]+)(?:\s+(?:de\s+|del\s+)?(\d{4}))?\b",
             q,
@@ -1206,10 +1278,22 @@ class TrainerChatbotService:
                 start_dt = datetime(year, month_num, d1, 0, 0, 0, tzinfo=timezone.utc)
                 end_dt = datetime(year, month_num, d2, 23, 59, 59, tzinfo=timezone.utc)
                 span_days = (end_dt.date() - start_dt.date()).days + 1
+                if span_days > 30:
+                    return DetailedPeriodResult(
+                        is_detailed_period_request=True,
+                        exceeds_limit=True,
+                        is_global_limit=True,
+                        start_date=start_dt,
+                        end_date=end_dt,
+                        period_days=span_days,
+                        raw_expression=m_range.group(0),
+                        blocking_message=ADMIN_GLOBAL_PERIOD_BLOCKING_MSG if is_admin else AGENT_GLOBAL_PERIOD_BLOCKING_MSG,
+                    )
                 exceeds = span_days > 15
                 return DetailedPeriodResult(
                     is_detailed_period_request=True,
                     exceeds_limit=exceeds,
+                    is_global_limit=False,
                     start_date=start_dt,
                     end_date=end_dt,
                     period_days=span_days,
@@ -1217,7 +1301,7 @@ class TrainerChatbotService:
                     blocking_message=(ADMIN_BLOCKING_MSG if is_admin else AGENT_BLOCKING_MSG) if exceeds else None,
                 )
 
-        # Pattern B: cross months: "del 25 de mayo al 5 de junio"
+        # Cross months: "del 25 de mayo al 5 de junio"
         m_cross = re.search(
             r"\b(?:del?|desde\s+el)\s+(\d{1,2})\s+de\s+([a-záéíóú]+)\s+(?:al?|hasta\s+el)\s+(\d{1,2})\s+de\s+([a-záéíóú]+)(?:\s+(?:de\s+|del\s+)?(\d{4}))?\b",
             q,
@@ -1242,10 +1326,22 @@ class TrainerChatbotService:
                 if start_dt > end_dt:
                     start_dt, end_dt = end_dt, start_dt
                 span_days = (end_dt.date() - start_dt.date()).days + 1
+                if span_days > 30:
+                    return DetailedPeriodResult(
+                        is_detailed_period_request=True,
+                        exceeds_limit=True,
+                        is_global_limit=True,
+                        start_date=start_dt,
+                        end_date=end_dt,
+                        period_days=span_days,
+                        raw_expression=m_cross.group(0),
+                        blocking_message=ADMIN_GLOBAL_PERIOD_BLOCKING_MSG if is_admin else AGENT_GLOBAL_PERIOD_BLOCKING_MSG,
+                    )
                 exceeds = span_days > 15
                 return DetailedPeriodResult(
                     is_detailed_period_request=True,
                     exceeds_limit=exceeds,
+                    is_global_limit=False,
                     start_date=start_dt,
                     end_date=end_dt,
                     period_days=span_days,
@@ -1298,16 +1394,46 @@ class TrainerChatbotService:
             if n_days is not None:
                 end_dt = ref_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
                 start_dt = (ref_dt - timedelta(days=n_days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
-                exceeds = n_days > 15
-                return DetailedPeriodResult(
-                    is_detailed_period_request=True,
-                    exceeds_limit=exceeds,
-                    start_date=start_dt,
-                    end_date=end_dt,
-                    period_days=n_days,
-                    raw_expression=m_days.group(0),
-                    blocking_message=(ADMIN_BLOCKING_MSG if is_admin else AGENT_BLOCKING_MSG) if exceeds else None,
-                )
+                if n_days > 30:
+                    return DetailedPeriodResult(
+                        is_detailed_period_request=True,
+                        exceeds_limit=True,
+                        is_global_limit=True,
+                        start_date=start_dt,
+                        end_date=end_dt,
+                        period_days=n_days,
+                        raw_expression=m_days.group(0),
+                        blocking_message=ADMIN_GLOBAL_PERIOD_BLOCKING_MSG if is_admin else AGENT_GLOBAL_PERIOD_BLOCKING_MSG,
+                    )
+                elif n_days > 15:
+                    if _has_detailed_intent(q):
+                        return DetailedPeriodResult(
+                            is_detailed_period_request=True,
+                            exceeds_limit=True,
+                            is_global_limit=False,
+                            start_date=start_dt,
+                            end_date=end_dt,
+                            period_days=n_days,
+                            raw_expression=m_days.group(0),
+                            blocking_message=ADMIN_BLOCKING_MSG if is_admin else AGENT_BLOCKING_MSG,
+                        )
+                    else:
+                        return DetailedPeriodResult(
+                            is_detailed_period_request=False,
+                            start_date=start_dt,
+                            end_date=end_dt,
+                            period_days=n_days,
+                            raw_expression=m_days.group(0),
+                        )
+                else:
+                    return DetailedPeriodResult(
+                        is_detailed_period_request=True,
+                        exceeds_limit=False,
+                        start_date=start_dt,
+                        end_date=end_dt,
+                        period_days=n_days,
+                        raw_expression=m_days.group(0),
+                    )
 
         # 4. Relative expressions: "últimas/os N semanas" / "última semana" / "esta semana" / "la semana pasada"
         m_weeks = re.search(
@@ -1327,16 +1453,46 @@ class TrainerChatbotService:
             n_days = n_weeks * 7
             end_dt = ref_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
             start_dt = (ref_dt - timedelta(days=n_days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
-            exceeds = n_days > 15
-            return DetailedPeriodResult(
-                is_detailed_period_request=True,
-                exceeds_limit=exceeds,
-                start_date=start_dt,
-                end_date=end_dt,
-                period_days=n_days,
-                raw_expression=m_weeks.group(0),
-                blocking_message=(ADMIN_BLOCKING_MSG if is_admin else AGENT_BLOCKING_MSG) if exceeds else None,
-            )
+            if n_days > 30:
+                return DetailedPeriodResult(
+                    is_detailed_period_request=True,
+                    exceeds_limit=True,
+                    is_global_limit=True,
+                    start_date=start_dt,
+                    end_date=end_dt,
+                    period_days=n_days,
+                    raw_expression=m_weeks.group(0),
+                    blocking_message=ADMIN_GLOBAL_PERIOD_BLOCKING_MSG if is_admin else AGENT_GLOBAL_PERIOD_BLOCKING_MSG,
+                )
+            elif n_days > 15:
+                if _has_detailed_intent(q):
+                    return DetailedPeriodResult(
+                        is_detailed_period_request=True,
+                        exceeds_limit=True,
+                        is_global_limit=False,
+                        start_date=start_dt,
+                        end_date=end_dt,
+                        period_days=n_days,
+                        raw_expression=m_weeks.group(0),
+                        blocking_message=ADMIN_BLOCKING_MSG if is_admin else AGENT_BLOCKING_MSG,
+                    )
+                else:
+                    return DetailedPeriodResult(
+                        is_detailed_period_request=False,
+                        start_date=start_dt,
+                        end_date=end_dt,
+                        period_days=n_days,
+                        raw_expression=m_weeks.group(0),
+                    )
+            else:
+                return DetailedPeriodResult(
+                    is_detailed_period_request=True,
+                    exceeds_limit=False,
+                    start_date=start_dt,
+                    end_date=end_dt,
+                    period_days=n_days,
+                    raw_expression=m_weeks.group(0),
+                )
 
         # 5. Relative expressions: "último/s N meses" / "último mes" / "este mes" / "el mes pasado"
         m_months = re.search(
@@ -1354,14 +1510,31 @@ class TrainerChatbotService:
 
         if m_months:
             n_days = n_months * 30
-            exceeds = n_days > 15
-            return DetailedPeriodResult(
-                is_detailed_period_request=True,
-                exceeds_limit=exceeds,
-                period_days=n_days,
-                raw_expression=m_months.group(0),
-                blocking_message=(ADMIN_BLOCKING_MSG if is_admin else AGENT_BLOCKING_MSG) if exceeds else None,
-            )
+            if n_days > 30:
+                return DetailedPeriodResult(
+                    is_detailed_period_request=True,
+                    exceeds_limit=True,
+                    is_global_limit=True,
+                    period_days=n_days,
+                    raw_expression=m_months.group(0),
+                    blocking_message=ADMIN_GLOBAL_PERIOD_BLOCKING_MSG if is_admin else AGENT_GLOBAL_PERIOD_BLOCKING_MSG,
+                )
+            else:
+                if _has_detailed_intent(q):
+                    return DetailedPeriodResult(
+                        is_detailed_period_request=True,
+                        exceeds_limit=True,
+                        is_global_limit=False,
+                        period_days=n_days,
+                        raw_expression=m_months.group(0),
+                        blocking_message=ADMIN_BLOCKING_MSG if is_admin else AGENT_BLOCKING_MSG,
+                    )
+                else:
+                    return DetailedPeriodResult(
+                        is_detailed_period_request=False,
+                        period_days=n_days,
+                        raw_expression=m_months.group(0),
+                    )
 
         # 6. Multiple months: e.g. "junio y julio", "mayo a julio"
         month_names_pattern = "|".join(SPANISH_MONTHS.keys())
@@ -1373,9 +1546,10 @@ class TrainerChatbotService:
             return DetailedPeriodResult(
                 is_detailed_period_request=True,
                 exceeds_limit=True,
+                is_global_limit=True,
                 period_days=60,
                 raw_expression=m_multi_month.group(0),
-                blocking_message=ADMIN_BLOCKING_MSG if is_admin else AGENT_BLOCKING_MSG,
+                blocking_message=ADMIN_GLOBAL_PERIOD_BLOCKING_MSG if is_admin else AGENT_GLOBAL_PERIOD_BLOCKING_MSG,
             )
 
         # 7. Full months: "todo junio", "en junio", "durante junio", "analízame junio", "analiza a este agente durante junio"
@@ -1400,23 +1574,25 @@ class TrainerChatbotService:
                 return DetailedPeriodResult(
                     is_detailed_period_request=True,
                     exceeds_limit=True,
+                    is_global_limit=False,
                     period_days=last_day,
                     raw_expression=matched_month,
                     blocking_message=ADMIN_BLOCKING_MSG if is_admin else AGENT_BLOCKING_MSG,
                 )
 
-        # 8. Broad history analysis request: "todo mi histórico", "todas mis evaluaciones"
+        # 8. Broad history request: "todo mi histórico", "histórico completo", "todo el historial"
         all_history_match = re.search(
-            r"\b(?:todo\s+(?:el\s+|mi\s+)?hist[oó]rico|todas\s+(?:las|mis)?\s*(?:evaluaciones|llamadas|simulaciones))\b",
+            r"\b(?:todo\s+(?:el\s+|mi\s+)?hist[oó]rico|hist[oó]rico\s+completo|todo\s+(?:el\s+|mi\s+)?historial|historial\s+completo)\b",
             q,
         )
-        if all_history_match and any(w in q for w in ["análisis", "analisis", "analiza", "analízame", "analizame", "revisa", "revísame", "revisame", "detalle", "detallado", "detallada"]):
+        if all_history_match:
             return DetailedPeriodResult(
                 is_detailed_period_request=True,
                 exceeds_limit=True,
+                is_global_limit=True,
                 period_days=999,
                 raw_expression=all_history_match.group(0),
-                blocking_message=ADMIN_BLOCKING_MSG if is_admin else AGENT_BLOCKING_MSG,
+                blocking_message=ADMIN_GLOBAL_PERIOD_BLOCKING_MSG if is_admin else AGENT_GLOBAL_PERIOD_BLOCKING_MSG,
             )
 
         # 9. Ambiguous temporal expression without resolvable dates:

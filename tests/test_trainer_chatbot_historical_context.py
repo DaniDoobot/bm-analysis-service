@@ -147,9 +147,9 @@ class TestTrainerChatbotHistoricalContext(unittest.IsolatedAsyncioTestCase):
                 )
                 db.add(eval_row)
 
-            # 2. Training cycles (12 reports total to prove >10 cycles work and oldest influence profile)
+            # 2. Training cycles (12 reports total within last 30 days)
             for c_idx in range(1, 13):
-                p_offset = (13 - c_idx) * 20  # Cycle 1 is 240 days ago, Cycle 12 is 20 days ago
+                p_offset = (13 - c_idx) * 2  # Cycle 1 is 24 days ago, Cycle 12 is 2 days ago
                 rep = TrainingAgentReport(
                     training_report_id=500 + c_idx,
                     company_id=1,
@@ -157,7 +157,7 @@ class TestTrainerChatbotHistoricalContext(unittest.IsolatedAsyncioTestCase):
                     hubspot_owner_id="agent_01",
                     agent_name="Ana García",
                     agent_initials="AG",
-                    period_start=now - timedelta(days=p_offset + 15),
+                    period_start=now - timedelta(days=p_offset + 1),
                     period_end=now - timedelta(days=p_offset),
                     status="completed",
                     avg_evaluacion_global=Decimal(str(round(6.0 + (c_idx * 0.15), 2))),
@@ -183,7 +183,36 @@ class TestTrainerChatbotHistoricalContext(unittest.IsolatedAsyncioTestCase):
                 )
                 db.add(rep)
 
-            # 3. Trainer simulation sessions (14 sessions total to prove >10 simulations work and oldest influence profile)
+            # Cycle older than 30 days (50 days ago) to verify cutoff
+            rep_old = TrainingAgentReport(
+                training_report_id=999,
+                company_id=1,
+                service_id=1,
+                hubspot_owner_id="agent_01",
+                agent_name="Ana García",
+                agent_initials="AG",
+                period_start=now - timedelta(days=60),
+                period_end=now - timedelta(days=50),
+                status="completed",
+                avg_evaluacion_global=Decimal("5.00"),
+                evolution_summary="Ciclo muy antiguo fuera de 30 días.",
+                final_report_json={
+                    "objectives_status": [
+                        {
+                            "title": "Objetivo Excluido Por Ser Antiguo",
+                            "type": "general",
+                            "status": "SUPERADO",
+                            "score": 9.0,
+                            "base_score": 5.0,
+                        }
+                    ],
+                    "recommendations": ["Recomendación excluida fuera de 30 días."],
+                },
+                created_at=now - timedelta(days=50),
+            )
+            db.add(rep_old)
+
+            # 3. Trainer simulation sessions (14 sessions total within last 30 days)
             sim1 = TrainerSimulation(
                 simulation_id=301,
                 company_id=1,
@@ -197,7 +226,7 @@ class TestTrainerChatbotHistoricalContext(unittest.IsolatedAsyncioTestCase):
             await db.flush()
 
             for s_idx in range(1, 15):
-                s_offset = (15 - s_idx) * 12  # Sim 1 is 168 days ago, Sim 14 is 12 days ago
+                s_offset = (15 - s_idx) * 2  # Sim 1 is 28 days ago, Sim 14 is 2 days ago
                 sess = TrainerSession(
                     session_id=400 + s_idx,
                     simulation_id=301,
@@ -228,6 +257,21 @@ class TestTrainerChatbotHistoricalContext(unittest.IsolatedAsyncioTestCase):
                     created_at=now - timedelta(days=s_offset),
                 )
                 db.add(ev)
+
+            # Simulation older than 30 days (60 days ago) to verify cutoff
+            sess_old = TrainerSession(
+                session_id=999,
+                simulation_id=301,
+                agent_id="agent_01",
+                agent_code="AG-01",
+                company_id=1,
+                service_id=1,
+                call_id="call-sim-old-999",
+                status="completed",
+                evaluation_status="completed",
+                created_at=now - timedelta(days=60),
+            )
+            db.add(sess_old)
 
             # 4. Data for another company (Company 7 - Empresa Demo)
             eval_demo = MassEvaluationResult(
@@ -270,26 +314,26 @@ class TestTrainerChatbotHistoricalContext(unittest.IsolatedAsyncioTestCase):
                 target_agent_id="agent_01",
             )
 
-        # 1. Total llamadas (15 antiguas + 15 recientes = 30)
-        self.assertIn("30 llamadas", profile)
-        self.assertIn("todo el histórico disponible sin restricción de 90 días", profile)
+        # 1. Total llamadas (15 recientes dentro de 30 días, 15 antiguas de hace 150 días excluidas)
+        self.assertIn("15 llamadas", profile)
+        self.assertIn("ÚLTIMOS 30 DÍAS", profile)
+        self.assertNotIn("call-old-", profile)
 
-        # 2. Puntuación histórica y reciente
-        self.assertIn("Puntuación media histórica global", profile)
+        # 2. Puntuación en los últimos 30 días
         self.assertIn("Puntuación media en los últimos 30 días", profile)
 
         # 3. Fortalezas consistentes
-        self.assertIn("Fortalezas Recurrentes y Consistentes", profile)
+        self.assertIn("Fortalezas Recurrentes en el Periodo", profile)
 
         # 4. Áreas de mejora recurrentes
-        self.assertIn("Errores y Criterios Recurrentes con Mayor Dificultad", profile)
+        self.assertIn("Errores y Criterios con Mayor Dificultad", profile)
 
         # 5. Evolución temporal de criterios (empatía)
-        self.assertIn("Evolución Temporal por Criterios", profile)
+        self.assertIn("Evolución Temporal por Criterios en el Periodo", profile)
         self.assertTrue("empatía" in profile.lower() or "empatia" in profile.lower())
 
         # 6. Ciclos y Objetivos SUPERADO / NO SUPERADO
-        self.assertIn("Histórico de Ciclos de Formación", profile)
+        self.assertIn("Ciclos de Formación en el Periodo", profile)
         self.assertIn("[SUPERADO] Escucha Activa Inicial", profile)
         self.assertIn("[NO SUPERADO] Manejo de Objeción de Precio", profile)
 
@@ -298,13 +342,17 @@ class TestTrainerChatbotHistoricalContext(unittest.IsolatedAsyncioTestCase):
         self.assertIn("técnica de doble alternativa", profile)
 
         # 8. Simulaciones de roleplay
-        self.assertIn("Histórico de Simulaciones de Roleplay", profile)
+        self.assertIn("Simulaciones de Roleplay en el Periodo", profile)
         self.assertIn("Firmeza en defensa de honorarios", profile)
 
         # 9. Formato limpio: sin nombres de tablas DB ni IDs expuestos
         self.assertNotIn("bm_mass_evaluation_results", profile)
         self.assertNotIn("bm_training_agent_reports", profile)
         self.assertNotIn("bm_trainer_sessions", profile)
+
+        # 10. Elementos fuera de los 30 días excluidos
+        self.assertNotIn("Objetivo Excluido Por Ser Antiguo", profile)
+        self.assertNotIn("call-sim-old-999", profile)
 
     async def test_historical_profile_respects_tenant_isolation(self):
         """Un usuario en Empresa 1 no puede ver datos de un agente de Empresa 7."""
@@ -327,7 +375,7 @@ class TestTrainerChatbotHistoricalContext(unittest.IsolatedAsyncioTestCase):
             )
 
         # No debe haber datos de demo_agent_99 porque pertenece a company_id=7
-        self.assertIn("No existen evaluaciones históricas de llamadas reales", profile)
+        self.assertIn("No existen evaluaciones de llamadas reales", profile)
         self.assertNotIn("9.90", profile)
 
     async def test_agent_role_cannot_spoof_target_agent_history(self):
@@ -362,8 +410,8 @@ class TestTrainerChatbotHistoricalContext(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(res["agent_id"], "agent_01")
         sys_prompt = captured_messages[0]["content"]
-        # Debe contener los datos del agente auténtico agent_01
-        self.assertIn("30 llamadas", sys_prompt)
+        # Debe contener los datos del agente auténtico agent_01 (15 llamadas en 30 días)
+        self.assertIn("15 llamadas", sys_prompt)
         self.assertIn("Manejo de Objeción de Precio", sys_prompt)
 
     async def test_admin_can_query_authorized_agent_history(self):
@@ -398,8 +446,8 @@ class TestTrainerChatbotHistoricalContext(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(res["agent_id"], "agent_01")
         sys_prompt = captured_messages[0]["content"]
-        self.assertIn("PERFIL HISTÓRICO Y EVOLUCIÓN COMPLETA DEL AGENTE", sys_prompt)
-        self.assertIn("30 llamadas", sys_prompt)
+        self.assertIn("PERFIL HISTÓRICO Y EVOLUCIÓN DEL AGENTE (ÚLTIMOS 30 DÍAS)", sys_prompt)
+        self.assertIn("15 llamadas", sys_prompt)
 
     async def test_absence_of_historical_data_handled_cleanly(self):
         """Si un agente no tiene histórico, el prompt advierte honestamente sin inventar datos."""
@@ -421,8 +469,8 @@ class TestTrainerChatbotHistoricalContext(unittest.IsolatedAsyncioTestCase):
                 target_agent_id="agent_without_data",
             )
 
-        self.assertIn("No existen evaluaciones históricas", profile)
-        self.assertNotIn("30 llamadas", profile)
+        self.assertIn("No existen evaluaciones de llamadas reales", profile)
+        self.assertNotIn("15 llamadas", profile)
 
     async def test_compact_prompt_size_limit(self):
         """Verifica que el bloque histórico se mantiene compacto (< 1500 tokens / ~6000 caracteres)."""
@@ -494,7 +542,7 @@ class TestTrainerChatbotHistoricalContext(unittest.IsolatedAsyncioTestCase):
         app.dependency_overrides.clear()
 
     async def test_full_history_queried_without_90_day_cutoff(self):
-        """4. El histórico no se corta a 90 días: incluye llamadas de hace 150 días (30 llamadas en total)."""
+        """4. El perfil acota a 30 días: incluye 15 llamadas recientes y excluye llamadas de hace 150 días."""
         context = TenantContext(
             user_id=1,
             user_email="admin@speech.com",
@@ -513,8 +561,9 @@ class TestTrainerChatbotHistoricalContext(unittest.IsolatedAsyncioTestCase):
                 target_agent_id="agent_01",
             )
 
-        self.assertIn("30 llamadas", profile)
-        self.assertIn("sin restricción de 90 días", profile)
+        self.assertIn("15 llamadas", profile)
+        self.assertIn("ÚLTIMOS 30 DÍAS", profile)
+        self.assertNotIn("call-old-", profile)
 
     async def test_history_summarized_beyond_12_documents_limit(self):
         """5. La trayectoria histórica supera la limitación de 12 documentos de conocimiento."""
@@ -541,10 +590,10 @@ class TestTrainerChatbotHistoricalContext(unittest.IsolatedAsyncioTestCase):
                 target_agent_id="agent_01",
             )
 
-        # Aunque docs sea vacío (0 documentos) o <= 12, el profile agrega las 30 llamadas y ciclos
+        # Aunque docs sea vacío (0 documentos) o <= 12, el profile agrega las 15 llamadas y ciclos de los últimos 30 días
         self.assertLessEqual(len(docs), 12)
-        self.assertIn("30 llamadas", profile)
-        self.assertIn("Histórico de Ciclos de Formación", profile)
+        self.assertIn("15 llamadas", profile)
+        self.assertIn("Ciclos de Formación en el Periodo", profile)
 
     async def test_strengths_and_weaknesses_extraction(self):
         """6. Extracción estructurada de fortalezas consistentes y áreas de mejora recurrentes."""
@@ -663,13 +712,13 @@ class TestTrainerChatbotHistoricalContext(unittest.IsolatedAsyncioTestCase):
                 target_agent_id="agent_01",
             )
 
-        self.assertIn("Histórico de Simulaciones de Roleplay (14 completadas)", profile)
+        self.assertIn("Simulaciones de Roleplay en el Periodo (14 completadas)", profile)
         self.assertIn("Puntuación media en simulaciones", profile)
         self.assertIn("Firmeza en defensa de honorarios", profile)
         self.assertIn("Doble opción de cierre", profile)
 
     async def test_historical_vs_recent_comparison(self):
-        """11. Comparación entre media histórica total y media reciente (últimos 30 días)."""
+        """11. Comparación de métricas acotadas a los últimos 30 días."""
         context = TenantContext(
             user_id=1,
             user_email="admin@speech.com",
@@ -688,9 +737,9 @@ class TestTrainerChatbotHistoricalContext(unittest.IsolatedAsyncioTestCase):
                 target_agent_id="agent_01",
             )
 
-        self.assertIn("Puntuación media histórica global: 7.00/10", profile)
         self.assertIn("Puntuación media en los últimos 30 días: 7.80/10", profile)
-        self.assertIn("15 llamadas recientes", profile)
+        self.assertIn("15 llamadas", profile)
+        self.assertNotIn("call-old-", profile)
 
     async def test_cycle_11_and_earlier_influence_profile(self):
         """12. Demuestra explícitamente que datos del ciclo #11 y del ciclo #1 (más antiguos que 10) influyen en el perfil."""

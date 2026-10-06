@@ -158,7 +158,7 @@ class TestTrainerChatbotSimulationCounts(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Simulaciones completadas: 3", profile)
         self.assertIn("Simulaciones evaluadas con nota: 0", profile)
         self.assertIn("Simulaciones interrumpidas/no finalizadas: 1", profile)
-        self.assertIn("Histórico de Simulaciones de Roleplay (3 completadas)", profile)
+        self.assertIn("Simulaciones de Roleplay en el Periodo (3 completadas)", profile)
         # Sin evaluaciones con nota, no debe haber puntuación media
         self.assertNotIn("Puntuación media en simulaciones", profile)
 
@@ -373,4 +373,4 @@ class TestTrainerChatbotSimulationCounts(unittest.IsolatedAsyncioTestCase):
 
         # Para el tenant company_id=1, no debe figurar la sesión de company_id=2
         self.assertNotIn("Simulaciones registradas/iniciadas: 1", profile)
-        self.assertIn("No existen evaluaciones históricas de llamadas reales, ciclos formativos ni simulaciones registradas", profile)
+        self.assertIn("No existen evaluaciones de llamadas reales, ciclos formativos ni simulaciones registradas para este agente en los últimos 30 días", profile)
