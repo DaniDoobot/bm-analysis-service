@@ -28,6 +28,7 @@ from app.models.trainer import (
     TrainerSession,
     TrainerEvaluation,
 )
+from app.models.trainer_chat import TrainerChat, TrainerChatMessage
 from app.models.companies import Company
 from app.models.teams import Team, UserServiceAssociation, UserTeamAssociation, AgentTeamAssociation
 
@@ -78,6 +79,8 @@ __all__ = [
     "TrainerSimulationVersion",
     "TrainerSession",
     "TrainerEvaluation",
+    "TrainerChat",
+    "TrainerChatMessage",
 ]
 
 

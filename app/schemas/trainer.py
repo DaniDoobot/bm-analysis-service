@@ -231,3 +231,5 @@ class TrainerChatResponse(BaseModel):
     sources: List[ChatSourceDocument] = []
     agent_id: Optional[str] = None
     company_id: Optional[int] = None
+    chat_id: Optional[int] = None
+    message_id: Optional[int] = None

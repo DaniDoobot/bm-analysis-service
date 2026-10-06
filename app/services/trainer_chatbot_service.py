@@ -1907,6 +1907,7 @@ class TrainerChatbotService:
         agent_id: Optional[str] = None,
         cycle_id: Optional[int] = None,
         conversation_history: Any = None,
+        chat_id: Optional[int] = None,
     ) -> dict[str, Any]:
         """
         Executes the full unified Chatbot pipeline:
@@ -1930,12 +1931,47 @@ class TrainerChatbotService:
             audio_file=audio_file,
         )
 
+        # 1b. Persistent chat lookup & ownership verification
+        persistent_chat = None
+        if chat_id is not None:
+            from app.services.trainer_chat_persistence_service import TrainerChatPersistenceService
+
+            persistent_chat = await TrainerChatPersistenceService.get_chat(
+                db=db,
+                chat_id=chat_id,
+                current_user=current_user,
+                context=context,
+                with_messages=False,
+            )
+            if not persistent_chat:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Conversación no encontrada.",
+                )
+
+            # Strict validation: prevent target swapping if client passes an agent_id
+            if (
+                agent_id
+                and persistent_chat.target_agent_id
+                and agent_id.strip() != persistent_chat.target_agent_id.strip()
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="El agente indicado no coincide con el agente asociado a esta conversación.",
+                )
+
+            if persistent_chat.target_agent_id and not agent_id:
+                agent_id = persistent_chat.target_agent_id
+
         # 2. Resolve target agent with strict tenant isolation
         target_agent_id = cls.resolve_target_agent(
             current_user=current_user,
             requested_agent_id=agent_id,
             context=context,
         )
+
+        if persistent_chat and not persistent_chat.target_agent_id and target_agent_id:
+            persistent_chat.target_agent_id = target_agent_id
 
         # Determine whether current_user is acting in an administrative role
         norm_role = normalize_role(current_user.role)
@@ -1945,6 +1981,57 @@ class TrainerChatbotService:
             InternalRole.SERVICE_MANAGER,
             InternalRole.TEAM_COORDINATOR,
         )
+
+        # Retrieve DB history & persist user message before LLM or early returns
+        db_history = None
+        if persistent_chat:
+            from app.services.trainer_chat_persistence_service import TrainerChatPersistenceService
+
+            db_history = await TrainerChatPersistenceService.get_recent_messages(
+                db=db,
+                chat_id=persistent_chat.chat_id,
+                limit=MAX_HISTORY_MESSAGES,
+            )
+            await TrainerChatPersistenceService.append_message(
+                db=db,
+                chat_id=persistent_chat.chat_id,
+                role="user",
+                content=query_text,
+                input_type=input_type,
+            )
+            await db.commit()
+
+        async def _make_early_return_payload(
+            resp_text: str,
+            sources: list = None,
+        ) -> dict[str, Any]:
+            ret_chat_id = None
+            ret_message_id = None
+            if persistent_chat:
+                from app.services.trainer_chat_persistence_service import TrainerChatPersistenceService
+
+                asst_msg = await TrainerChatPersistenceService.append_message(
+                    db=db,
+                    chat_id=persistent_chat.chat_id,
+                    role="assistant",
+                    content=resp_text,
+                    input_type="text",
+                )
+                await TrainerChatPersistenceService.touch_chat(db, persistent_chat.chat_id)
+                await db.commit()
+                ret_chat_id = persistent_chat.chat_id
+                ret_message_id = asst_msg.message_id
+
+            return {
+                "response": resp_text,
+                "user_query": query_text,
+                "input_type": input_type,
+                "sources": sources or [],
+                "agent_id": target_agent_id,
+                "company_id": context.company_id,
+                "chat_id": ret_chat_id,
+                "message_id": ret_message_id,
+            }
 
         # 3. Check for specific conversation inquiries (Flows A and B) or criteria search (Flow C)
         detected_call_ids = cls.detect_call_ids(query_text)
@@ -1983,14 +2070,7 @@ class TrainerChatbotService:
                         if is_admin else
                         f"He localizado la llamada {f_id}, pero no encuentro la llamada {m_id} entre las evaluaciones registradas de tu perfil para poder realizar la comparativa."
                     )
-                return {
-                    "response": missing_msg,
-                    "user_query": query_text,
-                    "input_type": input_type,
-                    "sources": [],
-                    "agent_id": target_agent_id,
-                    "company_id": context.company_id,
-                }
+                return await _make_early_return_payload(missing_msg)
 
             c1_fmt = cls.format_call_detail(call1, header_title=f"LLAMADA A COMPARAR (1): {call1.call_id}")
             c2_fmt = cls.format_call_detail(call2, header_title=f"LLAMADA A COMPARAR (2): {call2.call_id}")
@@ -2007,14 +2087,7 @@ class TrainerChatbotService:
                     if is_admin else
                     f"No he localizado la llamada {cid} entre las evaluaciones registradas de tu perfil."
                 )
-                return {
-                    "response": missing_msg,
-                    "user_query": query_text,
-                    "input_type": input_type,
-                    "sources": [],
-                    "agent_id": target_agent_id,
-                    "company_id": context.company_id,
-                }
+                return await _make_early_return_payload(missing_msg)
 
             conversation_detail = cls.format_call_detail(call, header_title=f"DETALLE DE LA LLAMADA: {call.call_id}")
             allowed_call_ids = {cid}
@@ -2028,14 +2101,7 @@ class TrainerChatbotService:
                     if is_admin else
                     "Puedes pedirme ejemplos de llamadas indicando criterios como empatía, claridad, explicación de condiciones o manejo de objeciones (por ejemplo: 'dame dos llamadas donde la empatía haya sido buena pero la gestión del precio regular')."
                 )
-                return {
-                    "response": no_criteria_msg,
-                    "user_query": query_text,
-                    "input_type": input_type,
-                    "sources": [],
-                    "agent_id": target_agent_id,
-                    "company_id": context.company_id,
-                }
+                return await _make_early_return_payload(no_criteria_msg)
 
             quantity = cls.extract_search_quantity(query_text)
             ref_dt = datetime.now(timezone.utc)
@@ -2102,14 +2168,7 @@ class TrainerChatbotService:
                 is_admin=is_admin,
             )
             if period_result.is_detailed_period_request and period_result.exceeds_limit:
-                return {
-                    "response": period_result.blocking_message,
-                    "user_query": query_text,
-                    "input_type": input_type,
-                    "sources": [],
-                    "agent_id": target_agent_id,
-                    "company_id": context.company_id,
-                }
+                return await _make_early_return_payload(period_result.blocking_message)
 
             if period_result.is_detailed_period_request and not period_result.exceeds_limit:
                 detailed_period_summary = await cls.build_detailed_period_summary(
@@ -2148,7 +2207,7 @@ class TrainerChatbotService:
             is_admin=is_admin,
         )
 
-        history = cls.sanitize_history(conversation_history)
+        history = db_history if persistent_chat is not None else cls.sanitize_history(conversation_history)
 
         messages = [{"role": "system", "content": system_instruction}]
         messages.extend(history)
@@ -2176,7 +2235,7 @@ class TrainerChatbotService:
             allowed_call_ids=allowed_call_ids,
         )
 
-        # 9. Format sources
+        # 9. Format sources & persist assistant message if persistent_chat
         sources = [
             {
                 "document_id": doc.id,
@@ -2187,6 +2246,23 @@ class TrainerChatbotService:
             for doc in documents
         ]
 
+        ret_chat_id = None
+        ret_message_id = None
+        if persistent_chat:
+            from app.services.trainer_chat_persistence_service import TrainerChatPersistenceService
+
+            asst_msg = await TrainerChatPersistenceService.append_message(
+                db=db,
+                chat_id=persistent_chat.chat_id,
+                role="assistant",
+                content=sanitized_response,
+                input_type="text",
+            )
+            await TrainerChatPersistenceService.touch_chat(db, persistent_chat.chat_id)
+            await db.commit()
+            ret_chat_id = persistent_chat.chat_id
+            ret_message_id = asst_msg.message_id
+
         return {
             "response": sanitized_response,
             "user_query": query_text,
@@ -2194,4 +2270,6 @@ class TrainerChatbotService:
             "sources": sources,
             "agent_id": target_agent_id,
             "company_id": context.company_id,
+            "chat_id": ret_chat_id,
+            "message_id": ret_message_id,
         }

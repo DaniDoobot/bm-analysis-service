@@ -25,7 +25,15 @@ from app.schemas.trainer import (
     AvailableSpeechStructure,
     TrainerChatResponse,
 )
+from app.schemas.trainer_chat import (
+    TrainerChatCreate,
+    TrainerChatUpdate,
+    TrainerChatMessageResponse,
+    TrainerChatSummaryResponse,
+    TrainerChatDetailResponse,
+)
 from app.services.trainer_service import TrainerService
+from app.services.trainer_chat_persistence_service import TrainerChatPersistenceService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/bm/trainer", tags=["Trainer Module"])
@@ -640,6 +648,152 @@ async def get_session_recording_audio(
     )
 
 
+# ── Persistent AI Tutor Chat Endpoints ─────────────────────────────────────────
+
+@router.get(
+    "/chats",
+    response_model=List[TrainerChatSummaryResponse],
+    summary="Listar conversaciones del Tutor IA del usuario actual",
+)
+async def list_trainer_chats(
+    target_agent_id: Optional[str] = Query(None, description="Filtrar por agente objetivo"),
+    include_archived: bool = Query(False, description="Incluir conversaciones archivadas"),
+    limit: int = Query(50, ge=1, le=100, description="Límite de resultados"),
+    offset: int = Query(0, ge=0, description="Desplazamiento"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    context: TenantContext = Depends(get_tenant_context),
+):
+    """
+    Lista las conversaciones activas del Tutor IA pertenecientes al usuario autenticado
+    dentro de su empresa. Aislamiento estricto por usuario y empresa.
+    """
+    return await TrainerChatPersistenceService.list_chats(
+        db=db,
+        current_user=current_user,
+        context=context,
+        target_agent_id=target_agent_id,
+        include_archived=include_archived,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.post(
+    "/chats",
+    response_model=TrainerChatDetailResponse,
+    status_code=http_status.HTTP_201_CREATED,
+    summary="Crear nueva conversación del Tutor IA",
+)
+async def create_trainer_chat(
+    payload: Optional[TrainerChatCreate] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    context: TenantContext = Depends(get_tenant_context),
+):
+    """
+    Crea un nuevo hilo de conversación para el Tutor IA, propiedad exclusiva del usuario.
+    Si el usuario es un Agente, target_agent_id se fuerza a su propio hubspot_owner_id.
+    """
+    if payload is None:
+        payload = TrainerChatCreate()
+    return await TrainerChatPersistenceService.create_chat(
+        db=db,
+        current_user=current_user,
+        context=context,
+        data=payload,
+    )
+
+
+@router.get(
+    "/chats/{chat_id}",
+    response_model=TrainerChatDetailResponse,
+    summary="Obtener detalle de una conversación del Tutor IA con todos sus mensajes",
+)
+async def get_trainer_chat(
+    chat_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    context: TenantContext = Depends(get_tenant_context),
+):
+    """
+    Recupera una conversación específica con su historial cronológico completo de mensajes.
+    Devuelve 404 si la conversación no existe, fue eliminada, o pertenece a otro usuario/empresa.
+    """
+    chat = await TrainerChatPersistenceService.get_chat(
+        db=db,
+        chat_id=chat_id,
+        current_user=current_user,
+        context=context,
+        with_messages=True,
+    )
+    if not chat:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="Conversación no encontrada.",
+        )
+    return chat
+
+
+@router.patch(
+    "/chats/{chat_id}",
+    response_model=TrainerChatSummaryResponse,
+    summary="Actualizar conversación (título o archivado)",
+)
+async def update_trainer_chat(
+    chat_id: int,
+    payload: TrainerChatUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    context: TenantContext = Depends(get_tenant_context),
+):
+    """
+    Actualiza el título o el estado de archivado de una conversación existente.
+    Devuelve 404 si la conversación no existe o pertenece a otro usuario.
+    """
+    chat = await TrainerChatPersistenceService.update_chat(
+        db=db,
+        chat_id=chat_id,
+        current_user=current_user,
+        context=context,
+        data=payload,
+    )
+    if not chat:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="Conversación no encontrada.",
+        )
+    return chat
+
+
+@router.delete(
+    "/chats/{chat_id}",
+    summary="Eliminar conversación (soft delete)",
+)
+async def delete_trainer_chat(
+    chat_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    context: TenantContext = Depends(get_tenant_context),
+):
+    """
+    Realiza un borrado lógico (is_active = False) de la conversación.
+    Devuelve 404 si la conversación no existe o pertenece a otro usuario.
+    """
+    success = await TrainerChatPersistenceService.soft_delete_chat(
+        db=db,
+        chat_id=chat_id,
+        current_user=current_user,
+        context=context,
+    )
+    if not success:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="Conversación no encontrada.",
+        )
+    return {"ok": True, "chat_id": chat_id, "detail": "Conversación eliminada correctamente."}
+
+
 # ── Trainer Chatbot Endpoint (Knowledge Layer RAG) ─────────────────────────────
 
 @router.post(
@@ -656,6 +810,7 @@ async def trainer_chat(
     """
     Endpoint del Chatbot de Trainer con entrada multimodal:
     - Acepta texto (message) o archivo de audio (audio_file) mediante multipart/form-data o JSON.
+    - Soporta persistencia de chat pasando `chat_id`. Si se omite, opera en modo stateless compatible.
     - Convierte el audio en texto mediante transcripción y continúa por el mismo pipeline RAG.
     - Recupera determinísticamente los documentos de conocimiento del agente.
     - Devuelve la respuesta fundamentada con citas y fuentes de conocimiento.
@@ -668,6 +823,7 @@ async def trainer_chat(
     agent_id: Optional[str] = None
     cycle_id: Optional[int] = None
     conversation_history: Any = None
+    chat_id: Optional[int] = None
 
     if "multipart/form-data" in content_type:
         form = await request.form()
@@ -691,6 +847,16 @@ async def trainer_chat(
                 raise HTTPException(
                     status_code=http_status.HTTP_400_BAD_REQUEST,
                     detail="El parámetro 'cycle_id' debe ser un número entero válido.",
+                )
+
+        raw_chat = form.get("chat_id")
+        if raw_chat is not None and str(raw_chat).strip():
+            try:
+                chat_id = int(raw_chat)
+            except (ValueError, TypeError):
+                raise HTTPException(
+                    status_code=http_status.HTTP_400_BAD_REQUEST,
+                    detail="El parámetro 'chat_id' debe ser un número entero válido.",
                 )
 
         conversation_history = form.get("conversation_history")
@@ -719,6 +885,16 @@ async def trainer_chat(
                         detail="El parámetro 'cycle_id' debe ser un número entero válido.",
                     )
 
+            raw_chat = body.get("chat_id")
+            if raw_chat is not None and str(raw_chat).strip():
+                try:
+                    chat_id = int(raw_chat)
+                except (ValueError, TypeError):
+                    raise HTTPException(
+                        status_code=http_status.HTTP_400_BAD_REQUEST,
+                        detail="El parámetro 'chat_id' debe ser un número entero válido.",
+                    )
+
             conversation_history = body.get("conversation_history")
 
     return await TrainerChatbotService.process_chat(
@@ -730,4 +906,5 @@ async def trainer_chat(
         agent_id=agent_id,
         cycle_id=cycle_id,
         conversation_history=conversation_history,
+        chat_id=chat_id,
     )
