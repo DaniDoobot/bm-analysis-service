@@ -268,6 +268,49 @@ class TestTrainerChatbotConversationSearch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(TrainerChatbotService.detect_call_ids("Ayer completé 5 llamadas con 100% de éxito"), [])
         self.assertEqual(TrainerChatbotService.detect_call_ids("El día 15 de marzo no trabajé"), [])
 
+    def test_detect_call_ids_regression_bug_cases(self):
+        # Mandatory bug regression cases: plural / criteria queries must NOT match any call_id
+        self.assertEqual(
+            TrainerChatbotService.detect_call_ids(
+                "Dame dos conversaciones donde la empatía haya sido buena"
+            ),
+            [],
+        )
+        self.assertEqual(
+            TrainerChatbotService.detect_call_ids(
+                "Dame dos conversaciones del último mes donde empatía y claridad hayan sido buenas pero la gestión del precio haya sido mala"
+            ),
+            [],
+        )
+        self.assertEqual(
+            TrainerChatbotService.detect_call_ids(
+                "Busca conversaciones donde tuve mala claridad"
+            ),
+            [],
+        )
+        self.assertEqual(
+            TrainerChatbotService.detect_call_ids(
+                "Enséñame llamadas donde gestioné mal el precio"
+            ),
+            [],
+        )
+
+        # Preserved single and comparison cases
+        self.assertEqual(
+            TrainerChatbotService.detect_call_ids("Analízame la conversación 123456"),
+            ["123456"],
+        )
+        self.assertEqual(
+            TrainerChatbotService.detect_call_ids("Analízame la llamada 123456"),
+            ["123456"],
+        )
+        self.assertEqual(
+            TrainerChatbotService.detect_call_ids(
+                "Compara la llamada 123456 con la 789012"
+            ),
+            ["123456", "789012"],
+        )
+
     # -------------------------------------------------------------
     # 2. Intent and criteria parsing
     # -------------------------------------------------------------
@@ -455,6 +498,58 @@ class TestTrainerChatbotConversationSearch(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("INSTRUCCIÓN PARA BÚSQUEDA DE EJEMPLOS POR CRITERIOS", sys_prompt)
                 self.assertIn("call-001-good", sys_prompt)
                 self.assertIn("call-001-good", res["response"])
+
+    async def test_regression_routing_criteria_query_not_routed_to_single_call(self):
+        """
+        End-to-end routing regression test:
+        'Dame dos conversaciones donde la empatía haya sido buena'
+        must NEVER route to single call detail or call fetch_scoped_call with 'es'.
+        Must route to criterion search intent, query criteria catalog, and use item_filters.
+        """
+        mock_catalog = [
+            {"key": "empatia", "label": "Empatía", "type": "score"},
+            {"key": "claridad_explicacion_economica", "label": "Explicación precio consulta", "type": "score"},
+        ]
+        query = "Dame dos conversaciones donde la empatía haya sido buena"
+
+        # 1. Verify detect_call_ids returns []
+        self.assertEqual(TrainerChatbotService.detect_call_ids(query), [])
+
+        # 2. Verify detect_criterion_search_intent returns True
+        self.assertTrue(TrainerChatbotService.detect_criterion_search_intent(query))
+
+        async with self.session_maker() as db:
+            with patch("app.utils.item_score_filters.get_evaluation_item_filter_options", new_callable=AsyncMock) as mock_get_opts, \
+                 patch.object(TrainerChatbotService, "fetch_scoped_call", new_callable=AsyncMock) as mock_fetch_call, \
+                 patch("app.services.trainer_chatbot_service.openai_service.complete_text", new_callable=AsyncMock) as mock_llm:
+
+                mock_get_opts.return_value = mock_catalog
+                mock_llm.return_value = (
+                    "Encontré la llamada call-001-good como ejemplo de alta empatía (9/10)."
+                )
+
+                res = await TrainerChatbotService.process_chat(
+                    db=db,
+                    current_user=self.agent_user,
+                    context=self.agent_context,
+                    message=query,
+                )
+
+                # MUST NOT enter single call flow or fetch_scoped_call
+                mock_fetch_call.assert_not_called()
+
+                # MUST enter criteria flow: catalog was consulted
+                mock_get_opts.assert_called_once()
+
+                # MUST NOT contain error message about nonexistent call 'es'
+                self.assertNotIn("No he localizado la llamada es", res["response"])
+                self.assertNotIn("llamada es", res["response"])
+
+                # LLM received the criteria prompt instruction and call example
+                call_args = mock_llm.call_args[1]["messages"]
+                sys_prompt = next(m["content"] for m in call_args if m["role"] == "system")
+                self.assertIn("INSTRUCCIÓN PARA BÚSQUEDA DE EJEMPLOS POR CRITERIOS", sys_prompt)
+                self.assertIn("call-001-good", sys_prompt)
 
     # -------------------------------------------------------------
     # 6. Sanitization of Call IDs vs Internal DB IDs

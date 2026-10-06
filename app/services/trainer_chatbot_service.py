@@ -797,13 +797,19 @@ class TrainerChatbotService:
             "ejemplo", "ejemplos", "muestra", "muestras", "detalle", "detalles",
         }
 
+        # Strict word boundaries on keywords to prevent partial suffix matching (e.g. 'conversaciones' -> 'conversacion' + 'es')
+        call_kw_single = r"(?:llamada|conversaci[oó]n)\b"
+        call_kw_any = r"(?:llamadas?|conversaci[oó]n|conversaciones)\b"
+        delim = r"(?:\s*[:#]\s*|\s+)"
+
         # 1. Comparison / multi-call pattern:
         # e.g., 'llamada 123456 con la 789012', 'conversación 123456 y la 789012', 'llamada 123456 o 789012'
+        prefix_any = rf"(?:(?:id|c[oó]digo)\s+(?:de\s+)?(?:las?\s+|los?\s+)?{call_kw_any}|(?:las?\s+|los?\s+)?{call_kw_any}(?:\s+con)?(?:\s+(?:id|c[oó]digo|n[uú]mero|num)\b)?)"
+        conn = r"\s+(?:y|e|con|o|a|vs\.?|frente\s+a)\s+"
+        second_prefix = rf"(?:(?:las?\s+|los?\s+)?{call_kw_any}(?:\s+con)?(?:\s+(?:id|c[oó]digo|n[uú]mero|num)\b)?{delim}|(?:las?\s+|los?\s+))?"
+
         two_call_pat = re.compile(
-            r"\b(?:(?:id|c[oó]digo)\s+(?:de\s+)?(?:la\s+)?(?:llamada|conversaci[oó]n)|(?:la\s+)?(?:llamada|conversaci[oó]n)(?:\s+(?:con\s+)?(?:id|c[oó]digo|n[uú]mero|num|#))?)\s*[:#]?\s*([a-zA-Z0-9_-]+)"
-            r"\s+(?:y|e|con|o|a|vs\.?|frente\s+a)\s+"
-            r"(?:(?:la\s+)?(?:llamada|conversaci[oó]n)\s*(?:con\s+)?(?:id|c[oó]digo|n[uú]mero|num|#)?\s*[:#]?|(?:la\s+|el\s+))?"
-            r"([a-zA-Z0-9_-]+)\b",
+            rf"\b{prefix_any}{delim}([a-zA-Z0-9_-]+){conn}{second_prefix}([a-zA-Z0-9_-]+)\b",
             re.IGNORECASE,
         )
         m = two_call_pat.search(q)
@@ -812,9 +818,10 @@ class TrainerChatbotService:
             if id1.lower() not in stop_words and id2.lower() not in stop_words and len(id1) >= 2 and len(id2) >= 2:
                 return [id1, id2]
 
-        # 2. General single call pattern:
+        # 2. General single call pattern (singular keywords only, with mandatory delimiter before ID):
+        prefix_single = rf"(?:(?:id|c[oó]digo)\s+(?:de\s+)?(?:la\s+|el\s+)?{call_kw_single}|(?:la\s+|el\s+)?{call_kw_single}(?:\s+con)?(?:\s+(?:id|c[oó]digo|n[uú]mero|num)\b)?)"
         call_pat = re.compile(
-            r"\b(?:(?:id|c[oó]digo)\s+(?:de\s+)?(?:la\s+)?(?:llamada|conversaci[oó]n)|(?:la\s+)?(?:llamada|conversaci[oó]n)(?:\s+(?:con\s+)?(?:id|c[oó]digo|n[uú]mero|num|#))?)\s*[:#]?\s*([a-zA-Z0-9_-]+)\b",
+            rf"\b{prefix_single}{delim}([a-zA-Z0-9_-]+)\b",
             re.IGNORECASE,
         )
         found: List[str] = []
