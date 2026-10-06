@@ -361,7 +361,7 @@ class TestTrainerChatbotConversationSearch(unittest.IsolatedAsyncioTestCase):
             {"key": "gestion_objeciones", "label": "Gestión de objeciones", "type": "score"},
             {"key": "saludo_adecuado", "label": "Saludo inicial correcto", "type": "boolean"},
         ]
-        with patch("app.utils.item_score_filters.get_evaluation_item_filter_options", new_callable=AsyncMock) as mock_get_opts:
+        with patch("app.utils.item_score_filters.get_evaluation_item_filter_options", autospec=True) as mock_get_opts:
             mock_get_opts.return_value = mock_catalog
             async with self.session_maker() as db:
                 filters = await TrainerChatbotService.parse_criteria_query(
@@ -381,6 +381,53 @@ class TestTrainerChatbotConversationSearch(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(f_price["polarity"], "negative")
                 self.assertEqual(f_price["min"], 0.0)
                 self.assertEqual(f_price["max"], 4.0)
+
+                mock_get_opts.assert_called_once_with(
+                    db=db,
+                    company_ids=[1],
+                    service_ids=None,
+                )
+
+    async def test_parse_criteria_query_real_signature_enforcement(self):
+        """
+        Validates that parse_criteria_query calls get_evaluation_item_filter_options
+        with its real signature (db, company_ids, service_ids) and never with agent_id.
+        Verifies that any call passing agent_id raises TypeError against the real signature.
+        """
+        import inspect
+        from app.utils.item_score_filters import get_evaluation_item_filter_options
+
+        # 1. Verify real function signature has NO agent_id parameter
+        sig = inspect.signature(get_evaluation_item_filter_options)
+        self.assertNotIn("agent_id", sig.parameters)
+        self.assertIn("company_ids", sig.parameters)
+        self.assertIn("service_ids", sig.parameters)
+
+        # 2. Verify calling real function with agent_id raises TypeError
+        async with self.session_maker() as db:
+            with self.assertRaises(TypeError):
+                await get_evaluation_item_filter_options(db=db, company_ids=[1], agent_id="agent_100")
+
+        # 3. Verify parse_criteria_query works with autospec=True (enforcing signature)
+        mock_catalog = [
+            {"key": "empatia", "label": "Empatía", "type": "score"},
+        ]
+        with patch("app.utils.item_score_filters.get_evaluation_item_filter_options", autospec=True) as mock_get_opts:
+            mock_get_opts.return_value = mock_catalog
+            async with self.session_maker() as db:
+                filters = await TrainerChatbotService.parse_criteria_query(
+                    "Dame dos conversaciones donde la empatía haya sido buena",
+                    db=db,
+                    context=self.agent_context,
+                    target_agent_id="agent_100",
+                )
+                self.assertEqual(len(filters), 1)
+                self.assertEqual(filters[0]["key"], "empatia")
+                mock_get_opts.assert_called_once_with(
+                    db=db,
+                    company_ids=[1],
+                    service_ids=None,
+                )
 
     # -------------------------------------------------------------
     # 3. Flow B: Single Call Detail
@@ -478,7 +525,7 @@ class TestTrainerChatbotConversationSearch(unittest.IsolatedAsyncioTestCase):
             {"key": "claridad_explicacion_economica", "label": "Explicación precio consulta", "type": "score"},
         ]
         async with self.session_maker() as db:
-            with patch("app.utils.item_score_filters.get_evaluation_item_filter_options", new_callable=AsyncMock) as mock_get_opts, \
+            with patch("app.utils.item_score_filters.get_evaluation_item_filter_options", autospec=True) as mock_get_opts, \
                  patch("app.services.trainer_chatbot_service.openai_service.complete_text", new_callable=AsyncMock) as mock_llm:
                 mock_get_opts.return_value = mock_catalog
                 mock_llm.return_value = (
@@ -519,7 +566,7 @@ class TestTrainerChatbotConversationSearch(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(TrainerChatbotService.detect_criterion_search_intent(query))
 
         async with self.session_maker() as db:
-            with patch("app.utils.item_score_filters.get_evaluation_item_filter_options", new_callable=AsyncMock) as mock_get_opts, \
+            with patch("app.utils.item_score_filters.get_evaluation_item_filter_options", autospec=True) as mock_get_opts, \
                  patch.object(TrainerChatbotService, "fetch_scoped_call", new_callable=AsyncMock) as mock_fetch_call, \
                  patch("app.services.trainer_chatbot_service.openai_service.complete_text", new_callable=AsyncMock) as mock_llm:
 
@@ -550,6 +597,82 @@ class TestTrainerChatbotConversationSearch(unittest.IsolatedAsyncioTestCase):
                 sys_prompt = next(m["content"] for m in call_args if m["role"] == "system")
                 self.assertIn("INSTRUCCIÓN PARA BÚSQUEDA DE EJEMPLOS POR CRITERIOS", sys_prompt)
                 self.assertIn("call-001-good", sys_prompt)
+
+    async def test_three_criteria_search_with_one_month_period_and_polarities(self):
+        """
+        Tests: 'Dame dos conversaciones del último mes donde empatía y claridad hayan sido buenas pero la gestión del precio haya sido mala'
+        Verifies:
+        1. 3 criteria parsed with AND logic and correct polarities:
+           - empatia: positive (7-10)
+           - claridad: positive (7-10)
+           - claridad_explicacion_economica: negative (0-4)
+        2. Period respects 30 days.
+        3. End-to-end process_chat executes without TypeError / HTTP 500.
+        """
+        query = "Dame dos conversaciones del último mes donde empatía y claridad hayan sido buenas pero la gestión del precio haya sido mala"
+        mock_catalog = [
+            {"key": "empatia", "label": "Empatía", "type": "score"},
+            {"key": "claridad", "label": "Claridad", "type": "score"},
+            {"key": "claridad_explicacion_economica", "label": "Explicación precio consulta", "type": "score"},
+            {"key": "gestion_objeciones", "label": "Gestión de objeciones", "type": "score"},
+        ]
+
+        # 1. Routing check: no call IDs detected, search intent recognized
+        self.assertEqual(TrainerChatbotService.detect_call_ids(query), [])
+        self.assertTrue(TrainerChatbotService.detect_criterion_search_intent(query))
+
+        # 2. Period check: respects 30 days
+        ref = datetime(2026, 10, 5, 12, 0, 0, tzinfo=timezone.utc)
+        s_dt, e_dt, lbl = TrainerChatbotService.extract_search_period(query, ref)
+        self.assertEqual((e_dt - s_dt).days, 30)
+
+        # 3. parse_criteria_query check with autospec (enforcing real signature)
+        with patch("app.utils.item_score_filters.get_evaluation_item_filter_options", autospec=True) as mock_get_opts:
+            mock_get_opts.return_value = mock_catalog
+            async with self.session_maker() as db:
+                filters = await TrainerChatbotService.parse_criteria_query(
+                    query,
+                    db=db,
+                    context=self.agent_context,
+                    target_agent_id="agent_100",
+                )
+                self.assertEqual(len(filters), 3)
+                f_emp = next(f for f in filters if f["key"] == "empatia")
+                f_cla = next(f for f in filters if f["key"] == "claridad")
+                f_pri = next(f for f in filters if f["key"] == "claridad_explicacion_economica")
+
+                self.assertEqual(f_emp["polarity"], "positive")
+                self.assertEqual(f_emp["min"], 7.0)
+                self.assertEqual(f_emp["max"], 10.0)
+
+                self.assertEqual(f_cla["polarity"], "positive")
+                self.assertEqual(f_cla["min"], 7.0)
+                self.assertEqual(f_cla["max"], 10.0)
+
+                self.assertEqual(f_pri["polarity"], "negative")
+                self.assertEqual(f_pri["min"], 0.0)
+                self.assertEqual(f_pri["max"], 4.0)
+
+        # 4. End-to-end process_chat execution without error / 500
+        async with self.session_maker() as db:
+            with patch("app.utils.item_score_filters.get_evaluation_item_filter_options", autospec=True) as mock_get_opts, \
+                 patch("app.services.trainer_chatbot_service.openai_service.complete_text", new_callable=AsyncMock) as mock_llm:
+                mock_get_opts.return_value = mock_catalog
+                mock_llm.return_value = "Aquí tienes los ejemplos donde mostraste buena empatía y claridad pero margen de mejora en precio."
+
+                res = await TrainerChatbotService.process_chat(
+                    db=db,
+                    current_user=self.agent_user,
+                    context=self.agent_context,
+                    message=query,
+                )
+
+                self.assertIsNotNone(res)
+                self.assertIn("response", res)
+                self.assertNotIn("No he localizado la llamada es", res["response"])
+                call_args = mock_llm.call_args[1]["messages"]
+                sys_prompt = next(m["content"] for m in call_args if m["role"] == "system")
+                self.assertIn("INSTRUCCIÓN PARA BÚSQUEDA DE EJEMPLOS POR CRITERIOS", sys_prompt)
 
     # -------------------------------------------------------------
     # 6. Sanitization of Call IDs vs Internal DB IDs

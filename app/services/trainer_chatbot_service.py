@@ -995,11 +995,21 @@ class TrainerChatbotService:
 
         q = query_text.lower()
 
-        # Fetch available catalog for tenant and agent
+        # Fetch available catalog for tenant and scoped service
+        comp_ids = [context.company_id] if (context and context.company_id is not None) else (
+            (context.allowed_company_ids if context.allowed_company_ids else None)
+            if (context and not context.is_super_admin)
+            else None
+        )
+        svc_ids = (
+            context.allowed_service_ids
+            if (context and not context.is_super_admin and context.allowed_service_ids)
+            else None
+        )
         catalog = await get_evaluation_item_filter_options(
             db=db,
-            company_ids=[context.company_id] if context.company_id is not None else None,
-            agent_id=target_agent_id,
+            company_ids=comp_ids,
+            service_ids=svc_ids,
         )
         if not catalog:
             return []
