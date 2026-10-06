@@ -4,7 +4,7 @@ import unicodedata
 import re
 from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select, delete, func
+from sqlalchemy import select, delete, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_db, get_tenant_context
