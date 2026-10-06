@@ -143,20 +143,21 @@ async def get_analytics_items(db: AsyncSession, service_str: str | None = None) 
     # De-duplicate criteria by key
     items_map = {}
     
-    # Fallback/standard items to ensure catalog population
-    from app.services.dashboard_service import CRITERIA_NAMES
-    for key, name in CRITERIA_NAMES.items():
-        # Map criterion keys to types
-        m_type = "score"
-        if key in ["cierre_cita", "cierre_cita_rate"]:
-            m_type = "percentage"
-        items_map[key] = {
-            "key": key,
-            "label": name,
-            "type": m_type,
-            "default_selected": False,
-            "order": 999
-        }
+    # Fallback/standard items to ensure catalog population (only for Front service or global legacy)
+    if service_id is None or service_id == 1:
+        from app.services.dashboard_service import CRITERIA_NAMES
+        for key, name in CRITERIA_NAMES.items():
+            # Map criterion keys to types
+            m_type = "score"
+            if key in ["cierre_cita", "cierre_cita_rate"]:
+                m_type = "percentage"
+            items_map[key] = {
+                "key": key,
+                "label": name,
+                "type": m_type,
+                "default_selected": False,
+                "order": 999
+            }
 
     # Add dynamic criteria
     for key, name, c_type in rows:

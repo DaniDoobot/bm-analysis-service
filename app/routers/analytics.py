@@ -123,8 +123,13 @@ async def get_all_metrics(
     if effective_company_id is None and context:
         effective_company_id = context.company_id
 
-    # Fallback/base metrics only apply to Boston Medical (company 1 or unrestricted context) when no specific typology is filtered
-    if (effective_company_id == 1 or (effective_company_id is None and context and context.is_super_admin)) and typology_id is None and typology_key is None:
+    # Fallback/base metrics only apply to Boston Medical (company 1 or unrestricted context) and Front service (service_id=1 or unspecified legacy) when no specific typology is filtered
+    if (
+        (effective_company_id == 1 or (effective_company_id is None and context and context.is_super_admin))
+        and (service_id is None or service_id == 1)
+        and typology_id is None
+        and typology_key is None
+    ):
         metrics = list(BASE_METRICS)
     else:
         metrics = []

@@ -10,7 +10,7 @@ from app.services import openai_service
 logger = logging.getLogger(__name__)
 
 
-async def transcribe_call(call_id: str) -> dict:
+async def transcribe_call(call_id: str, is_demo: bool | None = None) -> dict:
     """
     Full pipeline: HubSpot call → recording URL → download audio → transcribe.
 
@@ -22,10 +22,10 @@ async def transcribe_call(call_id: str) -> dict:
             "call_metadata": {...},
         }
     """
-    hubspot = HubSpotService()
+    hubspot = HubSpotService(is_demo=is_demo)
     twilio = TwilioService()
 
-    call_meta = await hubspot.get_call(call_id)
+    call_meta = await hubspot.get_call(call_id, is_demo=is_demo)
     recording_url = call_meta.get("recording_url")
 
     if not recording_url:

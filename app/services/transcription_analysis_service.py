@@ -191,14 +191,27 @@ async def analyze_transcription_pipeline(
 
     # If transcription is not provided, resolve and transcribe the audio now
     if not transcription:
-        logger.info("No transcription provided. Resolving and transcribing audio for call_id=%s", call_id)
+        from app.core.side_effects import resolve_company_demo_status
+        resolved_cid, resolved_is_demo = await resolve_company_demo_status(
+            db,
+            company_id=resolved_company_id,
+            service_id=resolved_service_id,
+        )
+        if resolved_cid is not None and resolved_company_id is None:
+            resolved_company_id = resolved_cid
+
+        logger.info(
+            "No transcription provided. Resolving and transcribing audio for call_id=%s (is_demo=%s)",
+            call_id,
+            resolved_is_demo,
+        )
         from app.services.hubspot_service import HubSpotService
         from app.services.twilio_service import TwilioService
         
         # 1. HubSpot Resolution
         try:
-            hs_service = HubSpotService()
-            hubspot_data = await hs_service.get_call(call_id)
+            hs_service = HubSpotService(is_demo=resolved_is_demo)
+            hubspot_data = await hs_service.get_call(call_id, is_demo=resolved_is_demo)
             target_url = hubspot_data.get("recording_url")
             if not target_url:
                 return {

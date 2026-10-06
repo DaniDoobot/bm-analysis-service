@@ -68,107 +68,7 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
     if call_timestamp:
         call_timestamp_source = "request_metadata"
 
-    # ── 1. HubSpot Resolution ──────────────────────────────────────────────
-    if not target_url:
-        logger.info("No direct recording_url provided. Resolving via HubSpot for call_id=%s", call_id)
-        try:
-            hs_service = HubSpotService()
-            hubspot_data = await hs_service.get_call(call_id)
-            target_url = hubspot_data.get("recording_url")
-            hubspot_url = hubspot_data.get("hubspot_url")
-            call_direction = hubspot_data.get("call_direction") or call_direction
-            
-            # Prioritized HubSpot timestamps
-            hs_timestamp = hubspot_data.get("hs_timestamp")
-            hs_createdate = hubspot_data.get("hs_createdate")
-            if hs_timestamp:
-                call_timestamp = hs_timestamp
-                call_timestamp_source = "hubspot_hs_timestamp"
-            elif hs_createdate:
-                call_timestamp = hs_createdate
-                call_timestamp_source = "hubspot_hs_createdate"
-            else:
-                call_timestamp = hubspot_data.get("call_timestamp") or call_timestamp
-                if call_timestamp and call_timestamp_source == "null":
-                    call_timestamp_source = "hubspot_call_timestamp"
-            
-            hubspot_owner_id = hubspot_data.get("hubspot_owner_id") or hubspot_owner_id
-            duracion_llamada = hubspot_data.get("call_duration") or duracion_llamada
-            agente_telefonico = hubspot_data.get("agente_telefonico") or agente_telefonico
-
-            if hubspot_owner_id and not metadata.get("agente_telefonico"):
-                # Try to resolve agent name
-                owner_name = await hs_service.get_owner_name(hubspot_owner_id)
-                if owner_name:
-                    agente_telefonico = owner_name
-
-        except Exception as e:
-            logger.error("Failed to fetch HubSpot data for call_id=%s: %s", call_id, e)
-            return {
-                "ok": False,
-                "status": "error",
-                "stage": "hubspot",
-                "error_message": f"HubSpot resolution failed: {str(e)}",
-            }
-    else:
-        logger.info("Using direct recording_url for call_id=%s", call_id)
-
-    # ── 1.5. Twilio Fallback Resolution ────────────────────────────────────
-    if not call_timestamp and target_url:
-        twilio_service = TwilioService()
-        if twilio_service.is_twilio_url(target_url) and twilio_service.account_sid and twilio_service.auth_token:
-            logger.info("Checking Twilio recording metadata fallback for call_id=%s (url=%s)", call_id, target_url)
-            try:
-                tw_meta = await twilio_service.get_recording_metadata(target_url)
-                if tw_meta:
-                    tw_date = tw_meta.get("date_created")
-                    if tw_date:
-                        call_timestamp = tw_date
-                        call_timestamp_source = "twilio_recording_date_created"
-            except Exception as e:
-                logger.warning("Twilio fallback failed for call_id=%s: %s", call_id, e)
-
-    # ── 1.8. Log resolved call timestamp ──
-    logger.info("Call timestamp resolution: call_timestamp_source=%s, call_timestamp=%s", call_timestamp_source, call_timestamp)
-
-    if not target_url:
-        return {
-            "ok": False,
-            "status": "error",
-            "stage": "validation",
-            "error_message": "No recording_url could be resolved for this call.",
-        }
-
-    # ── 2 & 3. Audio Download & Size Validation ─────────────────────────────
-    try:
-        twilio_service = TwilioService()
-        audio_bytes = await twilio_service.download_audio(target_url)
-    except Exception as e:
-        logger.error("Failed to download audio from %s: %s", target_url, e)
-        return {
-            "ok": False,
-            "status": "error",
-            "stage": "download_audio",
-            "error_message": f"Audio download failed: {str(e)}",
-        }
-
-    audio_size = sys.getsizeof(audio_bytes)
-    logger.info("Downloaded audio size: %.2f MB", audio_size / (1024 * 1024))
-
-    if audio_size > MAX_AUDIO_SIZE_BYTES:
-        return {
-            "ok": False,
-            "status": "error",
-            "stage": "audio_validation",
-            "error_message": "El audio supera el tamaño máximo permitido por Azure OpenAI (20 MB)",
-        }
-
-    # Guess format
-    audio_format = "mp3"
-    if target_url.endswith(".wav") or target_url.endswith(".WAV"):
-        audio_format = "wav"
-
-    # ── 4. Prompt & Service Resolution ─────────────────────────────────────
+    # ── 1. Prompt & Service Resolution (Resolved first for tenant & demo context) ──
     requested_service_id = getattr(request, "effective_service_id", None) or request.service_id or metadata.get("service_id")
     requested_prompt_id = getattr(request, "effective_prompt_id", None) or request.prompt_id or metadata.get("prompt_id")
     requested_company_id = getattr(request, "company_id", None) or metadata.get("company_id")
@@ -271,6 +171,120 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
             "stage": "prompt_resolution",
             "error_message": "Resolved prompt has no content.",
         }
+
+    # Resolve demo status fail-closed for HubSpot calls
+    from app.core.side_effects import resolve_company_demo_status
+    resolved_cid, resolved_is_demo = await resolve_company_demo_status(
+        db,
+        company_id=resolved_company_id,
+        service_id=resolved_service_id,
+    )
+    if resolved_cid is not None and resolved_company_id is None:
+        resolved_company_id = resolved_cid
+
+    # ── 2. HubSpot Resolution ──────────────────────────────────────────────
+    if not target_url:
+        logger.info(
+            "No direct recording_url provided. Resolving via HubSpot for call_id=%s (is_demo=%s)",
+            call_id,
+            resolved_is_demo,
+        )
+        try:
+            hs_service = HubSpotService(is_demo=resolved_is_demo)
+            hubspot_data = await hs_service.get_call(call_id, is_demo=resolved_is_demo)
+            target_url = hubspot_data.get("recording_url")
+            hubspot_url = hubspot_data.get("hubspot_url")
+            call_direction = hubspot_data.get("call_direction") or call_direction
+
+            # Prioritized HubSpot timestamps
+            hs_timestamp = hubspot_data.get("hs_timestamp")
+            hs_createdate = hubspot_data.get("hs_createdate")
+            if hs_timestamp:
+                call_timestamp = hs_timestamp
+                call_timestamp_source = "hubspot_hs_timestamp"
+            elif hs_createdate:
+                call_timestamp = hs_createdate
+                call_timestamp_source = "hubspot_hs_createdate"
+            else:
+                call_timestamp = hubspot_data.get("call_timestamp") or call_timestamp
+                if call_timestamp and call_timestamp_source == "null":
+                    call_timestamp_source = "hubspot_call_timestamp"
+
+            hubspot_owner_id = hubspot_data.get("hubspot_owner_id") or hubspot_owner_id
+            duracion_llamada = hubspot_data.get("call_duration") or duracion_llamada
+            agente_telefonico = hubspot_data.get("agente_telefonico") or agente_telefonico
+
+            if hubspot_owner_id and not metadata.get("agente_telefonico"):
+                # Try to resolve agent name
+                owner_name = await hs_service.get_owner_name(hubspot_owner_id)
+                if owner_name:
+                    agente_telefonico = owner_name
+
+        except Exception as e:
+            logger.error("Failed to fetch HubSpot data for call_id=%s: %s", call_id, e)
+            return {
+                "ok": False,
+                "status": "error",
+                "stage": "hubspot",
+                "error_message": f"HubSpot resolution failed: {str(e)}",
+            }
+    else:
+        logger.info("Using direct recording_url for call_id=%s", call_id)
+
+    # ── 2.5. Twilio Fallback Resolution ────────────────────────────────────
+    if not call_timestamp and target_url:
+        twilio_service = TwilioService()
+        if twilio_service.is_twilio_url(target_url) and twilio_service.account_sid and twilio_service.auth_token:
+            logger.info("Checking Twilio recording metadata fallback for call_id=%s (url=%s)", call_id, target_url)
+            try:
+                tw_meta = await twilio_service.get_recording_metadata(target_url)
+                if tw_meta:
+                    tw_date = tw_meta.get("date_created")
+                    if tw_date:
+                        call_timestamp = tw_date
+                        call_timestamp_source = "twilio_recording_date_created"
+            except Exception as e:
+                logger.warning("Twilio fallback failed for call_id=%s: %s", call_id, e)
+
+    # ── 2.8. Log resolved call timestamp ──
+    logger.info("Call timestamp resolution: call_timestamp_source=%s, call_timestamp=%s", call_timestamp_source, call_timestamp)
+
+    if not target_url:
+        return {
+            "ok": False,
+            "status": "error",
+            "stage": "validation",
+            "error_message": "No recording_url could be resolved for this call.",
+        }
+
+    # ── 2 & 3. Audio Download & Size Validation ─────────────────────────────
+    try:
+        twilio_service = TwilioService()
+        audio_bytes = await twilio_service.download_audio(target_url)
+    except Exception as e:
+        logger.error("Failed to download audio from %s: %s", target_url, e)
+        return {
+            "ok": False,
+            "status": "error",
+            "stage": "download_audio",
+            "error_message": f"Audio download failed: {str(e)}",
+        }
+
+    audio_size = sys.getsizeof(audio_bytes)
+    logger.info("Downloaded audio size: %.2f MB", audio_size / (1024 * 1024))
+
+    if audio_size > MAX_AUDIO_SIZE_BYTES:
+        return {
+            "ok": False,
+            "status": "error",
+            "stage": "audio_validation",
+            "error_message": "El audio supera el tamaño máximo permitido por Azure OpenAI (20 MB)",
+        }
+
+    # Guess format
+    audio_format = "mp3"
+    if target_url.endswith(".wav") or target_url.endswith(".WAV"):
+        audio_format = "wav"
 
     # Self-heal/Sync the prompt text with active criteria before validating or analyzing
     is_fallback_active = False

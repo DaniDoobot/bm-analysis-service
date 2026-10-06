@@ -1953,11 +1953,36 @@ async def get_agent_evolution(
             "total_objeciones": to_float(sum(1 for r in br if _has_objections(_get_loaded_attr(r, "result_json")))),
         })
 
+    # ── Resolve Criteria for Service / Context ────────────────────────────────
+    target_criteria_map: dict[str, str] = {}
+    if eff_service_id is not None and eff_service_id != 1:
+        # For non-Front services (e.g. EXPAC service_id=2), resolve configured criteria dynamically
+        try:
+            from app.utils.item_score_filters import get_evaluation_item_filter_options
+            dynamic_options = await get_evaluation_item_filter_options(
+                db,
+                company_ids=[effective_company_id] if effective_company_id is not None else None,
+                service_ids=[eff_service_id],
+                typology_id=typology_ids[0] if (typology_ids and len(typology_ids) == 1) else None,
+                typology_key=typology_key,
+            )
+            for opt in dynamic_options:
+                k = opt.get("key")
+                lbl = opt.get("label") or k
+                if k:
+                    target_criteria_map[k] = lbl
+        except Exception as e:
+            logger.warning("Error fetching dynamic criteria options in get_agent_evolution: %s", e)
+            target_criteria_map = {}
+    else:
+        # Front service (service_id=1) or global legacy fallback
+        target_criteria_map = dict(CRITERIA_NAMES)
+
     # ── Criteria evolution ────────────────────────────────────────────────────
     criteria_evolution = []
     if total_analyses >= 2:
         mid = total_analyses // 2
-        for key, name in CRITERIA_NAMES.items():
+        for key, name in target_criteria_map.items():
             fa, fa_count = get_avg_score_and_count_mass(rows[:mid], key)
             la, la_count = get_avg_score_and_count_mass(rows[mid:], key)
             if fa is not None and la is not None:
@@ -1977,7 +2002,7 @@ async def get_agent_evolution(
 
     # ── Strengths / Weaknesses ────────────────────────────────────────────────
     criteria_scores = []
-    for key, name in CRITERIA_NAMES.items():
+    for key, name in target_criteria_map.items():
         if key in ["evaluacion_global", "sentiment"]:
             continue
         av, av_count = get_avg_score_and_count_mass(rows, key)
