@@ -21,6 +21,7 @@ from app.utils.hubspot_owners import (
 )
 from app.utils.normalizers import normalize_direction, normalize_typology, normalize_status, normalize_sort
 from app.utils.dates import parse_madrid_date_bounds
+from app.utils.sanitization import sanitize_hubspot_metadata
 
 
 def _fix_date_to_end_of_day(dt: "datetime | None") -> "datetime | None":
@@ -922,7 +923,10 @@ async def get_my_analysis_results(
         items_out = []
         for r in results:
             if include_detail:
+                if "prompt_snapshot" not in r.__dict__:
+                    r.__dict__["prompt_snapshot"] = "{}"
                 d = MassEvaluationResultResponse.model_validate(r)
+                d.hubspot_metadata = sanitize_hubspot_metadata(d.hubspot_metadata)
             else:
                 d = MassEvaluationResultListItemResponse.model_validate(r)
             d.items_visual = build_items_visual(r.items_json)
@@ -1202,7 +1206,10 @@ async def list_results(
     response_mode = "list_full" if include_detail else "list_light"
     for r in results:
         if include_detail:
+            if "prompt_snapshot" not in r.__dict__:
+                r.__dict__["prompt_snapshot"] = "{}"
             d = MassEvaluationResultResponse.model_validate(r)
+            d.hubspot_metadata = sanitize_hubspot_metadata(d.hubspot_metadata)
         else:
             d = MassEvaluationResultListItemResponse.model_validate(r)
         d.items_visual = build_items_visual(r.items_json)
@@ -1346,6 +1353,8 @@ async def get_result(
 
     if result.recording_url:
         d.recording_url = f"/bm/mass-evaluations/results/{result.mass_analysis_id}/recording-audio"
+
+    d.hubspot_metadata = sanitize_hubspot_metadata(d.hubspot_metadata)
 
     if is_placeholder_agent_name(d.agent_name) and result.hubspot_owner_id:
         resolved_name = await resolve_agent_name_canonical(

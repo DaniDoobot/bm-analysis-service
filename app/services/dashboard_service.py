@@ -2476,21 +2476,24 @@ async def get_mass_result_detail(
     row = None
     try:
         id_val = int(identifier)
-        stmt = select(MassEvaluationResult).where(MassEvaluationResult.mass_analysis_id == id_val)
-        if context and not context.is_super_admin:
-            stmt = stmt.where(
-                or_(
-                    MassEvaluationResult.company_id.in_(context.allowed_company_ids),
-                    MassEvaluationResult.company_id.is_(None)
+        if id_val > 2147483647 or id_val < -2147483648:
+            id_val = None
+        if id_val is not None:
+            stmt = select(MassEvaluationResult).where(MassEvaluationResult.mass_analysis_id == id_val)
+            if context and not context.is_super_admin:
+                stmt = stmt.where(
+                    or_(
+                        MassEvaluationResult.company_id.in_(context.allowed_company_ids),
+                        MassEvaluationResult.company_id.is_(None)
+                    )
                 )
-            )
-            if context.allowed_service_ids is not None:
-                stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
-            if context.allowed_agent_ids is not None:
-                stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(context.allowed_agent_ids))
-        res = await db.execute(stmt)
-        row = res.scalars().first()
-    except ValueError:
+                if context.allowed_service_ids is not None:
+                    stmt = stmt.where(MassEvaluationResult.service_id.in_(context.allowed_service_ids))
+                if context.allowed_agent_ids is not None:
+                    stmt = stmt.where(MassEvaluationResult.hubspot_owner_id.in_(context.allowed_agent_ids))
+            res = await db.execute(stmt)
+            row = res.scalars().first()
+    except (ValueError, OverflowError):
         pass
         
     if not row:

@@ -110,6 +110,15 @@ class TestMassEvaluationRecordingProxy(unittest.IsolatedAsyncioTestCase):
                 prompt_id=1,
                 prompt_snapshot="{}",
                 result_json={"evaluacion_global": 8.5},
+                hubspot_metadata={
+                    "call_id": "call_101",
+                    "recording_url": "https://api.twilio.com/2010-04-01/Accounts/AC123/Recordings/RE101.mp3",
+                    "hs_call_recording_url": "https://api.twilio.com/2010-04-01/Accounts/AC123/Recordings/RE101.mp3",
+                    "audio_url": "https://api.twilio.com/audio.mp3",
+                    "status": "COMPLETED",
+                    "contact_id": "999888",
+                    "direction": "INBOUND",
+                },
             )
 
             # Call 2: Company 1, Service 2, Agent B, with Twilio recording_url
@@ -457,6 +466,105 @@ class TestMassEvaluationRecordingProxy(unittest.IsolatedAsyncioTestCase):
                     res.text,
                     f"Leak detected: 'api.twilio.com' was serialized in response from {endpoint}"
                 )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Requirement 15: Sanitización de hubspot_metadata en detalle y listado con detalle
+    # ─────────────────────────────────────────────────────────────────────────
+    async def test_15_hubspot_metadata_sanitization_preserves_other_keys(self):
+        app.dependency_overrides[get_tenant_context] = lambda: self.c1_admin_context
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            # 1. Detail endpoint
+            res = await client.get("/bm/mass-evaluations/results/101")
+            self.assertEqual(res.status_code, 200)
+            data = res.json()
+            
+            meta = data.get("hubspot_metadata")
+            self.assertIsNotNone(meta)
+            self.assertNotIn("recording_url", meta)
+            self.assertNotIn("hs_call_recording_url", meta)
+            self.assertNotIn("audio_url", meta)
+            
+            # Non-recording keys remain completely intact
+            self.assertEqual(meta.get("call_id"), "call_101")
+            self.assertEqual(meta.get("status"), "COMPLETED")
+            self.assertEqual(meta.get("contact_id"), "999888")
+            self.assertEqual(meta.get("direction"), "INBOUND")
+
+            # Root recording_url still points to secure proxy
+            self.assertEqual(data.get("recording_url"), "/bm/mass-evaluations/results/101/recording-audio")
+
+            # 2. List with include_detail=True
+            res_list = await client.get("/bm/mass-evaluations/results?include_detail=true")
+            self.assertEqual(res_list.status_code, 200)
+            items = res_list.json().get("items", [])
+            match = next((it for it in items if it.get("mass_analysis_id") == 101), None)
+            self.assertIsNotNone(match)
+            list_meta = match.get("hubspot_metadata")
+            self.assertIsNotNone(list_meta)
+            self.assertNotIn("recording_url", list_meta)
+            self.assertNotIn("hs_call_recording_url", list_meta)
+            self.assertEqual(list_meta.get("contact_id"), "999888")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Requirement 16: La BD y el modelo ORM persistido no sufren mutación
+    # ─────────────────────────────────────────────────────────────────────────
+    async def test_16_database_hubspot_metadata_is_not_mutated(self):
+        app.dependency_overrides[get_tenant_context] = lambda: self.c1_admin_context
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            # Trigger API call that sanitizes response
+            res = await client.get("/bm/mass-evaluations/results/101")
+            self.assertEqual(res.status_code, 200)
+
+        # Inspect database record directly via SQLAlchemy session
+        from sqlalchemy import select
+        async with AsyncSession(self.engine) as db:
+            stmt = select(MassEvaluationResult).where(MassEvaluationResult.mass_analysis_id == 101)
+            row = (await db.execute(stmt)).scalars().first()
+            self.assertIsNotNone(row)
+            self.assertIsNotNone(row.hubspot_metadata)
+            # The database STILL has the original raw values
+            self.assertEqual(
+                row.hubspot_metadata.get("recording_url"),
+                "https://api.twilio.com/2010-04-01/Accounts/AC123/Recordings/RE101.mp3"
+            )
+            self.assertEqual(
+                row.hubspot_metadata.get("hs_call_recording_url"),
+                "https://api.twilio.com/2010-04-01/Accounts/AC123/Recordings/RE101.mp3"
+            )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Requirement 17: Dashboard soporta call_id numérico de 12 dígitos sin desbordar int32
+    # ─────────────────────────────────────────────────────────────────────────
+    async def test_17_dashboard_handles_large_numeric_call_id_without_500(self):
+        app.dependency_overrides[get_tenant_context] = lambda: self.c1_admin_context
+
+        # Add a call with 12-digit numeric call_id
+        async with AsyncSession(self.engine) as db:
+            call_large = MassEvaluationResult(
+                mass_analysis_id=105,
+                job_id=1,
+                run_id=1,
+                call_id="525354158311",
+                company_id=1,
+                service_id=1,
+                status="completed",
+                recording_url="https://api.twilio.com/2010-04-01/Accounts/AC123/Recordings/RE105.mp3",
+                prompt_id=1,
+                prompt_snapshot="{}",
+                result_json={"evaluacion_global": 9.0},
+            )
+            db.add(call_large)
+            await db.commit()
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            res = await client.get("/bm/dashboard/latest-analyses/525354158311")
+            self.assertEqual(res.status_code, 200)
+            data = res.json()
+            self.assertEqual(data.get("call_id"), "525354158311")
+            self.assertEqual(data.get("recording_url"), "/bm/mass-evaluations/results/105/recording-audio")
+            self.assertNotIn("api.twilio.com", res.text)
 
 
 if __name__ == "__main__":

@@ -542,6 +542,12 @@ class MassEvaluationResultResponse(BaseModel):
     hubspot_ticket_error: str | None = None
     created_at: datetime
 
+    @field_validator("hubspot_metadata", mode="before")
+    @classmethod
+    def sanitize_metadata(cls, v: Any) -> Any:
+        from app.utils.sanitization import sanitize_hubspot_metadata
+        return sanitize_hubspot_metadata(v)
+
     class Config:
         from_attributes = True
 
