@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Any, Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status, status as http_status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status, status as http_status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -928,6 +928,8 @@ async def get_my_analysis_results(
             d.items_visual = build_items_visual(r.items_json)
             if d.execution_source is None:
                 d.execution_source = "on_demand"
+            if r.recording_url:
+                d.recording_url = f"/bm/mass-evaluations/results/{r.mass_analysis_id}/recording-audio"
             items_out.append(d)
 
         total_ms = round((time.perf_counter() - t_start) * 1000.0, 1)
@@ -1206,6 +1208,8 @@ async def list_results(
         d.items_visual = build_items_visual(r.items_json)
         if d.execution_source is None:
             d.execution_source = "on_demand"
+        if r.recording_url:
+            d.recording_url = f"/bm/mass-evaluations/results/{r.mass_analysis_id}/recording-audio"
 
         # Dynamically enrich placeholder agent_name without touching DB snapshots
         if is_placeholder_agent_name(d.agent_name) and r.hubspot_owner_id:
@@ -1245,16 +1249,12 @@ async def list_results(
 
 
 
-@router.get("/mass-evaluation-results/{mass_analysis_id}", response_model=MassEvaluationResultResponse)
-@router.get("/mass-evaluations/results/{mass_analysis_id}", response_model=MassEvaluationResultResponse)
-@router.get("/me/analysis-results/{mass_analysis_id}", response_model=MassEvaluationResultResponse)
-async def get_result(
+async def verify_mass_result_read_scope(
+    db: AsyncSession,
     mass_analysis_id: int,
-    context: TenantContext = Depends(get_tenant_context),
-    db: AsyncSession = Depends(get_db)
-):
-    """Retrieve full analysis result and normalized prompt snapshot elements of a call."""
-    from app.utils.visual_formatters import build_items_visual
+    context: TenantContext,
+) -> Any:
+    """Verify that the mass evaluation result exists and is within the actor's company, service, and agent scopes."""
     result = await MassEvaluationService.get_result(db, mass_analysis_id=mass_analysis_id)
     if not result:
         raise HTTPException(
@@ -1324,10 +1324,28 @@ async def get_result(
                         detail="Acceso denegado: no tienes permisos sobre el agente de este resultado."
                     )
 
+    return result
+
+
+@router.get("/mass-evaluation-results/{mass_analysis_id}", response_model=MassEvaluationResultResponse)
+@router.get("/mass-evaluations/results/{mass_analysis_id}", response_model=MassEvaluationResultResponse)
+@router.get("/me/analysis-results/{mass_analysis_id}", response_model=MassEvaluationResultResponse)
+async def get_result(
+    mass_analysis_id: int,
+    context: TenantContext = Depends(get_tenant_context),
+    db: AsyncSession = Depends(get_db)
+):
+    """Retrieve full analysis result and normalized prompt snapshot elements of a call."""
+    from app.utils.visual_formatters import build_items_visual
+    result = await verify_mass_result_read_scope(db, mass_analysis_id=mass_analysis_id, context=context)
+
     d = MassEvaluationResultResponse.model_validate(result)
     d.items_visual = build_items_visual(result.items_json)
     if d.execution_source is None:
         d.execution_source = "on_demand"
+
+    if result.recording_url:
+        d.recording_url = f"/bm/mass-evaluations/results/{result.mass_analysis_id}/recording-audio"
 
     if is_placeholder_agent_name(d.agent_name) and result.hubspot_owner_id:
         resolved_name = await resolve_agent_name_canonical(
@@ -1340,6 +1358,67 @@ async def get_result(
             d.agent_name = resolved_name
 
     return d
+
+
+@router.get("/mass-evaluations/results/{mass_analysis_id}/recording-audio")
+@router.get("/mass-evaluation-results/{mass_analysis_id}/recording-audio")
+@router.get("/me/analysis-results/{mass_analysis_id}/recording-audio")
+async def get_mass_result_recording_audio(
+    mass_analysis_id: int,
+    context: TenantContext = Depends(get_tenant_context),
+    db: AsyncSession = Depends(get_db),
+):
+    """Proxy endpoint to stream call recording audio securely with tenant verification."""
+    result = await verify_mass_result_read_scope(db, mass_analysis_id=mass_analysis_id, context=context)
+
+    raw_recording_url = result.recording_url
+    if not raw_recording_url:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="Grabación no disponible todavía"
+        )
+
+    import httpx
+    from app.services.twilio_service import TwilioService
+
+    try:
+        twilio_service = TwilioService()
+        audio_bytes = await twilio_service.download_audio(raw_recording_url)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise HTTPException(
+                status_code=http_status.HTTP_404_NOT_FOUND,
+                detail="Grabación no disponible"
+            )
+        if e.response.status_code in (401, 403):
+            raise HTTPException(
+                status_code=http_status.HTTP_502_BAD_GATEWAY,
+                detail="No se pudo recuperar la grabación desde Twilio"
+            )
+        raise HTTPException(
+            status_code=http_status.HTTP_502_BAD_GATEWAY,
+            detail=f"Error al descargar la grabación: {str(e)}"
+        )
+    except (httpx.ConnectError, httpx.TimeoutException):
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="Grabación no disponible"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=http_status.HTTP_502_BAD_GATEWAY,
+            detail=f"No se pudo recuperar la grabación: {str(e)}"
+        )
+
+    return Response(
+        content=audio_bytes,
+        media_type="audio/mpeg",
+        headers={
+            "Content-Type": "audio/mpeg",
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": f"inline; filename=mass_result_{mass_analysis_id}.mp3"
+        }
+    )
 
 
 

@@ -2602,7 +2602,7 @@ async def get_mass_result_detail(
         "batch_id": row.job_id,
         "mass_evaluation_id": row.job_id,
         "run_id": row.run_id,
-        "recording_url": row.recording_url,
+        "recording_url": f"/bm/mass-evaluations/results/{row.mass_analysis_id}/recording-audio" if row.recording_url else None,
         "execution_source": row.execution_source
     }
 
