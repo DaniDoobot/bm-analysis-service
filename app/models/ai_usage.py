@@ -57,6 +57,11 @@ class AIUsageEvent(Base):
     status: Mapped[str] = mapped_column(Text, default="success", server_default="'success'", nullable=False)
     attempt_number: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
 
+    # FinOps Phase 3: Cost attribution
+    estimated_cost_usd: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 6), nullable=True)
+    pricing_version: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    pricing_status: Mapped[str] = mapped_column(Text, default="unpriced", server_default="'unpriced'", nullable=False)
+
     company = relationship("Company")
     service = relationship("Service")
 
@@ -67,4 +72,40 @@ class AIUsageEvent(Base):
         Index("idx_bm_ai_usage_events_module_created", module, created_at.desc()),
         Index("idx_bm_ai_usage_events_model_created", model, created_at.desc()),
         Index("idx_bm_ai_usage_events_call_id", call_id),
+        Index("idx_bm_ai_usage_events_pricing_status", pricing_status, created_at.desc()),
     )
+
+
+class AIModelPricing(Base):
+    __tablename__ = "bm_ai_model_pricing"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    provider: Mapped[str] = mapped_column(Text, default="gemini", server_default="'gemini'", nullable=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    effective_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    effective_to: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    currency: Mapped[str] = mapped_column(Text, default="USD", server_default="'USD'", nullable=False)
+
+    input_text_price_per_million: Mapped[Decimal] = mapped_column(Numeric(10, 4), default=Decimal("0.0000"), nullable=False)
+    input_audio_price_per_million: Mapped[Decimal] = mapped_column(Numeric(10, 4), default=Decimal("0.0000"), nullable=False)
+    output_text_price_per_million: Mapped[Decimal] = mapped_column(Numeric(10, 4), default=Decimal("0.0000"), nullable=False)
+    output_audio_price_per_million: Mapped[Decimal] = mapped_column(Numeric(10, 4), default=Decimal("0.0000"), nullable=False)
+    cached_input_price_per_million: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)
+    thoughts_price_per_million: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)
+
+    pricing_version: Mapped[str] = mapped_column(Text, default="v1", server_default="'v1'", nullable=False)
+    is_active: Mapped[bool] = mapped_column(default=True, server_default="true", nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("idx_bm_ai_model_pricing_lookup", provider, model, effective_from.desc()),
+        Index("idx_bm_ai_model_pricing_active", is_active),
+    )
+

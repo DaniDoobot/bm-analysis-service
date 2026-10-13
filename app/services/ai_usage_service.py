@@ -178,43 +178,75 @@ async def record_ai_usage_event(
 
         dur_decimal = Decimal(str(round(u_dur, 2))) if u_dur is not None else None
 
-        event = AIUsageEvent(
-            company_id=company_id,
-            service_id=service_id,
-            module=module,
-            operation=operation,
-            provider=provider,
-            model=u_model,
-            credential_alias=u_alias,
-            request_id=u_req_id,
-            call_id=call_id,
-            mass_analysis_id=mass_analysis_id,
-            cycle_id=cycle_id,
-            trainer_session_id=trainer_session_id,
-            prompt_token_count=usage.prompt_token_count if usage else None,
-            candidates_token_count=usage.candidates_token_count if usage else None,
-            total_token_count=usage.total_token_count if usage else None,
-            cached_content_token_count=usage.cached_content_token_count if usage else None,
-            thoughts_token_count=usage.thoughts_token_count if usage else None,
-            input_text_tokens=usage.input_text_tokens if usage else None,
-            input_audio_tokens=usage.input_audio_tokens if usage else None,
-            output_text_tokens=usage.output_text_tokens if usage else None,
-            output_audio_tokens=usage.output_audio_tokens if usage else None,
-            audio_duration_seconds=dur_decimal,
-            execution_latency_ms=u_latency,
-            status=u_status,
-            attempt_number=u_attempt,
-        )
+        # FinOps Phase 3: Calculate estimated cost if pricing exists
+        est_cost_usd = None
+        p_version = None
+        p_status = "unpriced"
 
         async with AsyncSessionLocal() as session:
+            try:
+                from app.services.ai_pricing_service import get_model_pricing, calculate_event_cost
+                pricing = await get_model_pricing(
+                    session=session,
+                    model=u_model or "",
+                    provider=provider,
+                )
+                cost_calc = calculate_event_cost(
+                    pricing=pricing,
+                    prompt_token_count=usage.prompt_token_count if usage else None,
+                    candidates_token_count=usage.candidates_token_count if usage else None,
+                    cached_content_token_count=usage.cached_content_token_count if usage else None,
+                    thoughts_token_count=usage.thoughts_token_count if usage else None,
+                    input_text_tokens=usage.input_text_tokens if usage else None,
+                    input_audio_tokens=usage.input_audio_tokens if usage else None,
+                    output_text_tokens=usage.output_text_tokens if usage else None,
+                    output_audio_tokens=usage.output_audio_tokens if usage else None,
+                )
+                est_cost_usd = cost_calc.estimated_cost_usd
+                p_version = cost_calc.pricing_version
+                p_status = cost_calc.pricing_status
+            except Exception as pe:
+                logger.warning("Could not calculate AI usage cost: %s", pe)
+
+            event = AIUsageEvent(
+                company_id=company_id,
+                service_id=service_id,
+                module=module,
+                operation=operation,
+                provider=provider,
+                model=u_model,
+                credential_alias=u_alias,
+                request_id=u_req_id,
+                call_id=call_id,
+                mass_analysis_id=mass_analysis_id,
+                cycle_id=cycle_id,
+                trainer_session_id=trainer_session_id,
+                prompt_token_count=usage.prompt_token_count if usage else None,
+                candidates_token_count=usage.candidates_token_count if usage else None,
+                total_token_count=usage.total_token_count if usage else None,
+                cached_content_token_count=usage.cached_content_token_count if usage else None,
+                thoughts_token_count=usage.thoughts_token_count if usage else None,
+                input_text_tokens=usage.input_text_tokens if usage else None,
+                input_audio_tokens=usage.input_audio_tokens if usage else None,
+                output_text_tokens=usage.output_text_tokens if usage else None,
+                output_audio_tokens=usage.output_audio_tokens if usage else None,
+                audio_duration_seconds=dur_decimal,
+                execution_latency_ms=u_latency,
+                status=u_status,
+                attempt_number=u_attempt,
+                estimated_cost_usd=est_cost_usd,
+                pricing_version=p_version,
+                pricing_status=p_status,
+            )
+
             session.add(event)
             await session.commit()
 
         logger.debug(
-            "AI usage event recorded: module=%s operation=%s model=%s alias=%s total_tokens=%s latency_ms=%s",
+            "AI usage event recorded: module=%s operation=%s model=%s alias=%s total_tokens=%s cost_usd=%s status=%s",
             module, operation, u_model, u_alias,
             usage.total_token_count if usage else None,
-            u_latency,
+            est_cost_usd, p_status,
         )
 
     except Exception as exc:

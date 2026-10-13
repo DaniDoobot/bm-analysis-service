@@ -181,6 +181,9 @@ async def test_record_ai_usage_event_success():
     mock_session.__aexit__ = AsyncMock(return_value=None)
     mock_session.add = MagicMock()
     mock_session.commit = AsyncMock()
+    mock_pricing_res = MagicMock()
+    mock_pricing_res.scalars.return_value.first.return_value = None
+    mock_session.execute = AsyncMock(return_value=mock_pricing_res)
     with patch("app.services.ai_usage_service.AsyncSessionLocal", return_value=mock_session):
         await record_ai_usage_event(
             company_id=1,
