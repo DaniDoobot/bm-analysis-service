@@ -40,7 +40,7 @@ CREATE INDEX IF NOT EXISTS idx_bm_ai_usage_events_pricing_status
 
 -- 3. Seed official baseline pricing
 
--- 3.1. Gemini 3.8 Flash - Window 1: Launch / Promotional rates up to 2026-12-31 23:59:59 UTC
+-- 3.1. Gemini 3.8 Flash - Window 1: GA Launch (2026-09-02) to 2026-12-31 23:59:59 UTC
 -- Input: $0.75 / 1M (general input: text & audio)
 -- Output: $3.75 / 1M (including thinking tokens)
 -- Context Caching: $0.075 / 1M
@@ -51,8 +51,8 @@ INSERT INTO public.bm_ai_model_pricing (
     cached_input_price_per_million, thoughts_price_per_million,
     pricing_version, is_active, description
 )
-SELECT 'gemini', 'gemini-3.8-flash', '2026-06-01 00:00:00+00', '2027-01-01 00:00:00+00', 'USD',
-       0.7500, 0.7500, 3.7500, 3.7500, 0.0750, NULL, 'gemini-3.8-flash-2026', TRUE, 'Gemini 3.8 Flash promotional rates until 2026-12-31'
+SELECT 'gemini', 'gemini-3.8-flash', '2026-09-02 00:00:00+00', '2027-01-01 00:00:00+00', 'USD',
+       0.7500, 0.7500, 3.7500, 3.7500, 0.0750, NULL, 'gemini-3.8-flash-2026', TRUE, 'Gemini 3.8 Flash launch promotional rates until 2026-12-31'
 WHERE NOT EXISTS (
     SELECT 1 FROM public.bm_ai_model_pricing WHERE provider = 'gemini' AND model = 'gemini-3.8-flash' AND pricing_version = 'gemini-3.8-flash-2026'
 );

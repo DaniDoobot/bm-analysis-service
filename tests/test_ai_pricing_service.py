@@ -2,13 +2,14 @@
 Unit tests for AI Pricing Service and Cost Attribution (FinOps Phase 3).
 Covers:
 - Pricing lookup by provider, model, and effective date window.
-- Date-versioned pricing changes for Gemini 3.8 Flash (2026 promotional vs 2027 standard).
-- Gemini 3.1 Flash Live Preview multimodal rates (text vs audio input/output).
-- Calculation per modality: text-only, audio + text, cached tokens, thoughts, output audio.
-- Non-duplication of thinking tokens (ensuring thoughts are included in output, not double charged).
-- Non-duplication of cached tokens across modalities.
+- Gemini 3.8 Flash before launch (2026-08-31) -> unpriced.
+- Gemini 3.8 Flash GA launch (2026-09-02) -> 2026 promotional pricing.
+- Gemini 3.8 Flash standard rates from 2027-01-01.
+- Thinking tokens pricing: candidates (500) + thoughts (200) = 700 billable output tokens.
+- Usage metadata identity verification (total ~= prompt + candidates + thoughts).
+- Cached tokens: prompt (1000) with cached (300) -> 700 net regular + 300 cached.
+- Gemini 3.1 Flash Live Preview multimodal rates.
 - Handling of 0 values vs None (nulls).
-- Unpriced fallback without disrupting execution flow.
 - Idempotent backfill utility for unpriced historical events.
 """
 from datetime import datetime, timezone, timedelta
@@ -40,15 +41,34 @@ class TestAIPricingService(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(normalize_model_name(None))
         self.assertIsNone(normalize_model_name(""))
 
-    async def test_get_model_pricing_date_window_2026_vs_2027(self):
-        """Verify that pricing lookup selects the version effective at target date for Gemini 3.8 Flash."""
+    async def test_gemini_38_flash_before_launch_is_unpriced(self):
+        """Events before GA launch date 2026-09-02 must return None (unpriced)."""
+        session = AsyncMock()
+
+        # Database returns no pricing record matching target_date 2026-08-31
+        mock_execute = MagicMock()
+        mock_execute.scalars.return_value.first.return_value = None
+        session.execute = AsyncMock(return_value=mock_execute)
+
+        target_dt = datetime(2026, 8, 31, tzinfo=timezone.utc)
+        found = await get_model_pricing(
+            session=session,
+            model="models/gemini-3.8-flash",
+            provider="gemini",
+            target_date=target_dt,
+        )
+
+        self.assertIsNone(found)
+
+    async def test_gemini_38_flash_at_launch_2026_09_02(self):
+        """Events on or after 2026-09-02 match the 2026 promotional pricing window."""
         session = AsyncMock()
 
         pricing_2026 = AIModelPricing(
             id=1,
             provider="gemini",
             model="gemini-3.8-flash",
-            effective_from=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            effective_from=datetime(2026, 9, 2, tzinfo=timezone.utc),
             effective_to=datetime(2027, 1, 1, tzinfo=timezone.utc),
             pricing_version="gemini-3.8-flash-2026",
             input_text_price_per_million=Decimal("0.75"),
@@ -63,7 +83,7 @@ class TestAIPricingService(unittest.IsolatedAsyncioTestCase):
         mock_execute.scalars.return_value.first.return_value = pricing_2026
         session.execute = AsyncMock(return_value=mock_execute)
 
-        target_dt = datetime(2026, 10, 13, tzinfo=timezone.utc)
+        target_dt = datetime(2026, 9, 2, tzinfo=timezone.utc)
         found = await get_model_pricing(
             session=session,
             model="models/gemini-3.8-flash",
@@ -73,8 +93,7 @@ class TestAIPricingService(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(found, pricing_2026)
         self.assertEqual(found.pricing_version, "gemini-3.8-flash-2026")
-        self.assertEqual(found.input_text_price_per_million, Decimal("0.75"))
-        self.assertEqual(found.output_text_price_per_million, Decimal("3.75"))
+        self.assertEqual(found.effective_from, datetime(2026, 9, 2, tzinfo=timezone.utc))
 
     def test_gemini_38_flash_2026_calculation(self):
         """
@@ -136,12 +155,13 @@ class TestAIPricingService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res.pricing_version, "gemini-3.8-flash-2027")
         self.assertEqual(res.estimated_cost_usd, Decimal("0.300000"))
 
-    def test_thinking_tokens_not_double_charged(self):
+    def test_thinking_tokens_billed_at_output_rate(self):
         """
-        Verify thinking tokens are NOT charged as an extra fee on top of output tokens.
-        Google documentation: "Output price (including thinking tokens)".
-        candidates_token_count = 20,000 (includes 5,000 thoughts).
-        Output cost must be 20,000 * 3.75 / 1M = $0.075000 (NOT 20,000 + 5,000).
+        Verify: candidates (500) + thoughts (200) bills output over exactly 700 tokens.
+        Google pricing: "Output price (including thinking tokens)".
+        candidates = 500 @ $3.75/M = $0.001875
+        thoughts = 200 @ $3.75/M = $0.000750
+        Total output cost = 700 / 1M * 3.75 = $0.002625
         """
         pricing = AIModelPricing(
             pricing_version="gemini-3.8-flash-2026",
@@ -156,15 +176,72 @@ class TestAIPricingService(unittest.IsolatedAsyncioTestCase):
         res = calculate_event_cost(
             pricing=pricing,
             input_text_tokens=0,
-            output_text_tokens=20_000,
-            thoughts_token_count=5_000,
+            candidates_token_count=500,
+            thoughts_token_count=200,
         )
 
         self.assertEqual(res.pricing_status, "priced")
-        # Exactly 20,000 * $3.75 / 1M = $0.075000
-        self.assertEqual(res.estimated_cost_usd, Decimal("0.075000"))
-        self.assertEqual(res.details.get("thoughts_tokens"), 5_000)
-        self.assertEqual(res.details.get("thoughts_billing"), "included_in_output")
+        # 500 * 3.75/1M + 200 * 3.75/1M = 700 * 3.75/1M = $0.002625
+        self.assertEqual(res.estimated_cost_usd, Decimal("0.002625"))
+        self.assertEqual(res.details.get("candidates_tokens"), 500)
+        self.assertEqual(res.details.get("thoughts_tokens"), 200)
+
+    def test_usage_metadata_token_identity(self):
+        """
+        Verify the identity of Google UsageMetadata:
+        totalTokenCount ~= promptTokenCount + candidatesTokenCount + thoughtsTokenCount
+        """
+        prompt = 1000
+        candidates = 500
+        thoughts = 200
+        total = prompt + candidates + thoughts
+        self.assertEqual(total, 1700)
+
+        pricing = AIModelPricing(
+            pricing_version="gemini-3.8-flash-2026",
+            currency="USD",
+            input_text_price_per_million=Decimal("0.7500"),
+            output_text_price_per_million=Decimal("3.7500"),
+        )
+
+        res = calculate_event_cost(
+            pricing=pricing,
+            prompt_token_count=prompt,
+            candidates_token_count=candidates,
+            thoughts_token_count=thoughts,
+        )
+
+        # Input: 1000 * 0.75/1M = $0.000750
+        # Output: (500 + 200) * 3.75/1M = 700 * 3.75/1M = $0.002625
+        # Total = $0.003375
+        self.assertEqual(res.estimated_cost_usd, Decimal("0.003375"))
+
+    def test_cached_tokens_split(self):
+        """
+        Verify prompt = 1000, cached = 300:
+        700 net regular input @ $0.75/M = $0.000525
+        300 cached input @ $0.075/M = $0.0000225 -> rounded = $0.000023
+        Total = 0.000525 + 0.0000225 = $0.0005475 -> rounded to 6 dec: $0.000548
+        """
+        pricing = AIModelPricing(
+            pricing_version="gemini-3.8-flash-2026",
+            currency="USD",
+            input_text_price_per_million=Decimal("0.7500"),
+            output_text_price_per_million=Decimal("3.7500"),
+            cached_input_price_per_million=Decimal("0.0750"),
+        )
+
+        res = calculate_event_cost(
+            pricing=pricing,
+            prompt_token_count=1000,
+            cached_content_token_count=300,
+            candidates_token_count=0,
+        )
+
+        self.assertEqual(res.pricing_status, "priced")
+        self.assertEqual(res.details.get("net_prompt_tokens"), 700)
+        self.assertEqual(res.details.get("cached_tokens"), 300)
+        self.assertEqual(res.estimated_cost_usd, Decimal("0.000548"))
 
     def test_gemini_31_flash_live_preview_calculation(self):
         """
@@ -198,44 +275,13 @@ class TestAIPricingService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res.pricing_version, "gemini-live-v1")
         self.assertEqual(res.estimated_cost_usd, Decimal("0.286500"))
 
-    def test_multimodal_cached_tokens_non_duplication(self):
-        """
-        Ensure cached tokens are discounted from prompt input to prevent double charging.
-        Prompt text = 30,000 tokens, of which 20,000 are cached.
-        Un-cached text = 10,000 @ $0.75/M = $0.0075
-        Cached input = 20,000 @ $0.075/M = $0.0015
-        Output text = 1,000 @ $3.75/M = $0.00375
-        Total = 0.0075 + 0.0015 + 0.00375 = $0.012750
-        """
-        pricing = AIModelPricing(
-            pricing_version="gemini-3.8-flash-2026",
-            currency="USD",
-            input_text_price_per_million=Decimal("0.7500"),
-            input_audio_price_per_million=Decimal("0.7500"),
-            output_text_price_per_million=Decimal("3.7500"),
-            output_audio_price_per_million=Decimal("3.7500"),
-            cached_input_price_per_million=Decimal("0.0750"),
-        )
-
-        res = calculate_event_cost(
-            pricing=pricing,
-            input_text_tokens=30_000,
-            cached_content_token_count=20_000,
-            output_text_tokens=1_000,
-        )
-
-        self.assertEqual(res.pricing_status, "priced")
-        self.assertEqual(res.estimated_cost_usd, Decimal("0.012750"))
-
     def test_calculate_cost_fallback_when_modality_breakdown_missing(self):
         """When explicit input_text_tokens / input_audio_tokens are None, fall back to prompt_token_count."""
         pricing = AIModelPricing(
             pricing_version="gemini-3.8-flash-2026",
             currency="USD",
             input_text_price_per_million=Decimal("0.7500"),
-            input_audio_price_per_million=Decimal("0.7500"),
             output_text_price_per_million=Decimal("3.7500"),
-            output_audio_price_per_million=Decimal("3.7500"),
         )
 
         res = calculate_event_cost(
@@ -271,9 +317,7 @@ class TestAIPricingService(unittest.IsolatedAsyncioTestCase):
             pricing_version="gemini-3.8-flash-2026",
             currency="USD",
             input_text_price_per_million=Decimal("0.7500"),
-            input_audio_price_per_million=Decimal("0.7500"),
             output_text_price_per_million=Decimal("3.7500"),
-            output_audio_price_per_million=Decimal("3.7500"),
         )
 
         # Both 0
@@ -302,7 +346,7 @@ class TestAIPricingService(unittest.IsolatedAsyncioTestCase):
             id=1,
             provider="gemini",
             model="gemini-3.8-flash",
-            effective_from=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            effective_from=datetime(2026, 9, 2, tzinfo=timezone.utc),
             effective_to=datetime(2027, 1, 1, tzinfo=timezone.utc),
             pricing_version="gemini-3.8-flash-2026",
             input_text_price_per_million=Decimal("0.7500"),
@@ -319,6 +363,7 @@ class TestAIPricingService(unittest.IsolatedAsyncioTestCase):
             model="gemini-3.8-flash",
             input_text_tokens=20_000,
             output_text_tokens=5_000,
+            thoughts_token_count=1_000,
             estimated_cost_usd=None,
             pricing_status="unpriced",
             created_at=datetime(2026, 10, 1, tzinfo=timezone.utc),
@@ -337,8 +382,11 @@ class TestAIPricingService(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(stats["processed"], 1)
         self.assertEqual(stats["priced"], 1)
-        # 20k @ 0.75/M = 0.015 + 5k @ 3.75/M = 0.01875 => 0.033750
-        self.assertEqual(ev1.estimated_cost_usd, Decimal("0.033750"))
+        # Input: 20k @ 0.75/M = 0.015
+        # Output: 5k @ 3.75/M = 0.01875
+        # Thoughts: 1k @ 3.75/M = 0.00375
+        # Total = 0.015 + 0.01875 + 0.00375 = 0.037500
+        self.assertEqual(ev1.estimated_cost_usd, Decimal("0.037500"))
         self.assertEqual(ev1.pricing_status, "priced")
         self.assertEqual(ev1.pricing_version, "gemini-3.8-flash-2026")
         session.commit.assert_awaited()

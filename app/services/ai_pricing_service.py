@@ -128,64 +128,61 @@ def calculate_event_cost(
         )
 
     # 1. Input tokens determination & caching deduction
-    # Google Gemini reports prompt_token_count as the sum of all input tokens (including cached tokens).
-    # If cached_content_token_count is present, those tokens are billed at the cached rate.
-    # To determine the net non-cached input tokens across modalities:
-    # We deduct cached tokens proportionally or first from text, then audio, ensuring no double billing.
+    # Google Gemini reports prompt_token_count as the total input token count (including cached tokens).
+    # Net regular input = max(0, prompt_tokens - cached_tokens).
     is_partial = False
     details: Dict[str, Any] = {
         "pricing_version": pricing.pricing_version,
         "currency": pricing.currency,
     }
 
-    has_input_modalities = (input_text_tokens is not None) or (input_audio_tokens is not None)
-    raw_input_text = input_text_tokens if has_input_modalities else prompt_token_count
-    raw_input_audio = input_audio_tokens if has_input_modalities else 0
-
     eff_cached = max(0, cached_content_token_count or 0)
     eff_thoughts = max(0, thoughts_token_count or 0)
 
-    # Cached deduction across input modalities:
-    # First apply to text input, remainder to audio input
-    rem_cached = eff_cached
-    if raw_input_text is not None:
-        deduct_text = min(raw_input_text, rem_cached)
-        net_input_text = raw_input_text - deduct_text
-        rem_cached -= deduct_text
-    else:
-        net_input_text = None
-        is_partial = True
-
-    if raw_input_audio is not None:
-        deduct_audio = min(raw_input_audio, rem_cached)
-        net_input_audio = raw_input_audio - deduct_audio
-        rem_cached -= deduct_audio
-    else:
-        net_input_audio = 0
-
-    # 2. Output tokens determination
-    # In Gemini Developer API: "Output price (including thinking tokens)".
-    # candidates_token_count and candidates_tokens_details already include thinking tokens.
-    # Therefore, thoughts_token_count is informational and must NOT be added as an extra surcharge.
-    has_output_modalities = (output_text_tokens is not None) or (output_audio_tokens is not None)
-    eff_output_text = output_text_tokens if has_output_modalities else candidates_token_count
-    eff_output_audio = output_audio_tokens if has_output_modalities else 0
+    # Check if we have explicit modality breakdown for prompt
+    has_input_modalities = (input_text_tokens is not None) or (input_audio_tokens is not None)
 
     total_cost = Decimal("0.000000")
 
-    # Input Text cost (net of cache)
-    if net_input_text is not None:
-        cost_in_text = (Decimal(net_input_text) / ONE_MILLION) * Decimal(str(pricing.input_text_price_per_million))
-        total_cost += cost_in_text
-        details["net_input_text_tokens"] = net_input_text
-        details["cost_input_text_usd"] = float(cost_in_text)
+    if has_input_modalities:
+        # Modality breakdown provided
+        raw_text = input_text_tokens or 0
+        raw_audio = input_audio_tokens or 0
+        total_raw_input = raw_text + raw_audio
 
-    # Input Audio cost (net of cache)
-    if net_input_audio is not None and net_input_audio > 0:
-        cost_in_audio = (Decimal(net_input_audio) / ONE_MILLION) * Decimal(str(pricing.input_audio_price_per_million))
-        total_cost += cost_in_audio
-        details["net_input_audio_tokens"] = net_input_audio
+        # Net non-cached tokens deduction:
+        # If rates for text and audio input are identical (like Gemini 3.8 Flash), deduction is uniform.
+        # If rates differ (like Gemini Live), deduct cached tokens from text input first (caching in text),
+        # ensuring net input is never negative.
+        rem_cached = eff_cached
+        deduct_text = min(raw_text, rem_cached)
+        net_text = raw_text - deduct_text
+        rem_cached -= deduct_text
+
+        deduct_audio = min(raw_audio, rem_cached)
+        net_audio = raw_audio - deduct_audio
+
+        in_text_rate = Decimal(str(pricing.input_text_price_per_million))
+        in_audio_rate = Decimal(str(pricing.input_audio_price_per_million)) if pricing.input_audio_price_per_million is not None else in_text_rate
+
+        cost_in_text = (Decimal(net_text) / ONE_MILLION) * in_text_rate
+        cost_in_audio = (Decimal(net_audio) / ONE_MILLION) * in_audio_rate
+        total_cost += cost_in_text + cost_in_audio
+
+        details["net_input_text_tokens"] = net_text
+        details["net_input_audio_tokens"] = net_audio
+        details["cost_input_text_usd"] = float(cost_in_text)
         details["cost_input_audio_usd"] = float(cost_in_audio)
+    elif prompt_token_count is not None:
+        # Fallback when modality breakdown is not available:
+        # Treat net prompt as input_text_tokens
+        net_prompt = max(0, prompt_token_count - eff_cached)
+        cost_prompt = (Decimal(net_prompt) / ONE_MILLION) * Decimal(str(pricing.input_text_price_per_million))
+        total_cost += cost_prompt
+        details["net_prompt_tokens"] = net_prompt
+        details["cost_input_usd"] = float(cost_prompt)
+    else:
+        is_partial = True
 
     # Cached Input cost
     if eff_cached > 0:
@@ -195,26 +192,45 @@ def calculate_event_cost(
         details["cached_tokens"] = eff_cached
         details["cost_cached_usd"] = float(cost_cached)
 
-    # Output Text cost (includes thinking tokens per Google billing specification)
-    if eff_output_text is not None:
-        cost_out_text = (Decimal(eff_output_text) / ONE_MILLION) * Decimal(str(pricing.output_text_price_per_million))
-        total_cost += cost_out_text
-        details["output_text_tokens"] = eff_output_text
+    # 2. Output & Thinking tokens determination
+    # In Google Gemini:
+    # - candidates_token_count = tokens generated in candidates
+    # - thoughts_token_count = tokens used in reasoning/thinking process
+    # - total_token_count = prompt + candidates + thoughts
+    # Pricing rule: "Output price (including thinking tokens)".
+    # Both candidates and thoughts are billed at the OUTPUT rate.
+    has_output_modalities = (output_text_tokens is not None) or (output_audio_tokens is not None)
+
+    if has_output_modalities:
+        cand_text = output_text_tokens or 0
+        cand_audio = output_audio_tokens or 0
+
+        out_text_rate = Decimal(str(pricing.output_text_price_per_million))
+        out_audio_rate = Decimal(str(pricing.output_audio_price_per_million)) if pricing.output_audio_price_per_million is not None else out_text_rate
+
+        cost_out_text = (Decimal(cand_text) / ONE_MILLION) * out_text_rate
+        cost_out_audio = (Decimal(cand_audio) / ONE_MILLION) * out_audio_rate
+        total_cost += cost_out_text + cost_out_audio
+
+        details["output_text_tokens"] = cand_text
+        details["output_audio_tokens"] = cand_audio
         details["cost_output_text_usd"] = float(cost_out_text)
+        details["cost_output_audio_usd"] = float(cost_out_audio)
+    elif candidates_token_count is not None:
+        cost_out_cand = (Decimal(candidates_token_count) / ONE_MILLION) * Decimal(str(pricing.output_text_price_per_million))
+        total_cost += cost_out_cand
+        details["candidates_tokens"] = candidates_token_count
+        details["cost_candidates_usd"] = float(cost_out_cand)
     else:
         is_partial = True
 
-    # Output Audio cost
-    if eff_output_audio is not None and eff_output_audio > 0:
-        cost_out_audio = (Decimal(eff_output_audio) / ONE_MILLION) * Decimal(str(pricing.output_audio_price_per_million))
-        total_cost += cost_out_audio
-        details["output_audio_tokens"] = eff_output_audio
-        details["cost_output_audio_usd"] = float(cost_out_audio)
-
-    # Informational tracking for thoughts (no separate charge added)
+    # Thinking tokens cost:
+    # Billed at output_text_price_per_million
     if eff_thoughts > 0:
+        cost_thoughts = (Decimal(eff_thoughts) / ONE_MILLION) * Decimal(str(pricing.output_text_price_per_million))
+        total_cost += cost_thoughts
         details["thoughts_tokens"] = eff_thoughts
-        details["thoughts_billing"] = "included_in_output"
+        details["cost_thoughts_usd"] = float(cost_thoughts)
 
     # Round to 6 decimal places ($0.000001 precision)
     rounded_cost = total_cost.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
