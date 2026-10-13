@@ -176,7 +176,11 @@ async def test_record_ai_usage_event_success():
         audio_duration_seconds=4.5,
     )
 
-    mock_session = AsyncMock()
+    mock_session = MagicMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=None)
+    mock_session.add = MagicMock()
+    mock_session.commit = AsyncMock()
     with patch("app.services.ai_usage_service.AsyncSessionLocal", return_value=mock_session):
         await record_ai_usage_event(
             company_id=1,
@@ -323,7 +327,7 @@ def test_ai_response_properties_and_dict_access():
 async def test_gemini_provider_complete_text_backwards_compatible():
     """When return_usage is False (default), complete_text returns raw str."""
     with patch("google.genai.Client") as mock_client_cls, \
-         patch("app.services.ai_usage_service.record_ai_usage_event", new_callable=AsyncMock) as mock_record:
+         patch("app.services.ai_provider.record_ai_usage_event", new_callable=AsyncMock) as mock_record:
         mock_gen_resp = MagicMock()
         mock_gen_resp.text = '{"status": "ok"}'
         mock_gen_resp.response_id = "test-resp-id"
@@ -363,7 +367,7 @@ async def test_gemini_provider_complete_text_backwards_compatible():
 async def test_gemini_provider_complete_text_with_usage():
     """When return_usage is True or complete_text_with_usage is called, returns AIResponse."""
     with patch("google.genai.Client") as mock_client_cls, \
-         patch("app.services.ai_usage_service.record_ai_usage_event", new_callable=AsyncMock):
+         patch("app.services.ai_provider.record_ai_usage_event", new_callable=AsyncMock):
         mock_gen_resp = MagicMock()
         mock_gen_resp.text = "Hello world"
         mock_gen_resp.response_id = "resp-456"
@@ -393,7 +397,8 @@ async def test_gemini_provider_complete_text_with_usage():
 async def test_gemini_provider_retry_telemetry():
     """Verify that transient failures record status='transient_retry' before retrying."""
     with patch("google.genai.Client") as mock_client_cls, \
-         patch("app.services.ai_usage_service.record_ai_usage_event", new_callable=AsyncMock) as mock_record:
+         patch("app.services.ai_provider.record_ai_usage_event", new_callable=AsyncMock) as mock_record, \
+         patch("asyncio.sleep", new_callable=AsyncMock):
         mock_gen_resp = MagicMock()
         mock_gen_resp.text = '{"success": true}'
         mock_gen_resp.response_id = "retry-id"
