@@ -20,6 +20,7 @@ from app.config import get_settings
 from app.db import AsyncSessionLocal
 from app.services.trainer_service import TrainerService
 from app.services.ai_credentials import resolve_gemini_credentials
+from app.services.ai_usage_service import LiveSessionUsageTracker
 from app.routers.trainer_voice import redirect_trainer_call
 from app.routers.training_voice import redirect_twilio_call, get_active_cycles_for_agent
 
@@ -561,7 +562,7 @@ async def media_stream(websocket: WebSocket):
     
     setting_cid = getattr(setting, "company_id", None) if "setting" in locals() and setting else None
     setting_sid = getattr(setting, "service_id", None) if "setting" in locals() and setting else None
-    gemini_api_key, _ = resolve_gemini_credentials(
+    gemini_api_key, gemini_credential_alias = resolve_gemini_credentials(
         company_id=setting_cid,
         service_id=setting_sid,
         module="hub_media_stream",
@@ -677,6 +678,15 @@ Reglas de pronunciación:
 
     uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={gemini_api_key}"
     
+    usage_tracker = LiveSessionUsageTracker(
+        company_id=setting_cid,
+        service_id=setting_sid,
+        module="hub_media_stream",
+        operation="live_stream",
+        model=gemini_model,
+        credential_alias=gemini_credential_alias,
+    )
+
     session_config = build_gemini_live_session_config(gemini_model, system_instruction, tools_decl)
 
     try:
@@ -708,6 +718,7 @@ Reglas de pronunciación:
                 await gemini_ws.send(json.dumps(greet_msg))
             
             call_sid = None
+            call_start_time = None
             stream_sid = None
             attempts = 0
             redirected = False
@@ -823,6 +834,8 @@ Reglas de pronunciación:
                         if event == "start":
                             stream_sid = data["start"]["streamSid"]
                             call_sid = data["start"]["callSid"]
+                            call_start_time = datetime.now(timezone.utc)
+                            usage_tracker.call_id = call_sid
                             logger.info("Twilio stream start: stream_sid=%s, call_sid=%s", stream_sid, call_sid)
                             # Also read customParameters if Twilio delivers them via start event
                             custom_params = data["start"].get("customParameters", {})
@@ -966,6 +979,9 @@ Reglas de pronunciación:
                         if redirected:
                             break
                         data = json.loads(response_str)
+                        raw_usage = data.get("usageMetadata") or data.get("serverContent", {}).get("usageMetadata")
+                        if raw_usage:
+                            usage_tracker.update(raw_usage)
                         
                         # Forward audio from Gemini to Twilio
                         if "serverContent" in data:
@@ -1214,7 +1230,16 @@ Reglas de pronunciación:
                     logger.error("Error in send_to_twilio: %s", e)
 
             # Run Twilio receive and send loops concurrently
-            await asyncio.gather(receive_from_twilio(), send_to_twilio())
+            try:
+                await asyncio.gather(receive_from_twilio(), send_to_twilio())
+            finally:
+                try:
+                    dur_sec = None
+                    if call_start_time:
+                        dur_sec = (datetime.now(timezone.utc) - call_start_time).total_seconds()
+                    await usage_tracker.finalize(audio_duration_seconds=dur_sec)
+                except Exception as e_track:
+                    logger.error("Failed to finalize hub usage tracker: %s", e_track)
             
     except Exception as e:
         logger.error("Exception in training hub WebSocket: %s", e)

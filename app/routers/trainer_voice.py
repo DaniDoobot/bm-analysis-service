@@ -26,6 +26,7 @@ from app.config import get_settings
 from app.db import get_engine, AsyncSessionLocal
 from app.services.trainer_service import TrainerService
 from app.services.ai_credentials import resolve_gemini_credentials
+from app.services.ai_usage_service import LiveSessionUsageTracker
 
 try:
     import audioop
@@ -1128,12 +1129,13 @@ async def media_stream(
         gemini_model = f"models/{gemini_model}"
     
     gemini_api_key = None
+    gemini_credential_alias = None
     instruction = ""
     tools = []
     
     # ── 1. Setup mode identification vs session ──────────────────────────────
     if flow == "identify":
-        gemini_api_key, _ = resolve_gemini_credentials(module="trainer_voice_identify")
+        gemini_api_key, gemini_credential_alias = resolve_gemini_credentials(module="trainer_voice_identify")
         instruction = IDENTIFICATION_SYSTEM_INSTRUCTION
         tools = [
             {
@@ -1253,7 +1255,7 @@ async def media_stream(
         ]
         sim_cid = getattr(sess.simulation, "company_id", None)
         sim_sid = getattr(sess.simulation, "service_id", None)
-        gemini_api_key, _ = resolve_gemini_credentials(company_id=sim_cid, service_id=sim_sid, module="trainer_voice_session")
+        gemini_api_key, gemini_credential_alias = resolve_gemini_credentials(company_id=sim_cid, service_id=sim_sid, module="trainer_voice_session")
     else:
         logger.error("Trainer WebSocket connection requires either flow='identify' or a valid session_id.")
         await websocket.close()
@@ -1264,6 +1266,17 @@ async def media_stream(
         await websocket.close()
         return
     logger.info("Trainer voice Gemini API key configured: yes")
+
+    usage_tracker = LiveSessionUsageTracker(
+        company_id=sim_cid if session_id is not None else None,
+        service_id=sim_sid if session_id is not None else None,
+        module="trainer_voice_session" if session_id is not None else "trainer_voice_identify",
+        operation="live_stream",
+        model=gemini_model,
+        credential_alias=gemini_credential_alias,
+        trainer_session_id=session_id,
+        call_id=call_sid,
+    )
 
     gemini_url = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={gemini_api_key}"
     
@@ -1790,6 +1803,9 @@ async def media_stream(
                 async for message in gemini_ws:
                     try:
                         data = json.loads(message)
+                        raw_usage = data.get("usageMetadata") or data.get("serverContent", {}).get("usageMetadata")
+                        if raw_usage:
+                            usage_tracker.update(raw_usage)
                         
                         if "setupComplete" in data:
                             logger.info("Gemini Live Live API setup complete.")
@@ -2065,6 +2081,15 @@ async def media_stream(
                     if not t.done():
                         t.cancel()
                 await asyncio.gather(tw_task, gem_task, barge_task, return_exceptions=True)
+
+                # Persist live session usage telemetry
+                try:
+                    dur_sec = None
+                    if call_start_time:
+                        dur_sec = (datetime.now(timezone.utc) - call_start_time).total_seconds()
+                    await usage_tracker.finalize(audio_duration_seconds=dur_sec)
+                except Exception as e_track:
+                    logger.error("Failed to finalize live session usage tracker: %s", e_track)
 
             # Cancel monitor task if running
             if monitor_task:

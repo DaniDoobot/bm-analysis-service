@@ -30,6 +30,7 @@ from app.models.personalized_training import (
 from app.config import get_settings
 from app.db import get_engine
 from app.services.ai_credentials import resolve_gemini_credentials
+from app.services.ai_usage_service import LiveSessionUsageTracker
 
 try:
     import audioop
@@ -1388,13 +1389,14 @@ async def twilio_media_stream(
 
     gemini_model = settings.gemini_model or "models/gemini-3.1-flash-live-preview"
     gemini_api_key = None
+    gemini_credential_alias = None
 
     # Determine the system instructions and tools depending on the connection flow
     instruction = ""
     tools = []
     
     if flow == "identify":
-        gemini_api_key, _ = resolve_gemini_credentials(module="training_voice_identify")
+        gemini_api_key, gemini_credential_alias = resolve_gemini_credentials(module="training_voice_identify")
         instruction = IDENTIFICATION_SYSTEM_INSTRUCTION + "\n" + SPANISH_VOICE_RULES
         tools = [
             {
@@ -1495,7 +1497,7 @@ async def twilio_media_stream(
             ]
             set_cid = getattr(setting, "company_id", None) if setting else None
             set_sid = getattr(setting, "service_id", None) if setting else None
-            gemini_api_key, _ = resolve_gemini_credentials(company_id=set_cid, service_id=set_sid, module="training_voice_session")
+            gemini_api_key, gemini_credential_alias = resolve_gemini_credentials(company_id=set_cid, service_id=set_sid, module="training_voice_session")
     else:
         logger.error("WebSocket connection requires either flow='identify' or a valid session_id.")
         await websocket.close()
@@ -1505,6 +1507,17 @@ async def twilio_media_stream(
         logger.error("Training voice Gemini API key is not configured. Closing WebSocket.")
         await websocket.close()
         return
+
+    usage_tracker = LiveSessionUsageTracker(
+        company_id=set_cid if session_id is not None else None,
+        service_id=set_sid if session_id is not None else None,
+        module="training_voice_session" if session_id is not None else "training_voice_identify",
+        operation="live_stream",
+        model=gemini_model,
+        credential_alias=gemini_credential_alias,
+        trainer_session_id=session_id,
+        call_id=call_sid,
+    )
 
     gemini_url = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={gemini_api_key}"
     
@@ -1638,6 +1651,9 @@ async def twilio_media_stream(
                 async for raw_msg in gemini_ws:
                     try:
                         data = json.loads(raw_msg)
+                        raw_usage = data.get("usageMetadata") or data.get("serverContent", {}).get("usageMetadata")
+                        if raw_usage:
+                            usage_tracker.update(raw_usage)
                         
                         if "setupComplete" in data:
                             logger.info("Gemini Live configuration established.")
@@ -1886,6 +1902,15 @@ async def twilio_media_stream(
             # Cleanup duration monitor
             if monitor_task:
                 monitor_task.cancel()
+
+            # Persist live session usage telemetry
+            try:
+                dur_sec = None
+                if call_start_time:
+                    dur_sec = (datetime.now(timezone.utc) - call_start_time).total_seconds()
+                await usage_tracker.finalize(audio_duration_seconds=dur_sec)
+            except Exception as e_track:
+                logger.error("Failed to finalize training voice usage tracker: %s", e_track)
                 
             # Handle phone hangup (unexpected websocket disconnect without hangup_call tool)
             if session_id is not None and not redirected:

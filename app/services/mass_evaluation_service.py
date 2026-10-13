@@ -1738,6 +1738,9 @@ class MassEvaluationService:
                             company_id=company_id,
                             service_id=service_id,
                             module="mass_evaluations",
+                            operation="evaluate_call",
+                            call_id=str(call_id) if call_id is not None else None,
+                            audio_duration_seconds=float(call.get("call_duration_seconds")) if call.get("call_duration_seconds") is not None else None,
                         )
                         
                         parsed = safe_parse_json(raw_response)

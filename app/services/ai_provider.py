@@ -4,24 +4,70 @@ import base64
 import logging
 import random
 import time
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Union
 
 from app.config import get_settings
+from app.services.ai_usage_service import (
+    AIUsageMetadata,
+    parse_usage_metadata,
+    record_ai_usage_event,
+)
 from app.utils.error_categorization import is_transient_llm_error
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+
+@dataclass
+class AIResponse:
+    """Standardized response from AI providers containing text output and usage telemetry."""
+    text: str
+    usage: Optional[AIUsageMetadata] = None
+    response_id: Optional[str] = None
+    model: Optional[str] = None
+    provider: str = "gemini"
+    credential_alias: Optional[str] = None
+    data: Optional[Dict[str, Any]] = None
+
+    def __getitem__(self, item: str) -> Any:
+        if self.data and item in self.data:
+            return self.data[item]
+        if hasattr(self, item):
+            return getattr(self, item)
+        raise KeyError(item)
+
+    def get(self, item: str, default: Any = None) -> Any:
+        if self.data and item in self.data:
+            return self.data[item]
+        if hasattr(self, item):
+            return getattr(self, item)
+        return default
+
+    def __str__(self) -> str:
+        return self.text
+
+
 class AIProvider(abc.ABC):
     @abc.abstractmethod
     async def complete_text(
         self,
-        messages: list[dict[str, str]],
-        model: str | None = None,
+        messages: List[Dict[str, str]],
+        model: Optional[str] = None,
         temperature: float = 0.2,
-        response_format: str | None = "json_object",
-    ) -> str:
-        """Execute text completion and return raw response string."""
+        response_format: Optional[str] = "json_object",
+        company_id: Optional[int] = None,
+        service_id: Optional[int] = None,
+        module: Optional[str] = None,
+        operation: Optional[str] = None,
+        call_id: Optional[str] = None,
+        mass_analysis_id: Optional[int] = None,
+        cycle_id: Optional[int] = None,
+        trainer_session_id: Optional[int] = None,
+        audio_duration_seconds: Optional[float] = None,
+        return_usage: bool = False,
+    ) -> Union[str, AIResponse]:
+        """Execute text completion and return raw response string or AIResponse."""
         pass
 
     @abc.abstractmethod
@@ -29,23 +75,62 @@ class AIProvider(abc.ABC):
         self,
         audio_bytes: bytes,
         prompt_text: str,
-        audio_format: str = "mp3"
-    ) -> str:
-        """Analyze raw audio bytes using multimodal input and return raw JSON/response string."""
+        audio_format: str = "mp3",
+        company_id: Optional[int] = None,
+        service_id: Optional[int] = None,
+        module: Optional[str] = None,
+        operation: Optional[str] = None,
+        call_id: Optional[str] = None,
+        mass_analysis_id: Optional[int] = None,
+        cycle_id: Optional[int] = None,
+        trainer_session_id: Optional[int] = None,
+        audio_duration_seconds: Optional[float] = None,
+        return_usage: bool = False,
+    ) -> Union[str, AIResponse]:
+        """Analyze raw audio bytes using multimodal input and return raw JSON/response string or AIResponse."""
         pass
 
     @abc.abstractmethod
     async def transcribe_audio(
         self,
         audio_bytes: bytes,
-        filename: str = "audio.wav"
-    ) -> dict[str, str]:
-        """Transcribe audio bytes and return {"text": "...", "model": "...", "provider": "..."}."""
+        filename: str = "audio.wav",
+        company_id: Optional[int] = None,
+        service_id: Optional[int] = None,
+        module: Optional[str] = None,
+        operation: Optional[str] = None,
+        call_id: Optional[str] = None,
+        mass_analysis_id: Optional[int] = None,
+        cycle_id: Optional[int] = None,
+        trainer_session_id: Optional[int] = None,
+        audio_duration_seconds: Optional[float] = None,
+        return_usage: bool = False,
+    ) -> Union[Dict[str, str], AIResponse]:
+        """Transcribe audio bytes and return {'text': '...', 'model': '...', 'provider': '...'} or AIResponse."""
         pass
+
+    async def complete_text_with_usage(self, *args, **kwargs) -> AIResponse:
+        kwargs["return_usage"] = True
+        return await self.complete_text(*args, **kwargs)
+
+    async def analyze_audio_bytes_with_usage(self, *args, **kwargs) -> AIResponse:
+        kwargs["return_usage"] = True
+        return await self.analyze_audio_bytes(*args, **kwargs)
+
+    async def transcribe_audio_with_usage(self, *args, **kwargs) -> AIResponse:
+        kwargs["return_usage"] = True
+        return await self.transcribe_audio(*args, **kwargs)
 
 
 class GeminiProvider(AIProvider):
-    def __init__(self, api_key: str | None = None, credential_alias: str = "global_fallback"):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        credential_alias: str = "global_fallback",
+        company_id: Optional[int] = None,
+        service_id: Optional[int] = None,
+        module: Optional[str] = None,
+    ):
         try:
             from google import genai
             from google.genai import types
@@ -56,6 +141,9 @@ class GeminiProvider(AIProvider):
             self._types = types
             self._api_key = effective_key
             self.credential_alias = credential_alias
+            self.company_id = company_id
+            self.service_id = service_id
+            self.module = module
         except ImportError:
             raise RuntimeError("google-genai package not installed")
 
@@ -65,11 +153,21 @@ class GeminiProvider(AIProvider):
 
     async def complete_text(
         self,
-        messages: list[dict[str, str]],
-        model: str | None = None,
+        messages: List[Dict[str, str]],
+        model: Optional[str] = None,
         temperature: float = 0.2,
-        response_format: str | None = "json_object",
-    ) -> str:
+        response_format: Optional[str] = "json_object",
+        company_id: Optional[int] = None,
+        service_id: Optional[int] = None,
+        module: Optional[str] = None,
+        operation: Optional[str] = None,
+        call_id: Optional[str] = None,
+        mass_analysis_id: Optional[int] = None,
+        cycle_id: Optional[int] = None,
+        trainer_session_id: Optional[int] = None,
+        audio_duration_seconds: Optional[float] = None,
+        return_usage: bool = False,
+    ) -> Union[str, AIResponse]:
         model_name = model or settings.gemini_report_model
         
         system_instruction = None
@@ -111,24 +209,106 @@ class GeminiProvider(AIProvider):
             config_args["max_output_tokens"] = settings.gemini_max_output_tokens
 
         logger.info("Calling Gemini complete_text (google-genai): model=%s, temp=%.2f, json=%s", model_name, temperature, response_format)
+
+        cid = company_id if company_id is not None else self.company_id
+        sid = service_id if service_id is not None else self.service_id
+        mod = module if module is not None else self.module
+        op_name = operation or "complete_text"
+
         t_start = time.perf_counter()
-        
-        response = await self._client.aio.models.generate_content(
-            model=model_name,
-            contents=gemini_contents,
-            config=self._types.GenerateContentConfig(**config_args)
-        )
-        duration = time.perf_counter() - t_start
-        logger.info("Gemini complete_text completed in %.2f s", duration)
-        
-        return response.text or ""
+        try:
+            response = await self._client.aio.models.generate_content(
+                model=model_name,
+                contents=gemini_contents,
+                config=self._types.GenerateContentConfig(**config_args)
+            )
+            duration = time.perf_counter() - t_start
+            duration_ms = int(duration * 1000)
+            logger.info("Gemini complete_text completed in %.2f s", duration)
+
+            resp_id = getattr(response, "response_id", None)
+            raw_usage = getattr(response, "usage_metadata", None)
+            usage = parse_usage_metadata(
+                raw_usage,
+                model=model_name,
+                credential_alias=self.credential_alias,
+                response_id=resp_id,
+                execution_latency_ms=duration_ms,
+                audio_duration_seconds=audio_duration_seconds,
+                status="success",
+                attempt_number=1,
+            )
+
+            await record_ai_usage_event(
+                company_id=cid,
+                service_id=sid,
+                module=mod,
+                operation=op_name,
+                provider="gemini",
+                model=model_name,
+                credential_alias=self.credential_alias,
+                usage=usage,
+                request_id=resp_id,
+                call_id=call_id,
+                mass_analysis_id=mass_analysis_id,
+                cycle_id=cycle_id,
+                trainer_session_id=trainer_session_id,
+                audio_duration_seconds=audio_duration_seconds,
+                execution_latency_ms=duration_ms,
+                status="success",
+                attempt_number=1,
+            )
+
+            text_out = response.text or ""
+            if return_usage:
+                return AIResponse(
+                    text=text_out,
+                    usage=usage,
+                    response_id=resp_id,
+                    model=model_name,
+                    provider="gemini",
+                    credential_alias=self.credential_alias,
+                )
+            return text_out
+
+        except Exception as exc:
+            duration_ms = int((time.perf_counter() - t_start) * 1000)
+            await record_ai_usage_event(
+                company_id=cid,
+                service_id=sid,
+                module=mod,
+                operation=op_name,
+                provider="gemini",
+                model=model_name,
+                credential_alias=self.credential_alias,
+                usage=None,
+                call_id=call_id,
+                mass_analysis_id=mass_analysis_id,
+                cycle_id=cycle_id,
+                trainer_session_id=trainer_session_id,
+                audio_duration_seconds=audio_duration_seconds,
+                execution_latency_ms=duration_ms,
+                status="error",
+                attempt_number=1,
+            )
+            raise
 
     async def analyze_audio_bytes(
         self,
         audio_bytes: bytes,
         prompt_text: str,
-        audio_format: str = "mp3"
-    ) -> str:
+        audio_format: str = "mp3",
+        company_id: Optional[int] = None,
+        service_id: Optional[int] = None,
+        module: Optional[str] = None,
+        operation: Optional[str] = None,
+        call_id: Optional[str] = None,
+        mass_analysis_id: Optional[int] = None,
+        cycle_id: Optional[int] = None,
+        trainer_session_id: Optional[int] = None,
+        audio_duration_seconds: Optional[float] = None,
+        return_usage: bool = False,
+    ) -> Union[str, AIResponse]:
         model_name = settings.gemini_analysis_model
         
         system_prompt = (
@@ -162,19 +342,25 @@ class GeminiProvider(AIProvider):
             config_args["max_output_tokens"] = settings.gemini_max_output_tokens
 
         logger.info("Calling Gemini analyze_audio_bytes (google-genai): model=%s, format=%s, size=%.2f MB", model_name, audio_format, len(audio_bytes)/(1024*1024))
-        t_start = time.perf_counter()
+
+        cid = company_id if company_id is not None else self.company_id
+        sid = service_id if service_id is not None else self.service_id
+        mod = module if module is not None else self.module
+        op_name = operation or "analyze_audio_bytes"
 
         max_attempts = 5
         last_exception = None
 
         for attempt in range(1, max_attempts + 1):
+            t_attempt_start = time.perf_counter()
             try:
                 response = await self._client.aio.models.generate_content(
                     model=model_name,
                     contents=contents,
                     config=self._types.GenerateContentConfig(**config_args)
                 )
-                duration = time.perf_counter() - t_start
+                duration = time.perf_counter() - t_attempt_start
+                duration_ms = int(duration * 1000)
                 logger.info(
                     "Gemini analyze_audio_bytes completed in %.2f s (attempt %d/%d)",
                     duration, attempt, max_attempts,
@@ -187,14 +373,78 @@ class GeminiProvider(AIProvider):
                         "elapsed": duration,
                     }
                 )
-                return response.text or ""
+                resp_id = getattr(response, "response_id", None)
+                raw_usage = getattr(response, "usage_metadata", None)
+                usage = parse_usage_metadata(
+                    raw_usage,
+                    model=model_name,
+                    credential_alias=self.credential_alias,
+                    response_id=resp_id,
+                    execution_latency_ms=duration_ms,
+                    audio_duration_seconds=audio_duration_seconds,
+                    status="success",
+                    attempt_number=attempt,
+                )
+
+                await record_ai_usage_event(
+                    company_id=cid,
+                    service_id=sid,
+                    module=mod,
+                    operation=op_name,
+                    provider="gemini",
+                    model=model_name,
+                    credential_alias=self.credential_alias,
+                    usage=usage,
+                    request_id=resp_id,
+                    call_id=call_id,
+                    mass_analysis_id=mass_analysis_id,
+                    cycle_id=cycle_id,
+                    trainer_session_id=trainer_session_id,
+                    audio_duration_seconds=audio_duration_seconds,
+                    execution_latency_ms=duration_ms,
+                    status="success",
+                    attempt_number=attempt,
+                )
+
+                text_out = response.text or ""
+                if return_usage:
+                    return AIResponse(
+                        text=text_out,
+                        usage=usage,
+                        response_id=resp_id,
+                        model=model_name,
+                        provider="gemini",
+                        credential_alias=self.credential_alias,
+                    )
+                return text_out
+
             except Exception as e:
                 last_exception = e
-                elapsed = time.perf_counter() - t_start
+                elapsed = time.perf_counter() - t_attempt_start
+                elapsed_ms = int(elapsed * 1000)
                 is_transient = is_transient_llm_error(e)
+                status_str = "transient_retry" if (is_transient and attempt < max_attempts) else "error"
+
+                await record_ai_usage_event(
+                    company_id=cid,
+                    service_id=sid,
+                    module=mod,
+                    operation=op_name,
+                    provider="gemini",
+                    model=model_name,
+                    credential_alias=self.credential_alias,
+                    usage=None,
+                    call_id=call_id,
+                    mass_analysis_id=mass_analysis_id,
+                    cycle_id=cycle_id,
+                    trainer_session_id=trainer_session_id,
+                    audio_duration_seconds=audio_duration_seconds,
+                    execution_latency_ms=elapsed_ms,
+                    status=status_str,
+                    attempt_number=attempt,
+                )
 
                 if is_transient and attempt < max_attempts:
-                    # Exponential backoff with small jitter (e.g. ~1.1s, ~2.2s, ~4.2s, ~8.2s)
                     delay = (1.0 * (2 ** (attempt - 1))) + random.uniform(0.1, 0.35)
                     logger.warning(
                         "[gemini_retry] attempt=%d/%d delay_seconds=%.2f error_type=transient: %s. Retrying in %.2fs...",
@@ -227,8 +477,18 @@ class GeminiProvider(AIProvider):
     async def transcribe_audio(
         self,
         audio_bytes: bytes,
-        filename: str = "audio.wav"
-    ) -> dict[str, str]:
+        filename: str = "audio.wav",
+        company_id: Optional[int] = None,
+        service_id: Optional[int] = None,
+        module: Optional[str] = None,
+        operation: Optional[str] = None,
+        call_id: Optional[str] = None,
+        mass_analysis_id: Optional[int] = None,
+        cycle_id: Optional[int] = None,
+        trainer_session_id: Optional[int] = None,
+        audio_duration_seconds: Optional[float] = None,
+        return_usage: bool = False,
+    ) -> Union[Dict[str, str], AIResponse]:
         model_name = settings.gemini_analysis_model
         
         audio_format = "mp3"
@@ -258,32 +518,115 @@ class GeminiProvider(AIProvider):
         }
         
         logger.info("Calling Gemini transcribe_audio (google-genai): model=%s, size=%.2f MB", model_name, len(audio_bytes)/(1024*1024))
+
+        cid = company_id if company_id is not None else self.company_id
+        sid = service_id if service_id is not None else self.service_id
+        mod = module if module is not None else self.module
+        op_name = operation or "transcribe_audio"
+
         t_start = time.perf_counter()
-        
-        response = await self._client.aio.models.generate_content(
-            model=model_name,
-            contents=contents,
-            config=self._types.GenerateContentConfig(**config_args)
-        )
-        
-        duration = time.perf_counter() - t_start
-        logger.info("Gemini transcribe_audio completed in %.2f s", duration)
-        
-        return {
-            "text": response.text or "",
-            "model": model_name,
-            "provider": "gemini"
-        }
+        try:
+            response = await self._client.aio.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=self._types.GenerateContentConfig(**config_args)
+            )
+            
+            duration = time.perf_counter() - t_start
+            duration_ms = int(duration * 1000)
+            logger.info("Gemini transcribe_audio completed in %.2f s", duration)
+
+            resp_id = getattr(response, "response_id", None)
+            raw_usage = getattr(response, "usage_metadata", None)
+            usage = parse_usage_metadata(
+                raw_usage,
+                model=model_name,
+                credential_alias=self.credential_alias,
+                response_id=resp_id,
+                execution_latency_ms=duration_ms,
+                audio_duration_seconds=audio_duration_seconds,
+                status="success",
+                attempt_number=1,
+            )
+
+            await record_ai_usage_event(
+                company_id=cid,
+                service_id=sid,
+                module=mod,
+                operation=op_name,
+                provider="gemini",
+                model=model_name,
+                credential_alias=self.credential_alias,
+                usage=usage,
+                request_id=resp_id,
+                call_id=call_id,
+                mass_analysis_id=mass_analysis_id,
+                cycle_id=cycle_id,
+                trainer_session_id=trainer_session_id,
+                audio_duration_seconds=audio_duration_seconds,
+                execution_latency_ms=duration_ms,
+                status="success",
+                attempt_number=1,
+            )
+
+            res_dict = {
+                "text": response.text or "",
+                "model": model_name,
+                "provider": "gemini"
+            }
+            if return_usage:
+                return AIResponse(
+                    text=response.text or "",
+                    usage=usage,
+                    response_id=resp_id,
+                    model=model_name,
+                    provider="gemini",
+                    credential_alias=self.credential_alias,
+                    data=res_dict,
+                )
+            return res_dict
+
+        except Exception as exc:
+            duration_ms = int((time.perf_counter() - t_start) * 1000)
+            await record_ai_usage_event(
+                company_id=cid,
+                service_id=sid,
+                module=mod,
+                operation=op_name,
+                provider="gemini",
+                model=model_name,
+                credential_alias=self.credential_alias,
+                usage=None,
+                call_id=call_id,
+                mass_analysis_id=mass_analysis_id,
+                cycle_id=cycle_id,
+                trainer_session_id=trainer_session_id,
+                audio_duration_seconds=audio_duration_seconds,
+                execution_latency_ms=duration_ms,
+                status="error",
+                attempt_number=1,
+            )
+            raise
 
 
 class AzureOpenAIProvider(AIProvider):
     async def complete_text(
         self,
-        messages: list[dict[str, str]],
-        model: str | None = None,
+        messages: List[Dict[str, str]],
+        model: Optional[str] = None,
         temperature: float = 0.2,
-        response_format: str | None = "json_object",
-    ) -> str:
+        response_format: Optional[str] = "json_object",
+        company_id: Optional[int] = None,
+        service_id: Optional[int] = None,
+        module: Optional[str] = None,
+        operation: Optional[str] = None,
+        call_id: Optional[str] = None,
+        mass_analysis_id: Optional[int] = None,
+        cycle_id: Optional[int] = None,
+        trainer_session_id: Optional[int] = None,
+        audio_duration_seconds: Optional[float] = None,
+        return_usage: bool = False,
+    ) -> Union[str, AIResponse]:
         from openai import AsyncAzureOpenAI
         endpoint = settings.azure_openai_text_endpoint
         api_key = settings.azure_openai_text_api_key
@@ -298,7 +641,7 @@ class AzureOpenAIProvider(AIProvider):
             api_version=settings.azure_openai_api_version,
         )
         
-        kwargs: dict[str, Any] = {
+        kwargs: Dict[str, Any] = {
             "model": deployment,
             "messages": messages,
             "temperature": temperature,
@@ -308,14 +651,33 @@ class AzureOpenAIProvider(AIProvider):
             
         logger.info("Calling Legacy Azure complete_text (deployment: %s)", deployment)
         response = await client.chat.completions.create(**kwargs)
-        return response.choices[0].message.content or ""
+        text_out = response.choices[0].message.content or ""
+        if return_usage:
+            return AIResponse(
+                text=text_out,
+                usage=None,
+                response_id=getattr(response, "id", None),
+                model=deployment,
+                provider="azure_openai",
+            )
+        return text_out
 
     async def analyze_audio_bytes(
         self,
         audio_bytes: bytes,
         prompt_text: str,
-        audio_format: str = "mp3"
-    ) -> str:
+        audio_format: str = "mp3",
+        company_id: Optional[int] = None,
+        service_id: Optional[int] = None,
+        module: Optional[str] = None,
+        operation: Optional[str] = None,
+        call_id: Optional[str] = None,
+        mass_analysis_id: Optional[int] = None,
+        cycle_id: Optional[int] = None,
+        trainer_session_id: Optional[int] = None,
+        audio_duration_seconds: Optional[float] = None,
+        return_usage: bool = False,
+    ) -> Union[str, AIResponse]:
         from openai import AsyncAzureOpenAI
         endpoint = settings.azure_openai_audio_endpoint
         api_key = settings.azure_openai_audio_api_key
@@ -371,13 +733,32 @@ class AzureOpenAIProvider(AIProvider):
                 model=deployment,
                 messages=messages,
             )
-        return response.choices[0].message.content or ""
+        text_out = response.choices[0].message.content or ""
+        if return_usage:
+            return AIResponse(
+                text=text_out,
+                usage=None,
+                response_id=getattr(response, "id", None),
+                model=deployment,
+                provider="azure_openai",
+            )
+        return text_out
 
     async def transcribe_audio(
         self,
         audio_bytes: bytes,
-        filename: str = "audio.wav"
-    ) -> dict[str, str]:
+        filename: str = "audio.wav",
+        company_id: Optional[int] = None,
+        service_id: Optional[int] = None,
+        module: Optional[str] = None,
+        operation: Optional[str] = None,
+        call_id: Optional[str] = None,
+        mass_analysis_id: Optional[int] = None,
+        cycle_id: Optional[int] = None,
+        trainer_session_id: Optional[int] = None,
+        audio_duration_seconds: Optional[float] = None,
+        return_usage: bool = False,
+    ) -> Union[Dict[str, str], AIResponse]:
         from openai import AsyncAzureOpenAI
         import io
         endpoint = settings.azure_openai_transcription_endpoint
@@ -401,24 +782,40 @@ class AzureOpenAIProvider(AIProvider):
             model=deployment,
             file=audio_file,
         )
-        return {
+        res_dict = {
             "text": response.text,
             "model": deployment,
             "provider": "azure_openai"
         }
+        if return_usage:
+            return AIResponse(
+                text=response.text,
+                usage=None,
+                response_id=getattr(response, "id", None),
+                model=deployment,
+                provider="azure_openai",
+                data=res_dict,
+            )
+        return res_dict
 
 
 def get_ai_provider(
-    company_id: int | None = None,
-    service_id: int | None = None,
-    module: str | None = None,
+    company_id: Optional[int] = None,
+    service_id: Optional[int] = None,
+    module: Optional[str] = None,
 ) -> AIProvider:
     """Resolve and return the active AI provider based on settings and context."""
     provider = (settings.ai_provider or "gemini").lower()
     if provider == "gemini":
         from app.services.ai_credentials import resolve_gemini_credentials
         api_key, alias = resolve_gemini_credentials(company_id=company_id, service_id=service_id, module=module)
-        return GeminiProvider(api_key=api_key, credential_alias=alias)
+        return GeminiProvider(
+            api_key=api_key,
+            credential_alias=alias,
+            company_id=company_id,
+            service_id=service_id,
+            module=module,
+        )
     elif provider in ["azure", "azure_openai", "openai"]:
         return AzureOpenAIProvider()
     else:

@@ -29,6 +29,7 @@ from app.models.trainer import (
     TrainerEvaluation,
 )
 from app.models.trainer_chat import TrainerChat, TrainerChatMessage
+from app.models.ai_usage import AIUsageEvent
 from app.models.companies import Company
 from app.models.teams import Team, UserServiceAssociation, UserTeamAssociation, AgentTeamAssociation
 
@@ -81,6 +82,7 @@ __all__ = [
     "TrainerEvaluation",
     "TrainerChat",
     "TrainerChatMessage",
+    "AIUsageEvent",
 ]
 
 

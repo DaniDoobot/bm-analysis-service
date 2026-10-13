@@ -5197,6 +5197,10 @@ async def _evaluate_training_session_task_impl(session_id: int):
             audio_format = "wav"
             
         # 8. Call Azure OpenAI Multimodal Audio
+        cycle_id_val = getattr(agent_report, "training_report_id", None)
+        call_sid_val = getattr(session, "call_sid", None)
+        dur_sec_val = float(session.duration_seconds) if getattr(session, "duration_seconds", None) else None
+
         from app.services.openai_service import analyze_audio_bytes
         try:
             logger.info("Sending audio to Azure OpenAI multimodal analysis for session %d...", session_id)
@@ -5207,6 +5211,11 @@ async def _evaluate_training_session_task_impl(session_id: int):
                 company_id=company_id,
                 service_id=service_id,
                 module="cycles",
+                operation="evaluate_training_session",
+                call_id=call_sid_val,
+                cycle_id=cycle_id_val,
+                trainer_session_id=session_id,
+                audio_duration_seconds=dur_sec_val,
             )
         except Exception as e:
             logger.exception("Azure OpenAI analysis failed for session %d: %s", session_id, e)
@@ -5252,6 +5261,10 @@ async def _evaluate_training_session_task_impl(session_id: int):
                     company_id=company_id,
                     service_id=service_id,
                     module="cycles",
+                    operation="repair_json_evaluation",
+                    call_id=call_sid_val,
+                    cycle_id=cycle_id_val,
+                    trainer_session_id=session_id,
                 )
                 parsed_res = safe_parse_json(repaired_raw)
                 if parsed_res:

@@ -1134,12 +1134,17 @@ class TrainerService:
                 audio_bytes = await TrainerService.download_trainer_recording_audio(sess.recording_url)
                 
                 logger.info("Transcribing call audio for session %d via Whisper...", session_id)
+                trans_dur = float(sess.duration_seconds) if getattr(sess, "duration_seconds", None) else None
                 transcription_result = await openai_service.transcribe_audio(
                     audio_bytes,
                     filename="call.mp3",
                     company_id=sim.company_id,
                     service_id=sim.service_id,
                     module="trainer_post_eval",
+                    operation="transcribe_call",
+                    call_id=sess.call_sid,
+                    trainer_session_id=session_id,
+                    audio_duration_seconds=trans_dur,
                 )
                 transcript_text = transcription_result.get("text")
                 sess.transcript = transcript_text
@@ -1447,6 +1452,9 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido (sin markdown ```json ni texto ad
                 company_id=sim.company_id,
                 service_id=sim.service_id,
                 module="trainer_post_eval",
+                operation="evaluate_trainer_session",
+                call_id=sess.call_sid,
+                trainer_session_id=session_id,
             )
 
             # 6. Parse and extract results
