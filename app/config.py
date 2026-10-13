@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     # ── Azure OpenAI ──────────────────────────────────────────────────────────
     azure_openai_api_version: str = "2025-01-01-preview"
     gemini_api_key: str = ""
+    # ── Gemini Multi-Tenant Credentials ──────────────────────────────────────
+    gemini_key_boston_front: str = ""
+    gemini_key_boston_expac: str = ""
+    gemini_key_boston_comerciales: str = ""
+    gemini_key_empresa_demo: str = ""
     gemini_model: str = "models/gemini-3.1-flash-live-preview"
     # Rollback values: gemini_analysis_model="gemini-3.1-flash-lite", gemini_report_model="gemini-3.5-flash"
     gemini_analysis_model: str = "gemini-2.5-flash-lite"

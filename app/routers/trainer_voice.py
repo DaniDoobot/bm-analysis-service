@@ -25,6 +25,7 @@ from app.models.trainer import TrainerSimulation, TrainerSession, TrainerSimulat
 from app.config import get_settings
 from app.db import get_engine, AsyncSessionLocal
 from app.services.trainer_service import TrainerService
+from app.services.ai_credentials import resolve_gemini_credentials
 
 try:
     import audioop
@@ -1122,22 +1123,17 @@ async def media_stream(
             return
 
     # Load settings — use getattr() to avoid AttributeError if attribute doesn't exist
-    gemini_api_key = getattr(settings, "gemini_live_api_key", None) or getattr(settings, "gemini_api_key", None)
     gemini_model = getattr(settings, "gemini_live_model", None) or getattr(settings, "gemini_model", None) or "models/gemini-2.0-flash-exp"
     if gemini_model and not gemini_model.startswith("models/"):
         gemini_model = f"models/{gemini_model}"
     
-    if not gemini_api_key:
-        logger.error("Trainer voice Gemini API key is not configured. Closing WebSocket.")
-        await websocket.close()
-        return
-    logger.info("Trainer voice Gemini API key configured: yes")
-
+    gemini_api_key = None
     instruction = ""
     tools = []
     
     # ── 1. Setup mode identification vs session ──────────────────────────────
     if flow == "identify":
+        gemini_api_key, _ = resolve_gemini_credentials(module="trainer_voice_identify")
         instruction = IDENTIFICATION_SYSTEM_INSTRUCTION
         tools = [
             {
@@ -1255,10 +1251,19 @@ async def media_stream(
                 ]
             }
         ]
+        sim_cid = getattr(sess.simulation, "company_id", None)
+        sim_sid = getattr(sess.simulation, "service_id", None)
+        gemini_api_key, _ = resolve_gemini_credentials(company_id=sim_cid, service_id=sim_sid, module="trainer_voice_session")
     else:
         logger.error("Trainer WebSocket connection requires either flow='identify' or a valid session_id.")
         await websocket.close()
         return
+
+    if not gemini_api_key:
+        logger.error("Trainer voice Gemini API key is not configured. Closing WebSocket.")
+        await websocket.close()
+        return
+    logger.info("Trainer voice Gemini API key configured: yes")
 
     gemini_url = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={gemini_api_key}"
     

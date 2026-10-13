@@ -1734,7 +1734,10 @@ class MassEvaluationService:
                         raw_response = await analyze_audio_bytes(
                             audio_bytes=audio_bytes,
                             prompt_text=prompt_snapshot,
-                            audio_format=audio_format
+                            audio_format=audio_format,
+                            company_id=company_id,
+                            service_id=service_id,
+                            module="mass_evaluations",
                         )
                         
                         parsed = safe_parse_json(raw_response)

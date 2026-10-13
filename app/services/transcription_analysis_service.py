@@ -245,7 +245,13 @@ async def analyze_transcription_pipeline(
         # 3. Transcribe audio
         try:
             logger.info("Transcribing call audio via Whisper for transcription analysis...")
-            transcription_result = await openai_service.transcribe_audio(audio_bytes, filename="call.mp3")
+            transcription_result = await openai_service.transcribe_audio(
+                audio_bytes,
+                filename="call.mp3",
+                company_id=resolved_company_id,
+                service_id=resolved_service_id,
+                module="test_analysis",
+            )
             transcription = transcription_result.get("text")
             if not transcription:
                 return {
@@ -343,6 +349,9 @@ async def analyze_transcription_pipeline(
             messages=messages,
             response_format="json_object",
             model=model_to_use,
+            company_id=resolved_company_id,
+            service_id=resolved_service_id,
+            module="test_analysis",
         )
     except Exception as e:
         logger.error("Error calling Azure OpenAI: %s", e, exc_info=True)

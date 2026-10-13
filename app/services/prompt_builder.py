@@ -518,7 +518,11 @@ async def build_prompt_with_ai(
     while attempt <= max_attempts:
         try:
             raw_response = await openai_service.complete_text(
-                messages=current_messages, response_format="json_object"
+                messages=current_messages,
+                response_format="json_object",
+                company_id=getattr(prompt_obj, "company_id", None),
+                service_id=service_id or getattr(prompt_obj, "service_id", None),
+                module="prompt_builder",
             )
         except Exception as e:
             logger.error("Error calling OpenAI: %s", e, exc_info=True)

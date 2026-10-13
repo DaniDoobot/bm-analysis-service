@@ -3424,7 +3424,10 @@ class PersonalizedTrainingService:
                 ai_response_raw = await complete_text(
                     messages=messages,
                     temperature=0.3,
-                    response_format="json_object"
+                    response_format="json_object",
+                    company_id=resolved_cid,
+                    service_id=agent_setting.service_id,
+                    module="cycles",
                 )
                 duration_openai = time.perf_counter() - t_openai_start
                 logger.info(f"[training] call_openai_done duration={duration_openai:.2f}s")
@@ -4137,7 +4140,10 @@ class PersonalizedTrainingService:
                 sim_ai_response_raw = await complete_text(
                     messages=sim_messages,
                     temperature=0.4,
-                    response_format="json_object"
+                    response_format="json_object",
+                    company_id=resolved_cid,
+                    service_id=report.service_id,
+                    module="cycles",
                 )
                 t_sim_dur = _time.perf_counter() - t_sim_start
                 logger.info("[training] approve_cycle: AI call done duration=%.2fs", t_sim_dur)
@@ -5197,7 +5203,10 @@ async def _evaluate_training_session_task_impl(session_id: int):
             raw_response = await analyze_audio_bytes(
                 audio_bytes=audio_bytes,
                 prompt_text=prompt_text,
-                audio_format=audio_format
+                audio_format=audio_format,
+                company_id=company_id,
+                service_id=service_id,
+                module="cycles",
             )
         except Exception as e:
             logger.exception("Azure OpenAI analysis failed for session %d: %s", session_id, e)
@@ -5237,7 +5246,13 @@ async def _evaluate_training_session_task_impl(session_id: int):
                         )
                     }
                 ]
-                repaired_raw = await complete_text(messages=repair_messages, temperature=0.0)
+                repaired_raw = await complete_text(
+                    messages=repair_messages,
+                    temperature=0.0,
+                    company_id=company_id,
+                    service_id=service_id,
+                    module="cycles",
+                )
                 parsed_res = safe_parse_json(repaired_raw)
                 if parsed_res:
                     logger.info("JSON repair succeeded for session %d.", session_id)
@@ -5732,7 +5747,10 @@ async def check_and_finalize_training_cycle(db: AsyncSession, cycle_id: int):
         raw_response = await complete_text(
             messages=messages,
             temperature=0.3,
-            response_format="json_object"
+            response_format="json_object",
+            company_id=report.company_id,
+            service_id=report.service_id,
+            module="cycles",
         )
         
         from app.utils.json_utils import safe_parse_json
@@ -5743,7 +5761,14 @@ async def check_and_finalize_training_cycle(db: AsyncSession, cycle_id: int):
             logger.warning("Failed to parse cycle %d consolidation report (attempt 1). Retrying...", cycle_id)
             messages.append({"role": "assistant", "content": raw_response})
             messages.append({"role": "user", "content": "Error: La respuesta no era JSON válido. Devuelve estrictamente el objeto JSON sin envoltorios markdown."})
-            raw_response = await complete_text(messages=messages, temperature=0.0, response_format="json_object")
+            raw_response = await complete_text(
+                messages=messages,
+                temperature=0.0,
+                response_format="json_object",
+                company_id=report.company_id,
+                service_id=report.service_id,
+                module="cycles",
+            )
             parsed_report = safe_parse_json(raw_response)
         
         if parsed_report:

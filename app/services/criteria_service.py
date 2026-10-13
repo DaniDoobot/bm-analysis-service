@@ -1566,7 +1566,8 @@ async def generate_criterion_description_ai(db: AsyncSession, criterion_id: int 
         raw_description = await complete_text(
             messages=messages,
             temperature=0.4,
-            response_format=None
+            response_format=None,
+            module="criteria_generator",
         )
     except Exception as ex:
         logger.error(f"Error calling OpenAI for criterion AI description: {ex}", exc_info=True)

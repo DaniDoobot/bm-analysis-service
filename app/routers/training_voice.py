@@ -29,6 +29,7 @@ from app.models.personalized_training import (
 )
 from app.config import get_settings
 from app.db import get_engine
+from app.services.ai_credentials import resolve_gemini_credentials
 
 try:
     import audioop
@@ -1385,18 +1386,15 @@ async def twilio_media_stream(
             await websocket.close()
             return
 
-    gemini_api_key = settings.gemini_api_key
     gemini_model = settings.gemini_model or "models/gemini-3.1-flash-live-preview"
-    if not gemini_api_key:
-        logger.error("GEMINI_API_KEY is not configured in config/environment.")
-        await websocket.close()
-        return
-        
+    gemini_api_key = None
+
     # Determine the system instructions and tools depending on the connection flow
     instruction = ""
     tools = []
     
     if flow == "identify":
+        gemini_api_key, _ = resolve_gemini_credentials(module="training_voice_identify")
         instruction = IDENTIFICATION_SYSTEM_INSTRUCTION + "\n" + SPANISH_VOICE_RULES
         tools = [
             {
@@ -1495,11 +1493,19 @@ async def twilio_media_stream(
                     ]
                 }
             ]
+            set_cid = getattr(setting, "company_id", None) if setting else None
+            set_sid = getattr(setting, "service_id", None) if setting else None
+            gemini_api_key, _ = resolve_gemini_credentials(company_id=set_cid, service_id=set_sid, module="training_voice_session")
     else:
         logger.error("WebSocket connection requires either flow='identify' or a valid session_id.")
         await websocket.close()
         return
-        
+
+    if not gemini_api_key:
+        logger.error("Training voice Gemini API key is not configured. Closing WebSocket.")
+        await websocket.close()
+        return
+
     gemini_url = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={gemini_api_key}"
     
     try:

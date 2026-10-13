@@ -45,16 +45,23 @@ class AIProvider(abc.ABC):
 
 
 class GeminiProvider(AIProvider):
-    def __init__(self):
+    def __init__(self, api_key: str | None = None, credential_alias: str = "global_fallback"):
         try:
             from google import genai
             from google.genai import types
-            if not settings.gemini_api_key:
+            effective_key = api_key or settings.gemini_api_key
+            if not effective_key:
                 raise ValueError("GEMINI_API_KEY is not configured.")
-            self._client = genai.Client(api_key=settings.gemini_api_key)
+            self._client = genai.Client(api_key=effective_key)
             self._types = types
+            self._api_key = effective_key
+            self.credential_alias = credential_alias
         except ImportError:
             raise RuntimeError("google-genai package not installed")
+
+    @property
+    def api_key(self) -> str:
+        return self._api_key
 
     async def complete_text(
         self,
@@ -401,11 +408,17 @@ class AzureOpenAIProvider(AIProvider):
         }
 
 
-def get_ai_provider() -> AIProvider:
-    """Resolve and return the active AI provider based on settings."""
+def get_ai_provider(
+    company_id: int | None = None,
+    service_id: int | None = None,
+    module: str | None = None,
+) -> AIProvider:
+    """Resolve and return the active AI provider based on settings and context."""
     provider = (settings.ai_provider or "gemini").lower()
     if provider == "gemini":
-        return GeminiProvider()
+        from app.services.ai_credentials import resolve_gemini_credentials
+        api_key, alias = resolve_gemini_credentials(company_id=company_id, service_id=service_id, module=module)
+        return GeminiProvider(api_key=api_key, credential_alias=alias)
     elif provider in ["azure", "azure_openai", "openai"]:
         return AzureOpenAIProvider()
     else:

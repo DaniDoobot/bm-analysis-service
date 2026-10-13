@@ -19,6 +19,7 @@ from app.models.trainer import TrainerSimulation
 from app.config import get_settings
 from app.db import AsyncSessionLocal
 from app.services.trainer_service import TrainerService
+from app.services.ai_credentials import resolve_gemini_credentials
 from app.routers.trainer_voice import redirect_trainer_call
 from app.routers.training_voice import redirect_twilio_call, get_active_cycles_for_agent
 
@@ -266,7 +267,7 @@ async def redirect_call(call_sid: str, redirect_url: str) -> bool:
 @router.post("/incoming-call")
 async def incoming_call(request: Request):
     """Unified phone assistant entry point."""
-    gemini_api_key = getattr(settings, "gemini_live_api_key", None) or getattr(settings, "gemini_api_key", None)
+    gemini_api_key, _ = resolve_gemini_credentials(module="hub_incoming")
     if not gemini_api_key:
         logger.error("GEMINI_API_KEY / gemini_live_api_key is not configured. Answering call with config error TwiML.")
         twiml_error = """<?xml version="1.0" encoding="UTF-8"?>
@@ -558,9 +559,15 @@ async def media_stream(websocket: WebSocket):
                 agent_name = setting.agent_name
                 agent_initials = setting.agent_initials
     
-    gemini_api_key = getattr(settings, "gemini_live_api_key", None) or getattr(settings, "gemini_api_key", None)
+    setting_cid = getattr(setting, "company_id", None) if "setting" in locals() and setting else None
+    setting_sid = getattr(setting, "service_id", None) if "setting" in locals() and setting else None
+    gemini_api_key, _ = resolve_gemini_credentials(
+        company_id=setting_cid,
+        service_id=setting_sid,
+        module="hub_media_stream",
+    )
     if not gemini_api_key:
-        logger.error("GEMINI_API_KEY / gemini_live_api_key is not configured in WebSocket.")
+        logger.error("Gemini API key is not configured for training hub WebSocket.")
         await websocket.close()
         return
 

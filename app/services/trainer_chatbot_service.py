@@ -171,6 +171,8 @@ class TrainerChatbotService:
     async def validate_and_extract_input(
         message: Optional[str] = None,
         audio_file: Optional[Any] = None,
+        company_id: Optional[int] = None,
+        service_id: Optional[int] = None,
     ) -> Tuple[str, str]:
         """
         Validates input presence and exclusivity (either text OR audio, exactly one).
@@ -238,7 +240,13 @@ class TrainerChatbotService:
             )
 
         try:
-            transcription_res = await openai_service.transcribe_audio(audio_bytes, filename=filename)
+            transcription_res = await openai_service.transcribe_audio(
+                audio_bytes,
+                filename=filename,
+                company_id=company_id,
+                service_id=service_id,
+                module="tutor_chat",
+            )
         except Exception as e:
             logger.exception("Error durante la transcripción de audio en Trainer Chatbot: %s", e)
             raise HTTPException(
@@ -2105,6 +2113,8 @@ class TrainerChatbotService:
         query_text, input_type = await cls.validate_and_extract_input(
             message=message,
             audio_file=audio_file,
+            company_id=getattr(context, "company_id", None) or getattr(current_user, "company_id", None),
+            service_id=getattr(context, "primary_service_id", None),
         )
 
         # 1b. Persistent chat lookup & ownership verification
@@ -2391,10 +2401,15 @@ class TrainerChatbotService:
 
         # 7. Execute LLM completion via existing abstraction
         try:
+            resolved_cid = getattr(context, "company_id", None) or getattr(current_user, "company_id", None)
+            target_sid = getattr(context, "primary_service_id", None)
             response_text = await openai_service.complete_text(
                 messages=messages,
                 temperature=0.2,
                 response_format=None,
+                company_id=resolved_cid,
+                service_id=target_sid,
+                module="tutor_chat",
             )
         except Exception as llm_err:
             logger.exception("Error invocando complete_text en Trainer Chatbot: %s", llm_err)

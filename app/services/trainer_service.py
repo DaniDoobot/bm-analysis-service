@@ -594,11 +594,14 @@ class TrainerService:
             f"- Dificultad sugerida: {payload.difficulty or 'media'}\n"
             f"- Tono: {payload.tone or 'neutral/realista'}"
         )
-        messages = [
-            {"role": "system", "content": system_instruction},
-            {"role": "user", "content": user_message}
-        ]
-        raw = await openai_service.complete_text(messages=messages, response_format=None)
+        resolved_cid = svc.company_id if (svc and hasattr(svc, "company_id")) else None
+        raw = await openai_service.complete_text(
+            messages=messages,
+            response_format=None,
+            company_id=resolved_cid,
+            service_id=payload.service_id,
+            module="trainer_prompt",
+        )
         return raw.strip()
 
     @staticmethod
@@ -617,7 +620,11 @@ class TrainerService:
             {"role": "system", "content": system_instruction},
             {"role": "user", "content": user_message}
         ]
-        raw = await openai_service.complete_text(messages=messages, response_format=None)
+        raw = await openai_service.complete_text(
+            messages=messages,
+            response_format=None,
+            module="trainer_prompt",
+        )
         return raw.strip()
 
 
@@ -1112,6 +1119,12 @@ class TrainerService:
         await db.commit()
 
         try:
+            stmt_sim = select(TrainerSimulation).where(TrainerSimulation.simulation_id == sess.simulation_id)
+            res_sim = await db.execute(stmt_sim)
+            sim = res_sim.scalars().first()
+            if not sim:
+                raise ValueError(f"La simulación asociada ID {sess.simulation_id} no existe.")
+
             # 1. Resolve transcription
             transcript_text = sess.transcript
             
@@ -1121,7 +1134,13 @@ class TrainerService:
                 audio_bytes = await TrainerService.download_trainer_recording_audio(sess.recording_url)
                 
                 logger.info("Transcribing call audio for session %d via Whisper...", session_id)
-                transcription_result = await openai_service.transcribe_audio(audio_bytes, filename="call.mp3")
+                transcription_result = await openai_service.transcribe_audio(
+                    audio_bytes,
+                    filename="call.mp3",
+                    company_id=sim.company_id,
+                    service_id=sim.service_id,
+                    module="trainer_post_eval",
+                )
                 transcript_text = transcription_result.get("text")
                 sess.transcript = transcript_text
                 await db.commit()
@@ -1138,12 +1157,6 @@ class TrainerService:
                 )
                 res_v = await db.execute(stmt_v)
                 version = res_v.scalars().first()
-
-            stmt_sim = select(TrainerSimulation).where(TrainerSimulation.simulation_id == sess.simulation_id)
-            res_sim = await db.execute(stmt_sim)
-            sim = res_sim.scalars().first()
-            if not sim:
-                raise ValueError(f"La simulación asociada ID {sess.simulation_id} no existe.")
 
             roleplay_prompt = version.roleplay_prompt_snapshot if version else sim.roleplay_prompt
             config_id = version.evaluation_config_id if version else sim.evaluation_config_id
@@ -1431,6 +1444,9 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido (sin markdown ```json ni texto ad
             raw_response = await openai_service.complete_text(
                 messages=messages,
                 response_format="json_object",
+                company_id=sim.company_id,
+                service_id=sim.service_id,
+                module="trainer_post_eval",
             )
 
             # 6. Parse and extract results

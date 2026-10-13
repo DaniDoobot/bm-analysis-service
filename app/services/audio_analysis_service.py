@@ -341,6 +341,9 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
             audio_bytes=audio_bytes,
             prompt_text=prompt_text,
             audio_format=audio_format,
+            company_id=resolved_company_id,
+            service_id=resolved_service_id,
+            module="test_analysis",
         )
     except ValueError as ve:
         logger.error("Azure config error: %s", ve)

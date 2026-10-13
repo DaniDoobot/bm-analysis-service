@@ -234,7 +234,20 @@ async def test_analysis_by_audio_upload(
 
         # 2. Transcribe using Whisper via openai_service
         logger.info("Transcribing uploaded audio file via Whisper for transcription analysis...")
-        transcription_result = await openai_service.transcribe_audio(contents, filename=f"upload{suffix}")
+        resolved_cid = None
+        if eff_service_id:
+            try:
+                from app.core.side_effects import resolve_company_demo_status
+                resolved_cid, _ = await resolve_company_demo_status(db, service_id=eff_service_id)
+            except Exception:
+                pass
+        transcription_result = await openai_service.transcribe_audio(
+            contents,
+            filename=f"upload{suffix}",
+            company_id=resolved_cid,
+            service_id=eff_service_id,
+            module="test_analysis",
+        )
         transcription = transcription_result.get("text")
         if not transcription:
             logger.error("Whisper transcription returned empty text for uploaded file.")
