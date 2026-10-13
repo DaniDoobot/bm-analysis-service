@@ -38,8 +38,12 @@ ALTER TABLE public.bm_ai_usage_events
 CREATE INDEX IF NOT EXISTS idx_bm_ai_usage_events_pricing_status
     ON public.bm_ai_usage_events(pricing_status, created_at DESC);
 
--- 3. Seed initial baseline pricing for active models
--- Note: effective_from '2025-01-01 00:00:00+00' covers all historical events
+-- 3. Seed official baseline pricing
+
+-- 3.1. Gemini 3.8 Flash - Window 1: Launch / Promotional rates up to 2026-12-31 23:59:59 UTC
+-- Input: $0.75 / 1M (general input: text & audio)
+-- Output: $3.75 / 1M (including thinking tokens)
+-- Context Caching: $0.075 / 1M
 INSERT INTO public.bm_ai_model_pricing (
     provider, model, effective_from, effective_to, currency,
     input_text_price_per_million, input_audio_price_per_million,
@@ -47,12 +51,16 @@ INSERT INTO public.bm_ai_model_pricing (
     cached_input_price_per_million, thoughts_price_per_million,
     pricing_version, is_active, description
 )
-SELECT 'gemini', 'gemini-3.8-flash', '2025-01-01 00:00:00+00', NULL, 'USD',
-       0.1500, 2.0000, 0.6000, 2.0000, 0.0375, 0.6000, 'gemini-flash-v1', TRUE, 'Gemini 3.8 / 2.5 / 2.0 Flash standard rates'
+SELECT 'gemini', 'gemini-3.8-flash', '2026-06-01 00:00:00+00', '2027-01-01 00:00:00+00', 'USD',
+       0.7500, 0.7500, 3.7500, 3.7500, 0.0750, NULL, 'gemini-3.8-flash-2026', TRUE, 'Gemini 3.8 Flash promotional rates until 2026-12-31'
 WHERE NOT EXISTS (
-    SELECT 1 FROM public.bm_ai_model_pricing WHERE provider = 'gemini' AND model = 'gemini-3.8-flash'
+    SELECT 1 FROM public.bm_ai_model_pricing WHERE provider = 'gemini' AND model = 'gemini-3.8-flash' AND pricing_version = 'gemini-3.8-flash-2026'
 );
 
+-- 3.2. Gemini 3.8 Flash - Window 2: Standard rates from 2027-01-01 00:00:00 UTC onward
+-- Input: $1.50 / 1M (general input: text & audio)
+-- Output: $7.50 / 1M (including thinking tokens)
+-- Context Caching: $0.15 / 1M
 INSERT INTO public.bm_ai_model_pricing (
     provider, model, effective_from, effective_to, currency,
     input_text_price_per_million, input_audio_price_per_million,
@@ -60,12 +68,18 @@ INSERT INTO public.bm_ai_model_pricing (
     cached_input_price_per_million, thoughts_price_per_million,
     pricing_version, is_active, description
 )
-SELECT 'gemini', 'gemini-2.5-flash-lite', '2025-01-01 00:00:00+00', NULL, 'USD',
-       0.0750, 1.0000, 0.3000, 1.0000, 0.01875, 0.3000, 'gemini-flash-lite-v1', TRUE, 'Gemini Flash Lite standard rates'
+SELECT 'gemini', 'gemini-3.8-flash', '2027-01-01 00:00:00+00', NULL, 'USD',
+       1.5000, 1.5000, 7.5000, 7.5000, 0.1500, NULL, 'gemini-3.8-flash-2027', TRUE, 'Gemini 3.8 Flash standard rates from 2027-01-01'
 WHERE NOT EXISTS (
-    SELECT 1 FROM public.bm_ai_model_pricing WHERE provider = 'gemini' AND model = 'gemini-2.5-flash-lite'
+    SELECT 1 FROM public.bm_ai_model_pricing WHERE provider = 'gemini' AND model = 'gemini-3.8-flash' AND pricing_version = 'gemini-3.8-flash-2027'
 );
 
+-- 3.3. Gemini 3.1 Flash Live Preview - Multimodal WebSocket streaming rates
+-- Input Text: $0.75 / 1M
+-- Input Audio: $3.00 / 1M
+-- Output Text: $4.50 / 1M
+-- Output Audio: $12.00 / 1M
+-- No context caching
 INSERT INTO public.bm_ai_model_pricing (
     provider, model, effective_from, effective_to, currency,
     input_text_price_per_million, input_audio_price_per_million,
@@ -73,8 +87,8 @@ INSERT INTO public.bm_ai_model_pricing (
     cached_input_price_per_million, thoughts_price_per_million,
     pricing_version, is_active, description
 )
-SELECT 'gemini', 'gemini-3.1-flash-live-preview', '2025-01-01 00:00:00+00', NULL, 'USD',
-       0.3000, 3.0000, 1.2000, 3.0000, 0.0750, 1.2000, 'gemini-live-v1', TRUE, 'Gemini Live Multimodal standard rates'
+SELECT 'gemini', 'gemini-3.1-flash-live-preview', '2026-06-01 00:00:00+00', NULL, 'USD',
+       0.7500, 3.0000, 4.5000, 12.0000, NULL, NULL, 'gemini-live-v1', TRUE, 'Gemini 3.1 Flash Live Preview multimodal rates'
 WHERE NOT EXISTS (
     SELECT 1 FROM public.bm_ai_model_pricing WHERE provider = 'gemini' AND model = 'gemini-3.1-flash-live-preview'
 );
