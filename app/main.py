@@ -39,6 +39,7 @@ from app.routers import (
     teams,
     admin_users,
     admin_teams,
+    usage,
 )
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -118,6 +119,7 @@ app.include_router(companies.router)
 app.include_router(teams.router)
 app.include_router(admin_users.router)
 app.include_router(admin_teams.router)
+app.include_router(usage.router)
 
 
 
