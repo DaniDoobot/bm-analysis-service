@@ -127,6 +127,48 @@ def normalize_tipo_llamada(val: Any) -> str | None:
     return val_str
 
 
+def resolve_service_typology(
+    raw_value: Any,
+    typology_by_key: dict[str, Any],
+) -> tuple[Any | None, str | None]:
+    """
+    Resolve a raw typology value against the active catalog of a service.
+
+    Strategy:
+    1. Superficial normalization (strip, lowercase).
+    2. Check exact match in typology_by_key (both exact and case-insensitive).
+    3. If no exact match, apply legacy normalize_tipo_llamada() as fallback.
+    4. If legacy normalized key matches typology_by_key, return it.
+    5. If no match at all, return (None, None).
+    """
+    if raw_value is None:
+        return None, None
+
+    cleaned = str(raw_value).strip().lower()
+    if not cleaned:
+        return None, None
+
+    # Step 1: Exact match against active service typologies
+    if cleaned in typology_by_key:
+        return typology_by_key[cleaned], cleaned
+
+    for k, typ in typology_by_key.items():
+        if k.strip().lower() == cleaned:
+            return typ, k
+
+    # Step 2: Legacy fallback only if no exact match was found
+    legacy_normalized = normalize_tipo_llamada(cleaned)
+    if legacy_normalized and legacy_normalized != cleaned:
+        if legacy_normalized in typology_by_key:
+            return typology_by_key[legacy_normalized], legacy_normalized
+
+        for k, typ in typology_by_key.items():
+            if k.strip().lower() == legacy_normalized:
+                return typ, k
+
+    return None, None
+
+
 async def save_analysis(
     db: AsyncSession,
     *,
@@ -311,17 +353,19 @@ async def save_analysis(
                         detected_typology_key_raw = v
                         break
 
-            # Apply robust normalization helper
-            detected_typology_key = normalize_tipo_llamada(detected_typology_key_raw)
-            matched_typology = None
-            if detected_typology_key:
-                if detected_typology_key in typology_by_key:
-                    matched_typology = typology_by_key[detected_typology_key]
-                else:
-                    for k, typ in typology_by_key.items():
-                        if k.lower().strip() == detected_typology_key:
-                            matched_typology = typ
-                            break
+            # Resolve typology with exact match priority over legacy normalizer
+            matched_typology, resolved_key = resolve_service_typology(
+                detected_typology_key_raw, typology_by_key
+            )
+            detected_typology_key = resolved_key or (
+                normalize_tipo_llamada(detected_typology_key_raw)
+                if detected_typology_key_raw
+                else None
+            )
+
+            # Ensure analysis.tipo_llamada reflects canonical resolved typology if matched
+            if matched_typology and hasattr(matched_typology, "typology_key"):
+                analysis.tipo_llamada = matched_typology.typology_key
 
             logger.info(
                 "Manual/historical typology resolution: call_id=%s service_id=%s detected_raw=%s detected_norm=%s typology_keys=%s matched=%s",

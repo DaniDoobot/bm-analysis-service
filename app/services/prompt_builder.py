@@ -47,10 +47,20 @@ def sanitize_legacy_typologies_block(
             "No hay prioridades de tipologías definidas para esta estructura base.\n\n"
         )
     else:
-        # Build the new dynamic typologies section
+        # Build the new dynamic typologies section (specific first, 'otros' always last)
+        specific_typologies = [
+            t for t in active_typologies
+            if (getattr(t, "typology_key", None) or getattr(t, "key", None) or "").strip().lower() != "otros"
+        ]
+        fallback_typologies = [
+            t for t in active_typologies
+            if (getattr(t, "typology_key", None) or getattr(t, "key", None) or "").strip().lower() == "otros"
+        ]
+        ordered_typologies = specific_typologies + fallback_typologies
+
         bullet_lines = []
         active_keys = set()
-        for t in active_typologies:
+        for t in ordered_typologies:
             t_key = getattr(t, "typology_key", None) or getattr(t, "key", None)
             if t_key:
                 active_keys.add(t_key)
@@ -58,7 +68,7 @@ def sanitize_legacy_typologies_block(
                 bullet_lines.append(f"- {t_key}: {desc}")
 
         priority_lines = []
-        for idx, t in enumerate(active_typologies, 1):
+        for idx, t in enumerate(ordered_typologies, 1):
             t_key = getattr(t, "typology_key", None) or getattr(t, "key", None)
             if t_key:
                 priority_lines.append(f"{idx}. {t_key}")
@@ -69,6 +79,8 @@ def sanitize_legacy_typologies_block(
             "Tipos permitidos:\n" +
             "\n".join(bullet_lines) + "\n\n"
             "### PRIORIDADES EN CASO DE CONFLICTO\n"
+            "Debes priorizar siempre las tipologías específicas frente a categorías genéricas. "
+            "La tipología 'otros' debe utilizarse ÚNICAMENTE como último recurso cuando ninguna tipología específica aplique correctamente. "
             "Si una llamada cumple con características de múltiples tipologías o hay dudas sobre cuál elegir, aplica estrictamente este orden de prioridad decreciente (de mayor a menor importancia):\n" +
             "\n".join(priority_lines) + "\n\n"
         )
@@ -144,7 +156,20 @@ def sanitize_inputs_completely(
     Sanitizes draft_data, database criteria, and relationship maps completely
     to ensure zero legacy typologies leak or cause 500 errors.
     """
-    active_keys = [t.typology_key for t in active_typologies] if active_typologies else ["cita", "confirmacion", "cancelacion", "reagendo", "falta", "otros"]
+    if active_typologies:
+        specific_keys = [
+            getattr(t, "typology_key", None) or getattr(t, "key", "")
+            for t in active_typologies
+            if (getattr(t, "typology_key", None) or getattr(t, "key", "")).strip().lower() != "otros"
+        ]
+        fallback_keys = [
+            getattr(t, "typology_key", None) or getattr(t, "key", "")
+            for t in active_typologies
+            if (getattr(t, "typology_key", None) or getattr(t, "key", "")).strip().lower() == "otros"
+        ]
+        active_keys = [k for k in specific_keys if k] + [k for k in fallback_keys if k]
+    else:
+        active_keys = ["cita", "confirmacion", "cancelacion", "reagendo", "falta", "otros"]
     active_keys_set = set(active_keys)
     
     base_mapping = {
@@ -219,18 +244,22 @@ def sanitize_inputs_completely(
                     continue
                 c_key = c_dict.get("criterion_key") or c_dict.get("output_key") or ""
                 
-                # Clean allowed_values
-                if "allowed_values" in c_dict:
+                # Clean allowed_values (force active_keys for tipo_llamada)
+                if c_key in ("tipo_llamada", "tipo_de_llamada"):
+                    c_dict["allowed_values"] = list(active_keys)
+                elif "allowed_values" in c_dict:
                     c_dict["allowed_values"] = clean_allowed_values(c_key, c_dict["allowed_values"])
                     
                 # Clean applies_to_types
                 if "applies_to_types" in c_dict:
                     c_dict["applies_to_types"] = clean_applies_to(c_dict["applies_to_types"])
 
-    # 2. Sanitize database criteria
+    # 2. Sanitize database criteria (force active_keys for tipo_llamada)
     for c in criteria:
         c_key = c.criterion_key or c.output_key or ""
-        if c.allowed_values:
+        if c_key in ("tipo_llamada", "tipo_de_llamada"):
+            c.allowed_values = list(active_keys)
+        elif c.allowed_values:
             c.allowed_values = clean_allowed_values(c_key, c.allowed_values)
             
     # 3. Sanitize criterion typologies map
@@ -932,9 +961,18 @@ def _build_output_format(criteria: list[PromptCriterion], typologies: list[Any] 
     lines = []
     seen_keys = {"tipo_llamada"}
     
-    # 1. Add tipo_llamada first
+    # 1. Add tipo_llamada first (specific typologies first, 'otros' always last)
     if typologies:
-        options = "|".join([f'"{t.typology_key}"' for t in typologies]) + "|null"
+        specific = [
+            t for t in typologies
+            if (getattr(t, "typology_key", None) or getattr(t, "key", None) or "").strip().lower() != "otros"
+        ]
+        fallback = [
+            t for t in typologies
+            if (getattr(t, "typology_key", None) or getattr(t, "key", None) or "").strip().lower() == "otros"
+        ]
+        ordered = specific + fallback
+        options = "|".join([f'"{getattr(t, "typology_key", None) or getattr(t, "key", "")}"' for t in ordered]) + "|null"
     else:
         options = '"cita"|"confirmacion"|"cancelacion"|"reagendo"|"falta"|"otros"|null'
         

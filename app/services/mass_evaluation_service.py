@@ -1765,16 +1765,15 @@ class MassEvaluationService:
                                     detected_typology_key_raw = v
                                     break
 
-                        detected_typology_key = normalize_tipo_llamada(detected_typology_key_raw)
-                        matched_typology = None
-                        if detected_typology_key:
-                            if detected_typology_key in typology_by_key:
-                                matched_typology = typology_by_key[detected_typology_key]
-                            else:
-                                for k, typ in typology_by_key.items():
-                                    if k.lower().strip() == detected_typology_key:
-                                        matched_typology = typ
-                                        break
+                        from app.services.analysis_persistence import resolve_service_typology
+                        matched_typology, resolved_key = resolve_service_typology(
+                            detected_typology_key_raw, typology_by_key
+                        )
+                        detected_typology_key = resolved_key or (
+                            normalize_tipo_llamada(detected_typology_key_raw)
+                            if detected_typology_key_raw
+                            else None
+                        )
 
                         logger.info(
                             "Mass eval typology resolution: job_id=%s run_id=%s call_id=%s service_id=%s detected_raw=%s detected_norm=%s typology_keys=%s matched=%s",

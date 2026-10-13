@@ -1252,12 +1252,22 @@ def generate_base_prompt_skeleton(service_name: str | None, typologies: list) ->
     ]
     
     if typologies:
+        specific_typologies = [
+            t for t in typologies
+            if getattr(t, "typology_key", "").strip().lower() != "otros"
+        ]
+        fallback_typologies = [
+            t for t in typologies
+            if getattr(t, "typology_key", "").strip().lower() == "otros"
+        ]
+        ordered_typologies = specific_typologies + fallback_typologies
+
         lines.extend([
             "El analizador clasifica cada llamada en un único tipo_llamada. Devuelve la clave exacta de la tipología. Está prohibido inventar tipologías.",
             "",
             "Tipos permitidos:"
         ])
-        for t in typologies:
+        for t in ordered_typologies:
             desc = getattr(t, "description", None) or getattr(t, "typology_name", None) or getattr(t, "typology_key", "")
             lines.append(f"- {t.typology_key}: {desc}")
     else:
@@ -1269,8 +1279,12 @@ def generate_base_prompt_skeleton(service_name: str | None, typologies: list) ->
     ])
     
     if typologies:
-        lines.append("Si una llamada cumple varias tipologías, aplica este orden:")
-        for idx, t in enumerate(typologies, start=1):
+        lines.append(
+            "Debes priorizar siempre las tipologías específicas frente a categorías genéricas. "
+            "La tipología 'otros' debe utilizarse ÚNICAMENTE como último recurso cuando ninguna tipología específica aplique correctamente. "
+            "Si una llamada cumple varias tipologías, aplica este orden de prioridad decreciente:"
+        )
+        for idx, t in enumerate(ordered_typologies, start=1):
             lines.append(f"{idx}. {t.typology_key}")
     else:
         lines.append("No hay prioridades de tipologías definidas para esta estructura base.")
