@@ -298,7 +298,7 @@ class TestPromptBuilderIncludesCriteria(unittest.IsolatedAsyncioTestCase):
 
         captured_messages = []
 
-        async def capture_ai(messages, response_format=None):
+        async def capture_ai(messages, response_format=None, **kwargs):
             captured_messages.extend(messages)
             return ai_response
 

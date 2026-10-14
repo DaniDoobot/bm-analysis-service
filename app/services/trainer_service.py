@@ -1127,6 +1127,7 @@ class TrainerService:
 
             # 1. Resolve transcription
             transcript_text = sess.transcript
+            call_id_val = getattr(sess, "call_id", None) or getattr(sess, "external_call_sid", None) or getattr(sess, "call_sid", None)
             
             if not transcript_text and sess.recording_url:
                 # Download and transcribe audio
@@ -1142,7 +1143,7 @@ class TrainerService:
                     service_id=sim.service_id,
                     module="trainer_post_eval",
                     operation="transcribe_call",
-                    call_id=sess.call_sid,
+                    call_id=call_id_val,
                     trainer_session_id=session_id,
                     audio_duration_seconds=trans_dur,
                 )
@@ -1453,7 +1454,7 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido (sin markdown ```json ni texto ad
                 service_id=sim.service_id,
                 module="trainer_post_eval",
                 operation="evaluate_trainer_session",
-                call_id=sess.call_sid,
+                call_id=call_id_val,
                 trainer_session_id=session_id,
             )
 
