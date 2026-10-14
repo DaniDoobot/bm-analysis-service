@@ -5,6 +5,7 @@ without relying on non-existent 'call_sid' attribute.
 import os
 import sys
 import unittest
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
@@ -194,6 +195,175 @@ class TestTrainerSessionCallIdEvaluation(unittest.IsolatedAsyncioTestCase):
             sess = await db.get(TrainerSession, 600)
             self.assertEqual(sess.evaluation_status, "evaluated")
 
+    async def test_get_session_detail_returns_latest_evaluation_when_multiple_exist(self):
+        """
+        Verify that when a session has multiple evaluations (e.g., initial error evaluation 143,
+        followed by retry evaluation 144), get_session_detail returns the latest evaluation (144)
+        with its score, summary, and 'evaluated' status.
+        """
+        now = datetime.now(timezone.utc)
+        async with AsyncSessionLocal() as db:
+            sess = TrainerSession(
+                session_id=700,
+                agent_id="AGENT_700",
+                agent_code="AG700",
+                simulation_id=20,
+                service_id=20,
+                call_id="CA_TWILIO_700",
+                external_call_sid="CA_TWILIO_700_EXT",
+                status="completed",
+                evaluation_status="evaluated",
+                recording_url="https://api.twilio.com/fake/recording/700.mp3",
+                duration_seconds=295,
+                transcript="Transcripcion de la sesion 700.",
+                started_at=now - timedelta(hours=3),
+            )
+            db.add(sess)
+            await db.flush()
+
+            # Older failed evaluation (e.g. 143)
+            eval_old = TrainerEvaluation(
+                evaluation_id=143,
+                session_id=700,
+                evaluation_config_id=20,
+                prompt_snapshot="snapshot v1",
+                result_json={},
+                score=None,
+                summary=None,
+                error_message="'TrainerSession' object has no attribute 'call_sid'",
+                created_at=now - timedelta(hours=2),
+            )
+            db.add(eval_old)
+
+            # Newer successful evaluation (e.g. 144)
+            eval_new = TrainerEvaluation(
+                evaluation_id=144,
+                session_id=700,
+                evaluation_config_id=20,
+                prompt_snapshot="snapshot v1",
+                result_json={
+                    "score": 6.2,
+                    "empatia": 6.2,
+                    "feedback_empatia": "Buena empatia.",
+                    "criteria_evaluations": [],
+                },
+                score=Decimal("6.20"),
+                summary="Evaluación reprocesada con éxito.",
+                error_message=None,
+                created_at=now - timedelta(minutes=10),
+            )
+            db.add(eval_new)
+            await db.commit()
+
+        async with AsyncSessionLocal() as db:
+            detail = await TrainerService.get_session_detail(db, 700)
+            self.assertIsNotNone(detail)
+            self.assertIsNotNone(detail.evaluation)
+            self.assertEqual(detail.evaluation.evaluation_id, 144)
+            self.assertEqual(detail.evaluation.score, Decimal("6.20"))
+            self.assertIsNone(detail.evaluation.error_message)
+            self.assertEqual(detail.__dict__.get("score"), 6.20)
+            self.assertEqual(detail.evaluation_status, "evaluated")
+            self.assertEqual(detail.__dict__.get("evaluation_summary"), "Evaluación reprocesada con éxito.")
+
+    async def test_list_sessions_returns_latest_evaluation_when_multiple_exist(self):
+        """
+        Verify that list_sessions binds the latest evaluation when multiple evaluations exist
+        for a session.
+        """
+        now = datetime.now(timezone.utc)
+        async with AsyncSessionLocal() as db:
+            sess = TrainerSession(
+                session_id=750,
+                agent_id="AGENT_750",
+                agent_code="AG750",
+                simulation_id=20,
+                service_id=20,
+                call_id="CA_TWILIO_750",
+                status="completed",
+                evaluation_status="evaluated",
+                started_at=now - timedelta(hours=1),
+            )
+            db.add(sess)
+            await db.flush()
+
+            eval_1 = TrainerEvaluation(
+                evaluation_id=150,
+                session_id=750,
+                prompt_snapshot="snap",
+                result_json={},
+                score=None,
+                error_message="failed first attempt",
+                created_at=now - timedelta(minutes=40),
+            )
+            eval_2 = TrainerEvaluation(
+                evaluation_id=151,
+                session_id=750,
+                prompt_snapshot="snap",
+                result_json={"score": 8.0},
+                score=Decimal("8.00"),
+                summary="Segundo intento correcto",
+                error_message=None,
+                created_at=now - timedelta(minutes=5),
+            )
+            db.add_all([eval_1, eval_2])
+            await db.commit()
+
+        async with AsyncSessionLocal() as db:
+            sessions, total = await TrainerService.list_sessions(db, service_id=20, limit=50)
+            target = next((s for s in sessions if s.session_id == 750), None)
+            self.assertIsNotNone(target)
+            self.assertIsNotNone(target.evaluation)
+            self.assertEqual(target.evaluation.evaluation_id, 151)
+            self.assertEqual(target.evaluation.score, Decimal("8.00"))
+            self.assertEqual(target.__dict__.get("score"), 8.0)
+            self.assertEqual(target.evaluation_status, "evaluated")
+
+    async def test_get_session_detail_single_evaluation_regression(self):
+        """
+        Non-regression test: ensure standard sessions with a single evaluation
+        continue to load properly with score and details.
+        """
+        now = datetime.now(timezone.utc)
+        async with AsyncSessionLocal() as db:
+            sess = TrainerSession(
+                session_id=800,
+                agent_id="AGENT_800",
+                agent_code="AG800",
+                simulation_id=20,
+                service_id=20,
+                call_id="CA_TWILIO_800",
+                status="completed",
+                evaluation_status="evaluated",
+                started_at=now - timedelta(minutes=30),
+            )
+            db.add(sess)
+            await db.flush()
+
+            eval_single = TrainerEvaluation(
+                evaluation_id=201,
+                session_id=800,
+                prompt_snapshot="snap",
+                result_json={"score": 7.5},
+                score=Decimal("7.50"),
+                summary="Evaluación única estándar.",
+                error_message=None,
+                created_at=now - timedelta(minutes=20),
+            )
+            db.add(eval_single)
+            await db.commit()
+
+        async with AsyncSessionLocal() as db:
+            detail = await TrainerService.get_session_detail(db, 800)
+            self.assertIsNotNone(detail)
+            self.assertIsNotNone(detail.evaluation)
+            self.assertEqual(detail.evaluation.evaluation_id, 201)
+            self.assertEqual(detail.evaluation.score, Decimal("7.50"))
+            self.assertEqual(detail.__dict__.get("score"), 7.5)
+            self.assertEqual(detail.evaluation_status, "evaluated")
+            self.assertEqual(detail.__dict__.get("evaluation_summary"), "Evaluación única estándar.")
+
 
 if __name__ == "__main__":
     unittest.main()
+

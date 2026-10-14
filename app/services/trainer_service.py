@@ -1702,8 +1702,12 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido (sin markdown ```json ni texto ad
         if sessions:
             session_ids = [s.session_id for s in sessions]
 
-            # Eager-load evaluations
-            stmt_evals = select(TrainerEvaluation).where(TrainerEvaluation.session_id.in_(session_ids))
+            # Eager-load evaluations (order ascending so latest evaluation wins in dict comprehension)
+            stmt_evals = (
+                select(TrainerEvaluation)
+                .where(TrainerEvaluation.session_id.in_(session_ids))
+                .order_by(TrainerEvaluation.created_at.asc(), TrainerEvaluation.evaluation_id.asc())
+            )
             res_evals = await db.execute(stmt_evals)
             evals_map = {e.session_id: e for e in res_evals.scalars().all()}
 
@@ -1791,7 +1795,12 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido (sin markdown ```json ni texto ad
         res_sim = await db.execute(stmt_sim)
         session.simulation = res_sim.scalars().first()
 
-        stmt_eval = select(TrainerEvaluation).where(TrainerEvaluation.session_id == session.session_id)
+        stmt_eval = (
+            select(TrainerEvaluation)
+            .where(TrainerEvaluation.session_id == session.session_id)
+            .order_by(desc(TrainerEvaluation.created_at), desc(TrainerEvaluation.evaluation_id))
+            .limit(1)
+        )
         res_eval = await db.execute(stmt_eval)
         session.evaluation = res_eval.scalars().first()
         
