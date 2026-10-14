@@ -3,7 +3,7 @@ import logging
 import re
 from typing import Annotated, List, Optional
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, Response, status, Query
 from sqlalchemy import select, desc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1343,6 +1343,7 @@ async def hard_delete_training_report(
 
 
 @router.get("/admin/evaluations/{evaluation_id}")
+@router.get("/evaluations/{evaluation_id}")
 async def get_evaluation_detail(
     evaluation_id: int,
     context: Annotated[TenantContext, Depends(get_tenant_context)],
@@ -1350,8 +1351,8 @@ async def get_evaluation_detail(
 ):
     """
     Returns the full detail of a training call evaluation, including score,
-    feedback, transcription (formatted as conversation turns), and the
-    result_json criteria checklist.
+    feedback, transcription (formatted as conversation turns), result_json criteria checklist,
+    and secure recording_url when available.
     Accessible by authorized administrators, managers, coordinators, and the owner agent.
     """
     from app.models.personalized_training import TrainingCallEvaluation, TrainingCallSession
@@ -1363,24 +1364,33 @@ async def get_evaluation_detail(
     if not ev:
         raise HTTPException(status_code=404, detail=f"Evaluación {evaluation_id} no encontrada.")
 
-    # Ownership check: admin can see all; agents can only see their own
+    # Fetch associated call session
+    stmt_sess = select(TrainingCallSession).where(TrainingCallSession.session_id == ev.session_id)
+    res_sess = await db.execute(stmt_sess)
+    session = res_sess.scalars().first()
+
+    # Ownership check: admin can see all; agents/coordinators only their scope
     if not context.is_super_admin:
-        stmt_sess = select(TrainingCallSession).where(TrainingCallSession.session_id == ev.session_id)
-        res_sess = await db.execute(stmt_sess)
-        session = res_sess.scalars().first()
         if not session:
             raise HTTPException(status_code=403, detail="No tienes acceso a esta evaluación.")
         
-        if context.allowed_agent_ids is not None:
-            if session.agent_id not in context.allowed_agent_ids:
-                raise HTTPException(status_code=403, detail="No tienes acceso a esta evaluación.")
+        stmt_rep = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == session.cycle_id)
+        res_rep = await db.execute(stmt_rep)
+        rep = res_rep.scalars().first()
 
         if context.allowed_company_ids:
-            # Check company
-            stmt_rep = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == session.cycle_id)
-            res_rep = await db.execute(stmt_rep)
-            rep = res_rep.scalars().first()
             if not rep or rep.company_id not in context.allowed_company_ids:
+                raise HTTPException(status_code=403, detail="No tienes acceso a esta evaluación.")
+
+        if context.allowed_service_ids is not None and rep and rep.service_id is not None:
+            if rep.service_id not in context.allowed_service_ids:
+                raise HTTPException(status_code=403, detail="No tienes acceso a esta evaluación.")
+
+        if context.allowed_agent_ids is not None:
+            allowed_str_ids = [str(a).strip() for a in context.allowed_agent_ids]
+            sess_agent = str(session.agent_id).strip() if session.agent_id else ""
+            rep_agent = str(rep.hubspot_owner_id).strip() if rep and rep.hubspot_owner_id else ""
+            if sess_agent not in allowed_str_ids and rep_agent not in allowed_str_ids:
                 raise HTTPException(status_code=403, detail="No tienes acceso a esta evaluación.")
 
     # Parse transcription into conversation turns for easy rendering
@@ -1442,6 +1452,11 @@ async def get_evaluation_detail(
 
     strengths, weaknesses = PersonalizedTrainingService._extract_strengths_weaknesses(ev.result_json or {})
 
+    # Build secure proxy recording URL if recording is present on the session
+    recording_url = None
+    if session and session.recording_url:
+        recording_url = f"/bm/training/sessions/{session.session_id}/recording-audio"
+
     return {
         "evaluation_id": ev.evaluation_id,
         "session_id": ev.session_id,
@@ -1457,8 +1472,185 @@ async def get_evaluation_detail(
         "objectives_met": strengths,
         "areas_for_improvement": weaknesses,
         "result_json": ev.result_json,
+        "recording_url": recording_url,
         "created_at": ev.created_at,
     }
+
+
+# ── Cycle Audio Streaming / Proxy Endpoints ─────────────────────────────────
+
+async def verify_cycle_session_read_scope(
+    db: AsyncSession,
+    session_id: int,
+    context: TenantContext,
+):
+    """Verify that the training call session exists and is within the actor's company, service, and agent scopes."""
+    from app.models.personalized_training import TrainingCallSession
+
+    stmt = select(TrainingCallSession).where(TrainingCallSession.session_id == session_id)
+    res = await db.execute(stmt)
+    sess = res.scalars().first()
+    if not sess:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Sesión de ciclo formativo {session_id} no encontrada."
+        )
+
+    # Scoping checks
+    if not context.is_super_admin:
+        stmt_rep = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == sess.cycle_id)
+        res_rep = await db.execute(stmt_rep)
+        report = res_rep.scalars().first()
+
+        # 1. Company check
+        if report and report.company_id is not None:
+            if report.company_id not in context.allowed_company_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: esta sesión pertenece a otra empresa."
+                )
+
+        # 2. Service check
+        if report and report.service_id is not None and context.allowed_service_ids is not None:
+            if report.service_id not in context.allowed_service_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Acceso denegado: esta sesión pertenece a un servicio no asignado."
+                )
+
+        # 3. Agent check (strict for AGENT & COORDINATOR)
+        if context.allowed_agent_ids is not None:
+            allowed_str_ids = [str(a).strip() for a in context.allowed_agent_ids]
+            sess_agent = str(sess.agent_id).strip() if sess.agent_id else ""
+            rep_agent = str(report.hubspot_owner_id).strip() if report and report.hubspot_owner_id else ""
+            if sess_agent not in allowed_str_ids and rep_agent not in allowed_str_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="No tienes permisos para escuchar la grabación de este agente."
+                )
+
+    return sess
+
+
+@router.get("/sessions/{session_id}/recording-audio")
+@router.get("/admin/sessions/{session_id}/recording-audio")
+async def get_cycle_session_recording_audio(
+    session_id: int,
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+    db: AsyncSession = Depends(get_db),
+):
+    """Proxy endpoint to stream cycle simulation recording audio securely without exposing raw vendor URLs."""
+    from app.services.twilio_service import TwilioService
+    import httpx
+
+    sess = await verify_cycle_session_read_scope(db, session_id, context)
+
+    raw_recording_url = sess.recording_url
+    if not raw_recording_url:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Grabación no disponible todavía"
+        )
+
+    try:
+        twilio_service = TwilioService()
+        audio_bytes = await twilio_service.download_audio(raw_recording_url)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Grabación no disponible"
+            )
+        if e.response.status_code in (401, 403):
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="No se pudo recuperar la grabación desde el proveedor de audio"
+            )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Error al descargar la grabación: {str(e)}"
+        )
+    except (httpx.ConnectError, httpx.TimeoutException):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Grabación no disponible"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"No se pudo recuperar la grabación: {str(e)}"
+        )
+
+    media_type = "audio/wav" if raw_recording_url.lower().endswith(".wav") else "audio/mpeg"
+    filename = f"cycle_session_{session_id}.wav" if media_type == "audio/wav" else f"cycle_session_{session_id}.mp3"
+
+    return Response(
+        content=audio_bytes,
+        media_type=media_type,
+        headers={
+            "Content-Type": media_type,
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": f"inline; filename={filename}"
+        }
+    )
+
+
+@router.get("/evaluations/{evaluation_id}/recording-audio")
+@router.get("/admin/evaluations/{evaluation_id}/recording-audio")
+async def get_cycle_evaluation_recording_audio(
+    evaluation_id: int,
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+    db: AsyncSession = Depends(get_db),
+):
+    """Proxy endpoint to stream cycle simulation recording audio by evaluation ID."""
+    from app.models.personalized_training import TrainingCallEvaluation
+    stmt_ev = select(TrainingCallEvaluation.session_id).where(TrainingCallEvaluation.evaluation_id == evaluation_id)
+    res_ev = await db.execute(stmt_ev)
+    session_id = res_ev.scalar()
+    if not session_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Evaluación {evaluation_id} no encontrada o sin sesión asociada."
+        )
+
+    return await get_cycle_session_recording_audio(session_id=session_id, context=context, db=db)
+
+
+@router.get("/simulations/{completion_id}/recording-audio")
+async def get_cycle_completion_recording_audio(
+    completion_id: int,
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+    db: AsyncSession = Depends(get_db),
+):
+    """Proxy endpoint to stream cycle simulation recording audio by completion ID."""
+    from app.models.personalized_training import TrainingCompletionStatus, TrainingCallEvaluation
+    stmt_comp = select(
+        TrainingCompletionStatus.call_session_id,
+        TrainingCompletionStatus.evaluation_id
+    ).where(TrainingCompletionStatus.completion_id == completion_id)
+    res_comp = await db.execute(stmt_comp)
+    row = res_comp.first()
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Simulación de ciclo {completion_id} no encontrada."
+        )
+
+    session_id = row.call_session_id
+    if not session_id and row.evaluation_id:
+        stmt_ev = select(TrainingCallEvaluation.session_id).where(
+            TrainingCallEvaluation.evaluation_id == row.evaluation_id
+        )
+        res_ev = await db.execute(stmt_ev)
+        session_id = res_ev.scalar()
+
+    if not session_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="La simulación aún no dispone de sesión de llamada grabada."
+        )
+
+    return await get_cycle_session_recording_audio(session_id=session_id, context=context, db=db)
 
 
 # ── Knowledge Layer Endpoints (Phase 2) ─────────────────────────────────────

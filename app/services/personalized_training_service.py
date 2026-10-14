@@ -1531,6 +1531,7 @@ class PersonalizedTrainingService:
                     "strengths": None,
                     "weaknesses": None,
                     "result_json": None,
+                    "recording_url": None,
                     "created_at": p.created_at,
                 }
             slots.append(slot)
@@ -1650,6 +1651,29 @@ class PersonalizedTrainingService:
         else:
             status_val = "pending"
 
+        # Resolve recording_url if available
+        recording_url = None
+        call_sess = getattr(c, "call_session", None)
+        if not call_sess and evaluation is not None:
+            call_sess = getattr(evaluation, "session", None)
+
+        session_id_val = get_val(c, "call_session_id") or (getattr(call_sess, "session_id", None) if call_sess else None)
+        evaluation_id_val = get_val(c, "evaluation_id") or (getattr(evaluation, "evaluation_id", None) if evaluation else None)
+
+        has_recording = False
+        if call_sess is not None:
+            has_recording = bool(getattr(call_sess, "recording_url", None))
+        elif get_val(c, "recording_url"):
+            has_recording = True
+        elif status_val == "completed" and (session_id_val is not None or evaluation_id_val is not None):
+            has_recording = True
+
+        if has_recording:
+            if session_id_val:
+                recording_url = f"/bm/training/sessions/{session_id_val}/recording-audio"
+            elif evaluation_id_val:
+                recording_url = f"/bm/training/evaluations/{evaluation_id_val}/recording-audio"
+
         return {
             "completion_id": get_val(c, "completion_id", 0),
             "training_report_id": get_val(c, "training_report_id", 0),
@@ -1672,6 +1696,7 @@ class PersonalizedTrainingService:
             "strengths": strengths,
             "weaknesses": weaknesses,
             "result_json": result_json_extracted,
+            "recording_url": recording_url,
             "created_at": get_val(c, "created_at", datetime.now(timezone.utc)),
         }
 
@@ -2041,7 +2066,8 @@ class PersonalizedTrainingService:
             from sqlalchemy.orm import selectinload
             stmt_comp = select(TrainingCompletionStatus).options(
                 selectinload(TrainingCompletionStatus.evaluation),
-                selectinload(TrainingCompletionStatus.prompt)
+                selectinload(TrainingCompletionStatus.prompt),
+                selectinload(TrainingCompletionStatus.call_session),
             ).where(
                 TrainingCompletionStatus.training_report_id == report.training_report_id
             ).order_by(TrainingCompletionStatus.completion_id.asc())
@@ -2075,7 +2101,8 @@ class PersonalizedTrainingService:
             from sqlalchemy.orm import selectinload
             stmt_comp_h = select(TrainingCompletionStatus).options(
                 selectinload(TrainingCompletionStatus.evaluation),
-                selectinload(TrainingCompletionStatus.prompt)
+                selectinload(TrainingCompletionStatus.prompt),
+                selectinload(TrainingCompletionStatus.call_session),
             ).where(
                 TrainingCompletionStatus.training_report_id == h.training_report_id
             ).order_by(TrainingCompletionStatus.completion_id.asc())
@@ -2931,7 +2958,8 @@ class PersonalizedTrainingService:
         from sqlalchemy.orm import selectinload
         stmt_comp = select(TrainingCompletionStatus).options(
             selectinload(TrainingCompletionStatus.evaluation),
-            selectinload(TrainingCompletionStatus.prompt)
+            selectinload(TrainingCompletionStatus.prompt),
+            selectinload(TrainingCompletionStatus.call_session),
         ).where(
             TrainingCompletionStatus.training_report_id == report_id
         ).order_by(TrainingCompletionStatus.completion_id.asc())

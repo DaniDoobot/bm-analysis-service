@@ -35,6 +35,8 @@ ROLE_MAPPINGS = {
     "gestor_de_servicio": InternalRole.SERVICE_MANAGER,
     
     "team_coordinator": InternalRole.TEAM_COORDINATOR,
+    "coordinator": InternalRole.TEAM_COORDINATOR,
+    "coordinador": InternalRole.TEAM_COORDINATOR,
     "coordinador_equipo": InternalRole.TEAM_COORDINATOR,
     "coordinador_de_equipo": InternalRole.TEAM_COORDINATOR,
     

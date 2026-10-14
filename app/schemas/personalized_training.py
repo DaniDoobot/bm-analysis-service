@@ -137,6 +137,7 @@ class CompletionStatusOut(BaseModel):
     strengths: Optional[List[str]] = None
     weaknesses: Optional[List[str]] = None
     result_json: Optional[dict[str, Any]] = None
+    recording_url: Optional[str] = None
     created_at: datetime
 
     class Config:
