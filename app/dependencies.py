@@ -138,15 +138,13 @@ async def require_company_admin_or_super_admin(
 async def require_finops_access(
     context: TenantContext = Depends(get_tenant_context)
 ) -> TenantContext:
-    """Dependency ensuring the user has FinOps reporting access (superadmin, company admin, service manager)."""
-    if context.is_super_admin:
-        return context
-    if context.normalized_role in (InternalRole.COMPANY_ADMIN, InternalRole.SERVICE_MANAGER):
-        return context
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail="Acceso denegado: Se requiere rol Administrador o Gestor de Servicio para consultar datos FinOps."
-    )
+    """Dependency ensuring the user has FinOps reporting access (strictly Super Admin)."""
+    if not context.is_super_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Se requiere rol Super Administrador para consultar datos FinOps."
+        )
+    return context
 
 
 class RequireCompanyAccess:

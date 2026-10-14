@@ -182,36 +182,12 @@ def apply_usage_filters(
     Applies multi-tenant role boundary enforcement and user query filters to a SQLAlchemy select.
     Raises HTTP 403 if unauthorized access to companies or services is attempted.
     """
-    # 1. Multi-tenant access validation
+    # 1. Multi-tenant access validation: strictly Super Admin
     if not context.is_super_admin:
-        if context.normalized_role == InternalRole.COMPANY_ADMIN:
-            if company_id is not None and company_id != context.company_id and company_id not in context.allowed_company_ids:
-                raise HTTPException(
-                    status_code=http_status.HTTP_403_FORBIDDEN,
-                    detail="Acceso denegado: No tienes permisos para consultar datos de otra empresa.",
-                )
-            company_id = context.company_id
-        elif context.normalized_role == InternalRole.SERVICE_MANAGER:
-            if company_id is not None and company_id != context.company_id and company_id not in context.allowed_company_ids:
-                raise HTTPException(
-                    status_code=http_status.HTTP_403_FORBIDDEN,
-                    detail="Acceso denegado: No tienes permisos para consultar datos de otra empresa.",
-                )
-            company_id = context.company_id
-            if service_id is not None:
-                if context.allowed_service_ids is not None and service_id not in context.allowed_service_ids:
-                    raise HTTPException(
-                        status_code=http_status.HTTP_403_FORBIDDEN,
-                        detail="Acceso denegado: No tienes permisos para consultar datos de este servicio.",
-                    )
-            else:
-                if context.allowed_service_ids is not None:
-                    stmt = stmt.where(AIUsageEvent.service_id.in_(context.allowed_service_ids))
-        else:
-            raise HTTPException(
-                status_code=http_status.HTTP_403_FORBIDDEN,
-                detail="Acceso denegado: Se requiere rol Administrador o Gestor de Servicio para consultar datos FinOps.",
-            )
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado: Se requiere rol Super Administrador para consultar datos FinOps.",
+        )
 
     # 2. Date bounds filter
     stmt = stmt.where(AIUsageEvent.created_at >= dt_from_utc, AIUsageEvent.created_at <= dt_to_utc)

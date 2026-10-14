@@ -107,7 +107,16 @@ class TestFinOpsUsageReporting(unittest.IsolatedAsyncioTestCase):
                 password_hash=pwd,
                 is_active=True,
             )
-            db.add_all([self.u_super, self.u_company_admin, self.u_service_mgr, self.u_coordinator, self.u_agent])
+            self.u_unknown = User(
+                user_id=6,
+                username="unknown_user",
+                email="unknown@boston.es",
+                role="unknown_custom_role",
+                company_id=1,
+                password_hash=pwd,
+                is_active=True,
+            )
+            db.add_all([self.u_super, self.u_company_admin, self.u_service_mgr, self.u_coordinator, self.u_agent, self.u_unknown])
             await db.flush()
 
             # Base anchor datetime in UTC for test events (2026-10-10 12:00:00 UTC)
@@ -259,6 +268,7 @@ class TestFinOpsUsageReporting(unittest.IsolatedAsyncioTestCase):
         self.tok_service_mgr = create_access_token({"user_id": 3, "email": "mgr@boston.es"})
         self.tok_coord = create_access_token({"user_id": 4, "email": "coord@boston.es"})
         self.tok_agent = create_access_token({"user_id": 5, "email": "agent@boston.es"})
+        self.tok_unknown = create_access_token({"user_id": 6, "email": "unknown@boston.es"})
 
         async def override_get_db():
             async with self.session_maker() as session:
@@ -488,74 +498,67 @@ class TestFinOpsUsageReporting(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res_acme.status_code, 200)
         self.assertEqual(res_acme.json()["total_events"], 1)
 
-    # ── 8. TENANT ISOLATION: COMPANY ADMIN ────────────────────────────────────
-    async def test_tenant_company_admin_restricted_to_own_company(self):
-        """Company Admin is scoped to their company; querying another company raises 403."""
-        # Unspecified company_id -> automatically scoped to Boston (company 1, 4 events)
-        res = await self.client.get(
-            "/bm/usage/summary?date_from=2026-10-01&date_to=2026-10-31",
-            headers={"Authorization": f"Bearer {self.tok_comp_admin}"},
-        )
-        self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.json()["total_events"], 4)
-
-        # Attempt to query Acme (company 2) -> 403 Forbidden
-        res_forbid = await self.client.get(
-            "/bm/usage/summary?company_id=2&date_from=2026-10-01&date_to=2026-10-31",
-            headers={"Authorization": f"Bearer {self.tok_comp_admin}"},
-        )
-        self.assertEqual(res_forbid.status_code, 403)
-        self.assertIn("Acceso denegado", res_forbid.json()["detail"])
-
-    # ── 9. TENANT ISOLATION: SERVICE MANAGER ──────────────────────────────────
-    async def test_tenant_service_manager_restricted_to_allowed_services(self):
-        """Service Manager is scoped to their primary/allowed service (Front = service 1)."""
-        # Unspecified service_id -> automatically scoped to service 1 (2 events: ev1, ev3)
-        res = await self.client.get(
-            "/bm/usage/summary?date_from=2026-10-01&date_to=2026-10-31",
-            headers={"Authorization": f"Bearer {self.tok_service_mgr}"},
-        )
-        self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.json()["total_events"], 2)
-
-        # Explicit service 1 allowed -> 200
-        res_ok = await self.client.get(
-            "/bm/usage/summary?service_id=1&date_from=2026-10-01&date_to=2026-10-31",
-            headers={"Authorization": f"Bearer {self.tok_service_mgr}"},
-        )
-        self.assertEqual(res_ok.status_code, 200)
-
-        # Attempt to query EXPAC (service 2) -> 403 Forbidden
-        res_forbid_service = await self.client.get(
-            "/bm/usage/summary?service_id=2&date_from=2026-10-01&date_to=2026-10-31",
-            headers={"Authorization": f"Bearer {self.tok_service_mgr}"},
-        )
-        self.assertEqual(res_forbid_service.status_code, 403)
-        self.assertIn("Acceso denegado", res_forbid_service.json()["detail"])
-
-        # Attempt to query Acme (company 2) -> 403 Forbidden
-        res_forbid_comp = await self.client.get(
-            "/bm/usage/summary?company_id=2&date_from=2026-10-01&date_to=2026-10-31",
-            headers={"Authorization": f"Bearer {self.tok_service_mgr}"},
-        )
-        self.assertEqual(res_forbid_comp.status_code, 403)
-
-    # ── 10. FORBIDDEN FOR AGENTS AND COORDINATORS ─────────────────────────────
-    async def test_non_finops_roles_forbidden(self):
-        """Agents and Team Coordinators must receive 403 Forbidden on all usage endpoints."""
-        for token in (self.tok_agent, self.tok_coord):
-            res_summary = await self.client.get(
-                "/bm/usage/summary",
-                headers={"Authorization": f"Bearer {token}"},
+    # ── 8. TENANT ISOLATION: COMPANY ADMIN FORBIDDEN ──────────────────────────
+    async def test_tenant_company_admin_forbidden(self):
+        """Company Admin must receive 403 Forbidden on all usage endpoints."""
+        endpoints = [
+            "/bm/usage/summary",
+            "/bm/usage/timeseries",
+            "/bm/usage/by-company",
+            "/bm/usage/by-service",
+            "/bm/usage/by-module",
+            "/bm/usage/by-model",
+        ]
+        for ep in endpoints:
+            res = await self.client.get(
+                ep,
+                headers={"Authorization": f"Bearer {self.tok_comp_admin}"},
             )
-            self.assertEqual(res_summary.status_code, 403)
-            self.assertIn("Acceso denegado", res_summary.json()["detail"])
+            self.assertEqual(res.status_code, 403, f"Expected 403 for company admin on {ep}, got {res.status_code}")
+            self.assertIn("Acceso denegado", res.json()["detail"])
 
-            res_comp = await self.client.get(
-                "/bm/usage/by-company",
-                headers={"Authorization": f"Bearer {token}"},
+    # ── 9. TENANT ISOLATION: SERVICE MANAGER FORBIDDEN ────────────────────────
+    async def test_tenant_service_manager_forbidden(self):
+        """Service Manager must receive 403 Forbidden on all usage endpoints."""
+        endpoints = [
+            "/bm/usage/summary",
+            "/bm/usage/timeseries",
+            "/bm/usage/by-company",
+            "/bm/usage/by-service",
+            "/bm/usage/by-module",
+            "/bm/usage/by-model",
+        ]
+        for ep in endpoints:
+            res = await self.client.get(
+                ep,
+                headers={"Authorization": f"Bearer {self.tok_service_mgr}"},
             )
-            self.assertEqual(res_comp.status_code, 403)
+            self.assertEqual(res.status_code, 403, f"Expected 403 for service manager on {ep}, got {res.status_code}")
+            self.assertIn("Acceso denegado", res.json()["detail"])
+
+    # ── 10. FORBIDDEN FOR AGENTS, COORDINATORS AND UNKNOWN ROLES ──────────────
+    async def test_non_superadmin_roles_forbidden(self):
+        """Agents, Team Coordinators, and Unknown roles must receive 403 Forbidden on all usage endpoints."""
+        endpoints = [
+            "/bm/usage/summary",
+            "/bm/usage/timeseries",
+            "/bm/usage/by-company",
+            "/bm/usage/by-service",
+            "/bm/usage/by-module",
+            "/bm/usage/by-model",
+        ]
+        for token, role_label in [
+            (self.tok_coord, "coordinator"),
+            (self.tok_agent, "agent"),
+            (self.tok_unknown, "unknown_role"),
+        ]:
+            for ep in endpoints:
+                res = await self.client.get(
+                    ep,
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                self.assertEqual(res.status_code, 403, f"Expected 403 for {role_label} on {ep}, got {res.status_code}")
+                self.assertIn("Acceso denegado", res.json()["detail"])
 
     # ── 11. TIMEZONE PERIOD BOUNDS (MADRID -> UTC) ────────────────────────────
     def test_madrid_period_bounds_calculations(self):
