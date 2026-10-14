@@ -142,7 +142,7 @@ async def get_service_manager_agent_ids(db: AsyncSession, context: TenantContext
 
 
 def sanitize_report_for_agent(report: dict) -> dict:
-    """Removes sensitive prompt_text instructions from simulation prompts for agents."""
+    """Removes sensitive prompt_text instructions and hides improvement_objectives from simulation prompts for agents."""
     if not report:
         return report
     
@@ -150,6 +150,15 @@ def sanitize_report_for_agent(report: dict) -> dict:
         for p in report["prompts"]:
             if isinstance(p, dict):
                 p["prompt_text"] = ""
+    if "simulations" in report and isinstance(report["simulations"], list):
+        for s in report["simulations"]:
+            if isinstance(s, dict):
+                s["prompt_text"] = ""
+                s["improvement_objectives"] = None
+    if "completion_statuses" in report and isinstance(report["completion_statuses"], list):
+        for c in report["completion_statuses"]:
+            if isinstance(c, dict):
+                c["improvement_objectives"] = None
     return report
 
 
@@ -1106,7 +1115,10 @@ async def get_my_training_history(
     )
     if not detail:
         return []
-    return detail["history"]
+    history = detail["history"]
+    if context.normalized_role == InternalRole.AGENT:
+        history = [sanitize_report_for_agent(h) for h in history]
+    return history
 
 
 @router.get("/me/reports/{training_report_id}", response_model=TrainingAgentReportOut)
@@ -1199,7 +1211,10 @@ async def get_agent_training_history(
     )
     if not detail:
         return []
-    return detail["history"]
+    history = detail["history"]
+    if context.normalized_role == InternalRole.AGENT:
+        history = [sanitize_report_for_agent(h) for h in history]
+    return history
 
 
 @router.get("/reports/{training_report_id}", response_model=TrainingAgentReportOut)
@@ -1355,9 +1370,22 @@ async def get_evaluation_detail(
     and secure recording_url when available.
     Accessible by authorized administrators, managers, coordinators, and the owner agent.
     """
-    from app.models.personalized_training import TrainingCallEvaluation, TrainingCallSession
+    from sqlalchemy.orm import selectinload
+    from app.models.personalized_training import (
+        TrainingCallEvaluation,
+        TrainingCallSession,
+        TrainingSimulationPrompt,
+        TrainingAgentReport,
+    )
 
-    stmt = select(TrainingCallEvaluation).where(TrainingCallEvaluation.evaluation_id == evaluation_id)
+    stmt = (
+        select(TrainingCallEvaluation)
+        .options(
+            selectinload(TrainingCallEvaluation.prompt),
+            selectinload(TrainingCallEvaluation.cycle),
+        )
+        .where(TrainingCallEvaluation.evaluation_id == evaluation_id)
+    )
     res = await db.execute(stmt)
     ev = res.scalars().first()
 
@@ -1457,6 +1485,36 @@ async def get_evaluation_detail(
     if session and session.recording_url:
         recording_url = f"/bm/training/sessions/{session.session_id}/recording-audio"
 
+    # Resolve improvement objectives only for management roles (hide from agents)
+    improvement_objectives = None
+    if context.normalized_role != InternalRole.AGENT:
+        rep_obj = getattr(ev, "__dict__", {}).get("cycle")
+        if not rep_obj:
+            cycle_id = getattr(ev, "cycle_id", None) or (getattr(session, "cycle_id", None) if session else None)
+            if cycle_id:
+                stmt_rep = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == cycle_id)
+                res_rep = await db.execute(stmt_rep)
+                rep_obj = res_rep.scalars().first()
+
+        prompt_obj = getattr(ev, "__dict__", {}).get("prompt")
+        if not prompt_obj:
+            sim_prompt_id = (
+                getattr(ev, "conversation_id", None)
+                or (getattr(session, "conversation_id", None) if session else None)
+            )
+            if sim_prompt_id:
+                stmt_p = select(TrainingSimulationPrompt).where(
+                    TrainingSimulationPrompt.simulation_prompt_id == sim_prompt_id
+                )
+                res_p = await db.execute(stmt_p)
+                prompt_obj = res_p.scalars().first()
+
+        improvement_objectives = PersonalizedTrainingService.resolve_simulation_improvement_objectives(
+            prompt=prompt_obj,
+            report=rep_obj,
+            evaluation=ev,
+        )
+
     return {
         "evaluation_id": ev.evaluation_id,
         "session_id": ev.session_id,
@@ -1473,6 +1531,7 @@ async def get_evaluation_detail(
         "areas_for_improvement": weaknesses,
         "result_json": ev.result_json,
         "recording_url": recording_url,
+        "improvement_objectives": improvement_objectives,
         "created_at": ev.created_at,
     }
 

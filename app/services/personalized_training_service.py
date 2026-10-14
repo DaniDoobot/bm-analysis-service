@@ -1442,7 +1442,427 @@ class PersonalizedTrainingService:
         return strengths, weaknesses
 
     @staticmethod
-    def _build_simulation_slots(prompts: list, completions: list) -> list:
+    def resolve_simulation_improvement_objectives(
+        prompt: Any = None,
+        report: Any = None,
+        evaluation: Any = None,
+    ) -> List[dict]:
+        """
+        Determines and evaluates the specific improvement objectives introduced into a training simulation.
+        Produces structured objects containing:
+          - objective_id: slug / identifier
+          - name: objective title or name
+          - description: detailed description or behavioral guideline
+          - status: "passed" | "failed" | "not_evaluable"
+          - status_label: "Superado" | "No superado" | "No evaluable"
+          - score: individual numerical score (1.0 to 10.0) when available
+          - feedback: individual pedagogical feedback / reasoning
+          - evidence: textual quote from the call when available
+          - expected_behavior: expected observable behavior
+          - observed_behavior: observed agent behavior
+        """
+        if not prompt:
+            return []
+
+        def _clean_str(val: Any) -> str:
+            if val is None:
+                return ""
+            s = str(val).lower().strip()
+            s = s.replace("_", " ").replace("-", " ")
+            s = re.sub(r"[áàäâ]", "a", s)
+            s = re.sub(r"[éèëê]", "e", s)
+            s = re.sub(r"[íìïî]", "i", s)
+            s = re.sub(r"[óòöô]", "o", s)
+            s = re.sub(r"[úùüû]", "u", s)
+            s = re.sub(r"[ñ]", "n", s)
+            s = re.sub(r"[^\w\s]", "", s)
+            return re.sub(r"\s+", " ", s).strip()
+
+        # 1. Extract prompt objective metadata
+        focus_data = getattr(prompt, "objective_focus_json", None) if not isinstance(prompt, dict) else prompt.get("objective_focus_json")
+        if focus_data is None and isinstance(prompt, dict):
+            focus_data = prompt.get("objective_focus") or prompt.get("objectives")
+
+        if isinstance(focus_data, str) and focus_data.startswith("{") and focus_data.endswith("}"):
+            try:
+                import json
+                focus_data = json.loads(focus_data)
+            except Exception:
+                pass
+
+        linked_spec = []
+        linked_gen = []
+        focus_list = []
+        obj_summary = None
+        exp_behavior = None
+
+        if isinstance(focus_data, dict):
+            raw_spec = focus_data.get("linked_specific_objectives") or []
+            linked_spec = [str(x).strip() for x in raw_spec if x] if isinstance(raw_spec, list) else ([str(raw_spec).strip()] if raw_spec else [])
+            raw_gen = focus_data.get("linked_general_objectives") or []
+            linked_gen = [str(x).strip() for x in raw_gen if x] if isinstance(raw_gen, list) else ([str(raw_gen).strip()] if raw_gen else [])
+            raw_focus = focus_data.get("focus") or []
+            focus_list = [str(x).strip() for x in raw_focus if x] if isinstance(raw_focus, list) else ([str(raw_focus).strip()] if raw_focus else [])
+            obj_summary = focus_data.get("objective_summary") or focus_data.get("resumen_objetivo")
+            exp_behavior = focus_data.get("expected_behavior") or focus_data.get("conducta_esperada")
+        elif isinstance(focus_data, list):
+            focus_list = [str(x).strip() for x in focus_data if x]
+        elif isinstance(focus_data, str) and focus_data.strip():
+            focus_list = [focus_data.strip()]
+
+        # 2. Extract cycle objectives from report if available
+        spec_objs = []
+        gen_objs = []
+        final_obj_status_map = {}
+        if report:
+            raw_spec_objs = getattr(report, "specific_objectives_json", None) if not isinstance(report, dict) else report.get("specific_objectives_json")
+            if isinstance(raw_spec_objs, list):
+                spec_objs = [x for x in raw_spec_objs if isinstance(x, dict)]
+            raw_gen_objs = getattr(report, "general_objectives_json", None) if not isinstance(report, dict) else report.get("general_objectives_json")
+            if isinstance(raw_gen_objs, list):
+                gen_objs = [x for x in raw_gen_objs if isinstance(x, dict)]
+
+            final_rep = getattr(report, "final_report_json", None) if not isinstance(report, dict) else report.get("final_report_json")
+            if isinstance(final_rep, dict):
+                for os_item in (final_rep.get("objectives_status") or []):
+                    if isinstance(os_item, dict) and os_item.get("title"):
+                        final_obj_status_map[_clean_str(os_item.get("title"))] = os_item
+
+        spec_map = {_clean_str(item.get("title")): item for item in spec_objs if item.get("title")}
+        gen_map = {_clean_str(item.get("title")): item for item in gen_objs if item.get("title")}
+
+        # 3. Assemble target objectives for this simulation
+        targets = []
+        seen_keys = set()
+
+        def _add_target(name: str, desc: Optional[str], rel_crits: List[str], exp_b: Optional[str], obj_type: str):
+            c_name = str(name).strip()
+            if not c_name:
+                return
+            key_id = _clean_str(c_name).replace(" ", "_")
+            if key_id in seen_keys:
+                return
+            seen_keys.add(key_id)
+            targets.append({
+                "objective_id": key_id,
+                "name": c_name,
+                "description": desc,
+                "related_criteria": [str(rc).strip() for rc in rel_crits if rc],
+                "expected_behavior": exp_b,
+                "type": obj_type
+            })
+
+        # A. Specific objectives linked to this simulation
+        for s_title in linked_spec:
+            s_norm = _clean_str(s_title)
+            matched = spec_map.get(s_norm)
+            if not matched:
+                for k, v in spec_map.items():
+                    if s_norm in k or k in s_norm:
+                        matched = v
+                        break
+            name = matched.get("title") if matched else s_title
+            desc = (matched.get("description") or matched.get("specific_behavior_to_improve")) if matched else obj_summary
+            rel = matched.get("related_criteria") or [] if matched else []
+            exp = (matched.get("specific_behavior_to_improve") or exp_behavior) if matched else exp_behavior
+            _add_target(name, desc, rel, exp, "specific")
+
+        # B. General objectives linked to this simulation
+        for g_title in linked_gen:
+            g_norm = _clean_str(g_title)
+            matched = gen_map.get(g_norm)
+            if not matched:
+                for k, v in gen_map.items():
+                    if g_norm in k or k in g_norm:
+                        matched = v
+                        break
+            name = matched.get("title") if matched else g_title
+            desc = matched.get("description") if matched else obj_summary
+            rel = []
+            exp = (matched.get("expected_behavior") or exp_behavior) if matched else exp_behavior
+            _add_target(name, desc, rel, exp, "general")
+
+        # C. Focus list
+        for f in focus_list:
+            f_norm = _clean_str(f)
+            matched_spec = spec_map.get(f_norm)
+            matched_gen = gen_map.get(f_norm)
+            if not matched_spec and not matched_gen:
+                for k, v in spec_map.items():
+                    if f_norm in k or k in f_norm:
+                        matched_spec = v
+                        break
+                if not matched_spec:
+                    for k, v in gen_map.items():
+                        if f_norm in k or k in f_norm:
+                            matched_gen = v
+                            break
+            name = (matched_spec.get("title") if matched_spec else (matched_gen.get("title") if matched_gen else f))
+            desc = (matched_spec.get("description") if matched_spec else (matched_gen.get("description") if matched_gen else obj_summary))
+            rel = (matched_spec.get("related_criteria") or []) if matched_spec else [f_norm.replace(" ", "_")]
+            exp = (matched_spec.get("specific_behavior_to_improve") if matched_spec else (matched_gen.get("expected_behavior") if matched_gen else exp_behavior))
+            _add_target(name, desc, rel, exp, "focus")
+
+        # D. Fallback if no specific targets could be assembled
+        if not targets:
+            if obj_summary:
+                p_title = getattr(prompt, "title", None) if not isinstance(prompt, dict) else prompt.get("title")
+                fallback_name = p_title or "Objetivo principal de la simulación"
+                _add_target(fallback_name, obj_summary, [], exp_behavior, "summary")
+            else:
+                return []
+
+        # 4. Extract evaluation data if available
+        res_json = None
+        eval_score = None
+        eval_feedback = None
+        if evaluation:
+            res_json = getattr(evaluation, "result_json", None) if not isinstance(evaluation, dict) else evaluation.get("result_json")
+            raw_sc = getattr(evaluation, "score", None) if not isinstance(evaluation, dict) else evaluation.get("score")
+            if raw_sc is not None:
+                try:
+                    eval_score = round(float(raw_sc), 1)
+                except Exception:
+                    pass
+            eval_feedback = getattr(evaluation, "feedback", None) if not isinstance(evaluation, dict) else evaluation.get("feedback")
+
+        # Parse evaluation details
+        criteria_evals = []
+        criteria_checklist = {}
+        objectives_met_phrases = []
+        areas_imp_phrases = []
+
+        if isinstance(res_json, dict):
+            raw_ce = res_json.get("criteria_evaluations")
+            if isinstance(raw_ce, list):
+                criteria_evals = [c for c in raw_ce if isinstance(c, dict)]
+
+            inner_res = res_json.get("result_json")
+            if isinstance(inner_res, dict):
+                criteria_checklist = inner_res
+            else:
+                criteria_checklist = {k: v for k, v in res_json.items() if isinstance(v, bool)}
+
+            obj_met = res_json.get("objectives_met") or res_json.get("strengths") or []
+            if isinstance(obj_met, list):
+                objectives_met_phrases = [str(x) for x in obj_met]
+
+            areas_imp = res_json.get("areas_for_improvement") or res_json.get("weaknesses") or []
+            if isinstance(areas_imp, list):
+                areas_imp_phrases = [str(x) for x in areas_imp]
+
+        # 5. Evaluate each target objective
+        results = []
+        for tgt in targets:
+            t_norm = _clean_str(tgt["name"])
+            t_rel_norm = [_clean_str(rc) for rc in tgt.get("related_criteria", []) if rc]
+
+            # Case: Not yet evaluated / No evaluation data
+            if not evaluation or not res_json:
+                results.append({
+                    "objective_id": tgt["objective_id"],
+                    "name": tgt["name"],
+                    "description": tgt["description"],
+                    "status": "not_evaluable",
+                    "status_label": "No evaluable",
+                    "score": None,
+                    "feedback": "Simulación pendiente de realización.",
+                    "evidence": None,
+                    "expected_behavior": tgt["expected_behavior"],
+                    "observed_behavior": None,
+                })
+                continue
+
+            # Case: Evaluated -> Match against criteria_evaluations
+            matching_ce = []
+            for ce in criteria_evals:
+                c_key_norm = _clean_str(ce.get("criterion_key", ""))
+                c_name_norm = _clean_str(ce.get("criterion_name", ""))
+
+                is_match = False
+                for rel_norm in t_rel_norm:
+                    if rel_norm and (rel_norm == c_key_norm or rel_norm in c_name_norm or c_name_norm in rel_norm):
+                        is_match = True
+                        break
+                if not is_match and (t_norm in c_name_norm or c_name_norm in t_norm):
+                    is_match = True
+                if not is_match and c_key_norm and (t_norm in c_key_norm or c_key_norm in t_norm):
+                    is_match = True
+
+                if is_match:
+                    matching_ce.append(ce)
+
+            if matching_ce:
+                scores = []
+                for ce in matching_ce:
+                    sc = ce.get("score")
+                    if sc is not None:
+                        try:
+                            scores.append(float(sc))
+                        except Exception:
+                            pass
+                passed_vals = [ce.get("passed") for ce in matching_ce if ce.get("passed") is not None]
+
+                avg_score = round(sum(scores) / len(scores), 1) if scores else None
+
+                if passed_vals:
+                    if all(passed_vals):
+                        is_passed = True
+                    elif not any(passed_vals):
+                        is_passed = False
+                    else:
+                        is_passed = bool(avg_score is not None and avg_score >= 7.0)
+                elif avg_score is not None:
+                    is_passed = bool(avg_score >= 7.0)
+                else:
+                    is_passed = True
+
+                status = "passed" if is_passed else "failed"
+                status_label = "Superado" if is_passed else "No superado"
+
+                fb_parts = []
+                if is_passed:
+                    for ce in matching_ce:
+                        r_text = ce.get("reasoning")
+                        if r_text and r_text not in fb_parts:
+                            fb_parts.append(r_text)
+                else:
+                    for ce in matching_ce:
+                        tip_text = ce.get("improvement_tip") or ce.get("reasoning")
+                        if tip_text and tip_text not in fb_parts:
+                            fb_parts.append(tip_text)
+
+                observed_parts = [ce.get("observed_behavior") for ce in matching_ce if ce.get("observed_behavior")]
+                evidence_parts = [
+                    ce.get("evidence_quote") for ce in matching_ce
+                    if ce.get("evidence_quote") and "sin evidencia" not in ce.get("evidence_quote").lower()
+                ]
+
+                feedback_text = " ".join(fb_parts) if fb_parts else (
+                    " ".join(observed_parts) if observed_parts else (
+                        f"El agente superó satisfactoriamente las pautas esperadas para {tgt['name']}." if is_passed
+                        else f"El agente no superó los criterios requeridos para {tgt['name']}; requiere refuerzo."
+                    )
+                )
+
+                evidence_text = " | ".join(dict.fromkeys(evidence_parts)) if evidence_parts else None
+                observed_text = " ".join(dict.fromkeys(observed_parts)) if observed_parts else None
+
+                results.append({
+                    "objective_id": tgt["objective_id"],
+                    "name": tgt["name"],
+                    "description": tgt["description"],
+                    "status": status,
+                    "status_label": status_label,
+                    "score": avg_score or eval_score,
+                    "feedback": feedback_text,
+                    "evidence": evidence_text,
+                    "expected_behavior": matching_ce[0].get("expected_behavior") or tgt["expected_behavior"],
+                    "observed_behavior": observed_text,
+                })
+                continue
+
+            # Case: Match against criteria checklist (boolean dict)
+            matched_crit_key = None
+            matched_crit_val = None
+            for ck, cv in criteria_checklist.items():
+                ck_norm = _clean_str(ck)
+                for rel_norm in t_rel_norm:
+                    if rel_norm and (rel_norm == ck_norm or rel_norm in ck_norm or ck_norm in rel_norm):
+                        matched_crit_key = ck
+                        matched_crit_val = cv
+                        break
+                if matched_crit_key is None and (t_norm in ck_norm or ck_norm in t_norm):
+                    matched_crit_key = ck
+                    matched_crit_val = cv
+                    break
+
+            if matched_crit_key is not None:
+                is_passed = bool(matched_crit_val)
+                status = "passed" if is_passed else "failed"
+                status_label = "Superado" if is_passed else "No superado"
+
+                candidate_pool = objectives_met_phrases if is_passed else areas_imp_phrases
+                matched_phrase = next((p for p in candidate_pool if t_norm in _clean_str(p) or _clean_str(p) in t_norm), None)
+                os_just = final_obj_status_map.get(t_norm, {}).get("justification") if final_obj_status_map else None
+
+                if matched_phrase:
+                    feedback_text = str(matched_phrase)
+                elif os_just:
+                    feedback_text = str(os_just)
+                elif is_passed:
+                    feedback_text = f"El agente demostró un desempeño correcto en '{tgt['name']}' cumpliendo las pautas requeridas."
+                else:
+                    feedback_text = f"El agente no superó el objetivo '{tgt['name']}'; se detectaron áreas de mejora durante la llamada."
+
+                results.append({
+                    "objective_id": tgt["objective_id"],
+                    "name": tgt["name"],
+                    "description": tgt["description"],
+                    "status": status,
+                    "status_label": status_label,
+                    "score": eval_score if is_passed else (min(eval_score, 6.0) if eval_score is not None else None),
+                    "feedback": feedback_text,
+                    "evidence": None,
+                    "expected_behavior": tgt["expected_behavior"],
+                    "observed_behavior": None,
+                })
+                continue
+
+            # Case: Match against objectives_met or areas_for_improvement
+            matched_met = next((p for p in objectives_met_phrases if t_norm in _clean_str(p) or _clean_str(p) in t_norm), None)
+            matched_area = next((p for p in areas_imp_phrases if t_norm in _clean_str(p) or _clean_str(p) in t_norm), None)
+
+            if matched_met:
+                results.append({
+                    "objective_id": tgt["objective_id"],
+                    "name": tgt["name"],
+                    "description": tgt["description"],
+                    "status": "passed",
+                    "status_label": "Superado",
+                    "score": eval_score,
+                    "feedback": f"Objetivo superado satisfactoriamente: {matched_met}",
+                    "evidence": None,
+                    "expected_behavior": tgt["expected_behavior"],
+                    "observed_behavior": None,
+                })
+            elif matched_area:
+                results.append({
+                    "objective_id": tgt["objective_id"],
+                    "name": tgt["name"],
+                    "description": tgt["description"],
+                    "status": "failed",
+                    "status_label": "No superado",
+                    "score": min(eval_score, 6.0) if eval_score is not None else None,
+                    "feedback": f"Objetivo no superado: {matched_area}",
+                    "evidence": None,
+                    "expected_behavior": tgt["expected_behavior"],
+                    "observed_behavior": None,
+                })
+            else:
+                # Case: Objective not evaluable in this call (or pending simulation)
+                feedback_msg = (
+                    "Simulación pendiente de realización."
+                    if evaluation is None
+                    else "No se observó suficiente evidencia en la llamada para evaluar este objetivo."
+                )
+                results.append({
+                    "objective_id": tgt["objective_id"],
+                    "name": tgt["name"],
+                    "description": tgt["description"],
+                    "status": "not_evaluable",
+                    "status_label": "No evaluable",
+                    "score": None,
+                    "feedback": feedback_msg,
+                    "evidence": None,
+                    "expected_behavior": tgt["expected_behavior"],
+                    "observed_behavior": None,
+                })
+
+        return results
+
+    @staticmethod
+    def _build_simulation_slots(prompts: list, completions: list, report: Any = None) -> list:
         slots = []
         if not prompts:
             return slots
@@ -1504,9 +1924,15 @@ class PersonalizedTrainingService:
                             matched_c = c
                             break
 
+            effective_report = report or getattr(p, "report", None)
             if matched_c:
                 used_completion_ids.add(matched_c.completion_id)
-                slot = PersonalizedTrainingService._map_completion_to_dict(matched_c)
+                if not getattr(matched_c, "prompt", None):
+                    try:
+                        matched_c.prompt = p
+                    except Exception:
+                        pass
+                slot = PersonalizedTrainingService._map_completion_to_dict(matched_c, prompt=p, report=effective_report)
                 slot["prompt_number"] = p.prompt_number
                 slot["title"] = p.title or slot.get("title") or f"Simulación {p.prompt_number}"
             else:
@@ -1532,6 +1958,11 @@ class PersonalizedTrainingService:
                     "weaknesses": None,
                     "result_json": None,
                     "recording_url": None,
+                    "improvement_objectives": PersonalizedTrainingService.resolve_simulation_improvement_objectives(
+                        prompt=p,
+                        report=effective_report,
+                        evaluation=None,
+                    ),
                     "created_at": p.created_at,
                 }
             slots.append(slot)
@@ -1539,7 +1970,11 @@ class PersonalizedTrainingService:
         return slots
 
     @staticmethod
-    def _map_completion_to_dict(c: TrainingCompletionStatus) -> Optional[dict]:
+    def _map_completion_to_dict(
+        c: TrainingCompletionStatus,
+        prompt: Any = None,
+        report: Any = None,
+    ) -> Optional[dict]:
         if not c:
             return None
             
@@ -1554,14 +1989,18 @@ class PersonalizedTrainingService:
         weaknesses = None
         result_json_extracted = None
         
-        # Safely extract from loaded relationships
+        # Safely extract from loaded relationships or explicit parameters
+        c_prompt = prompt or getattr(c, "prompt", None)
         try:
-            c_prompt = getattr(c, "prompt", None)
             if c_prompt is not None:
                 prompt_number = getattr(c_prompt, "prompt_number", None)
                 title = getattr(c_prompt, "title", None)
         except Exception:
             pass
+
+        c_report = report or getattr(c, "report", None)
+        if not c_report and c_prompt is not None:
+            c_report = getattr(c_prompt, "report", None)
             
         evaluation = None
         try:
@@ -1638,6 +2077,13 @@ class PersonalizedTrainingService:
         except Exception:
             pass
 
+        # Resolve improvement objectives
+        improvement_objectives = PersonalizedTrainingService.resolve_simulation_improvement_objectives(
+            prompt=c_prompt,
+            report=c_report,
+            evaluation=evaluation,
+        )
+
         # Handle dictionary or ORM access defensively
         def get_val(obj, key, default=None):
             if isinstance(obj, dict):
@@ -1697,6 +2143,7 @@ class PersonalizedTrainingService:
             "weaknesses": weaknesses,
             "result_json": result_json_extracted,
             "recording_url": recording_url,
+            "improvement_objectives": improvement_objectives,
             "created_at": get_val(c, "created_at", datetime.now(timezone.utc)),
         }
 
@@ -1949,7 +2396,7 @@ class PersonalizedTrainingService:
         # Build simulation slots
         simulation_slots = []
         if prompts is not None:
-            simulation_slots = PersonalizedTrainingService._build_simulation_slots(prompts, completions or [])
+            simulation_slots = PersonalizedTrainingService._build_simulation_slots(prompts, completions or [], report=r)
 
         # Calculate progress completion metrics based on simulation slots
         progress_total = len(prompts) if prompts is not None else 4
@@ -2062,12 +2509,13 @@ class PersonalizedTrainingService:
             res_prompts = await db.execute(stmt_prompts)
             prompts = list(res_prompts.scalars().all())
 
-            # Fetch completion statuses eagerly loading evaluation and prompt details
+            # Fetch completion statuses eagerly loading evaluation, prompt, call_session, and report details
             from sqlalchemy.orm import selectinload
             stmt_comp = select(TrainingCompletionStatus).options(
                 selectinload(TrainingCompletionStatus.evaluation),
                 selectinload(TrainingCompletionStatus.prompt),
                 selectinload(TrainingCompletionStatus.call_session),
+                selectinload(TrainingCompletionStatus.report),
             ).where(
                 TrainingCompletionStatus.training_report_id == report.training_report_id
             ).order_by(TrainingCompletionStatus.completion_id.asc())
@@ -2103,6 +2551,7 @@ class PersonalizedTrainingService:
                 selectinload(TrainingCompletionStatus.evaluation),
                 selectinload(TrainingCompletionStatus.prompt),
                 selectinload(TrainingCompletionStatus.call_session),
+                selectinload(TrainingCompletionStatus.report),
             ).where(
                 TrainingCompletionStatus.training_report_id == h.training_report_id
             ).order_by(TrainingCompletionStatus.completion_id.asc())
@@ -2954,12 +3403,13 @@ class PersonalizedTrainingService:
         res_prompts = await db.execute(stmt_prompts)
         prompts = list(res_prompts.scalars().all())
 
-        # Fetch completion statuses eagerly loading evaluation and prompt details
+        # Fetch completion statuses eagerly loading evaluation, prompt, call_session, and report details
         from sqlalchemy.orm import selectinload
         stmt_comp = select(TrainingCompletionStatus).options(
             selectinload(TrainingCompletionStatus.evaluation),
             selectinload(TrainingCompletionStatus.prompt),
             selectinload(TrainingCompletionStatus.call_session),
+            selectinload(TrainingCompletionStatus.report),
         ).where(
             TrainingCompletionStatus.training_report_id == report_id
         ).order_by(TrainingCompletionStatus.completion_id.asc())

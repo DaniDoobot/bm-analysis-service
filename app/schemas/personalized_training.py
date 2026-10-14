@@ -116,6 +116,22 @@ class SimulationPromptOut(BaseModel):
         from_attributes = True
 
 
+class SimulationImprovementObjectiveOut(BaseModel):
+    objective_id: Optional[str] = None
+    name: str
+    description: Optional[str] = None
+    status: str = "not_evaluable"  # "passed" | "failed" | "not_evaluable"
+    status_label: Optional[str] = "No evaluable"  # "Superado" | "No superado" | "No evaluable"
+    score: Optional[float] = None
+    feedback: Optional[str] = None
+    evidence: Optional[str] = None
+    expected_behavior: Optional[str] = None
+    observed_behavior: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
 class CompletionStatusOut(BaseModel):
     completion_id: int
     training_report_id: int
@@ -138,6 +154,7 @@ class CompletionStatusOut(BaseModel):
     weaknesses: Optional[List[str]] = None
     result_json: Optional[dict[str, Any]] = None
     recording_url: Optional[str] = None
+    improvement_objectives: Optional[List[SimulationImprovementObjectiveOut]] = None
     created_at: datetime
 
     class Config:
