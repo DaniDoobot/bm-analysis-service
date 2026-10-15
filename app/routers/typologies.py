@@ -32,6 +32,7 @@ async def list_typologies(
     service_id: int | None = None,
     is_active: bool | None = None,
     company_id: int | None = None,
+    include_archived: bool = False,
     db: AsyncSession = Depends(get_db)
 ):
     role = context.normalized_role
@@ -80,6 +81,8 @@ async def list_typologies(
 
     if is_active is not None:
         stmt = stmt.where(Typology.is_active == is_active)
+    elif not include_archived:
+        stmt = stmt.where(Typology.is_active == True)
 
     stmt = stmt.order_by(Typology.sort_order.asc(), Typology.typology_id.asc())
     result = await db.execute(stmt)
@@ -381,9 +384,12 @@ async def delete_typology(
     logger.info("Soft-deleting/archiving typology (ID: %d, key: '%s').", typology_id, typology.typology_key)
     typology.is_active = False
     
-    # Cascade clean up from bm_prompt_criterion_typologies so inactive typologies are excluded from active prompt applicability
+    # Cascade clean up from bm_prompt_criterion_typologies and bm_base_structure_typologies
     await db.execute(
         delete(PromptCriterionTypology).where(PromptCriterionTypology.typology_id == typology_id)
+    )
+    await db.execute(
+        delete(BaseStructureTypology).where(BaseStructureTypology.typology_id == typology_id)
     )
     
     await db.commit()

@@ -1184,7 +1184,7 @@ async def list_base_structures(
     from sqlalchemy import or_
     stmt = select(PromptBaseStructure)
     if not include_archived:
-        stmt = stmt.where(PromptBaseStructure.is_active == True)
+        stmt = stmt.where(PromptBaseStructure.is_active == True, PromptBaseStructure.deleted_at == None)
     if service_id is not None:
         if include_global:
             stmt = stmt.where(
@@ -1407,9 +1407,20 @@ async def delete_base_structure(
     if not struct:
         return {"found": False, "deleted": False}
 
+    # Idempotent: already deleted/inactive
+    if not struct.is_active or (hasattr(struct, "deleted_at") and struct.deleted_at is not None):
+        return {
+            "found": True,
+            "deleted": True,
+            "action": "already_deleted",
+            "message": f"La estructura base {structure_id} ya había sido retirada previamente."
+        }
+
     # Find dependent prompts
     from sqlalchemy import delete
-    from app.models.prompts import Prompt, BaseStructureTypology
+    from app.models.prompts import Prompt, BaseStructureTypology, StructurePermission
+    from app.services import archive_service
+
     p_stmt = select(Prompt).where(
         Prompt.base_structure_id == structure_id,
         Prompt.deleted_at == None  # noqa: E711  (SQLAlchemy syntax)
@@ -1481,23 +1492,37 @@ async def delete_base_structure(
             ),
         }
 
-    # Safe to delete — cascade all dependent prompts (active or not)
-    for p in dependent_prompts:
-        await db.delete(p)
+    now = datetime.now(timezone.utc)
 
-    # Delete BaseStructureTypology records
+    # Safely retire dependent prompts (archiving those with history to preserve evaluation integrity)
+    for p in dependent_prompts:
+        await archive_service.delete_prompt(db, p.prompt_id)
+
+    # Delete BaseStructureTypology records for this base structure
     await db.execute(delete(BaseStructureTypology).where(BaseStructureTypology.base_structure_id == structure_id))
 
-    # Delete base structure
-    await db.delete(struct)
+    # Clean up StructurePermission for this base structure
+    await db.execute(delete(StructurePermission).where(
+        StructurePermission.structure_type == "base",
+        StructurePermission.structure_id == structure_id
+    ))
+
+    # Soft-delete the base structure
+    struct.is_active = False
+    struct.deleted_at = now
+    if not struct.structure_key.startswith("deleted_"):
+        struct.structure_key = f"deleted_{int(now.timestamp())}_{struct.structure_key}"
+
     await db.commit()
 
     return {
         "found": True,
         "deleted": True,
+        "action": "soft_deleted",
         "has_dependencies": bool(dependent_prompts),
         "deleted_prompts_count": len(dependent_prompts),
         "deleted_active_prompts_count": len(active_prompts),
+        "message": f"Estructura base {structure_id} retirada correctamente preservando el histórico."
     }
 
 
@@ -1540,10 +1565,9 @@ async def create_prompt_from_base(db: AsyncSession, body: CreateFromBaseRequest)
     Create a new prompt from a base structure.
     Returns prompt detail including prompt_id, prompt_version_id, criteria count.
     """
-    # 1. Fetch base structure
     struct = await get_base_structure(db, body.base_structure_id)
-    if not struct:
-        raise ValueError(f"Base structure with ID {body.base_structure_id} not found.")
+    if not struct or not struct.is_active or (hasattr(struct, "deleted_at") and struct.deleted_at is not None):
+        raise ValueError(f"Base structure with ID {body.base_structure_id} not found or inactive.")
 
     # 2. Resolve company_id: prefer base structure's company, derive from service if NULL
     resolved_company_id = struct.company_id

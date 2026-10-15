@@ -97,6 +97,11 @@ class PromptBaseStructure(Base):
     is_global: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
     owner_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("bm_users.user_id", ondelete="RESTRICT"), nullable=True)
 
+    # Archiving and Soft Delete support
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_by_email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
 
 class StructurePermission(Base):
     __tablename__ = "bm_structure_permissions"

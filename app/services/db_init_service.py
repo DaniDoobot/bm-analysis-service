@@ -514,6 +514,16 @@ async def init_db():
                 await conn.execute(text("ALTER TABLE bm_prompt_base_structures ADD COLUMN service_id INTEGER NULL;"))
                 logger.info("Column 'service_id' added successfully to 'bm_prompt_base_structures'.")
 
+            for col_name, col_type in [
+                ("deleted_at", "TIMESTAMPTZ NULL"),
+                ("archived_at", "TIMESTAMPTZ NULL"),
+                ("archived_by_email", "TEXT NULL"),
+            ]:
+                if not await check_column_exists_safely(conn, "bm_prompt_base_structures", col_name):
+                    logger.info("Adding column '%s' to 'bm_prompt_base_structures' table...", col_name)
+                    await conn.execute(text(f"ALTER TABLE bm_prompt_base_structures ADD COLUMN {col_name} {col_type};"))
+                    logger.info("Column '%s' added successfully to 'bm_prompt_base_structures'.", col_name)
+
             # 1.6.2 bm_prompts
             if not await check_column_exists_safely(conn, "bm_prompts", "service_id"):
                 logger.info("Adding column 'service_id' to 'bm_prompts' table...")

@@ -48,71 +48,137 @@ async def restore_prompt(db: AsyncSession, prompt_id: int) -> Prompt:
     await db.refresh(prompt)
     return prompt
 
-async def delete_prompt(db: AsyncSession, prompt_id: int) -> dict:
-    """Hard delete a prompt structure if it has no associated analyses, jobs, evaluations or runs."""
-    from sqlalchemy import delete
+async def delete_prompt(db: AsyncSession, prompt_id: int, user_email: str | None = None) -> dict:
+    """
+    Safely delete a prompt structure:
+    - If it has associated analyses, jobs, automations, or trainer configs:
+      retire/archive it safely (is_active=False, is_archived=True, deleted_at=now)
+      preserving historical versions, criteria, and analysis references.
+    - If it has NO historical data:
+      hard-delete it cleanly.
+    """
+    from sqlalchemy import delete, update
     from app.models.analyses import Analysis
     from app.models.criteria import PromptCriterion, PromptCriterionTypology
     from app.models.personalized_training import TrainingCallEvaluation
     from app.models.mass_evaluations import MassEvaluationJob, MassEvaluationResult, MassAnalysisAutomation
     from app.models.prompts import StructurePermission
+    from app.models.trainer import TrainerEvaluationConfig
 
     # 1. Load prompt
-    stmt = select(Prompt).where(Prompt.prompt_id == prompt_id, Prompt.deleted_at == None)
+    stmt = select(Prompt).where(Prompt.prompt_id == prompt_id)
     result = await db.execute(stmt)
     prompt = result.scalars().first()
     if not prompt:
         raise ValueError(f"Estructura con ID {prompt_id} no encontrada.")
 
-    # 2. Safeguard checks
-    # A. Active in production?
-    if prompt.is_active:
-        raise ValueError("No se puede borrar la estructura activa en producción.")
-
-    # B. Referenced in Analysis directly?
-    analysis_stmt = select(Analysis.analysis_id).where(Analysis.prompt_id == prompt_id).limit(1)
-    analysis_res = await db.execute(analysis_stmt)
-    if analysis_res.scalar():
-        raise ValueError("No se puede borrar porque tiene análisis asociados. Archívala en su lugar.")
-
-    # C. Referenced in mass jobs?
-    jobs_stmt = select(MassEvaluationJob).where(MassEvaluationJob.prompt_id == prompt_id)
-    jobs_res = await db.execute(jobs_stmt)
-    if jobs_res.scalars().first():
-        raise ValueError("No se puede borrar porque tiene configuraciones de evaluaciones masivas asociadas. Archívala en su lugar.")
-
-    # D. Referenced in mass results?
-    results_stmt = select(MassEvaluationResult).where(MassEvaluationResult.prompt_id == prompt_id)
-    results_res = await db.execute(results_stmt)
-    if results_res.scalars().first():
-        raise ValueError("No se puede borrar porque tiene resultados de evaluaciones masivas asociados. Archívala en su lugar.")
-
-    # E. Referenced in automations?
-    auto_stmt = select(MassAnalysisAutomation.automation_id).where(MassAnalysisAutomation.prompt_id == prompt_id).limit(1)
-    auto_res = await db.execute(auto_stmt)
-    if auto_res.scalar():
-        raise ValueError("No se puede borrar porque tiene automaciones de análisis asociadas. Archívala en su lugar.")
+    # Idempotent: already soft-deleted
+    if prompt.deleted_at is not None:
+        return {
+            "ok": True,
+            "status": "deleted",
+            "action": "already_deleted",
+            "archived": True,
+            "prompt_id": prompt_id,
+            "message": "La estructura ya había sido retirada previamente."
+        }
 
     # Fetch prompt versions
     version_ids_stmt = select(PromptVersion.id).where(PromptVersion.prompt_id == prompt_id)
     version_ids_res = await db.execute(version_ids_stmt)
     version_ids = version_ids_res.scalars().all()
 
-    if version_ids:
-        # F. Version used in analyses?
+    # 2. Check for historical usage
+    has_history = False
+
+    # A. Referenced in Analysis directly?
+    analysis_stmt = select(Analysis.analysis_id).where(Analysis.prompt_id == prompt_id).limit(1)
+    if (await db.execute(analysis_stmt)).scalar() is not None:
+        has_history = True
+
+    # B. Referenced in mass jobs?
+    if not has_history:
+        jobs_stmt = select(MassEvaluationJob.job_id).where(MassEvaluationJob.prompt_id == prompt_id).limit(1)
+        if (await db.execute(jobs_stmt)).scalar() is not None:
+            has_history = True
+
+    # C. Referenced in mass results?
+    if not has_history:
+        results_stmt = select(MassEvaluationResult.mass_analysis_id).where(MassEvaluationResult.prompt_id == prompt_id).limit(1)
+        if (await db.execute(results_stmt)).scalar() is not None:
+            has_history = True
+
+    # D. Referenced in automations?
+    if not has_history:
+        auto_stmt = select(MassAnalysisAutomation.automation_id).where(MassAnalysisAutomation.prompt_id == prompt_id).limit(1)
+        if (await db.execute(auto_stmt)).scalar() is not None:
+            has_history = True
+
+    # E. Versions used in analyses or trainer evaluations?
+    if not has_history and version_ids:
         v_analysis_stmt = select(Analysis.analysis_id).where(Analysis.prompt_version_id.in_(version_ids)).limit(1)
-        v_analysis_res = await db.execute(v_analysis_stmt)
-        if v_analysis_res.scalar():
-            raise ValueError("No se puede borrar porque tiene versiones usadas en análisis. Archívala en su lugar.")
+        if (await db.execute(v_analysis_stmt)).scalar() is not None:
+            has_history = True
+        if not has_history:
+            v_train_stmt = select(TrainingCallEvaluation.evaluation_id).where(TrainingCallEvaluation.prompt_version_id.in_(version_ids)).limit(1)
+            if (await db.execute(v_train_stmt)).scalar() is not None:
+                has_history = True
 
-        # G. Version used in training evaluations?
-        v_train_stmt = select(TrainingCallEvaluation.evaluation_id).where(TrainingCallEvaluation.prompt_version_id.in_(version_ids)).limit(1)
-        v_train_res = await db.execute(v_train_stmt)
-        if v_train_res.scalar():
-            raise ValueError("No se puede borrar porque tiene versiones usadas en entrenamientos de agentes. Archívala en su lugar.")
+    # F. Referenced in Trainer evaluation configs?
+    if not has_history:
+        trainer_stmt = select(TrainerEvaluationConfig.config_id).where(TrainerEvaluationConfig.speech_structure_id == prompt_id).limit(1)
+        if (await db.execute(trainer_stmt)).scalar() is not None:
+            has_history = True
 
-    # 3. Clean up child records
-    # A. Criteria and their typology associations
+    now = datetime.now(timezone.utc)
+
+    # 3. If it has history -> SAFE SOFT-DELETE / ARCHIVAL
+    if has_history:
+        prompt.is_active = False
+        prompt.is_archived = True
+        prompt.deleted_at = now
+        prompt.archived_at = now
+        prompt.archived_by_email = user_email
+
+        # Mark versions as archived
+        if version_ids:
+            await db.execute(
+                update(PromptVersion)
+                .where(PromptVersion.prompt_id == prompt_id)
+                .values(is_archived=True, archived_at=now, archived_by_email=user_email)
+            )
+
+        # Deactivate active automations pointing to this prompt
+        await db.execute(
+            update(MassAnalysisAutomation)
+            .where(MassAnalysisAutomation.prompt_id == prompt_id, MassAnalysisAutomation.is_active == True)
+            .values(is_active=False)
+        )
+
+        # Deactivate active mass evaluation jobs pointing to this prompt
+        await db.execute(
+            update(MassEvaluationJob)
+            .where(MassEvaluationJob.prompt_id == prompt_id, MassEvaluationJob.is_active == True)
+            .values(is_active=False)
+        )
+
+        # Clean up structure permissions for this prompt
+        await db.execute(delete(StructurePermission).where(
+            StructurePermission.structure_type == "specific",
+            StructurePermission.structure_id == prompt_id
+        ))
+
+        await db.commit()
+        return {
+            "ok": True,
+            "status": "deleted",
+            "action": "archived",
+            "archived": True,
+            "prompt_id": prompt_id,
+            "message": "Estructura retirada del servicio y archivada para preservar el histórico de análisis."
+        }
+
+    # 4. If NO history -> CLEAN PHYSICAL DELETE
     criteria_ids_stmt = select(PromptCriterion.criterion_id).where(PromptCriterion.prompt_id == prompt_id)
     criteria_ids_res = await db.execute(criteria_ids_stmt)
     criteria_ids = criteria_ids_res.scalars().all()
@@ -120,16 +186,21 @@ async def delete_prompt(db: AsyncSession, prompt_id: int) -> dict:
         await db.execute(delete(PromptCriterionTypology).where(PromptCriterionTypology.criterion_id.in_(criteria_ids)))
         await db.execute(delete(PromptCriterion).where(PromptCriterion.prompt_id == prompt_id))
 
-    # B. Prompt versions
-    await db.execute(delete(PromptVersion).where(PromptVersion.prompt_id == prompt_id))
+    if version_ids:
+        await db.execute(delete(PromptVersion).where(PromptVersion.prompt_id == prompt_id))
 
-    # C. Structure permissions
     await db.execute(delete(StructurePermission).where(
         StructurePermission.structure_type == "specific",
         StructurePermission.structure_id == prompt_id
     ))
 
-    # D. Finally hard delete the prompt record itself
     await db.delete(prompt)
     await db.commit()
-    return {"ok": True, "status": "deleted", "prompt_id": prompt_id}
+    return {
+        "ok": True,
+        "status": "deleted",
+        "action": "hard_deleted",
+        "deleted": True,
+        "prompt_id": prompt_id,
+        "message": "Estructura sin histórico eliminada definitivamente."
+    }

@@ -24,7 +24,7 @@ from app.services.auth_service import (
     require_structure_restore,
     log_audit,
 )
-from app.models.prompts import StructurePermission, PromptBaseStructure, BaseStructureTypology
+from app.models.prompts import Prompt, StructurePermission, PromptBaseStructure, BaseStructureTypology
 from app.models.typologies import Typology
 from app.schemas.prompts import (
     ActivateVersionRequest,
@@ -908,11 +908,30 @@ async def delete_prompt(
     prompt_id: int,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_admin)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
 ):
-    """Hard delete a prompt structure if safeguards allow. Admin only."""
+    """Hard delete or archive a prompt structure if safeguards allow. Admin only."""
     from app.services import archive_service
+    prompt = await db.get(Prompt, prompt_id)
+    if not prompt:
+        raise HTTPException(status_code=404, detail=f"Prompt con ID {prompt_id} no encontrado.")
+
+    if not context.is_super_admin:
+        if prompt.company_id and prompt.company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado a otra empresa."
+            )
+        if context.normalized_role == InternalRole.SERVICE_MANAGER:
+            if context.allowed_service_ids is not None and prompt.service_id not in context.allowed_service_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="No tienes permisos para eliminar esta estructura específica."
+                )
+
     try:
-        res = await archive_service.delete_prompt(db, prompt_id)
+        user_email = getattr(current_user, "email", None)
+        res = await archive_service.delete_prompt(db, prompt_id, user_email=user_email)
         await log_audit(db, current_user.user_id, "delete", "specific", prompt_id)
         return res
     except ValueError as e:
