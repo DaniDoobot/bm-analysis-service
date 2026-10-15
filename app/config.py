@@ -63,6 +63,14 @@ class Settings(BaseSettings):
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
 
+    # ── Boston Recording Archive ──────────────────────────────────────────────
+    boston_recording_api_key: str = ""
+
+    # ── CloudTalk API ─────────────────────────────────────────────────────────
+    cloudtalk_api_key_id: str = ""
+    cloudtalk_api_key_secret: str = ""
+    cloudtalk_api_base_url: str = "https://my.cloudtalk.io/api"
+
     # ── Automation Scheduler ──────────────────────────────────────────────────
     enable_automation_scheduler: bool = False
     automation_running_stale_after_minutes: int = 60

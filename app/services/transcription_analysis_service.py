@@ -178,7 +178,7 @@ async def analyze_transcription_pipeline(
         resolved_service_id = active_prompt.get("service_id")
         resolved_company_id = active_prompt.get("company_id")
 
-    if not resolved_version_id or not prompt_content:
+    if not prompt_content or (not custom_prompt_text and not resolved_version_id):
         return {
             "ok": False,
             "status": "error",
@@ -206,7 +206,7 @@ async def analyze_transcription_pipeline(
             resolved_is_demo,
         )
         from app.services.hubspot_service import HubSpotService
-        from app.services.twilio_service import TwilioService
+        from app.services.audio_download_service import AudioDownloadService, AudioDownloadError
         
         # 1. HubSpot Resolution
         try:
@@ -231,15 +231,23 @@ async def analyze_transcription_pipeline(
             
         # 2. Download audio
         try:
-            twilio_service = TwilioService()
-            audio_bytes = await twilio_service.download_audio(target_url)
-        except Exception as e:
-            logger.error("Failed to download Twilio audio from %s: %s", target_url, e)
+            downloader = AudioDownloadService()
+            audio_bytes = await downloader.download_audio(target_url)
+        except AudioDownloadError as e:
+            logger.error("Audio download error for call_id=%s (source=%s): %s", call_id, e.stage, e.message)
             return {
                 "ok": False,
                 "status": "error",
                 "stage": "download_audio",
-                "error_message": f"Twilio download failed: {str(e)}",
+                "error_message": f"Audio download failed: {e.message}",
+            }
+        except Exception as e:
+            logger.error("Failed to download audio from %s: %s", target_url, e)
+            return {
+                "ok": False,
+                "status": "error",
+                "stage": "download_audio",
+                "error_message": f"Audio download failed: {str(e)}",
             }
             
         # 3. Transcribe audio

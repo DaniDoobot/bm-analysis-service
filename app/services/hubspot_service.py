@@ -141,34 +141,63 @@ class HubSpotService:
             logger.warning("HUBSPOT_ACCESS_TOKEN not set — returning empty call dict")
             return {}
 
-        url = f"{HUBSPOT_API_BASE}/crm/v3/objects/calls/{call_id}"
+        clean_id = str(call_id).strip()
+        call_props = [
+            "hs_call_direction",
+            "hs_call_duration",
+            "hs_call_recording_url",
+            "hs_timestamp",
+            "hs_createdate",
+            "hubspot_owner_id",
+            "hs_call_status",
+            "hs_call_title",
+            "hs_call_callee_object_id",
+            "hs_call_callee_object_type",
+            "hs_call_external_id",
+        ]
+
+        url = f"{HUBSPOT_API_BASE}/crm/v3/objects/calls/{clean_id}"
         params = {
-            "properties": ",".join([
-                "hs_call_direction",
-                "hs_call_duration",
-                "hs_call_recording_url",
-                "hs_timestamp",
-                "hs_createdate",
-                "hubspot_owner_id",
-                "hs_call_status",
-                "hs_call_title",
-                "hs_call_callee_object_id",
-                "hs_call_callee_object_type",
-            ]),
-            "associations": "contacts"
+            "properties": ",".join(call_props),
+            "associations": "contacts",
         }
 
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.get(url, headers=self._headers(), params=params)
+            if response.status_code == 404:
+                # Fallback: check if call_id is a CloudTalk external ID (hs_call_external_id)
+                logger.info(
+                    "Call ID %s returned 404 on direct lookup. Attempting search by hs_call_external_id (CloudTalk ID)...",
+                    clean_id,
+                )
+                ext_match = await self.search_call_by_external_id(clean_id, is_demo=is_demo)
+                if ext_match:
+                    logger.info(
+                        "Resolved CloudTalk call_id %s to HubSpot object ID %s (recording_url=%s)",
+                        clean_id,
+                        ext_match.get("call_id"),
+                        ext_match.get("recording_url"),
+                    )
+                    return ext_match
+                # If still not found, raise original status error
+                response.raise_for_status()
+
             response.raise_for_status()
             data = response.json()
 
+        return self._normalize_call_object(data)
+
+    def _normalize_call_object(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Normalizes a raw HubSpot call object into standard dictionary."""
+        call_id = str(data.get("id") or "")
         props = data.get("properties", {})
         owner_id = props.get("hubspot_owner_id")
         contact_id, is_ambiguous = self.extract_patient_contact_id(data)
+        cloudtalk_id = props.get("hs_call_external_id")
 
         return {
             "call_id": call_id,
+            "cloudtalk_id": cloudtalk_id,
             "hubspot_url": self.build_hubspot_url(call_id),
             "call_direction": props.get("hs_call_direction"),
             "call_duration": props.get("hs_call_duration"),
@@ -177,13 +206,72 @@ class HubSpotService:
             "hs_timestamp": props.get("hs_timestamp"),
             "hs_createdate": props.get("hs_createdate"),
             "hubspot_owner_id": owner_id,
-            "agente_telefonico": owner_id,  # Will be enriched if owner lookup is added
+            "agente_telefonico": owner_id,
             "status": props.get("hs_call_status"),
             "callee_object_id": props.get("hs_call_callee_object_id"),
             "callee_object_type": props.get("hs_call_callee_object_type"),
             "contact_id": contact_id,
             "is_contact_ambiguous": is_ambiguous,
         }
+
+    async def search_call_by_external_id(
+        self,
+        external_id: str,
+        is_demo: bool | None = None,
+    ) -> dict[str, Any] | None:
+        """
+        Search for a call in HubSpot matching hs_call_external_id (e.g., CloudTalk call ID).
+        Returns normalized call dict or None if not found.
+        """
+        eff_is_demo = self._resolve_is_demo(is_demo)
+        if eff_is_demo is not False:
+            return None
+
+        if not self.token or not external_id:
+            return None
+
+        clean_ext_id = str(external_id).strip()
+        search_url = f"{HUBSPOT_API_BASE}/crm/v3/objects/calls/search"
+        call_props = [
+            "hs_call_direction",
+            "hs_call_duration",
+            "hs_call_recording_url",
+            "hs_timestamp",
+            "hs_createdate",
+            "hubspot_owner_id",
+            "hs_call_status",
+            "hs_call_title",
+            "hs_call_callee_object_id",
+            "hs_call_callee_object_type",
+            "hs_call_external_id",
+        ]
+        body = {
+            "filterGroups": [
+                {
+                    "filters": [
+                        {
+                            "propertyName": "hs_call_external_id",
+                            "operator": "EQ",
+                            "value": clean_ext_id,
+                        }
+                    ]
+                }
+            ],
+            "properties": call_props,
+            "limit": 1,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                res = await client.post(search_url, headers=self._headers(), json=body)
+                if res.status_code == 200:
+                    results = res.json().get("results", [])
+                    if results:
+                        return self._normalize_call_object(results[0])
+        except Exception as e:
+            logger.warning("Error searching HubSpot call by external_id %s: %s", clean_ext_id, e)
+
+        return None
 
     async def create_ticket(
         self,

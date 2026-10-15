@@ -259,8 +259,17 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
 
     # ── 2 & 3. Audio Download & Size Validation ─────────────────────────────
     try:
-        twilio_service = TwilioService()
-        audio_bytes = await twilio_service.download_audio(target_url)
+        from app.services.audio_download_service import AudioDownloadService, AudioDownloadError
+        downloader = AudioDownloadService()
+        audio_bytes = await downloader.download_audio(target_url)
+    except AudioDownloadError as e:
+        logger.error("Audio download error for call_id=%s (source=%s): %s", call_id, e.stage, e.message)
+        return {
+            "ok": False,
+            "status": "error",
+            "stage": "download_audio",
+            "error_message": f"Audio download failed: {e.message}",
+        }
     except Exception as e:
         logger.error("Failed to download audio from %s: %s", target_url, e)
         return {

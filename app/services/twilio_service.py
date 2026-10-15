@@ -27,25 +27,12 @@ class TwilioService:
 
     async def download_audio(self, recording_url: str) -> bytes:
         """
-        Download a Twilio recording as raw bytes (in memory).
-        Handles Twilio Basic Auth automatically.
+        Download recording audio into memory.
+        Delegates to centralized AudioDownloadService supporting both Twilio and Boston Archive.
         """
-        if not recording_url:
-            raise ValueError("recording_url is empty")
-
-        # Twilio recording URLs may need .mp3 appended
-        if self.is_twilio_url(recording_url) and not recording_url.endswith((".mp3", ".wav")):
-            recording_url = recording_url + ".mp3"
-
-        auth = self._auth() if self.is_twilio_url(recording_url) else None
-
-        async with httpx.AsyncClient(timeout=120) as client:
-            kwargs = {"follow_redirects": True}
-            if auth:
-                kwargs["auth"] = auth
-            response = await client.get(recording_url, **kwargs)
-            response.raise_for_status()
-            return response.content
+        from app.services.audio_download_service import AudioDownloadService
+        downloader = AudioDownloadService()
+        return await downloader.download_audio(recording_url)
 
     async def get_recording_metadata(self, recording_url: str) -> dict[str, Any] | None:
         """
