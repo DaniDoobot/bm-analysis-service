@@ -514,6 +514,299 @@ class TestCycleSimulationImprovementObjectives(unittest.IsolatedAsyncioTestCase)
 
             app.dependency_overrides.clear()
 
+    async def test_calibracion_protocolario_trato_de_usted_mapping(self):
+        """
+        Section 12: Reproduce exact conceptual case:
+        Objective: 'Calibración del registro protocolario de usted', related_criteria: ['Trato de Usted']
+        Criterion: criterion_key: 'trato_de_usted', criterion_name: 'Trato de Usted', passed: false, score: 4.0
+        Expected: status = 'failed', status_label = 'No superado', score = 4.0. NEVER not_evaluable.
+        """
+        prompt = {
+            "title": "Simulación de acogida",
+            "objective_focus_json": [
+                {
+                    "title": "Calibración del registro protocolario de usted",
+                    "description": "Adoptar el tratamiento de usted con el paciente.",
+                    "related_criteria": ["Trato de Usted"],
+                    "expected_behavior": "Tratar de usted de forma consistente."
+                }
+            ]
+        }
+        evaluation = {
+            "score": 4.0,
+            "feedback": "El agente no aplicó el trato protocolario de usted.",
+            "result_json": {
+                "criteria_evaluations": [
+                    {
+                        "criterion_key": "trato_de_usted",
+                        "criterion_name": "Trato de Usted",
+                        "passed": False,
+                        "score": 4.0,
+                        "reasoning": "El agente tuteó al paciente en varios turnos.",
+                        "improvement_tip": "Emplear 'usted' desde el primer saludo.",
+                        "evidence_quote": "Encantado, Carlos, dime en qué te ayudo."
+                    }
+                ]
+            }
+        }
+
+        objectives = PersonalizedTrainingService.resolve_simulation_improvement_objectives(
+            prompt=prompt,
+            report=None,
+            evaluation=evaluation,
+        )
+
+        self.assertEqual(len(objectives), 1)
+        obj = objectives[0]
+        self.assertEqual(obj["name"], "Calibración del registro protocolario de usted")
+        self.assertEqual(obj["status"], "failed")
+        self.assertEqual(obj["status_label"], "No superado")
+        self.assertEqual(obj["score"], 4.0)
+        self.assertIn("usted", obj["feedback"].lower())
+        self.assertEqual(obj["evidence"], "Encantado, Carlos, dime en qué te ayudo.")
+        self.assertNotEqual(obj["status"], "not_evaluable")
+
+    async def test_trato_de_usted_passed_true(self):
+        """Verify objective is 'passed' and 'Superado' when criterion passes."""
+        prompt = {
+            "title": "Simulación formal",
+            "objective_focus_json": [
+                {
+                    "name": "Calibración del registro protocolario de usted",
+                    "related_criteria": ["Trato de Usted"]
+                }
+            ]
+        }
+        evaluation = {
+            "score": 9.0,
+            "result_json": {
+                "criteria_evaluations": [
+                    {
+                        "criterion_key": "trato_de_usted",
+                        "criterion_name": "Trato de usted",
+                        "passed": True,
+                        "score": 9.0,
+                        "reasoning": "Excelente uso del tratamiento formal de usted.",
+                        "evidence_quote": "Buenas tardes, señor Carlos, ¿en qué podemos ayudarle?"
+                    }
+                ]
+            }
+        }
+
+        objectives = PersonalizedTrainingService.resolve_simulation_improvement_objectives(
+            prompt=prompt,
+            report=None,
+            evaluation=evaluation,
+        )
+
+        self.assertEqual(len(objectives), 1)
+        obj = objectives[0]
+        self.assertEqual(obj["status"], "passed")
+        self.assertEqual(obj["status_label"], "Superado")
+        self.assertEqual(obj["score"], 9.0)
+        self.assertIn("excelente", obj["feedback"].lower())
+
+    async def test_multiple_related_criteria(self):
+        """Verify multiple related criteria calculate average score and combined status."""
+        prompt = {
+            "title": "Simulación combinada",
+            "objective_focus_json": [
+                {
+                    "title": "Registro protocolario y empatía inicial",
+                    "related_criteria": ["Trato de Usted", "Empatía"]
+                }
+            ]
+        }
+        evaluation = {
+            "score": 6.0,
+            "result_json": {
+                "criteria_evaluations": [
+                    {
+                        "criterion_key": "trato_de_usted",
+                        "criterion_name": "Trato de Usted",
+                        "passed": False,
+                        "score": 4.0,
+                        "reasoning": "El agente tuteó.",
+                        "improvement_tip": "Adoptar usted."
+                    },
+                    {
+                        "criterion_key": "empatia",
+                        "criterion_name": "Empatía",
+                        "passed": True,
+                        "score": 8.0,
+                        "reasoning": "Buena validación emocional del paciente."
+                    }
+                ]
+            }
+        }
+
+        objectives = PersonalizedTrainingService.resolve_simulation_improvement_objectives(
+            prompt=prompt,
+            report=None,
+            evaluation=evaluation,
+        )
+
+        self.assertEqual(len(objectives), 1)
+        obj = objectives[0]
+        self.assertEqual(obj["score"], 6.0)
+        self.assertEqual(obj["status"], "failed")
+        self.assertEqual(obj["status_label"], "No superado")
+
+    async def test_related_criterion_null_score_no_evidence(self):
+        """Verify that when matching criteria have null score and null passed, objective is not_evaluable."""
+        prompt = {
+            "title": "Simulación",
+            "objective_focus_json": [
+                {
+                    "title": "Calibración del registro protocolario de usted",
+                    "related_criteria": ["Trato de Usted"]
+                }
+            ]
+        }
+        evaluation = {
+            "score": 7.0,
+            "result_json": {
+                "criteria_evaluations": [
+                    {
+                        "criterion_key": "trato_de_usted",
+                        "criterion_name": "Trato de Usted",
+                        "passed": None,
+                        "score": None,
+                        "reasoning": None
+                    }
+                ]
+            }
+        }
+
+        objectives = PersonalizedTrainingService.resolve_simulation_improvement_objectives(
+            prompt=prompt,
+            report=None,
+            evaluation=evaluation,
+        )
+
+        self.assertEqual(len(objectives), 1)
+        obj = objectives[0]
+        self.assertEqual(obj["status"], "not_evaluable")
+        self.assertEqual(obj["status_label"], "No evaluable")
+        self.assertIsNone(obj["score"])
+        self.assertIn("No se observó suficiente evidencia", obj["feedback"])
+
+    async def test_objective_without_matching_criteria_is_not_evaluable(self):
+        """Verify objective with zero matching criteria in evaluation is not_evaluable."""
+        prompt = {
+            "title": "Simulación",
+            "objective_focus_json": [
+                {
+                    "title": "Gestión de cobros bancarios complejos",
+                    "related_criteria": ["cobros_bancarios_iban"]
+                }
+            ]
+        }
+        evaluation = {
+            "score": 8.0,
+            "result_json": {
+                "criteria_evaluations": [
+                    {
+                        "criterion_key": "trato_de_usted",
+                        "criterion_name": "Trato de Usted",
+                        "passed": True,
+                        "score": 10.0
+                    }
+                ]
+            }
+        }
+
+        objectives = PersonalizedTrainingService.resolve_simulation_improvement_objectives(
+            prompt=prompt,
+            report=None,
+            evaluation=evaluation,
+        )
+
+        self.assertEqual(len(objectives), 1)
+        obj = objectives[0]
+        self.assertEqual(obj["status"], "not_evaluable")
+        self.assertEqual(obj["status_label"], "No evaluable")
+        self.assertIsNone(obj["score"])
+
+    async def test_distinct_objectives_maintain_own_descriptions_and_behaviors(self):
+        """
+        Section 13: Verify that distinct objectives preserve their individual name,
+        description, and expected_behavior and DO NOT inherit a shared aggregate summary.
+        """
+        prompt = {
+            "title": "Simulación de prueba",
+            "objective_summary": "Resumen global compartido de toda la simulación.",
+            "expected_behavior": "Conducta global compartida de toda la simulación.",
+            "objective_focus_json": [
+                {
+                    "title": "Calibración del registro protocolario de usted",
+                    "description": "Descripción específica del trato formal.",
+                    "related_criteria": ["Trato de Usted"],
+                    "expected_behavior": "Conducta específica del trato formal."
+                },
+                {
+                    "title": "Acogida empática inmediata ante vulnerabilidad",
+                    "description": "Descripción específica de la empatía humana.",
+                    "related_criteria": ["Empatía"],
+                    "expected_behavior": "Conducta específica de la empatía humana."
+                },
+                {
+                    "title": "Cierre estructurado con puntualidad y prestigio médico",
+                    "description": "Descripción específica del cierre clínico.",
+                    "related_criteria": ["Puntualidad importancia"],
+                    "expected_behavior": "Conducta específica del cierre clínico."
+                }
+            ]
+        }
+        evaluation = {
+            "score": 7.0,
+            "result_json": {
+                "criteria_evaluations": [
+                    {"criterion_key": "trato_de_usted", "criterion_name": "Trato de Usted", "passed": False, "score": 3.0},
+                    {"criterion_key": "empatia", "criterion_name": "Empatía", "passed": True, "score": 8.0},
+                    {"criterion_key": "puntualidad_importancia", "criterion_name": "Puntualidad importancia", "passed": False, "score": 4.0}
+                ]
+            }
+        }
+
+        objectives = PersonalizedTrainingService.resolve_simulation_improvement_objectives(
+            prompt=prompt,
+            report=None,
+            evaluation=evaluation,
+        )
+
+        self.assertEqual(len(objectives), 3)
+
+        # Objective 1
+        o1 = next(o for o in objectives if "protocolario" in o["name"])
+        self.assertEqual(o1["name"], "Calibración del registro protocolario de usted")
+        self.assertEqual(o1["description"], "Descripción específica del trato formal.")
+        self.assertEqual(o1["expected_behavior"], "Conducta específica del trato formal.")
+        self.assertEqual(o1["status"], "failed")
+        self.assertEqual(o1["score"], 3.0)
+
+        # Objective 2
+        o2 = next(o for o in objectives if "vulnerabilidad" in o["name"])
+        self.assertEqual(o2["name"], "Acogida empática inmediata ante vulnerabilidad")
+        self.assertEqual(o2["description"], "Descripción específica de la empatía humana.")
+        self.assertEqual(o2["expected_behavior"], "Conducta específica de la empatía humana.")
+        self.assertEqual(o2["status"], "passed")
+        self.assertEqual(o2["score"], 8.0)
+
+        # Objective 3
+        o3 = next(o for o in objectives if "prestigio" in o["name"])
+        self.assertEqual(o3["name"], "Cierre estructurado con puntualidad y prestigio médico")
+        self.assertEqual(o3["description"], "Descripción específica del cierre clínico.")
+        self.assertEqual(o3["expected_behavior"], "Conducta específica del cierre clínico.")
+        self.assertEqual(o3["status"], "failed")
+        self.assertEqual(o3["score"], 4.0)
+
+        # Verify none of them inherited the aggregate summary
+        for o in [o1, o2, o3]:
+            self.assertNotEqual(o["description"], "Resumen global compartido de toda la simulación.")
+            self.assertNotEqual(o["expected_behavior"], "Conducta global compartida de toda la simulación.")
+
 
 if __name__ == "__main__":
     unittest.main()
+

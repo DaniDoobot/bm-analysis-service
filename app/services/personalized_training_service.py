@@ -1478,6 +1478,78 @@ class PersonalizedTrainingService:
             s = re.sub(r"[^\w\s]", "", s)
             return re.sub(r"\s+", " ", s).strip()
 
+        _STOP_WORDS = {"de", "del", "la", "el", "los", "las", "en", "con", "por", "para", "e", "y", "a", "al"}
+
+        def _token_set(s: str) -> set:
+            if not s:
+                return set()
+            return {w for w in s.split() if w and w not in _STOP_WORDS}
+
+        _CRITERIA_ALIASES = {
+            "trato_usted": {"trato_de_usted", "trato_usted", "tratamiento_formal", "registro_protocolario", "trato"},
+            "trato_de_usted": {"trato_de_usted", "trato_usted", "tratamiento_formal", "registro_protocolario", "trato"},
+            "despedida_con_refuerzo": {"despedida_con_refuerzo", "despedida_refuerzo", "refuerzo_especialista", "despedida"},
+            "despedida_refuerzo": {"despedida_con_refuerzo", "despedida_refuerzo", "refuerzo_especialista", "despedida"},
+            "puntualidad_importancia": {"puntualidad_importancia", "puntualidad", "cultura_puntualidad"},
+            "puntualidad": {"puntualidad_importancia", "puntualidad", "cultura_puntualidad"},
+            "n3_preguntas": {"n3_preguntas", "preguntas_clave_sondeo", "preguntas_clave", "uso_preguntas", "sondeo_clinico"},
+            "preguntas_clave_sondeo": {"n3_preguntas", "preguntas_clave_sondeo", "preguntas_clave", "uso_preguntas", "sondeo_clinico"},
+            "recomienda_con_pareja": {"recomienda_con_pareja", "recomienda_pareja"},
+            "recomienda_pareja": {"recomienda_con_pareja", "recomienda_pareja"},
+            "medicacion_e_informes_med": {"medicacion_e_informes_med", "medicacion_informes", "informes_medicos"},
+            "medicacion_informes": {"medicacion_e_informes_med", "medicacion_informes", "informes_medicos"},
+            "explicacion_precio_consulta": {"explicacion_precio_consulta", "precio_consulta", "precio"},
+            "precio_consulta": {"explicacion_precio_consulta", "precio_consulta", "precio"},
+            "direccion_y_referencias": {"direccion_y_referencias", "direccion_referencias", "direccion"},
+            "cierre_de_cita": {"cierre_de_cita", "cierre_cita", "cierre"},
+            "cierre_cita": {"cierre_de_cita", "cierre_cita", "cierre"},
+            "empatia": {"empatia", "acogida_empatica"},
+            "conexion_emocional": {"conexion_emocional", "conexion"},
+            "fomenta_dialogo": {"fomenta_dialogo", "dialogo"},
+            "escucha_activa": {"escucha_activa", "escucha"},
+            "gestion_objeciones": {"gestion_objeciones", "manejo_objeciones"},
+            "manejo_objeciones": {"gestion_objeciones", "manejo_objeciones"},
+        }
+
+        _KEYWORD_CRITERIA_HINTS = [
+            ({"usted", "protocolario"}, ["trato_de_usted", "trato_usted"]),
+            ({"empatia", "empatica", "vulnerabilidad"}, ["empatia", "conexion_emocional"]),
+            ({"puntualidad", "puntual", "antelacion"}, ["puntualidad_importancia"]),
+            ({"cierre", "despedida", "prestigio"}, ["despedida_con_refuerzo", "cierre_de_cita", "siguiente_paso"]),
+            ({"sondeo", "preguntas", "indagacion"}, ["preguntas_clave_sondeo", "uso_preguntas", "n3_preguntas"]),
+            ({"escucha", "interrumpir"}, ["escucha_activa"]),
+            ({"objecion", "objeciones"}, ["gestion_objeciones", "manejo_objeciones"]),
+            ({"precio", "coste", "tarifa"}, ["explicacion_precio_consulta", "precio_consulta"]),
+        ]
+
+        def _match_objective_catalog(title_str: str, catalog_map: dict):
+            if not title_str or not catalog_map:
+                return None
+            t_clean = _clean_str(title_str)
+            if t_clean in catalog_map:
+                return catalog_map[t_clean]
+            for k, v in catalog_map.items():
+                if t_clean in k or k in t_clean:
+                    return v
+            t_toks = _token_set(t_clean)
+            if not t_toks:
+                return None
+            best_match = None
+            best_overlap = 0
+            for k, v in catalog_map.items():
+                k_toks = _token_set(k)
+                overlap = len(t_toks & k_toks)
+                if overlap == 0:
+                    for tt in t_toks:
+                        if len(tt) >= 5 and any(tt[:5] == kt[:5] for kt in k_toks):
+                            overlap += 1
+                if overlap > best_overlap and (overlap >= 2 or (len(t_toks) == 1 and overlap >= 1)):
+                    best_overlap = overlap
+                    best_match = v
+            if best_match and (best_overlap / max(1, len(t_toks)) >= 0.4 or best_overlap >= 2):
+                return best_match
+            return None
+
         # 1. Extract prompt objective metadata
         focus_data = getattr(prompt, "objective_focus_json", None) if not isinstance(prompt, dict) else prompt.get("objective_focus_json")
         if focus_data is None and isinstance(prompt, dict):
@@ -1498,17 +1570,31 @@ class PersonalizedTrainingService:
 
         if isinstance(focus_data, dict):
             raw_spec = focus_data.get("linked_specific_objectives") or []
-            linked_spec = [str(x).strip() for x in raw_spec if x] if isinstance(raw_spec, list) else ([str(raw_spec).strip()] if raw_spec else [])
+            linked_spec = raw_spec if isinstance(raw_spec, list) else ([raw_spec] if raw_spec else [])
             raw_gen = focus_data.get("linked_general_objectives") or []
-            linked_gen = [str(x).strip() for x in raw_gen if x] if isinstance(raw_gen, list) else ([str(raw_gen).strip()] if raw_gen else [])
+            linked_gen = raw_gen if isinstance(raw_gen, list) else ([raw_gen] if raw_gen else [])
             raw_focus = focus_data.get("focus") or []
-            focus_list = [str(x).strip() for x in raw_focus if x] if isinstance(raw_focus, list) else ([str(raw_focus).strip()] if raw_focus else [])
+            focus_list = raw_focus if isinstance(raw_focus, list) else ([raw_focus] if raw_focus else [])
             obj_summary = focus_data.get("objective_summary") or focus_data.get("resumen_objetivo")
             exp_behavior = focus_data.get("expected_behavior") or focus_data.get("conducta_esperada")
         elif isinstance(focus_data, list):
-            focus_list = [str(x).strip() for x in focus_data if x]
+            focus_list = focus_data
         elif isinstance(focus_data, str) and focus_data.strip():
             focus_list = [focus_data.strip()]
+
+        # Complement with direct prompt attributes when available
+        if not linked_spec:
+            raw_ls = getattr(prompt, "linked_specific_objectives", None) or (prompt.get("linked_specific_objectives") if isinstance(prompt, dict) else None)
+            if raw_ls:
+                linked_spec = raw_ls if isinstance(raw_ls, list) else [raw_ls]
+        if not linked_gen:
+            raw_lg = getattr(prompt, "linked_general_objectives", None) or (prompt.get("linked_general_objectives") if isinstance(prompt, dict) else None)
+            if raw_lg:
+                linked_gen = raw_lg if isinstance(raw_lg, list) else [raw_lg]
+        if not obj_summary:
+            obj_summary = getattr(prompt, "objective_summary", None) or (prompt.get("objective_summary") if isinstance(prompt, dict) else None)
+        if not exp_behavior:
+            exp_behavior = getattr(prompt, "expected_behavior", None) or (prompt.get("expected_behavior") if isinstance(prompt, dict) else None)
 
         # 2. Extract cycle objectives from report if available
         spec_objs = []
@@ -1542,6 +1628,10 @@ class PersonalizedTrainingService:
             key_id = _clean_str(c_name).replace(" ", "_")
             if key_id in seen_keys:
                 return
+            if obj_type == "focus":
+                for sk in seen_keys:
+                    if (key_id in sk or sk in key_id) and len(key_id) >= 6 and len(sk) >= 6:
+                        return
             seen_keys.add(key_id)
             targets.append({
                 "objective_id": key_id,
@@ -1553,54 +1643,78 @@ class PersonalizedTrainingService:
             })
 
         # A. Specific objectives linked to this simulation
-        for s_title in linked_spec:
-            s_norm = _clean_str(s_title)
-            matched = spec_map.get(s_norm)
-            if not matched:
-                for k, v in spec_map.items():
-                    if s_norm in k or k in s_norm:
-                        matched = v
-                        break
+        for s_item in linked_spec:
+            s_title = s_item.get("title") or s_item.get("name") if isinstance(s_item, dict) else str(s_item)
+            matched = _match_objective_catalog(s_title, spec_map)
             name = matched.get("title") if matched else s_title
-            desc = (matched.get("description") or matched.get("specific_behavior_to_improve")) if matched else obj_summary
-            rel = matched.get("related_criteria") or [] if matched else []
-            exp = (matched.get("specific_behavior_to_improve") or exp_behavior) if matched else exp_behavior
-            _add_target(name, desc, rel, exp, "specific")
+            desc = (s_item.get("description") if isinstance(s_item, dict) else None) or (matched.get("description") or matched.get("specific_behavior_to_improve") if matched else None)
+            rel = (s_item.get("related_criteria") if isinstance(s_item, dict) else None) or (matched.get("related_criteria") if matched else [])
+            exp = (s_item.get("expected_behavior") if isinstance(s_item, dict) else None) or (matched.get("specific_behavior_to_improve") if matched else None)
+            _add_target(name, desc, rel or [], exp, "specific")
 
         # B. General objectives linked to this simulation
-        for g_title in linked_gen:
-            g_norm = _clean_str(g_title)
-            matched = gen_map.get(g_norm)
-            if not matched:
-                for k, v in gen_map.items():
-                    if g_norm in k or k in g_norm:
-                        matched = v
-                        break
+        for g_item in linked_gen:
+            g_title = g_item.get("title") or g_item.get("name") if isinstance(g_item, dict) else str(g_item)
+            matched = _match_objective_catalog(g_title, gen_map)
             name = matched.get("title") if matched else g_title
-            desc = matched.get("description") if matched else obj_summary
-            rel = []
-            exp = (matched.get("expected_behavior") or exp_behavior) if matched else exp_behavior
-            _add_target(name, desc, rel, exp, "general")
+            desc = (g_item.get("description") if isinstance(g_item, dict) else None) or (matched.get("description") if matched else None)
+            rel = (g_item.get("related_criteria") if isinstance(g_item, dict) else None) or []
+            exp = (g_item.get("expected_behavior") if isinstance(g_item, dict) else None) or (matched.get("expected_behavior") if matched else None)
+            _add_target(name, desc, rel or [], exp, "general")
 
         # C. Focus list
         for f in focus_list:
-            f_norm = _clean_str(f)
-            matched_spec = spec_map.get(f_norm)
-            matched_gen = gen_map.get(f_norm)
-            if not matched_spec and not matched_gen:
-                for k, v in spec_map.items():
-                    if f_norm in k or k in f_norm:
-                        matched_spec = v
-                        break
-                if not matched_spec:
-                    for k, v in gen_map.items():
-                        if f_norm in k or k in f_norm:
-                            matched_gen = v
-                            break
-            name = (matched_spec.get("title") if matched_spec else (matched_gen.get("title") if matched_gen else f))
-            desc = (matched_spec.get("description") if matched_spec else (matched_gen.get("description") if matched_gen else obj_summary))
-            rel = (matched_spec.get("related_criteria") or []) if matched_spec else [f_norm.replace(" ", "_")]
-            exp = (matched_spec.get("specific_behavior_to_improve") if matched_spec else (matched_gen.get("expected_behavior") if matched_gen else exp_behavior))
+            if isinstance(f, dict):
+                name = f.get("name") or f.get("title") or "Objetivo de simulación"
+                desc = f.get("description")
+                rel = list(f.get("related_criteria") or [])
+                exp = f.get("expected_behavior") or f.get("specific_behavior_to_improve")
+            else:
+                f_str = str(f).strip()
+                f_norm = _clean_str(f_str)
+                matched_spec = _match_objective_catalog(f_str, spec_map)
+                matched_gen = _match_objective_catalog(f_str, gen_map)
+
+                if matched_spec and (f_norm == _clean_str(matched_spec.get("title")) or f_norm in _clean_str(matched_spec.get("title")) or _clean_str(matched_spec.get("title")) in f_norm):
+                    name = matched_spec.get("title")
+                elif matched_gen and (f_norm == _clean_str(matched_gen.get("title")) or f_norm in _clean_str(matched_gen.get("title")) or _clean_str(matched_gen.get("title")) in f_norm):
+                    name = matched_gen.get("title")
+                else:
+                    name = f_str
+                desc = None
+                rel = []
+                exp = None
+
+            matched_spec = _match_objective_catalog(name, spec_map)
+            matched_gen = _match_objective_catalog(name, gen_map)
+
+            if not desc:
+                desc = (matched_spec.get("description") or matched_spec.get("specific_behavior_to_improve")) if matched_spec else ((matched_gen.get("description")) if matched_gen else None)
+            if not rel:
+                if matched_spec:
+                    spec_rel = matched_spec.get("related_criteria") or []
+                    f_toks = _token_set(_clean_str(name))
+                    matched_sub = [rc for rc in spec_rel if any(t in _clean_str(rc) for t in f_toks)]
+                    rel = matched_sub if matched_sub else list(spec_rel)
+                else:
+                    rel = []
+            if not exp:
+                exp = (matched_spec.get("specific_behavior_to_improve")) if matched_spec else ((matched_gen.get("expected_behavior")) if matched_gen else None)
+
+            # Keyword hint enrichment if rel is empty or missing known criteria hints
+            name_clean = _clean_str(name)
+            name_toks = _token_set(name_clean)
+            for kw_set, hint_crits in _KEYWORD_CRITERIA_HINTS:
+                if kw_set & name_toks:
+                    for hc in hint_crits:
+                        if hc not in rel:
+                            rel.append(hc)
+
+            if not desc:
+                desc = obj_summary if len(focus_list) == 1 and obj_summary else f"Pauta específica de simulación: {name}."
+            if not exp:
+                exp = exp_behavior or f"Demostrar conducta adecuada respecto a {name}."
+
             _add_target(name, desc, rel, exp, "focus")
 
         # D. Fallback if no specific targets could be assembled
@@ -1651,11 +1765,126 @@ class PersonalizedTrainingService:
             if isinstance(areas_imp, list):
                 areas_imp_phrases = [str(x) for x in areas_imp]
 
+        def _match_criteria_for_tgt(tgt: dict) -> list:
+            if not criteria_evals:
+                return []
+            rel_crits = list(tgt.get("related_criteria") or [])
+            t_name = tgt.get("name", "")
+            t_clean = _clean_str(t_name)
+            t_toks = _token_set(t_clean)
+
+            # If no related_criteria, enrich from keyword hints
+            if not rel_crits:
+                for kw_set, hint_crits in _KEYWORD_CRITERIA_HINTS:
+                    if kw_set & t_toks:
+                        for hc in hint_crits:
+                            if hc not in rel_crits:
+                                rel_crits.append(hc)
+
+            # ── Tier 1 & 2: Match each related_criterion ──
+            matched_from_rel = []
+            if rel_crits:
+                for rc in rel_crits:
+                    rc_clean = _clean_str(rc)
+                    if not rc_clean:
+                        continue
+                    rc_toks = _token_set(rc_clean)
+                    rc_key = rc_clean.replace(" ", "_")
+
+                    # Check Tier 1 exact match first for this rc
+                    rc_matched = False
+                    for ce in criteria_evals:
+                        ck = _clean_str(ce.get("criterion_key", ""))
+                        cn = _clean_str(ce.get("criterion_name", ""))
+                        if rc_clean == ck or rc_clean == cn:
+                            if ce not in matched_from_rel:
+                                matched_from_rel.append(ce)
+                            rc_matched = True
+
+                    if rc_matched:
+                        continue
+
+                    # If no exact match for this rc, check Tier 2 safe normalization & aliases
+                    for ce in criteria_evals:
+                        ck = _clean_str(ce.get("criterion_key", ""))
+                        cn = _clean_str(ce.get("criterion_name", ""))
+                        ck_toks = _token_set(ck)
+                        cn_toks = _token_set(cn)
+                        ck_key = ck.replace(" ", "_")
+
+                        if rc_toks and (rc_toks == ck_toks or rc_toks == cn_toks):
+                            if ce not in matched_from_rel:
+                                matched_from_rel.append(ce)
+                            continue
+
+                        aliases = _CRITERIA_ALIASES.get(rc_key) or _CRITERIA_ALIASES.get(rc_clean) or set()
+                        if ck_key in aliases or any(a in ck_key for a in aliases if len(a) >= 4):
+                            if ce not in matched_from_rel:
+                                matched_from_rel.append(ce)
+                            continue
+                        c_aliases = _CRITERIA_ALIASES.get(ck_key) or set()
+                        if rc_key in c_aliases or any(a in rc_key for a in c_aliases if len(a) >= 4):
+                            if ce not in matched_from_rel:
+                                matched_from_rel.append(ce)
+                            continue
+
+                        if len(rc_toks) >= 2 and (rc_toks.issubset(ck_toks) or rc_toks.issubset(cn_toks)):
+                            if ce not in matched_from_rel:
+                                matched_from_rel.append(ce)
+                            continue
+
+                if matched_from_rel:
+                    return matched_from_rel
+
+            # ── Tier 3: Objective name/title fallback ──
+            tier3_matches = []
+            for ce in criteria_evals:
+                ck = _clean_str(ce.get("criterion_key", ""))
+                cn = _clean_str(ce.get("criterion_name", ""))
+                ck_toks = _token_set(ck)
+                cn_toks = _token_set(cn)
+
+                if t_clean and (t_clean == ck or t_clean == cn):
+                    if ce not in tier3_matches:
+                        tier3_matches.append(ce)
+                    continue
+
+                if t_toks and (t_toks == ck_toks or t_toks == cn_toks):
+                    if ce not in tier3_matches:
+                        tier3_matches.append(ce)
+                    continue
+
+                if (ck_toks and len(ck_toks) >= 2 and ck_toks.issubset(t_toks)) or (cn_toks and len(cn_toks) >= 2 and cn_toks.issubset(t_toks)):
+                    if ce not in tier3_matches:
+                        tier3_matches.append(ce)
+                    continue
+
+                if "usted" in t_toks and ("usted" in ck_toks or "usted" in cn_toks):
+                    if ce not in tier3_matches:
+                        tier3_matches.append(ce)
+                    continue
+
+            if tier3_matches:
+                return tier3_matches
+
+            # ── Tier 4: Substring coincidence as last resort ──
+            tier4_matches = []
+            for ce in criteria_evals:
+                ck = _clean_str(ce.get("criterion_key", ""))
+                cn = _clean_str(ce.get("criterion_name", ""))
+                if len(cn) >= 5 and (cn in t_clean or t_clean in cn):
+                    if ce not in tier4_matches:
+                        tier4_matches.append(ce)
+                elif len(ck) >= 5 and (ck in t_clean or t_clean in ck):
+                    if ce not in tier4_matches:
+                        tier4_matches.append(ce)
+
+            return tier4_matches
+
         # 5. Evaluate each target objective
         results = []
         for tgt in targets:
             t_norm = _clean_str(tgt["name"])
-            t_rel_norm = [_clean_str(rc) for rc in tgt.get("related_criteria", []) if rc]
 
             # Case: Not yet evaluated / No evaluation data
             if not evaluation or not res_json:
@@ -1673,35 +1902,21 @@ class PersonalizedTrainingService:
                 })
                 continue
 
-            # Case: Evaluated -> Match against criteria_evaluations
-            matching_ce = []
-            for ce in criteria_evals:
-                c_key_norm = _clean_str(ce.get("criterion_key", ""))
-                c_name_norm = _clean_str(ce.get("criterion_name", ""))
+            matching_ce = _match_criteria_for_tgt(tgt)
 
-                is_match = False
-                for rel_norm in t_rel_norm:
-                    if rel_norm and (rel_norm == c_key_norm or rel_norm in c_name_norm or c_name_norm in rel_norm):
-                        is_match = True
-                        break
-                if not is_match and (t_norm in c_name_norm or c_name_norm in t_norm):
-                    is_match = True
-                if not is_match and c_key_norm and (t_norm in c_key_norm or c_key_norm in t_norm):
-                    is_match = True
+            # Filter only criteria with evaluated evidence (score or passed not None)
+            evaluable_ce = [ce for ce in matching_ce if ce.get("passed") is not None or ce.get("score") is not None]
 
-                if is_match:
-                    matching_ce.append(ce)
-
-            if matching_ce:
+            if evaluable_ce:
                 scores = []
-                for ce in matching_ce:
+                for ce in evaluable_ce:
                     sc = ce.get("score")
                     if sc is not None:
                         try:
                             scores.append(float(sc))
                         except Exception:
                             pass
-                passed_vals = [ce.get("passed") for ce in matching_ce if ce.get("passed") is not None]
+                passed_vals = [ce.get("passed") for ce in evaluable_ce if ce.get("passed") is not None]
 
                 avg_score = round(sum(scores) / len(scores), 1) if scores else None
 
@@ -1722,19 +1937,19 @@ class PersonalizedTrainingService:
 
                 fb_parts = []
                 if is_passed:
-                    for ce in matching_ce:
+                    for ce in evaluable_ce:
                         r_text = ce.get("reasoning")
                         if r_text and r_text not in fb_parts:
                             fb_parts.append(r_text)
                 else:
-                    for ce in matching_ce:
+                    for ce in evaluable_ce:
                         tip_text = ce.get("improvement_tip") or ce.get("reasoning")
                         if tip_text and tip_text not in fb_parts:
                             fb_parts.append(tip_text)
 
-                observed_parts = [ce.get("observed_behavior") for ce in matching_ce if ce.get("observed_behavior")]
+                observed_parts = [ce.get("observed_behavior") for ce in evaluable_ce if ce.get("observed_behavior")]
                 evidence_parts = [
-                    ce.get("evidence_quote") for ce in matching_ce
+                    ce.get("evidence_quote") for ce in evaluable_ce
                     if ce.get("evidence_quote") and "sin evidencia" not in ce.get("evidence_quote").lower()
                 ]
 
@@ -1748,16 +1963,18 @@ class PersonalizedTrainingService:
                 evidence_text = " | ".join(dict.fromkeys(evidence_parts)) if evidence_parts else None
                 observed_text = " ".join(dict.fromkeys(observed_parts)) if observed_parts else None
 
+                resolved_score = avg_score if avg_score is not None else eval_score
+
                 results.append({
                     "objective_id": tgt["objective_id"],
                     "name": tgt["name"],
                     "description": tgt["description"],
                     "status": status,
                     "status_label": status_label,
-                    "score": avg_score or eval_score,
+                    "score": resolved_score,
                     "feedback": feedback_text,
                     "evidence": evidence_text,
-                    "expected_behavior": matching_ce[0].get("expected_behavior") or tgt["expected_behavior"],
+                    "expected_behavior": tgt["expected_behavior"] or evaluable_ce[0].get("expected_behavior"),
                     "observed_behavior": observed_text,
                 })
                 continue
@@ -1767,8 +1984,9 @@ class PersonalizedTrainingService:
             matched_crit_val = None
             for ck, cv in criteria_checklist.items():
                 ck_norm = _clean_str(ck)
-                for rel_norm in t_rel_norm:
-                    if rel_norm and (rel_norm == ck_norm or rel_norm in ck_norm or ck_norm in rel_norm):
+                for rc in tgt.get("related_criteria", []):
+                    rc_norm = _clean_str(rc)
+                    if rc_norm and (rc_norm == ck_norm or rc_norm in ck_norm or ck_norm in rc_norm):
                         matched_crit_key = ck
                         matched_crit_val = cv
                         break
