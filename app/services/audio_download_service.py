@@ -1,13 +1,15 @@
 """
 Centralized audio download service for call recordings.
 Supports:
-- Twilio recordings (api.twilio.com) with HTTP Basic Auth.
-- Boston Medical / CloudTalk archive (grabaciones.bostonmedical.info) with X-Api-Key header.
-- Direct audio URLs.
+- Direct provider download: CloudTalk API (/calls/recording/{call_id}.json) via cloudtalk_id (primary source).
+- Fallback / Historical URL download:
+  * Boston Medical archive (grabaciones.bostonmedical.info) with X-Api-Key header.
+  * Twilio recordings (api.twilio.com) with HTTP Basic Auth.
+  * Direct audio URLs.
 
 Enforces:
-- Strict content-type and payload validation (rejection of HTML/Microsoft login screens).
-- Safe logging (masking API keys and query signature parameters).
+- Strict content-type and binary payload validation (RIFF/WAVE required for application/octet-stream, rejection of HTML/SSO screens).
+- Safe logging (masking API keys, credentials, and query signature parameters).
 - Preserving exact URLs and query params for Boston Archive (no appending .mp3).
 """
 import logging
@@ -17,6 +19,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import httpx
 
 from app.config import get_settings
+from app.services.cloudtalk_service import CloudTalkService, is_valid_wav_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +29,26 @@ ALLOWED_AUDIO_CONTENT_TYPES = frozenset({
     "audio/mp3",
     "audio/wav",
     "audio/x-wav",
+    "audio/wave",
     "audio/mp4",
     "audio/x-m4a",
     "audio/aac",
     "audio/ogg",
     "application/octet-stream",
 })
+
+
+def detect_audio_format(audio_bytes: bytes, recording_url: str | None = None) -> str:
+    """
+    Determine audio format ('wav' or 'mp3') from binary signature first, then URL extension.
+    """
+    if is_valid_wav_bytes(audio_bytes):
+        return "wav"
+    if recording_url:
+        clean_path = recording_url.strip().split("?")[0].lower()
+        if clean_path.endswith(".wav"):
+            return "wav"
+    return "mp3"
 
 
 class AudioDownloadError(Exception):
@@ -73,11 +90,18 @@ def sanitize_recording_url(url: str) -> str:
 
 
 class AudioDownloadService:
-    def __init__(self):
+    def __init__(self, cloudtalk_service: CloudTalkService | None = None):
         settings = get_settings()
         self.twilio_account_sid = settings.twilio_account_sid
         self.twilio_auth_token = settings.twilio_auth_token
         self.boston_recording_api_key = (settings.boston_recording_api_key or "").strip()
+        self._cloudtalk_service = cloudtalk_service
+
+    @property
+    def cloudtalk_service(self) -> CloudTalkService:
+        if self._cloudtalk_service is None:
+            self._cloudtalk_service = CloudTalkService()
+        return self._cloudtalk_service
 
     @staticmethod
     def is_twilio_url(url: str) -> bool:
@@ -99,22 +123,83 @@ class AudioDownloadService:
             return "cloudtalk"
         return "direct"
 
-    async def download_audio(self, recording_url: str, timeout: int = 120) -> bytes:
+    async def download_from_cloudtalk(self, call_id: str, timeout: int = 120) -> bytes:
+        """
+        Download recording directly from CloudTalk API using call_id.
+        """
+        return await self.cloudtalk_service.download_recording(call_id, timeout=timeout)
+
+    async def download_audio(
+        self,
+        recording_url: str | None = None,
+        timeout: int = 120,
+        cloudtalk_id: str | None = None,
+    ) -> bytes:
         """
         Download recording audio into memory.
-        Applies provider-specific authentication, headers, and validation.
+
+        Strategy:
+        1. Primary: If cloudtalk_id is provided, attempt direct WAV download from CloudTalk API.
+           If CloudTalk fails (404, 403, 429, timeout, invalid response, controlled error)
+           and recording_url is available, log safely and fall back to recording_url.
+        2. Fallback / Historical: Download from recording_url (IA España grabaciones.bostonmedical.info
+           with X-Api-Key, or Twilio with Basic Auth, or direct URL).
         """
-        if not recording_url or not recording_url.strip():
+        clean_cloudtalk_id = str(cloudtalk_id or "").strip()
+        clean_recording_url = str(recording_url or "").strip()
+
+        if clean_cloudtalk_id:
+            try:
+                return await self.download_from_cloudtalk(clean_cloudtalk_id, timeout=timeout)
+            except AudioDownloadError as ct_err:
+                has_fallback = bool(clean_recording_url)
+                logger.warning(
+                    "CloudTalk primary download failed: provider=cloudtalk, call_id=%s, status=%d, fallback_applied=%s, reason=%s",
+                    clean_cloudtalk_id,
+                    ct_err.status_code,
+                    has_fallback,
+                    ct_err.message,
+                )
+                if not has_fallback:
+                    raise
+            except Exception as ct_exc:
+                has_fallback = bool(clean_recording_url)
+                logger.warning(
+                    "CloudTalk primary download unexpected error: provider=cloudtalk, call_id=%s, status=502, fallback_applied=%s, error=%s",
+                    clean_cloudtalk_id,
+                    has_fallback,
+                    type(ct_exc).__name__,
+                )
+                if not has_fallback:
+                    raise AudioDownloadError(
+                        f"No se pudo descargar la grabación desde CloudTalk para call_id={clean_cloudtalk_id}.",
+                        status_code=502,
+                        stage="download_audio",
+                    )
+
+        if not clean_recording_url:
             raise AudioDownloadError(
                 "La URL de grabación está vacía.",
                 status_code=400,
                 stage="download_audio",
             )
 
-        url = recording_url.strip()
+        url = clean_recording_url
         provider = self.detect_provider(url)
         sanitized_url = sanitize_recording_url(url)
         parsed_domain = urlparse(url).netloc
+
+        # Guard against Cdr.recording_link (analytics.cloudtalk.io HTML SPA page)
+        if "analytics.cloudtalk.io" in parsed_domain.lower():
+            logger.error(
+                "Rejected CloudTalk analytics HTML link as recording URL: provider=cloudtalk, url=%s",
+                sanitized_url,
+            )
+            raise AudioDownloadError(
+                "El enlace analytics.cloudtalk.io no es un archivo de audio descargable (es una página HTML).",
+                status_code=502,
+                stage="download_audio",
+            )
 
         auth = None
         headers: dict[str, str] = {}
@@ -136,7 +221,7 @@ class AudioDownloadService:
             # - DO NOT modify the URL.
             # - DO NOT strip query params (e.g., ?f=...).
             # - DO NOT append .mp3.
-            # - Enforce X-Api-Key.
+            # - Enforce X-Api-Key ONLY for grabaciones.bostonmedical.info.
             if not self.boston_recording_api_key:
                 raise AudioDownloadError(
                     "BOSTON_RECORDING_API_KEY no configurada. Configure la variable de entorno para acceder al archivo de grabaciones de Boston Medical.",
@@ -144,6 +229,10 @@ class AudioDownloadService:
                     stage="download_audio",
                 )
             headers["X-Api-Key"] = self.boston_recording_api_key
+
+        elif provider == "cloudtalk":
+            if self.cloudtalk_service.is_configured:
+                auth = (self.cloudtalk_service.api_key_id, self.cloudtalk_service.api_key_secret)
 
         logger.info(
             "Initiating audio download: provider=%s, domain=%s, url=%s",
@@ -163,23 +252,23 @@ class AudioDownloadService:
                 response = await client.get(url, **kwargs)
 
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-            logger.error("Connection error downloading audio from %s: %s", sanitized_url, e)
+            logger.error("Connection error downloading audio from %s: %s", sanitized_url, type(e).__name__)
             raise AudioDownloadError(
                 f"No se pudo conectar con el servidor de grabaciones ({parsed_domain}): error de red o timeout.",
                 status_code=504,
                 stage="download_audio",
             )
         except httpx.TimeoutException as e:
-            logger.error("Timeout downloading audio from %s: %s", sanitized_url, e)
+            logger.error("Timeout downloading audio from %s: %s", sanitized_url, type(e).__name__)
             raise AudioDownloadError(
                 f"Timeout al descargar la grabación desde {parsed_domain} tras {timeout}s.",
                 status_code=504,
                 stage="download_audio",
             )
         except Exception as e:
-            logger.error("Unexpected error requesting audio from %s: %s", sanitized_url, e)
+            logger.error("Unexpected error requesting audio from %s: %s", sanitized_url, type(e).__name__)
             raise AudioDownloadError(
-                f"Error al descargar grabación: {str(e)}",
+                f"Error al descargar grabación desde {parsed_domain}: {type(e).__name__}",
                 status_code=502,
                 stage="download_audio",
             )
@@ -234,13 +323,20 @@ class AudioDownloadService:
                 status_code=404,
                 stage="download_audio",
             )
+        if response.status_code == 429:
+            logger.warning("HTTP 429 Too Many Requests downloading audio from %s", sanitized_url)
+            raise AudioDownloadError(
+                f"Error 429: Límite de peticiones excedido en el servidor remoto ({parsed_domain}).",
+                status_code=429,
+                stage="download_audio",
+            )
 
         try:
             response.raise_for_status()
-        except httpx.HTTPStatusError as e:
+        except httpx.HTTPStatusError:
             logger.error("HTTP error %s downloading audio from %s", response.status_code, sanitized_url)
             raise AudioDownloadError(
-                f"Error HTTP {response.status_code} al descargar grabación: {str(e)}",
+                f"Error HTTP {response.status_code} al descargar grabación desde {parsed_domain}.",
                 status_code=502,
                 stage="download_audio",
             )
@@ -265,6 +361,33 @@ class AudioDownloadService:
             raise AudioDownloadError(
                 f"Tipo de contenido inválido ({content_type}). Se esperaba un archivo de audio, "
                 "pero el servidor devolvió una página HTML (posible portal de autenticación o error web).",
+                status_code=502,
+                stage="download_audio",
+            )
+
+        # Reject application/octet-stream unless binary header confirms RIFF/WAVE
+        if content_type == "application/octet-stream" and not is_valid_wav_bytes(content):
+            logger.error(
+                "Rejected non-WAV application/octet-stream payload: provider=%s, size_bytes=%d, url=%s",
+                provider,
+                len(content),
+                sanitized_url,
+            )
+            raise AudioDownloadError(
+                "Tipo de contenido application/octet-stream rechazado: la cabecera binaria no corresponde a un archivo WAV válido (RIFF/WAVE).",
+                status_code=502,
+                stage="download_audio",
+            )
+
+        if content_type and content_type not in ALLOWED_AUDIO_CONTENT_TYPES:
+            logger.error(
+                "Unsupported audio content-type: provider=%s, content_type=%s, url=%s",
+                provider,
+                content_type,
+                sanitized_url,
+            )
+            raise AudioDownloadError(
+                f"Tipo de contenido no soportado ({content_type}) al descargar grabación.",
                 status_code=502,
                 stage="download_audio",
             )
@@ -319,6 +442,7 @@ class AudioDownloadService:
             logger.warning(
                 "Failed to fetch Twilio recording metadata from %s: %s",
                 sanitize_recording_url(base_url),
-                e,
+                type(e).__name__,
             )
             return None
+

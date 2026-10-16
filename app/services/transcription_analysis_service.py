@@ -206,14 +206,19 @@ async def analyze_transcription_pipeline(
             resolved_is_demo,
         )
         from app.services.hubspot_service import HubSpotService
-        from app.services.audio_download_service import AudioDownloadService, AudioDownloadError
+        from app.services.audio_download_service import (
+            AudioDownloadService,
+            AudioDownloadError,
+            detect_audio_format,
+        )
         
         # 1. HubSpot Resolution
         try:
             hs_service = HubSpotService(is_demo=resolved_is_demo)
             hubspot_data = await hs_service.get_call(call_id, is_demo=resolved_is_demo)
             target_url = hubspot_data.get("recording_url")
-            if not target_url:
+            cloudtalk_id = hubspot_data.get("cloudtalk_id")
+            if not target_url and not cloudtalk_id:
                 return {
                     "ok": False,
                     "status": "error",
@@ -229,10 +234,13 @@ async def analyze_transcription_pipeline(
                 "error_message": f"HubSpot resolution failed: {str(e)}",
             }
             
-        # 2. Download audio
+        # 2. Download audio (CloudTalk primary when cloudtalk_id is present, with fallback to target_url)
         try:
             downloader = AudioDownloadService()
-            audio_bytes = await downloader.download_audio(target_url)
+            if cloudtalk_id:
+                audio_bytes = await downloader.download_audio(target_url, cloudtalk_id=cloudtalk_id)
+            else:
+                audio_bytes = await downloader.download_audio(target_url)
         except AudioDownloadError as e:
             logger.error("Audio download error for call_id=%s (source=%s): %s", call_id, e.stage, e.message)
             return {
@@ -242,7 +250,7 @@ async def analyze_transcription_pipeline(
                 "error_message": f"Audio download failed: {e.message}",
             }
         except Exception as e:
-            logger.error("Failed to download audio from %s: %s", target_url, e)
+            logger.error("Failed to download audio for call_id=%s: %s", call_id, e)
             return {
                 "ok": False,
                 "status": "error",
@@ -252,10 +260,11 @@ async def analyze_transcription_pipeline(
             
         # 3. Transcribe audio
         try:
-            logger.info("Transcribing call audio via Whisper for transcription analysis...")
+            audio_ext = detect_audio_format(audio_bytes, target_url)
+            logger.info("Transcribing call audio via Whisper for transcription analysis (format=%s)...", audio_ext)
             transcription_result = await openai_service.transcribe_audio(
                 audio_bytes,
-                filename="call.mp3",
+                filename=f"call.{audio_ext}",
                 company_id=resolved_company_id,
                 service_id=resolved_service_id,
                 module="test_analysis",

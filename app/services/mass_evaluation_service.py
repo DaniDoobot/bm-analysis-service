@@ -1459,7 +1459,8 @@ class MassEvaluationService:
                             
                             calls.append({
                                 "call_id": cid,
-                                "hs_object_id": cid,
+                                "hs_object_id": call_meta.get("call_id") or cid,
+                                "cloudtalk_id": call_meta.get("cloudtalk_id"),
                                 "recording_url": call_meta.get("recording_url"),
                                 "hubspot_owner_id": call_meta.get("hubspot_owner_id"),
                                 "call_timestamp": call_meta.get("call_timestamp"),
@@ -1644,13 +1645,14 @@ class MassEvaluationService:
                         logger.warning("Failed to check run cancellation status: %s", e_status)
  
                     call_id = call["call_id"]
-                    recording_url = call["recording_url"]
+                    recording_url = call.get("recording_url")
+                    cloudtalk_id = call.get("cloudtalk_id")
 
                     # Pre-deletion by job_id + call_id is disabled.
                     # We now perform a clean upsert based on call_id + prompt_id when saving results.
                     pass
                     
-                    if not recording_url:
+                    if not recording_url and not cloudtalk_id:
                         # Skip
                         res_row = await MassEvaluationService._upsert_mass_evaluation_result(
                             db=db,
@@ -1720,15 +1722,19 @@ class MassEvaluationService:
                     alarma_feed = None
                     try:
                         twilio_service = TwilioService()
-                        audio_bytes = await twilio_service.download_audio(recording_url)
+                        if cloudtalk_id:
+                            from app.services.audio_download_service import AudioDownloadService
+                            downloader = AudioDownloadService()
+                            audio_bytes = await downloader.download_audio(recording_url, cloudtalk_id=cloudtalk_id)
+                        else:
+                            audio_bytes = await twilio_service.download_audio(recording_url)
                         
                         audio_size = sys.getsizeof(audio_bytes)
                         if audio_size > MAX_AUDIO_SIZE_BYTES:
                             raise ValueError("El audio supera el tamaño máximo permitido por Azure OpenAI (20 MB)")
                             
-                        audio_format = "mp3"
-                        if recording_url.endswith(".wav") or recording_url.endswith(".WAV"):
-                            audio_format = "wav"
+                        from app.services.audio_download_service import detect_audio_format
+                        audio_format = detect_audio_format(audio_bytes, recording_url)
                             
                         # Call Azure / OpenAI
                         raw_response = await analyze_audio_bytes(

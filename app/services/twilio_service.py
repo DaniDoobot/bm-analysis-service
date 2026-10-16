@@ -25,14 +25,16 @@ class TwilioService:
     def is_twilio_url(self, url: str) -> bool:
         return "twilio.com" in url or "api.twilio.com" in url
 
-    async def download_audio(self, recording_url: str) -> bytes:
+    async def download_audio(self, recording_url: str | None = None, cloudtalk_id: str | None = None) -> bytes:
         """
         Download recording audio into memory.
-        Delegates to centralized AudioDownloadService supporting both Twilio and Boston Archive.
+        Delegates to centralized AudioDownloadService supporting CloudTalk, Boston Archive, and Twilio.
         """
         from app.services.audio_download_service import AudioDownloadService
         downloader = AudioDownloadService()
-        return await downloader.download_audio(recording_url)
+        if cloudtalk_id:
+            return await downloader.download_audio(recording_url, cloudtalk_id=cloudtalk_id)
+        return await downloader.download_audio(recording_url or "")
 
     async def get_recording_metadata(self, recording_url: str) -> dict[str, Any] | None:
         """

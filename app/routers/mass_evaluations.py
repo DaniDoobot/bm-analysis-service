@@ -1351,7 +1351,11 @@ async def get_result(
     if d.execution_source is None:
         d.execution_source = "on_demand"
 
-    if result.recording_url:
+    has_cloudtalk = bool(
+        isinstance(result.hubspot_metadata, dict)
+        and (result.hubspot_metadata.get("cloudtalk_id") or result.hubspot_metadata.get("hs_call_external_id"))
+    )
+    if result.recording_url or has_cloudtalk:
         d.recording_url = f"/bm/mass-evaluations/results/{result.mass_analysis_id}/recording-audio"
 
     d.hubspot_metadata = sanitize_hubspot_metadata(d.hubspot_metadata)
@@ -1381,18 +1385,29 @@ async def get_mass_result_recording_audio(
     result = await verify_mass_result_read_scope(db, mass_analysis_id=mass_analysis_id, context=context)
 
     raw_recording_url = result.recording_url
-    if not raw_recording_url:
+    cloudtalk_id = None
+    if isinstance(result.hubspot_metadata, dict):
+        cloudtalk_id = (
+            result.hubspot_metadata.get("cloudtalk_id")
+            or result.hubspot_metadata.get("hs_call_external_id")
+        )
+
+    if not raw_recording_url and not cloudtalk_id:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Grabación no disponible todavía"
         )
 
     import httpx
+    from app.services.audio_download_service import detect_audio_format
     from app.services.twilio_service import TwilioService
 
     try:
         twilio_service = TwilioService()
-        audio_bytes = await twilio_service.download_audio(raw_recording_url)
+        if cloudtalk_id:
+            audio_bytes = await twilio_service.download_audio(raw_recording_url, cloudtalk_id=str(cloudtalk_id))
+        else:
+            audio_bytes = await twilio_service.download_audio(raw_recording_url)
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             raise HTTPException(
@@ -1419,13 +1434,16 @@ async def get_mass_result_recording_audio(
             detail=f"No se pudo recuperar la grabación: {str(e)}"
         )
 
+    ext = detect_audio_format(audio_bytes, raw_recording_url)
+    media_type = "audio/wav" if ext == "wav" else "audio/mpeg"
+
     return Response(
         content=audio_bytes,
-        media_type="audio/mpeg",
+        media_type=media_type,
         headers={
-            "Content-Type": "audio/mpeg",
+            "Content-Type": media_type,
             "Cache-Control": "private, no-store",
-            "Content-Disposition": f"inline; filename=mass_result_{mass_analysis_id}.mp3"
+            "Content-Disposition": f"inline; filename=mass_result_{mass_analysis_id}.{ext}"
         }
     )
 

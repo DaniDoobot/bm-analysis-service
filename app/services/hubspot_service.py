@@ -687,6 +687,7 @@ class HubSpotService:
             "hs_call_status",
             "hs_call_callee_object_id",
             "hs_call_callee_object_type",
+            "hs_call_external_id",
         ]
         
         results = []
@@ -763,6 +764,7 @@ class HubSpotService:
                     results.append({
                         "call_id": h.get("id"),
                         "hs_object_id": props.get("hs_object_id") or h.get("id"),
+                        "cloudtalk_id": props.get("hs_call_external_id"),
                         "recording_url": props.get("hs_call_recording_url"),
                         "hubspot_owner_id": props.get("hubspot_owner_id"),
                         "call_timestamp": props.get("hs_timestamp") or props.get("hs_createdate"),

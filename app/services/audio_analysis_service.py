@@ -183,6 +183,7 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
         resolved_company_id = resolved_cid
 
     # ── 2. HubSpot Resolution ──────────────────────────────────────────────
+    cloudtalk_id = metadata.get("cloudtalk_id") or metadata.get("hs_call_external_id")
     if not target_url:
         logger.info(
             "No direct recording_url provided. Resolving via HubSpot for call_id=%s (is_demo=%s)",
@@ -193,6 +194,7 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
             hs_service = HubSpotService(is_demo=resolved_is_demo)
             hubspot_data = await hs_service.get_call(call_id, is_demo=resolved_is_demo)
             target_url = hubspot_data.get("recording_url")
+            cloudtalk_id = hubspot_data.get("cloudtalk_id") or cloudtalk_id
             hubspot_url = hubspot_data.get("hubspot_url")
             call_direction = hubspot_data.get("call_direction") or call_direction
 
@@ -249,7 +251,7 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
     # ── 2.8. Log resolved call timestamp ──
     logger.info("Call timestamp resolution: call_timestamp_source=%s, call_timestamp=%s", call_timestamp_source, call_timestamp)
 
-    if not target_url:
+    if not target_url and not cloudtalk_id:
         return {
             "ok": False,
             "status": "error",
@@ -259,9 +261,16 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
 
     # ── 2 & 3. Audio Download & Size Validation ─────────────────────────────
     try:
-        from app.services.audio_download_service import AudioDownloadService, AudioDownloadError
+        from app.services.audio_download_service import (
+            AudioDownloadService,
+            AudioDownloadError,
+            detect_audio_format,
+        )
         downloader = AudioDownloadService()
-        audio_bytes = await downloader.download_audio(target_url)
+        if cloudtalk_id:
+            audio_bytes = await downloader.download_audio(target_url, cloudtalk_id=cloudtalk_id)
+        else:
+            audio_bytes = await downloader.download_audio(target_url)
     except AudioDownloadError as e:
         logger.error("Audio download error for call_id=%s (source=%s): %s", call_id, e.stage, e.message)
         return {
@@ -271,7 +280,7 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
             "error_message": f"Audio download failed: {e.message}",
         }
     except Exception as e:
-        logger.error("Failed to download audio from %s: %s", target_url, e)
+        logger.error("Failed to download audio for call_id=%s: %s", call_id, e)
         return {
             "ok": False,
             "status": "error",
@@ -290,10 +299,8 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
             "error_message": "El audio supera el tamaño máximo permitido por Azure OpenAI (20 MB)",
         }
 
-    # Guess format
-    audio_format = "mp3"
-    if target_url.endswith(".wav") or target_url.endswith(".WAV"):
-        audio_format = "wav"
+    # Guess format (binary signature first, then URL extension)
+    audio_format = detect_audio_format(audio_bytes, target_url)
 
     # Self-heal/Sync the prompt text with active criteria before validating or analyzing
     is_fallback_active = False
