@@ -182,3 +182,203 @@ async def analysis_detail(
     if not result:
         raise HTTPException(status_code=404, detail="Analysis not found")
     return result
+
+
+async def verify_analysis_read_scope(
+    db: AsyncSession,
+    analysis_id: int,
+    context: TenantContext,
+):
+    """
+    Verify that the analysis exists and the requesting user has tenant/service/agent
+    scope to access it.
+    Returns the Analysis ORM row if allowed; raises 404 if not found or 403 if out of scope.
+    """
+    from sqlalchemy import select
+    from app.models.analyses import Analysis
+    from app.models.prompts import Prompt
+    from app.models.services import Service
+
+    res = await db.execute(select(Analysis).where(Analysis.analysis_id == analysis_id))
+    record = res.scalar_one_or_none()
+    if not record:
+        raise HTTPException(status_code=404, detail="Análisis no encontrado.")
+
+    if context.is_super_admin:
+        return record
+
+    effective_company_id = record.company_id
+    effective_service_id = record.service_id
+
+    if (effective_company_id is None or effective_service_id is None) and record.prompt_id:
+        p_res = await db.execute(
+            select(Prompt.company_id, Prompt.service_id).where(Prompt.prompt_id == record.prompt_id)
+        )
+        p_row = p_res.first()
+        if p_row:
+            if effective_company_id is None and p_row[0] is not None:
+                effective_company_id = p_row[0]
+            if effective_service_id is None and p_row[1] is not None:
+                effective_service_id = p_row[1]
+
+    if effective_company_id is None and effective_service_id is not None:
+        s_res = await db.execute(
+            select(Service.company_id).where(Service.service_id == effective_service_id)
+        )
+        effective_company_id = s_res.scalar_one_or_none()
+
+    if context.allowed_company_ids is not None:
+        if effective_company_id is None or effective_company_id not in context.allowed_company_ids:
+            raise HTTPException(
+                status_code=403,
+                detail="Acceso denegado: El análisis pertenece a otra empresa.",
+            )
+    elif context.company_id is not None and effective_company_id != context.company_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Acceso denegado: El análisis pertenece a otra empresa.",
+        )
+
+    if context.allowed_service_ids is not None:
+        if effective_service_id is None or effective_service_id not in context.allowed_service_ids:
+            raise HTTPException(
+                status_code=403,
+                detail="Acceso denegado: No tienes permisos sobre este servicio.",
+            )
+
+    if context.allowed_agent_ids is not None:
+        if not record.hubspot_owner_id or record.hubspot_owner_id not in context.allowed_agent_ids:
+            raise HTTPException(
+                status_code=403,
+                detail="Acceso denegado: Solo puedes acceder a tus propios análisis.",
+            )
+
+    return record
+
+
+@router.get("/analyses/{analysis_id}/recording-audio")
+@router.get("/me/analyses/{analysis_id}/recording-audio")
+async def get_analysis_recording_audio(
+    analysis_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+):
+    """
+    Protected server-side proxy that downloads and streams the call recording
+    associated with a Laboratorio / Test Analysis (bm_analyses) record.
+
+    Resolution priority:
+    1. CloudTalk direct WAV (via cloudtalk_id / hs_call_external_id)
+    2. Fallback recording_url (grabaciones.bostonmedical.info with X-Api-Key, or Twilio)
+    """
+    from fastapi.responses import Response
+    from app.core.side_effects import resolve_company_demo_status
+    from app.services.audio_download_service import (
+        AudioDownloadError,
+        AudioDownloadService,
+        detect_audio_format,
+    )
+    from app.services.hubspot_service import HubSpotService
+
+    record = await verify_analysis_read_scope(db, analysis_id, context)
+
+    payload = record.payload if isinstance(record.payload, dict) else {}
+    hs_data = payload.get("hubspot_data") if isinstance(payload.get("hubspot_data"), dict) else {}
+    hs_props = (
+        hs_data.get("hubspot_properties")
+        if isinstance(hs_data.get("hubspot_properties"), dict)
+        else (payload.get("hubspot_properties") if isinstance(payload.get("hubspot_properties"), dict) else {})
+    )
+
+    raw_recording_url = (
+        payload.get("recording_url")
+        or payload.get("audio_url")
+        or hs_data.get("recording_url")
+        or hs_props.get("hs_call_recording_url")
+    )
+    cloudtalk_id = (
+        payload.get("cloudtalk_id")
+        or payload.get("hs_call_external_id")
+        or hs_data.get("cloudtalk_id")
+        or hs_data.get("hs_call_external_id")
+        or hs_props.get("hs_call_external_id")
+    )
+
+    # Dynamic HubSpot resolution only when neither cloudtalk_id nor raw_recording_url is in payload
+    call_id_str = str(record.call_id).strip() if record.call_id else ""
+    if not cloudtalk_id and not raw_recording_url and call_id_str and not call_id_str.startswith("TEST_"):
+        try:
+            _, is_demo = await resolve_company_demo_status(
+                db,
+                company_id=record.company_id,
+                service_id=record.service_id,
+            )
+            hs_service = HubSpotService(is_demo=is_demo)
+            resolved_hs = await hs_service.get_call(call_id_str, is_demo=is_demo)
+            if isinstance(resolved_hs, dict):
+                if not cloudtalk_id:
+                    cloudtalk_id = (
+                        resolved_hs.get("cloudtalk_id")
+                        or resolved_hs.get("hs_call_external_id")
+                        or (resolved_hs.get("hubspot_properties") or {}).get("hs_call_external_id")
+                    )
+                if not raw_recording_url:
+                    raw_recording_url = (
+                        resolved_hs.get("recording_url")
+                        or (resolved_hs.get("hubspot_properties") or {}).get("hs_call_recording_url")
+                    )
+        except Exception as e:
+            logger.warning(
+                "Dynamic HubSpot lookup failed during recording-audio for analysis_id=%d (call_id=%s): %s",
+                analysis_id,
+                call_id_str,
+                e,
+            )
+
+    if not raw_recording_url and not cloudtalk_id:
+        raise HTTPException(
+            status_code=404,
+            detail="No hay grabación disponible para este análisis.",
+        )
+
+    try:
+        downloader = AudioDownloadService()
+        audio_bytes = await downloader.download_audio(
+            raw_recording_url,
+            cloudtalk_id=str(cloudtalk_id) if cloudtalk_id else None,
+        )
+    except AudioDownloadError as e:
+        logger.warning(
+            "Recording download failed for analysis_id=%d (stage=%s, status=%s): %s",
+            analysis_id,
+            e.stage,
+            e.status_code,
+            e.message,
+        )
+        status_code = 404 if e.status_code == 404 else 502
+        raise HTTPException(
+            status_code=status_code,
+            detail=f"No se pudo obtener la grabación de audio ({e.message}).",
+        )
+    except Exception as e:
+        logger.error(
+            "Unexpected error downloading recording for analysis_id=%d: %s",
+            analysis_id,
+            e,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Error interno al descargar la grabación de audio.",
+        )
+
+    ext = detect_audio_format(audio_bytes, raw_recording_url)
+    media_type = "audio/wav" if ext == "wav" else "audio/mpeg"
+
+    return Response(
+        content=audio_bytes,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'inline; filename="analysis_{analysis_id}.{ext}"',
+            "Cache-Control": "private, no-store",
+        },
+    )

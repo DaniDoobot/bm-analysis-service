@@ -180,6 +180,7 @@ async def save_analysis(
     payload: dict[str, Any],                 # full payload for audit
     transcription: str | None = None,
     transcription_metadata: dict[str, Any] | None = None,
+    active_criteria: list[Any] | None = None,
 ) -> Analysis:
     """
     Persist a complete analysis run:
@@ -331,7 +332,7 @@ async def save_analysis(
             typology_by_key = {t.typology_key: t for t in active_typologies}
 
             # Fetch criteria early to support robust fallback typology matching
-            criteria = await get_active_criteria(db, prompt_id)
+            criteria = active_criteria if active_criteria is not None else await get_active_criteria(db, prompt_id)
 
             # 1. Try direct keys in clean_result
             detected_typology_key_raw = clean_result.get("tipo_llamada")
@@ -377,7 +378,14 @@ async def save_analysis(
                 matched_typology,
             )
 
-            results_list = await _insert_results(db, analysis, clean_result, prompt_id, matched_typology=matched_typology)
+            results_list = await _insert_results(
+                db,
+                analysis,
+                clean_result,
+                prompt_id,
+                matched_typology=matched_typology,
+                active_criteria=criteria,
+            )
 
         # ── 3. Calculate Global Score and Persist/Sync ───────────────────
         from app.utils.scores import calculate_score_from_criterion_results
@@ -474,10 +482,13 @@ async def _insert_results(
     result_json: dict[str, Any],
     prompt_id: int,
     matched_typology: Any | None = None,
+    active_criteria: list[Any] | None = None,
 ) -> list[Any]:
     """Insert per-criterion rows in bm_analysis_criterion_results and return them."""
     from app.models.analyses import AnalysisCriterionResult
-    criteria: list[PromptCriterion] = await get_active_criteria(db, prompt_id)
+    criteria: list[PromptCriterion] = (
+        active_criteria if active_criteria is not None else await get_active_criteria(db, prompt_id)
+    )
     c_ids = [c.criterion_id for c in criteria]
 
     # Fetch criterion-typology associations

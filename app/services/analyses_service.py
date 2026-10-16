@@ -453,4 +453,21 @@ async def enrich_analyses(db: AsyncSession, items: list[Any]) -> list[Any]:
         setattr(item, 'typology_key', t_key)
         setattr(item, 'typology_name', t_name)
 
+        item_type = getattr(item, 'analysis_type', None)
+        item_call_id = getattr(item, 'call_id', None)
+        item_payload = getattr(item, 'payload', None)
+        has_payload_audio = isinstance(item_payload, dict) and bool(
+            item_payload.get('recording_url')
+            or item_payload.get('audio_url')
+            or item_payload.get('cloudtalk_id')
+            or (isinstance(item_payload.get('hubspot_data'), dict) and (
+                item_payload['hubspot_data'].get('recording_url')
+                or item_payload['hubspot_data'].get('cloudtalk_id')
+            ))
+        )
+        if aid and (item_type == 'audio' or has_payload_audio) and (item_call_id or has_payload_audio):
+            setattr(item, 'recording_url', f"/bm/analyses/{aid}/recording-audio")
+        else:
+            setattr(item, 'recording_url', None)
+
     return items

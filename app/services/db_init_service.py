@@ -1437,7 +1437,7 @@ async def init_db():
 
         # 3. Seed structures in a safe, non-destructive session
         from app.dependencies import get_db
-        async with AsyncSession(engine) as db:
+        async with AsyncSession(engine, expire_on_commit=False) as db:
             # Seed default Services
             services_data = [
                 {"key": "front", "name": "Front", "desc": "Servicio de Front Desk / Recepción"},

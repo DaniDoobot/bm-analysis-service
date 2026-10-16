@@ -85,7 +85,28 @@ def build_summary(analysis: Analysis, results: list[AnalysisResult]) -> dict[str
         "prompt_id": analysis.prompt_id,
         "prompt_version_id": analysis.prompt_version_id,
         "total_results": len(results),
+        "recording_url": getattr(analysis, "recording_url", None),
     }
+
+
+def _parse_numeric_criterion_value(raw_value: Any, criterion_type: str) -> float:
+    """
+    Parse a numeric or percentage value from AI output.
+    Accepts int, float, Decimal, numeric strings, and percentage strings like '46%' or '46,5 %'.
+    Raises ValueError or TypeError if conversion is not possible.
+    """
+    if isinstance(raw_value, bool):
+        raise TypeError("Boolean is not a valid numeric criterion value")
+    if isinstance(raw_value, (int, float, Decimal)):
+        return float(raw_value)
+    if isinstance(raw_value, str):
+        cleaned = raw_value.strip()
+        if cleaned.endswith("%"):
+            cleaned = cleaned[:-1].strip()
+        if "," in cleaned and "." not in cleaned:
+            cleaned = cleaned.replace(",", ".")
+        return float(cleaned)
+    return float(raw_value)
 
 
 def map_criterion_value(
@@ -114,7 +135,7 @@ def map_criterion_value(
 
     if criterion_type in ("score_1_10", "percentage", "number"):
         try:
-            out["value_number"] = float(raw_value)
+            out["value_number"] = _parse_numeric_criterion_value(raw_value, criterion_type)
         except (ValueError, TypeError):
             logger.warning(
                 "Cannot convert %r to number for criterion_type=%s", raw_value, criterion_type

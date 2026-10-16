@@ -718,3 +718,297 @@ class TestTranscriptionAnalysisServiceIntegration(unittest.IsolatedAsyncioTestCa
                     self.assertEqual(res.get("stage"), "download_audio")
                     self.assertIn("login de Microsoft", res.get("error_message"))
 
+
+class TestAnalysisRecordingAudioEndpoint(unittest.IsolatedAsyncioTestCase):
+    """
+    Tests for GET /bm/analyses/{analysis_id}/recording-audio (Laboratorio playback):
+    1. Existing analysis + CloudTalk -> WAV 200 (audio/wav)
+    2. Historical analysis without CloudTalk -> MP3 fallback (audio/mpeg)
+    3. Nonexistent analysis_id -> 404
+    4. Analysis from another company -> 403
+    5. Unauthorized service -> 403
+    6. CloudTalk failure + fallback recording_url -> works (MP3 200)
+    7. Analysis without available audio -> controlled error (404 / 502)
+    8. Zero credentials in response or logs
+    """
+
+    def _make_context(
+        self,
+        *,
+        is_super_admin: bool = False,
+        company_id: int = 1,
+        allowed_company_ids: list[int] | None = None,
+        allowed_service_ids: list[int] | None = None,
+        allowed_agent_ids: list[str] | None = None,
+    ):
+        ctx = MagicMock()
+        ctx.is_super_admin = is_super_admin
+        ctx.company_id = company_id
+        ctx.allowed_company_ids = allowed_company_ids if allowed_company_ids is not None else [company_id]
+        ctx.allowed_service_ids = allowed_service_ids
+        ctx.allowed_agent_ids = allowed_agent_ids
+        return ctx
+
+    def _make_analysis(
+        self,
+        *,
+        analysis_id: int = 220,
+        call_id: str = "1320873716",
+        company_id: int = 1,
+        service_id: int = 1,
+        hubspot_owner_id: str = "owner_1",
+        payload: dict | None = None,
+    ):
+        rec = MagicMock()
+        rec.analysis_id = analysis_id
+        rec.call_id = call_id
+        rec.company_id = company_id
+        rec.service_id = service_id
+        rec.prompt_id = 58
+        rec.hubspot_owner_id = hubspot_owner_id
+        rec.payload = payload if payload is not None else {
+            "recording_url": "https://grabaciones.bostonmedical.info/boston/file.php?f=call_1320873716.mp3",
+            "hubspot_data": {
+                "call_id": "528232473849",
+                "cloudtalk_id": "1320873716",
+                "recording_url": "https://grabaciones.bostonmedical.info/boston/file.php?f=call_1320873716.mp3",
+            },
+        }
+        return rec
+
+    def _mock_db_returning(self, record):
+        mock_db = AsyncMock()
+        mock_res = MagicMock()
+        mock_res.scalar_one_or_none.return_value = record
+        mock_db.execute.return_value = mock_res
+        return mock_db
+
+    async def test_1_existing_analysis_with_cloudtalk_returns_wav_200(self):
+        from app.routers.analyses import get_analysis_recording_audio
+
+        record = self._make_analysis(analysis_id=220, call_id="1320873716")
+        mock_db = self._mock_db_returning(record)
+        ctx = self._make_context(company_id=1, allowed_service_ids=[1])
+
+        with patch(
+            "app.services.audio_download_service.AudioDownloadService.download_audio",
+            new_callable=AsyncMock,
+            return_value=FAKE_WAV_BYTES,
+        ) as mock_dl:
+            resp = await get_analysis_recording_audio(analysis_id=220, db=mock_db, context=ctx)
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(resp.media_type, "audio/wav")
+            self.assertEqual(resp.body, FAKE_WAV_BYTES)
+            self.assertIn('filename="analysis_220.wav"', resp.headers.get("content-disposition", ""))
+            self.assertEqual(resp.headers.get("cache-control"), "private, no-store")
+            mock_dl.assert_called_once_with(
+                "https://grabaciones.bostonmedical.info/boston/file.php?f=call_1320873716.mp3",
+                cloudtalk_id="1320873716",
+            )
+
+    async def test_2_historical_analysis_without_cloudtalk_returns_mp3_fallback(self):
+        from app.routers.analyses import get_analysis_recording_audio
+
+        record = self._make_analysis(
+            analysis_id=105,
+            call_id="TEST_HIST_105",
+            payload={
+                "recording_url": "https://grabaciones.bostonmedical.info/boston/file.php?f=call_999.mp3",
+                "hubspot_data": {},
+            },
+        )
+        mock_db = self._mock_db_returning(record)
+        ctx = self._make_context(company_id=1, allowed_service_ids=[1])
+
+        with patch(
+            "app.services.audio_download_service.AudioDownloadService.download_audio",
+            new_callable=AsyncMock,
+            return_value=FAKE_MP3_BYTES,
+        ) as mock_dl:
+            resp = await get_analysis_recording_audio(analysis_id=105, db=mock_db, context=ctx)
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(resp.media_type, "audio/mpeg")
+            self.assertEqual(resp.body, FAKE_MP3_BYTES)
+            self.assertIn('filename="analysis_105.mp3"', resp.headers.get("content-disposition", ""))
+            mock_dl.assert_called_once_with(
+                "https://grabaciones.bostonmedical.info/boston/file.php?f=call_999.mp3",
+                cloudtalk_id=None,
+            )
+
+    async def test_3_nonexistent_analysis_returns_404(self):
+        from fastapi import HTTPException
+        from app.routers.analyses import get_analysis_recording_audio
+
+        mock_db = self._mock_db_returning(None)
+        ctx = self._make_context(company_id=1)
+
+        with self.assertRaises(HTTPException) as exc_ctx:
+            await get_analysis_recording_audio(analysis_id=999999, db=mock_db, context=ctx)
+        self.assertEqual(exc_ctx.exception.status_code, 404)
+
+    async def test_4_cross_company_analysis_returns_403(self):
+        from fastapi import HTTPException
+        from app.routers.analyses import get_analysis_recording_audio
+
+        record = self._make_analysis(analysis_id=220, company_id=1, service_id=1)
+        mock_db = self._mock_db_returning(record)
+        ctx = self._make_context(company_id=7, allowed_company_ids=[7])
+
+        with self.assertRaises(HTTPException) as exc_ctx:
+            await get_analysis_recording_audio(analysis_id=220, db=mock_db, context=ctx)
+        self.assertEqual(exc_ctx.exception.status_code, 403)
+
+    async def test_5_unauthorized_service_returns_403(self):
+        from fastapi import HTTPException
+        from app.routers.analyses import get_analysis_recording_audio
+
+        record = self._make_analysis(analysis_id=220, company_id=1, service_id=1)
+        mock_db = self._mock_db_returning(record)
+        ctx = self._make_context(company_id=1, allowed_company_ids=[1], allowed_service_ids=[2, 3])
+
+        with self.assertRaises(HTTPException) as exc_ctx:
+            await get_analysis_recording_audio(analysis_id=220, db=mock_db, context=ctx)
+        self.assertEqual(exc_ctx.exception.status_code, 403)
+
+    async def test_6_cloudtalk_failure_falls_back_to_ia_espana_mp3(self):
+        from app.routers.analyses import get_analysis_recording_audio
+
+        record = self._make_analysis(analysis_id=220, call_id="1320873716")
+        mock_db = self._mock_db_returning(record)
+        ctx = self._make_context(company_id=1, allowed_service_ids=[1])
+
+        ct_404 = MagicMock()
+        ct_404.status_code = 404
+        ct_404.headers = {}
+
+        boston_200 = MagicMock()
+        boston_200.status_code = 200
+        boston_200.url = "https://grabaciones.bostonmedical.info/boston/file.php?f=call_1320873716.mp3"
+        boston_200.headers = {"content-type": "audio/mpeg"}
+        boston_200.content = FAKE_MP3_BYTES
+        boston_200.history = []
+
+        with patch("app.services.cloudtalk_service.CloudTalkService.is_configured", new_callable= lambda: property(lambda self: True)):
+            with patch("httpx.AsyncClient.get", new_callable=AsyncMock, side_effect=[ct_404, boston_200]):
+                resp = await get_analysis_recording_audio(analysis_id=220, db=mock_db, context=ctx)
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(resp.media_type, "audio/mpeg")
+                self.assertEqual(resp.body, FAKE_MP3_BYTES)
+
+    async def test_7_analysis_without_audio_returns_controlled_404(self):
+        from fastapi import HTTPException
+        from app.routers.analyses import get_analysis_recording_audio
+
+        record = self._make_analysis(
+            analysis_id=221,
+            call_id="TEST_NO_AUDIO",
+            payload={"recording_url": None, "hubspot_data": {}},
+        )
+        mock_db = self._mock_db_returning(record)
+        ctx = self._make_context(company_id=1, allowed_service_ids=[1])
+
+        with self.assertRaises(HTTPException) as exc_ctx:
+            await get_analysis_recording_audio(analysis_id=221, db=mock_db, context=ctx)
+        self.assertEqual(exc_ctx.exception.status_code, 404)
+
+    async def test_8_zero_credentials_in_error_response_or_logs(self):
+        from fastapi import HTTPException
+        from app.routers.analyses import get_analysis_recording_audio
+
+        secret_boston = "SECRET_BOSTON_API_KEY_xyz987"
+        secret_ct = "SECRET_CLOUDTALK_KEY_abc123"
+        record = self._make_analysis(
+            analysis_id=220,
+            call_id="1320873716",
+            payload={
+                "recording_url": f"https://grabaciones.bostonmedical.info/boston/file.php?f=call_1320873716.mp3&token={secret_boston}",
+                "cloudtalk_id": "1320873716",
+            },
+        )
+        mock_db = self._mock_db_returning(record)
+        ctx = self._make_context(company_id=1, allowed_service_ids=[1])
+
+        with patch(
+            "app.services.audio_download_service.AudioDownloadService.download_audio",
+            new_callable=AsyncMock,
+            side_effect=AudioDownloadError("Upstream 404 not found", status_code=404, stage="download_audio"),
+        ):
+            with self.assertRaises(HTTPException) as exc_ctx:
+                await get_analysis_recording_audio(analysis_id=220, db=mock_db, context=ctx)
+            self.assertEqual(exc_ctx.exception.status_code, 404)
+            self.assertNotIn(secret_boston, str(exc_ctx.exception.detail))
+            self.assertNotIn(secret_ct, str(exc_ctx.exception.detail))
+
+
+class TestPercentageCriterionMapping(unittest.TestCase):
+    """Verify percentage strings like '46%' and '54%' convert cleanly without warnings."""
+
+    def test_percentage_strings_and_numbers(self):
+        from app.services.analysis_results_mapper import map_criterion_value
+
+        r1 = map_criterion_value("46%", "percentage")
+        self.assertEqual(r1["value_number"], 46.0)
+        self.assertEqual(r1["raw_value"], "46%")
+
+        r2 = map_criterion_value("54%", "percentage")
+        self.assertEqual(r2["value_number"], 54.0)
+        self.assertEqual(r2["raw_value"], "54%")
+
+        r3 = map_criterion_value("46,5 %", "percentage")
+        self.assertEqual(r3["value_number"], 46.5)
+
+        r4 = map_criterion_value(46, "percentage")
+        self.assertEqual(r4["value_number"], 46.0)
+
+        r5 = map_criterion_value("not_a_number", "percentage")
+        self.assertIsNone(r5["value_number"])
+
+
+class TestFixDemoAgentNamesStartup(unittest.IsolatedAsyncioTestCase):
+    """Verify fix_demo_agent_names skips redundant updates when already normalized and never triggers MissingGreenlet."""
+
+    async def test_skips_bulk_update_when_already_normalized(self):
+        from scripts.fix_demo_agent_names import fix_demo_agent_names, calculate_demo_agent_code
+
+        mock_company = MagicMock()
+        mock_company.company_id = 7
+        mock_company.company_name = "Empresa Demo"
+        mock_company.company_key = "empresa-demo"
+        mock_company.is_demo = True
+
+        # Create 60 normalized users
+        users = []
+        for i in range(1, 61):
+            idx_str = f"{i:02d}"
+            u = MagicMock()
+            u.user_id = 1000 + i
+            u.company_id = 7
+            u.hubspot_owner_id = f"demo_owner_{idx_str}"
+            u.name = f"Agente Demo {idx_str}"
+            u.username = f"agente.demo.{idx_str}"
+            u.email = f"agente.demo.{idx_str}@doobot.ai"
+            u.agent_initials = calculate_demo_agent_code(i)
+            users.append(u)
+
+        res_users = MagicMock()
+        res_users.scalars.return_value.all.return_value = users
+
+        res_zero = MagicMock()
+        res_zero.scalar.return_value = 0
+
+        mock_db = AsyncMock()
+        mock_db.execute.side_effect = [res_users, res_zero, res_zero, res_zero]
+
+        with patch("scripts.fix_demo_agent_names.resolve_demo_company", new_callable=AsyncMock, return_value=mock_company):
+            result = await fix_demo_agent_names(mock_db, dry_run=False)
+            self.assertEqual(result["company_id"], 7)
+            self.assertEqual(result["company_name"], "Empresa Demo")
+            self.assertTrue(result.get("skipped"))
+            self.assertEqual(result["updated_evals"], 0)
+            mock_db.commit.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+

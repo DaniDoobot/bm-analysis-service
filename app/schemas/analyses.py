@@ -41,6 +41,7 @@ class AnalysisListItem(BaseModel):
     typology_id: int | None = None
     typology_key: str | None = None
     typology_name: str | None = None
+    recording_url: str | None = None
 
 
 class AnalysisDetail(BaseModel):
@@ -86,6 +87,7 @@ class AnalysisDetail(BaseModel):
     typology_id: int | None = None
     typology_key: str | None = None
     typology_name: str | None = None
+    recording_url: str | None = None
 
 
 class AnalysisResultOut(BaseModel):

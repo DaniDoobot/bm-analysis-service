@@ -107,12 +107,15 @@ async def fix_demo_agent_names(
         demo_company = await resolve_demo_company(db)
 
     demo_company_id = demo_company.company_id
+    demo_company_name = demo_company.company_name
+    demo_company_key = demo_company.company_key
+    demo_company_is_demo = demo_company.is_demo
     logger.info(
         "Targeting demo company: id=%d, name='%s', key='%s', is_demo=%s (dry_run=%s)",
         demo_company_id,
-        demo_company.company_name,
-        demo_company.company_key,
-        demo_company.is_demo,
+        demo_company_name,
+        demo_company_key,
+        demo_company_is_demo,
         dry_run,
     )
 
@@ -136,28 +139,118 @@ async def fix_demo_agent_names(
             logger.critical(err_msg)
             raise RuntimeError(err_msg)
 
-    print("\n" + "=" * 95)
-    print(f"DEMO AGENTS CORRECTION (company_id={demo_company_id}, name='{demo_company.company_name}') - DRY RUN: {dry_run}")
-    print(f"Total demo agent records found in database: {len(existing_users)}")
-    print("=" * 95)
-    print(f"{'HS Owner ID':<15} | {'Nombre Actual':<25} -> {'Nombre Nuevo':<20} | {'Cód. Actual':<12} -> {'Cód. Nuevo':<10}")
-    print("-" * 95)
-
     user_by_oid: Dict[str, User] = {u.hubspot_owner_id: u for u in existing_users if u.hubspot_owner_id}
 
+    # Check whether any demo user needs normalization
+    users_need_update = False
     for i in range(1, 61):
         idx_str = f"{i:02d}"
         oid = f"demo_owner_{idx_str}"
         target_name = f"Agente Demo {idx_str}"
+        target_username = f"agente.demo.{idx_str}"
+        target_email = f"agente.demo.{idx_str}@doobot.ai"
         target_code = calculate_demo_agent_code(i)
-
         current_u = user_by_oid.get(oid) or user_by_oid.get(f"demo_owner_{i}")
-        curr_name = (current_u.name if current_u and current_u.name else "(no existe)")
-        curr_code = (current_u.agent_initials if current_u and current_u.agent_initials else "-")
+        if current_u and (
+            current_u.name != target_name
+            or current_u.username != target_username
+            or current_u.email != target_email
+            or current_u.agent_initials != target_code
+            or current_u.hubspot_owner_id != oid
+        ):
+            users_need_update = True
+            break
 
-        print(f"{oid:<15} | {curr_name:<25} -> {target_name:<20} | {curr_code:<12} -> {target_code:<10}")
+    if not users_need_update and not dry_run:
+        # Fast check if any related table has unnormalized demo_owner_X (1..9 without leading zero)
+        # or non-matching agent_name prefix
+        from sqlalchemy import func
+        legacy_oids = [f"demo_owner_{i}" for i in range(1, 10)]
+        dirty_evals = (
+            await db.execute(
+                select(func.count())
+                .select_from(MassEvaluationResult)
+                .where(
+                    MassEvaluationResult.company_id == demo_company_id,
+                    MassEvaluationResult.hubspot_owner_id.like("demo_owner_%"),
+                    or_(
+                        MassEvaluationResult.hubspot_owner_id.in_(legacy_oids),
+                        MassEvaluationResult.agent_name.is_(None),
+                        ~MassEvaluationResult.agent_name.like("Agente Demo %"),
+                    ),
+                )
+            )
+        ).scalar() or 0
+        dirty_reports = (
+            await db.execute(
+                select(func.count())
+                .select_from(TrainingAgentReport)
+                .where(
+                    TrainingAgentReport.company_id == demo_company_id,
+                    TrainingAgentReport.hubspot_owner_id.like("demo_owner_%"),
+                    or_(
+                        TrainingAgentReport.hubspot_owner_id.in_(legacy_oids),
+                        TrainingAgentReport.agent_name.is_(None),
+                        ~TrainingAgentReport.agent_name.like("Agente Demo %"),
+                    ),
+                )
+            )
+        ).scalar() or 0
+        dirty_settings = (
+            await db.execute(
+                select(func.count())
+                .select_from(TrainingAgentSetting)
+                .where(
+                    TrainingAgentSetting.company_id == demo_company_id,
+                    TrainingAgentSetting.hubspot_owner_id.like("demo_owner_%"),
+                    or_(
+                        TrainingAgentSetting.hubspot_owner_id.in_(legacy_oids),
+                        TrainingAgentSetting.agent_name.is_(None),
+                        ~TrainingAgentSetting.agent_name.like("Agente Demo %"),
+                    ),
+                )
+            )
+        ).scalar() or 0
 
-    print("=" * 95 + "\n")
+        if dirty_evals == 0 and dirty_reports == 0 and dirty_settings == 0:
+            logger.info(
+                "Demo agent names already normalized for company_id=%d (%d users); skipping bulk update.",
+                demo_company_id,
+                len(existing_users),
+            )
+            return {
+                "company_id": demo_company_id,
+                "company_name": demo_company_name,
+                "found_demo_users": len(existing_users),
+                "updated_users": 0,
+                "updated_settings": 0,
+                "updated_evals": 0,
+                "updated_reports": 0,
+                "dry_run": dry_run,
+                "skipped": True,
+            }
+
+    if dry_run or users_need_update:
+        print("\n" + "=" * 95)
+        print(f"DEMO AGENTS CORRECTION (company_id={demo_company_id}, name='{demo_company_name}') - DRY RUN: {dry_run}")
+        print(f"Total demo agent records found in database: {len(existing_users)}")
+        print("=" * 95)
+        print(f"{'HS Owner ID':<15} | {'Nombre Actual':<25} -> {'Nombre Nuevo':<20} | {'Cód. Actual':<12} -> {'Cód. Nuevo':<10}")
+        print("-" * 95)
+
+        for i in range(1, 61):
+            idx_str = f"{i:02d}"
+            oid = f"demo_owner_{idx_str}"
+            target_name = f"Agente Demo {idx_str}"
+            target_code = calculate_demo_agent_code(i)
+
+            current_u = user_by_oid.get(oid) or user_by_oid.get(f"demo_owner_{i}")
+            curr_name = (current_u.name if current_u and current_u.name else "(no existe)")
+            curr_code = (current_u.agent_initials if current_u and current_u.agent_initials else "-")
+
+            print(f"{oid:<15} | {curr_name:<25} -> {target_name:<20} | {curr_code:<12} -> {target_code:<10}")
+
+        print("=" * 95 + "\n")
 
     updated_users = 0
     updated_settings = 0
@@ -174,10 +267,20 @@ async def fix_demo_agent_names(
 
         oids = [f"demo_owner_{idx_str}", f"demo_owner_{i}"]
 
-        # 1. Update User
+        # 1. Update User (only rows that differ)
         stmt_u = (
             update(User)
-            .where(User.company_id == demo_company_id, User.hubspot_owner_id.in_(oids))
+            .where(
+                User.company_id == demo_company_id,
+                User.hubspot_owner_id.in_(oids),
+                or_(
+                    User.name.is_distinct_from(target_name),
+                    User.username.is_distinct_from(target_username),
+                    User.email.is_distinct_from(target_email),
+                    User.agent_initials.is_distinct_from(target_code),
+                    User.hubspot_owner_id.is_distinct_from(oid),
+                ),
+            )
             .values(
                 name=target_name,
                 username=target_username,
@@ -187,12 +290,20 @@ async def fix_demo_agent_names(
             )
         )
         res_u = await db.execute(stmt_u)
-        updated_users += res_u.rowcount
+        updated_users += res_u.rowcount or 0
 
-        # 2. Update TrainingAgentSetting
+        # 2. Update TrainingAgentSetting (only rows that differ)
         stmt_s = (
             update(TrainingAgentSetting)
-            .where(TrainingAgentSetting.company_id == demo_company_id, TrainingAgentSetting.hubspot_owner_id.in_(oids))
+            .where(
+                TrainingAgentSetting.company_id == demo_company_id,
+                TrainingAgentSetting.hubspot_owner_id.in_(oids),
+                or_(
+                    TrainingAgentSetting.agent_name.is_distinct_from(target_name),
+                    TrainingAgentSetting.agent_initials.is_distinct_from(target_code),
+                    TrainingAgentSetting.hubspot_owner_id.is_distinct_from(oid),
+                ),
+            )
             .values(
                 agent_name=target_name,
                 agent_initials=target_code,
@@ -200,24 +311,39 @@ async def fix_demo_agent_names(
             )
         )
         res_s = await db.execute(stmt_s)
-        updated_settings += res_s.rowcount
+        updated_settings += res_s.rowcount or 0
 
-        # 3. Update MassEvaluationResult
+        # 3. Update MassEvaluationResult (only rows that differ)
         stmt_e = (
             update(MassEvaluationResult)
-            .where(MassEvaluationResult.company_id == demo_company_id, MassEvaluationResult.hubspot_owner_id.in_(oids))
+            .where(
+                MassEvaluationResult.company_id == demo_company_id,
+                MassEvaluationResult.hubspot_owner_id.in_(oids),
+                or_(
+                    MassEvaluationResult.agent_name.is_distinct_from(target_name),
+                    MassEvaluationResult.hubspot_owner_id.is_distinct_from(oid),
+                ),
+            )
             .values(
                 agent_name=target_name,
                 hubspot_owner_id=oid,
             )
         )
         res_e = await db.execute(stmt_e)
-        updated_evals += res_e.rowcount
+        updated_evals += res_e.rowcount or 0
 
-        # 4. Update TrainingAgentReport
+        # 4. Update TrainingAgentReport (only rows that differ)
         stmt_r = (
             update(TrainingAgentReport)
-            .where(TrainingAgentReport.company_id == demo_company_id, TrainingAgentReport.hubspot_owner_id.in_(oids))
+            .where(
+                TrainingAgentReport.company_id == demo_company_id,
+                TrainingAgentReport.hubspot_owner_id.in_(oids),
+                or_(
+                    TrainingAgentReport.agent_name.is_distinct_from(target_name),
+                    TrainingAgentReport.agent_initials.is_distinct_from(target_code),
+                    TrainingAgentReport.hubspot_owner_id.is_distinct_from(oid),
+                ),
+            )
             .values(
                 agent_name=target_name,
                 agent_initials=target_code,
@@ -225,10 +351,10 @@ async def fix_demo_agent_names(
             )
         )
         res_r = await db.execute(stmt_r)
-        updated_reports += res_r.rowcount
+        updated_reports += res_r.rowcount or 0
 
     logger.info(
-        "Demo agent names fix summary for company_id=%d: %d users, %d training settings, %d mass evaluations, %d training reports matched/updated.",
+        "Demo agent names fix summary for company_id=%d: %d users, %d training settings, %d mass evaluations, %d training reports updated.",
         demo_company_id,
         updated_users,
         updated_settings,
@@ -237,15 +363,16 @@ async def fix_demo_agent_names(
     )
 
     if not dry_run:
-        await db.commit()
-        logger.info("Changes successfully committed to database.")
+        if updated_users or updated_settings or updated_evals or updated_reports:
+            await db.commit()
+            logger.info("Changes successfully committed to database.")
     else:
         await db.rollback()
         logger.info("[DRY RUN] Rolled back all changes without committing.")
 
     return {
         "company_id": demo_company_id,
-        "company_name": demo_company.company_name,
+        "company_name": demo_company_name,
         "found_demo_users": len(existing_users),
         "updated_users": updated_users,
         "updated_settings": updated_settings,

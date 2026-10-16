@@ -78,6 +78,9 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
     resolved_service_id = requested_service_id
     resolved_company_id = requested_company_id
     prompt_text = None
+    prompt_already_synced = False
+    resolved_prompt_name = None
+    resolved_service_name = None
 
     logger.info(
         "Test analysis audio request: call_id=%s, service_id=%s, prompt_id=%s, company_id=%s",
@@ -99,6 +102,8 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
                 "stage": "validation",
                 "error_message": f"La estructura con ID {resolved_prompt_id} no existe o se encuentra archivada/eliminada.",
             }
+
+        resolved_prompt_name = p_obj.prompt_name
 
         if p_obj.service_id is not None:
             if resolved_service_id is not None and resolved_service_id != p_obj.service_id:
@@ -144,6 +149,9 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
         resolved_prompt_id = active_prompt.get("prompt_id")
         resolved_version_id = active_prompt.get("prompt_version_id") or active_prompt.get("current_version_id")
         prompt_text = active_prompt.get("prompt")
+        resolved_prompt_name = active_prompt.get("prompt_name")
+        resolved_service_name = active_prompt.get("service_name")
+        prompt_already_synced = bool(active_prompt.get("already_synced"))
         if active_prompt.get("company_id"):
             resolved_company_id = active_prompt.get("company_id")
 
@@ -163,6 +171,9 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
         prompt_text = active_prompt.get("prompt")
         resolved_service_id = active_prompt.get("service_id")
         resolved_company_id = active_prompt.get("company_id")
+        resolved_prompt_name = active_prompt.get("prompt_name")
+        resolved_service_name = active_prompt.get("service_name")
+        prompt_already_synced = bool(active_prompt.get("already_synced"))
 
     if not prompt_text:
         return {
@@ -303,31 +314,34 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
     audio_format = detect_audio_format(audio_bytes, target_url)
 
     # Self-heal/Sync the prompt text with active criteria before validating or analyzing
+    # (Skip if get_active_prompt already performed the sync in Step 1 of this same request)
     is_fallback_active = False
-    try:
-        from app.services.prompts_service import sync_prompt_text_with_active_criteria, PromptValidationError
-        from app.models.prompts import PromptVersion
-        
-        prompt_text_healed, changed = await sync_prompt_text_with_active_criteria(db, resolved_prompt_id, prompt_text)
-        if changed:
-            prompt_text = prompt_text_healed
-            v_obj = await db.get(PromptVersion, resolved_version_id)
-            if v_obj:
-                from sqlalchemy import func
-                v_obj.prompt = prompt_text
-                v_obj.updated_at = func.now() if hasattr(func, 'now') else datetime.now(timezone.utc)
-                db.add(v_obj)
-                await db.commit()
-                logger.info("Self-healed prompt version ID %s in audio analysis pipeline.", resolved_version_id)
-    except PromptValidationError as val_ex:
-        logger.warning(
-            "Prompt validation failed during audio analysis self-healing: %s. "
-            "Falling back to the last valid prompt version content currently stored.",
-            val_ex
-        )
-        is_fallback_active = True
-    except Exception as ex:
-        logger.error("Error during prompt self-healing in audio analysis pipeline: %s", ex, exc_info=True)
+    if not prompt_already_synced:
+        try:
+            from app.services.prompts_service import sync_prompt_text_with_active_criteria, PromptValidationError
+            from app.models.prompts import PromptVersion
+            
+            prompt_text_healed, changed = await sync_prompt_text_with_active_criteria(db, resolved_prompt_id, prompt_text)
+            if changed:
+                prompt_text = prompt_text_healed
+                v_obj = await db.get(PromptVersion, resolved_version_id)
+                if v_obj:
+                    from sqlalchemy import func
+                    from datetime import datetime, timezone
+                    v_obj.prompt = prompt_text
+                    v_obj.updated_at = func.now() if hasattr(func, 'now') else datetime.now(timezone.utc)
+                    db.add(v_obj)
+                    await db.commit()
+                    logger.info("Self-healed prompt version ID %s in audio analysis pipeline.", resolved_version_id)
+        except PromptValidationError as val_ex:
+            logger.warning(
+                "Prompt validation failed during audio analysis self-healing: %s. "
+                "Falling back to the last valid prompt version content currently stored.",
+                val_ex
+            )
+            is_fallback_active = True
+        except Exception as ex:
+            logger.error("Error during prompt self-healing in audio analysis pipeline: %s", ex, exc_info=True)
 
     # ── 4.2. Validate Active Criteria are in prompt_text ──────────────
     from app.services.criteria_service import get_active_criteria
@@ -351,7 +365,16 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
 
     logger.info("Resolved prompt_id=%s, version_id=%s for call_id=%s", resolved_prompt_id, resolved_version_id, call_id)
 
-    # ── 5. Call Azure OpenAI Audio ──────────────────────────────────────────
+    # ── 5. Call AI Provider (Audio) ─────────────────────────────────────────
+    safe_audio_duration: float | None = None
+    if duracion_llamada is not None:
+        try:
+            val_dur = float(duracion_llamada)
+            # HubSpot hs_call_duration is often in milliseconds if > 36000
+            safe_audio_duration = val_dur / 1000.0 if val_dur > 36000 else val_dur
+        except (ValueError, TypeError):
+            safe_audio_duration = None
+
     try:
         raw_response = await analyze_audio_bytes(
             audio_bytes=audio_bytes,
@@ -360,6 +383,8 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
             company_id=resolved_company_id,
             service_id=resolved_service_id,
             module="test_analysis",
+            call_id=str(call_id) if call_id is not None else None,
+            audio_duration_seconds=safe_audio_duration,
         )
     except ValueError as ve:
         logger.error("Azure config error: %s", ve)
@@ -398,10 +423,15 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
         from app.models.prompts import Prompt
         from app.models.typologies import Typology
         
-        prompt_obj = await db.get(Prompt, resolved_prompt_id)
-        if prompt_obj and prompt_obj.service_id:
+        effective_typo_service_id = resolved_service_id
+        if not effective_typo_service_id and resolved_prompt_id:
+            prompt_obj = await db.get(Prompt, resolved_prompt_id)
+            if prompt_obj and prompt_obj.service_id:
+                effective_typo_service_id = prompt_obj.service_id
+
+        if effective_typo_service_id:
             t_stmt = select(Typology.typology_key).where(
-                Typology.service_id == prompt_obj.service_id,
+                Typology.service_id == effective_typo_service_id,
                 Typology.is_active == True
             )
             t_res = await db.execute(t_stmt)
@@ -432,12 +462,11 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
     # ── 6.5. Defensive Keys Guard ──────────────────────────────────────────
     try:
         if parsed and isinstance(parsed, dict):
-            from app.services.criteria_service import get_active_criteria
             from app.models.criteria import PromptCriterionTypology
             from app.models.typologies import Typology
             from sqlalchemy import select
             
-            active_criteria_objs = await get_active_criteria(db, resolved_prompt_id)
+            active_criteria_objs = active_criteria
             if active_criteria_objs:
                 # Fetch criterion-typology mappings in batch
                 criteria_ids = [c.criterion_id for c in active_criteria_objs]
@@ -557,10 +586,12 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
             result_json=parsed,
             payload={
                 "recording_url": target_url,
+                "cloudtalk_id": str(cloudtalk_id) if cloudtalk_id else None,
                 "hubspot_data": hubspot_data if hubspot_data else None,
                 "raw_response": raw_response,
             },
             transcription=None,  # Audio has no explicit transcription
+            active_criteria=active_criteria,
         )
     except Exception as e:
         logger.error("Error saving audio analysis to DB for call_id=%s: %s", call_id, e, exc_info=True)
@@ -572,19 +603,19 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
         }
 
     # ── 8. Build Response ───────────────────────────────────────────────────
-    resolved_service_name = None
-    if analysis_record.service_id:
+    if not resolved_service_name and analysis_record.service_id:
         from app.models.services import Service
         s_obj = await db.get(Service, analysis_record.service_id)
         if s_obj:
             resolved_service_name = s_obj.service_name
 
-    resolved_prompt_name = None
-    if analysis_record.prompt_id:
+    if not resolved_prompt_name and analysis_record.prompt_id:
         from app.models.prompts import Prompt
         p_obj = await db.get(Prompt, analysis_record.prompt_id)
         if p_obj:
             resolved_prompt_name = p_obj.prompt_name
+
+    proxy_recording_url = f"/bm/analyses/{analysis_record.analysis_id}/recording-audio"
 
     summary = {
         "tipo_llamada": parsed.get("tipo_llamada"),
@@ -598,6 +629,7 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
         "agente_telefonico": agente_telefonico or parsed.get("agente_telefonico"),
         "objeciones": parsed.get("objeciones"),
         "propension": parsed.get("propension"),
+        "recording_url": proxy_recording_url,
     }
 
     logger.info("Completed audio analysis for call_id=%s (analysis_id=%s)", call_id, analysis_record.analysis_id)
@@ -608,6 +640,7 @@ async def process_audio_analysis(db: AsyncSession, request: AnalyzeAudioRequest)
         "message": "Análisis de audio completado y guardado en base de datos",
         "call_id": call_id,
         "analysis_id": analysis_record.analysis_id,
+        "recording_url": proxy_recording_url,
         "service_id": analysis_record.service_id,
         "service_name": resolved_service_name,
         "prompt_id": analysis_record.prompt_id,

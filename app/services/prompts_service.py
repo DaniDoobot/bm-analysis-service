@@ -417,7 +417,9 @@ async def sync_prompt_text_with_active_criteria(
 
     # 5. Check duplicate keys in new_prompt_text
     import re
-    header_count = len(re.findall(r"^\s*[-*]\s*\[[^\]]+\]", new_prompt_text, re.MULTILINE))
+    header_count = len(
+        re.findall(r"^\s*[-*]\s*\[[^\]]+\].*\b(?:output_key|feed_key):", new_prompt_text, re.MULTILINE | re.IGNORECASE)
+    )
     
     final_header_occurrences = {}
     for c in active_criteria:
@@ -793,9 +795,11 @@ async def get_active_prompt(
     prompt_text = current.prompt if current else None
     
     # Saneamiento automático / Sanity check antes de servir
+    already_synced = False
     if current and prompt_text:
         try:
             prompt_text, changed = await sync_prompt_text_with_active_criteria(db, p.prompt_id, prompt_text)
+            already_synced = True
             
             # Si hubo cambios, persistir en base de datos
             if changed or current.prompt != prompt_text:
@@ -828,10 +832,12 @@ async def get_active_prompt(
         "base_structure_id": p.base_structure_id,
         "base_structure_key": p.base_structure_key,
         "base_structure_name": p.base_structure_name,
+        "company_id": p.company_id,
         "service_id": p.service_id,
         "service_key": p.service.service_key if p.service else None,
         "service_name": p.service.service_name if p.service else None,
         "owner_user_id": p.owner_user_id,
+        "already_synced": already_synced,
 
         # Aliases for frontend compatibility
         "name": p.prompt_name,
