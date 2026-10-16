@@ -78,6 +78,24 @@ app.add_middleware(
 )
 
 # ── Global error handler ──────────────────────────────────────────────────────
+# TEMPORARY DIAGNOSTIC: CloudTalk webhook payload validation
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
+from app.routers.cloudtalk_webhook import log_cloudtalk_request_validation_error
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """
+    # TEMPORARY DIAGNOSTIC: CloudTalk webhook payload validation
+    Log detailed validation errors specifically for CloudTalk call-ended webhook.
+    For all other endpoints, delegates directly to default FastAPI validation handler.
+    """
+    if request.url.path.rstrip("/").endswith("/bm/integrations/cloudtalk/call-ended"):
+        await log_cloudtalk_request_validation_error(request, exc)
+    return await request_validation_exception_handler(request, exc)
+
+
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):
     logger.exception("Unhandled exception on %s %s", request.method, request.url)

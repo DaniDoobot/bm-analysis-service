@@ -535,6 +535,104 @@ class TestCloudTalkWebhookEvaluation(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(validate_webhook_secret("bad-key"))
             self.assertTrue(validate_webhook_secret(secret_sample))
 
+    # ── 18. Diagnóstico de 422 en Webhook CloudTalk ───────────────────────────
+    def test_webhook_422_request_validation_diagnostics_logging(self):
+        """18. Invalid payload triggers 422, logs diagnostics with loc/msg/type, and never leaks secret."""
+        secret_sample = "SUPER_SECRET_CLOUDTALK_KEY_998877"
+        settings = get_settings()
+
+        # Send invalid body: talking_time as invalid complex dict or list instead of expected type, or invalid json structure
+        # In CloudTalkWebhookPayload, Cdr must be Optional[Dict[str, Any]]. Passing a string triggers Pydantic RequestValidationError!
+        invalid_payload = {
+            "call_id": "1320873716",
+            "talking_time": 45,
+            "Cdr": "this_should_be_a_dict_not_a_string",
+        }
+
+        with patch.object(settings, "cloudtalk_webhook_secret", secret_sample), \
+             self.assertLogs("app.routers.cloudtalk_webhook", level="WARNING") as captured_logs:
+
+            response = self.client.post(
+                "/bm/integrations/cloudtalk/call-ended",
+                headers={
+                    "X-CloudTalk-Webhook-Key": secret_sample,
+                    "Content-Type": "application/json",
+                    "User-Agent": "CloudTalk-WorkflowAutomation/1.0",
+                },
+                json=invalid_payload,
+            )
+
+            # Response must still be 422 Unprocessable Entity
+            self.assertEqual(response.status_code, 422)
+
+            # Check that diagnostic logging fired
+            all_logs_text = "\n".join(captured_logs.output)
+            self.assertIn("[cloudtalk_webhook_validation_error]", all_logs_text)
+            self.assertIn("endpoint=/bm/integrations/cloudtalk/call-ended", all_logs_text)
+            self.assertIn("status=422", all_logs_text)
+            self.assertIn("content_type=application/json", all_logs_text)
+            self.assertIn("Cdr", all_logs_text)
+            self.assertIn("call_id", all_logs_text)
+
+            # CRITICAL: Verify secret was NEVER leaked into logs
+            self.assertNotIn(secret_sample, all_logs_text)
+
+    # ── 19. Diagnóstico de 422 en procesamiento (call_id ausente) ─────────────
+    def test_webhook_422_processing_error_diagnostics_logging(self):
+        """19. Payload without call_id triggers 422, logs diagnostic entry, and never leaks secret."""
+        secret_sample = "SUPER_SECRET_CLOUDTALK_KEY_554433"
+        settings = get_settings()
+
+        with patch.object(settings, "cloudtalk_webhook_secret", secret_sample), \
+             self.assertLogs("app.routers.cloudtalk_webhook", level="WARNING") as captured_logs:
+
+            response = self.client.post(
+                "/bm/integrations/cloudtalk/call-ended",
+                headers={
+                    "X-CloudTalk-Webhook-Key": secret_sample,
+                    "Content-Type": "application/json",
+                },
+                json={"talking_time": 25},  # Missing call_id / cdr_id
+            )
+
+            self.assertEqual(response.status_code, 422)
+            all_logs_text = "\n".join(captured_logs.output)
+            self.assertIn("[cloudtalk_webhook_validation_error]", all_logs_text)
+            self.assertIn("endpoint=/bm/integrations/cloudtalk/call-ended", all_logs_text)
+            self.assertIn("status=422", all_logs_text)
+            self.assertIn("call_id", all_logs_text)
+            self.assertNotIn(secret_sample, all_logs_text)
+
+    # ── 20. Verificación de scrubbing si el secreto viaja en el body ─────────
+    def test_webhook_422_scrubs_secret_if_passed_in_payload_body(self):
+        """20. Ensures configured secret is scrubbed even if passed in invalid payload body."""
+        secret_sample = "SUPER_SECRET_CLOUDTALK_KEY_999999"
+        settings = get_settings()
+
+        invalid_payload = {
+            "Cdr": secret_sample,  # Causes validation error and contains secret value
+            "token": secret_sample,
+            "secret_field": secret_sample,
+        }
+
+        with patch.object(settings, "cloudtalk_webhook_secret", secret_sample), \
+             self.assertLogs("app.routers.cloudtalk_webhook", level="WARNING") as captured_logs:
+
+            response = self.client.post(
+                "/bm/integrations/cloudtalk/call-ended",
+                headers={
+                    "X-CloudTalk-Webhook-Key": secret_sample,
+                    "Content-Type": "application/json",
+                },
+                json=invalid_payload,
+            )
+
+            self.assertEqual(response.status_code, 422)
+            all_logs_text = "\n".join(captured_logs.output)
+            self.assertIn("[cloudtalk_webhook_validation_error]", all_logs_text)
+            self.assertNotIn(secret_sample, all_logs_text)
+
 
 if __name__ == "__main__":
     unittest.main()
+
