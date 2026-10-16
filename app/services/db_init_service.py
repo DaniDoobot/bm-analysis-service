@@ -212,22 +212,23 @@ async def init_db():
         # 1.b Ensure bm_training_knowledge_documents and its partial unique indexes exist (v018)
         if engine.dialect.name != "sqlite":
             import os
-            v018_path = os.path.join(
+            migrations_dir = os.path.join(
                 os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
                 "migrations",
-                "v018_training_knowledge_documents.sql"
             )
-            if os.path.exists(v018_path):
-                try:
-                    async with engine.begin() as conn:
-                        with open(v018_path, "r", encoding="utf-8") as mf:
-                            sql_content = mf.read()
-                        statements = [stmt.strip() for stmt in sql_content.split(";") if stmt.strip()]
-                        for stmt in statements:
-                            await conn.execute(text(stmt))
-                        logger.info("Migration v018_training_knowledge_documents verified/applied successfully.")
-                except Exception as e_v018:
-                    logger.warning("Could not apply v018_training_knowledge_documents script directly: %s", e_v018)
+            for m_filename in ["v018_training_knowledge_documents.sql", "v026_cloudtalk_evaluation_jobs.sql"]:
+                m_path = os.path.join(migrations_dir, m_filename)
+                if os.path.exists(m_path):
+                    try:
+                        async with engine.begin() as conn:
+                            with open(m_path, "r", encoding="utf-8") as mf:
+                                sql_content = mf.read()
+                            statements = [stmt.strip() for stmt in sql_content.split(";") if stmt.strip()]
+                            for stmt in statements:
+                                await conn.execute(text(stmt))
+                            logger.info("Migration %s verified/applied successfully.", m_filename)
+                    except Exception as e_m:
+                        logger.warning("Could not apply %s script directly: %s", m_filename, e_m)
 
         # 1.c Verify that bm_training_knowledge_documents table exists
         async with engine.begin() as conn:
@@ -239,6 +240,14 @@ async def init_db():
                 logger.error("[DB INIT] CRITICAL: Table 'bm_training_knowledge_documents' does not exist after create_all!")
                 raise RuntimeError("Table 'bm_training_knowledge_documents' failed to initialize.")
             logger.info("[DB INIT] Verified table 'bm_training_knowledge_documents' is present.")
+
+            has_ct_jobs_table = await conn.run_sync(
+                lambda sync_conn: inspect(sync_conn).has_table("bm_cloudtalk_evaluation_jobs")
+            )
+            if not has_ct_jobs_table:
+                logger.error("[DB INIT] CRITICAL: Table 'bm_cloudtalk_evaluation_jobs' does not exist after create_all!")
+                raise RuntimeError("Table 'bm_cloudtalk_evaluation_jobs' failed to initialize.")
+            logger.info("[DB INIT] Verified table 'bm_cloudtalk_evaluation_jobs' is present.")
 
         # Early dynamic column migration for bm_users to avoid ProgrammingError on User model queries
         async with engine.begin() as conn:
@@ -1442,7 +1451,8 @@ async def init_db():
             services_data = [
                 {"key": "front", "name": "Front", "desc": "Servicio de Front Desk / Recepción"},
                 {"key": "experiencia_paciente", "name": "Experiencia de Paciente", "desc": "Servicio de Experiencia de Paciente"},
-                {"key": "asesorias", "name": "Asesorías", "desc": "Servicio de Asesorías / Consultas"}
+                {"key": "asesorias", "name": "Asesorías", "desc": "Servicio de Asesorías / Consultas"},
+                {"key": "cloudtalk_bot", "name": "Cloudtalk Bot", "desc": "Evaluación automática de llamadas de CloudTalk"},
             ]
             service_ids_map = {}
             for s_item in services_data:
@@ -1452,6 +1462,7 @@ async def init_db():
                 existing_s = res_s.scalars().first()
                 if not existing_s:
                     new_s = Service(
+                        company_id=1,
                         service_key=s_key,
                         service_name=s_item["name"],
                         description=s_item["desc"],
@@ -1462,6 +1473,8 @@ async def init_db():
                     service_ids_map[s_key] = new_s.service_id
                     logger.info("Seeded service: %s", s_key)
                 else:
+                    if existing_s.company_id is None:
+                        existing_s.company_id = 1
                     service_ids_map[s_key] = existing_s.service_id
 
             # Seed default Typologies for 'front' service

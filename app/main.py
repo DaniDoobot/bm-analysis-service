@@ -40,6 +40,7 @@ from app.routers import (
     admin_users,
     admin_teams,
     usage,
+    cloudtalk_webhook,
 )
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -120,6 +121,7 @@ app.include_router(teams.router)
 app.include_router(admin_users.router)
 app.include_router(admin_teams.router)
 app.include_router(usage.router)
+app.include_router(cloudtalk_webhook.router)
 
 
 
@@ -267,6 +269,38 @@ async def start_hubspot_alarm_recovery_scheduler():
             await asyncio.sleep(60)
 
 
+# ── CloudTalk Evaluation Scheduler ────────────────────────────────────────────
+async def start_cloudtalk_evaluation_scheduler():
+    """Background scheduler task checking for due CloudTalk evaluation jobs every 10 seconds."""
+    logger.info("CloudTalk evaluation background scheduler task started.")
+    import asyncio
+    await asyncio.sleep(8)  # Give app some startup headroom
+
+    from app.db import get_engine
+    from app.services.cloudtalk_webhook_service import run_due_cloudtalk_jobs
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    engine = get_engine()
+
+    while True:
+        try:
+            async with AsyncSession(engine) as db:
+                try:
+                    await run_due_cloudtalk_jobs(db, limit=20)
+                except Exception as e_inner:
+                    await db.rollback()
+                    logger.error("Error in cloudtalk evaluation job sweep: %s", e_inner)
+                finally:
+                    await db.close()
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            logger.info("CloudTalk evaluation background scheduler task cancelled.")
+            break
+        except Exception as e:
+            logger.error("Error in cloudtalk scheduler loop: %s", e, exc_info=True)
+            await asyncio.sleep(10)
+
+
 # ── Startup ───────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup_event():
@@ -326,5 +360,11 @@ async def startup_event():
         asyncio.create_task(start_hubspot_alarm_recovery_scheduler())
     else:
         logger.info("HubSpot alarm tickets recovery scheduler is DISABLED (HUBSPOT_ALARM_TICKETS_ENABLED=false).")
+
+    # Start CloudTalk automatic evaluation scheduler if enabled
+    if settings.enable_cloudtalk_scheduler:
+        asyncio.create_task(start_cloudtalk_evaluation_scheduler())
+    else:
+        logger.info("CloudTalk evaluation background scheduler is DISABLED (ENABLE_CLOUDTALK_SCHEDULER=false).")
 
 

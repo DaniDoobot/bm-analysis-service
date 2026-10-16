@@ -56,6 +56,8 @@ def resolve_functional_area(module: Optional[str]) -> str:
         return "TUTOR_IA"
     if m in ("prompt_builder", "criteria_generator"):
         return "CONFIGURACION_IA"
+    if m in ("cloudtalk_bot", "cloudtalk_automatic_evaluation"):
+        return "CLOUDTALK_BOT"
     return "OTROS"
 
 
@@ -79,6 +81,10 @@ def get_functional_area_expr():
         (
             AIUsageEvent.module.in_(["prompt_builder", "criteria_generator"]),
             "CONFIGURACION_IA",
+        ),
+        (
+            AIUsageEvent.module.in_(["cloudtalk_bot", "cloudtalk_automatic_evaluation"]),
+            "CLOUDTALK_BOT",
         ),
         else_="OTROS",
     )

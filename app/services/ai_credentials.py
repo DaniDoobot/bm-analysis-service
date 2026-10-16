@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 ALIAS_BOSTON_FRONT = "boston_front"
 ALIAS_BOSTON_EXPAC = "boston_expac"
 ALIAS_BOSTON_COMERCIALES = "boston_comerciales"
+ALIAS_BOSTON_CLOUDTALK_BOT = "boston_cloudtalk_bot"
 ALIAS_EMPRESA_DEMO = "empresa_demo"
 ALIAS_GLOBAL_FALLBACK = "global_fallback"
 
@@ -59,6 +60,18 @@ def resolve_gemini_credentials(
             if key and key.strip():
                 _log_resolved(company_id, service_id, module, ALIAS_BOSTON_COMERCIALES)
                 return key.strip(), ALIAS_BOSTON_COMERCIALES
+        elif service_id == 13 or module in ("cloudtalk_bot", "cloudtalk_automatic_evaluation"):
+            raw_key = os.environ.get("GEMINI_KEY_BOSTON_CLOUDTALK_BOT")
+            key = raw_key if raw_key is not None else getattr(settings, "gemini_key_boston_cloudtalk_bot", "")
+            if key and key.strip():
+                _log_resolved(company_id, service_id, module, ALIAS_BOSTON_CLOUDTALK_BOT)
+                return key.strip(), ALIAS_BOSTON_CLOUDTALK_BOT
+            # Architecturally fall back to Boston Front key if set, then global fallback
+            raw_front = os.environ.get("GEMINI_KEY_BOSTON_FRONT")
+            key_front = raw_front if raw_front is not None else getattr(settings, "gemini_key_boston_front", "")
+            if key_front and key_front.strip():
+                _log_resolved(company_id, service_id, module, ALIAS_BOSTON_FRONT)
+                return key_front.strip(), ALIAS_BOSTON_FRONT
 
     # 2. Empresa Demo (company_id=7)
     elif company_id == 7:

@@ -32,6 +32,7 @@ from app.models.trainer_chat import TrainerChat, TrainerChatMessage
 from app.models.ai_usage import AIUsageEvent, AIModelPricing
 from app.models.companies import Company
 from app.models.teams import Team, UserServiceAssociation, UserTeamAssociation, AgentTeamAssociation
+from app.models.cloudtalk_jobs import CloudTalkEvaluationJob
 
 __all__ = [
     "Company",
@@ -39,6 +40,7 @@ __all__ = [
     "UserServiceAssociation",
     "UserTeamAssociation",
     "AgentTeamAssociation",
+    "CloudTalkEvaluationJob",
     "Prompt",
     "PromptVersion",
     "PromptBaseStructure",

@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     gemini_key_boston_front: str = ""
     gemini_key_boston_expac: str = ""
     gemini_key_boston_comerciales: str = ""
+    gemini_key_boston_cloudtalk_bot: str = ""
     gemini_key_empresa_demo: str = ""
     gemini_model: str = "models/gemini-3.1-flash-live-preview"
     # Rollback values: gemini_analysis_model="gemini-3.1-flash-lite", gemini_report_model="gemini-3.5-flash"
@@ -70,6 +71,9 @@ class Settings(BaseSettings):
     cloudtalk_api_key_id: str = ""
     cloudtalk_api_key_secret: str = ""
     cloudtalk_api_base_url: str = "https://my.cloudtalk.io/api"
+    cloudtalk_webhook_secret: str = ""
+    cloudtalk_bot_service_key: str = "cloudtalk_bot"
+    enable_cloudtalk_scheduler: bool = True
 
     # ── Automation Scheduler ──────────────────────────────────────────────────
     enable_automation_scheduler: bool = False
