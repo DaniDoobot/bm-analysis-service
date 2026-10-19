@@ -890,8 +890,26 @@ class PersonalizedTrainingService:
         current_rep_by_owner: dict[str, TrainingAgentReport] = {}
         for r in all_agent_reps_list:
             reps_by_owner[r.hubspot_owner_id].append(r)
-            if r.is_current and r.hubspot_owner_id not in current_rep_by_owner:
-                current_rep_by_owner[r.hubspot_owner_id] = r
+
+        for owner_id_k, owner_reps in reps_by_owner.items():
+            cur_cands = [r for r in owner_reps if r.is_current and r.status != "superseded"]
+            active_cur = [r for r in cur_cands if r.status in ("in_progress", "running")]
+            if active_cur:
+                active_cur.sort(key=lambda r: r.training_report_id)
+                current_rep_by_owner[owner_id_k] = active_cur[0]
+            elif cur_cands:
+                valid_cur = [r for r in cur_cands if r.status in ("completed", "pending_approval")]
+                chosen = valid_cur[0] if valid_cur else cur_cands[0]
+                if chosen.status in ("failed", "skipped"):
+                    fallback_valid = [r for r in owner_reps if r.status in ("in_progress", "running", "completed")]
+                    if fallback_valid:
+                        active_fb = [r for r in fallback_valid if r.status in ("in_progress", "running")]
+                        if active_fb:
+                            active_fb.sort(key=lambda r: r.training_report_id)
+                            chosen = active_fb[0]
+                        else:
+                            chosen = fallback_valid[0]
+                current_rep_by_owner[owner_id_k] = chosen
 
         all_report_ids = [r.training_report_id for r in all_agent_reps_list]
 
@@ -2676,6 +2694,87 @@ class PersonalizedTrainingService:
         return mapped
 
     @staticmethod
+    async def _get_active_in_progress_cycle(
+        db: AsyncSession,
+        hubspot_owner_id: str,
+        exclude_report_id: Optional[int] = None,
+    ) -> Optional[TrainingAgentReport]:
+        """
+        Returns the earliest active cycle in ('in_progress', 'running') that still has
+        pending simulations (or 0 completion statuses created yet).
+        """
+        conds = [
+            TrainingAgentReport.hubspot_owner_id == hubspot_owner_id,
+            TrainingAgentReport.status.in_(["in_progress", "running"]),
+        ]
+        if exclude_report_id is not None:
+            conds.append(TrainingAgentReport.training_report_id != exclude_report_id)
+
+        stmt_active = (
+            select(TrainingAgentReport)
+            .where(and_(*conds))
+            .order_by(TrainingAgentReport.training_report_id.asc())
+        )
+        res_active = await db.execute(stmt_active)
+        candidates = list(res_active.scalars().all())
+        if not candidates:
+            return None
+
+        for cand in candidates:
+            stmt_total = select(func.count(TrainingCompletionStatus.completion_id)).where(
+                TrainingCompletionStatus.training_report_id == cand.training_report_id
+            )
+            total_c = (await db.execute(stmt_total)).scalar() or 0
+
+            stmt_done = select(func.count(TrainingCompletionStatus.completion_id)).where(
+                and_(
+                    TrainingCompletionStatus.training_report_id == cand.training_report_id,
+                    TrainingCompletionStatus.status == "completed",
+                )
+            )
+            done_c = (await db.execute(stmt_done)).scalar() or 0
+
+            if total_c == 0 or done_c < total_c:
+                return cand
+
+        return None
+
+    @staticmethod
+    async def _get_valid_visible_cycle(
+        db: AsyncSession,
+        hubspot_owner_id: str,
+        exclude_report_id: Optional[int] = None,
+    ) -> Optional[TrainingAgentReport]:
+        """
+        Returns the active in_progress/running cycle if one exists, otherwise the latest
+        completed cycle for this agent. Used to ensure failed/skipped/pending_approval
+        reports never displace a valid cycle visible to the agent.
+        """
+        active_cycle = await PersonalizedTrainingService._get_active_in_progress_cycle(
+            db, hubspot_owner_id=hubspot_owner_id, exclude_report_id=exclude_report_id
+        )
+        if active_cycle is not None:
+            return active_cycle
+
+        conds = [
+            TrainingAgentReport.hubspot_owner_id == hubspot_owner_id,
+            TrainingAgentReport.status == "completed",
+        ]
+        if exclude_report_id is not None:
+            conds.append(TrainingAgentReport.training_report_id != exclude_report_id)
+
+        stmt_comp = (
+            select(TrainingAgentReport)
+            .where(and_(*conds))
+            .order_by(
+                desc(TrainingAgentReport.is_current),
+                desc(TrainingAgentReport.training_report_id),
+            )
+        )
+        res_comp = await db.execute(stmt_comp)
+        return res_comp.scalars().first()
+
+    @staticmethod
     async def get_agent_detail(
         db: AsyncSession,
         hubspot_owner_id: str,
@@ -2701,7 +2800,7 @@ class PersonalizedTrainingService:
         # Fetch current report.
         # IMPORTANT: Cycles in 'pending_approval' status are intentionally excluded here by default.
         # They are visible to admins via /admin/agents/{id} but NOT to agents until approved.
-        excluded_statuses = ["archived"]
+        excluded_statuses = ["archived", "superseded"]
         if not include_pending_approval:
             excluded_statuses.append("pending_approval")
         
@@ -2713,7 +2812,40 @@ class PersonalizedTrainingService:
             )
         ).order_by(desc(TrainingAgentReport.training_report_id))
         res_rep = await db.execute(stmt_rep)
-        report = res_rep.scalars().first()
+        current_candidates = list(res_rep.scalars().all())
+
+        # Prioritize active in_progress/running cycle (oldest unfinished first), then completed,
+        # and ensure a failed/skipped report never hides a valid active or completed cycle.
+        report = None
+        active_current = [r for r in current_candidates if r.status in ("in_progress", "running")]
+        if active_current:
+            # Oldest active cycle takes precedence so earlier unfinished cycles are never hidden
+            active_current.sort(key=lambda r: r.training_report_id)
+            report = active_current[0]
+        elif current_candidates:
+            completed_current = [r for r in current_candidates if r.status == "completed"]
+            if include_pending_approval:
+                pending_app_current = [r for r in current_candidates if r.status == "pending_approval"]
+                if pending_app_current:
+                    report = pending_app_current[0]
+                elif completed_current:
+                    report = completed_current[0]
+                else:
+                    report = current_candidates[0]
+            else:
+                if completed_current:
+                    report = completed_current[0]
+                else:
+                    report = current_candidates[0]
+
+        # Defensive fallback: if report is None or failed/skipped, never leave the agent without
+        # access to an existing valid in_progress/running or completed cycle.
+        if report is None or report.status in ("failed", "skipped"):
+            valid_fallback = await PersonalizedTrainingService._get_valid_visible_cycle(
+                db, hubspot_owner_id=hubspot_owner_id
+            )
+            if valid_fallback is not None:
+                report = valid_fallback
 
         current_report_data = None
         progress_completed = 0
@@ -3899,9 +4031,9 @@ class PersonalizedTrainingService:
                 TrainingAgentReport.hubspot_owner_id == hubspot_owner_id,
                 TrainingAgentReport.period_start == period_start,
                 TrainingAgentReport.period_end == period_end,
-                TrainingAgentReport.is_current == True
+                TrainingAgentReport.status.notin_(["archived", "superseded"])
             )
-        )
+        ).order_by(desc(TrainingAgentReport.training_report_id))
         res_dup = await db.execute(stmt_dup)
         existing_report = res_dup.scalars().first()
         existing_report_id = existing_report.training_report_id if existing_report else None
@@ -3934,7 +4066,7 @@ class PersonalizedTrainingService:
             db, hubspot_owner_id=hubspot_owner_id, run_id=run_id
         )
 
-        # Create base report in database as 'running'
+        # Create base report in database as 'running' (is_current=False until lifecycle resolution)
         new_report = TrainingAgentReport(
             training_run_id=run_id,
             company_id=resolved_cid,
@@ -3945,7 +4077,7 @@ class PersonalizedTrainingService:
             period_start=period_start,
             period_end=period_end,
             status="running",
-            is_current=True
+            is_current=False
         )
         db.add(new_report)
         await db.flush()
@@ -3963,6 +4095,10 @@ class PersonalizedTrainingService:
                 logger.info("No evaluations found for agent %s in period %s to %s. Skipping report.", hubspot_owner_id, period_start, period_end)
                 new_report.status = "skipped"
                 new_report.skipped_reason = "No hay evaluaciones masivas en el periodo."
+                valid_prev = await PersonalizedTrainingService._get_valid_visible_cycle(
+                    db, hubspot_owner_id=hubspot_owner_id, exclude_report_id=new_report.training_report_id
+                )
+                new_report.is_current = (valid_prev is None)
                 await db.commit()
                 await db.refresh(new_report)
                 return new_report
@@ -4481,12 +4617,12 @@ class PersonalizedTrainingService:
             # NOTE: TrainingSimulationPrompt and TrainingCompletionStatus are intentionally NOT created here.
             # They will be generated by approve_training_cycle() when an admin approves this cycle.
 
-            # 9. Deactivate previous reports for this agent
-            # NOTE: We do NOT deactivate previous in_progress cycles when generating a new pending_approval.
-            # The admin will confirm the deactivation at approval time.
-            # We DO deactivate previous pending_approval reports for the same agent to avoid duplicates.
+            # 9. Resolve is_current lifecycle for pending_approval report
+            # Rule A & C: Never deactivate or displace an active (in_progress/running) or completed cycle
+            # while the new cycle is only in pending_approval.
+            # Rule D: Never leave two reports competing with is_current=True.
 
-            # Deactivate any previous pending_approval reports (but NOT in_progress ones)
+            # Deactivate any previous pending_approval reports (but NOT in_progress/completed ones)
             stmt_deact_pending = select(TrainingAgentReport).where(
                 and_(
                     TrainingAgentReport.hubspot_owner_id == hubspot_owner_id,
@@ -4500,6 +4636,32 @@ class PersonalizedTrainingService:
                 old_p.is_current = False
                 old_p.status = "superseded"
                 old_p.superseded_by_report_id = new_report.training_report_id
+
+            # Deactivate any previous failed/skipped reports that were marked current
+            stmt_deact_failed = select(TrainingAgentReport).where(
+                and_(
+                    TrainingAgentReport.hubspot_owner_id == hubspot_owner_id,
+                    TrainingAgentReport.training_report_id != new_report.training_report_id,
+                    TrainingAgentReport.status.in_(["failed", "skipped"]),
+                    or_(
+                        TrainingAgentReport.is_current == True,
+                        TrainingAgentReport.training_report_id == existing_report_id,
+                    ),
+                )
+            )
+            res_deact_failed = await db.execute(stmt_deact_failed)
+            for old_f in res_deact_failed.scalars().all():
+                old_f.is_current = False
+                old_f.superseded_by_report_id = new_report.training_report_id
+
+            valid_prev = await PersonalizedTrainingService._get_valid_visible_cycle(
+                db, hubspot_owner_id=hubspot_owner_id, exclude_report_id=new_report.training_report_id
+            )
+            if valid_prev is not None:
+                valid_prev.is_current = True
+                new_report.is_current = False
+            else:
+                new_report.is_current = True
 
             # 10. Commit
             logger.info("[training] commit_ok")
@@ -4517,6 +4679,18 @@ class PersonalizedTrainingService:
             
             # Start a clean transaction to insert a failed report with the traceback details
             try:
+                valid_prev = await PersonalizedTrainingService._get_valid_visible_cycle(
+                    db, hubspot_owner_id=hubspot_owner_id
+                )
+                stmt_pa = select(TrainingAgentReport).where(
+                    and_(
+                        TrainingAgentReport.hubspot_owner_id == hubspot_owner_id,
+                        TrainingAgentReport.status == "pending_approval",
+                    )
+                )
+                pending_pa = (await db.execute(stmt_pa)).scalars().first()
+                has_valid_or_pending = (valid_prev is not None) or (pending_pa is not None)
+
                 failed_report = TrainingAgentReport(
                     training_run_id=run_id,
                     company_id=resolved_cid,
@@ -4527,7 +4701,7 @@ class PersonalizedTrainingService:
                     period_start=period_start,
                     period_end=period_end,
                     status="failed",
-                    is_current=True,
+                    is_current=(not has_valid_or_pending),
                     error_message=str(ex),
                     evaluations_count=aggregates.get("evaluations_count", 0) if 'aggregates' in locals() else 0,
                     calls_count=aggregates.get("calls_count", 0) if 'aggregates' in locals() else 0,
@@ -4535,9 +4709,15 @@ class PersonalizedTrainingService:
                 db.add(failed_report)
                 await db.flush()
                 
-                # Deactivate previous reports even on failure so this failure is marked current
+                # Rule A & B: NEVER deactivate or supersede active (in_progress/running), completed,
+                # or pending_approval reports when a new report generation fails.
                 if existing_report_id:
-                    stmt_old = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == existing_report_id)
+                    stmt_old = select(TrainingAgentReport).where(
+                        and_(
+                            TrainingAgentReport.training_report_id == existing_report_id,
+                            TrainingAgentReport.status.in_(["failed", "skipped"]),
+                        )
+                    )
                     res_old = await db.execute(stmt_old)
                     old_rep = res_old.scalars().first()
                     if old_rep:
@@ -4545,18 +4725,21 @@ class PersonalizedTrainingService:
                         old_rep.status = "superseded"
                         old_rep.superseded_by_report_id = failed_report.training_report_id
                 
-                stmt_deact = select(TrainingAgentReport).where(
+                stmt_deact_failed = select(TrainingAgentReport).where(
                     and_(
                         TrainingAgentReport.hubspot_owner_id == hubspot_owner_id,
                         TrainingAgentReport.training_report_id != failed_report.training_report_id,
-                        TrainingAgentReport.is_current == True
+                        TrainingAgentReport.status.in_(["failed", "skipped"]),
+                        TrainingAgentReport.is_current == True,
                     )
                 )
-                res_deact = await db.execute(stmt_deact)
-                deacts = res_deact.scalars().all()
-                for d_rep in deacts:
+                res_deact = await db.execute(stmt_deact_failed)
+                for d_rep in res_deact.scalars().all():
                     d_rep.is_current = False
                     d_rep.superseded_by_report_id = failed_report.training_report_id
+
+                if valid_prev is not None and not valid_prev.is_current:
+                    valid_prev.is_current = True
                 
                 await db.commit()
                 await db.refresh(failed_report)
@@ -4650,6 +4833,63 @@ class PersonalizedTrainingService:
         return report
 
     @staticmethod
+    async def _apply_approval_is_current_rules(
+        db: AsyncSession,
+        report: TrainingAgentReport,
+    ) -> None:
+        """
+        Enforces Rules A, C, and D when a cycle transitions to 'in_progress':
+        - Rule A & D: If an earlier active ('in_progress'/'running') cycle with pending
+          simulations exists, keep that earlier cycle as is_current=True and set the newly
+          approved cycle to is_current=False (never allow two competing is_current=True cycles).
+        - Rule C & D: If no earlier active cycle exists (e.g. previous cycle is 'completed',
+          'failed', 'skipped', or none), set is_current=False on all previous reports and
+          activate the newly approved cycle with is_current=True.
+        """
+        active_prev = await PersonalizedTrainingService._get_active_in_progress_cycle(
+            db,
+            hubspot_owner_id=report.hubspot_owner_id,
+            exclude_report_id=report.training_report_id,
+        )
+        if active_prev is not None:
+            active_prev.is_current = True
+            report.is_current = False
+            stmt_other = select(TrainingAgentReport).where(
+                and_(
+                    TrainingAgentReport.hubspot_owner_id == report.hubspot_owner_id,
+                    TrainingAgentReport.training_report_id.notin_(
+                        [report.training_report_id, active_prev.training_report_id]
+                    ),
+                    TrainingAgentReport.is_current == True,
+                )
+            )
+            for other_r in (await db.execute(stmt_other)).scalars().all():
+                other_r.is_current = False
+            logger.info(
+                "[training] approve_cycle: active cycle %d still has pending simulations for agent %s; keeping %d as is_current=True and setting new cycle %d as is_current=False.",
+                active_prev.training_report_id,
+                report.hubspot_owner_id,
+                active_prev.training_report_id,
+                report.training_report_id,
+            )
+        else:
+            stmt_other = select(TrainingAgentReport).where(
+                and_(
+                    TrainingAgentReport.hubspot_owner_id == report.hubspot_owner_id,
+                    TrainingAgentReport.training_report_id != report.training_report_id,
+                    TrainingAgentReport.is_current == True,
+                )
+            )
+            for other_r in (await db.execute(stmt_other)).scalars().all():
+                other_r.is_current = False
+            report.is_current = True
+            logger.info(
+                "[training] approve_cycle: no unfinished active cycle for agent %s; setting cycle %d as is_current=True.",
+                report.hubspot_owner_id,
+                report.training_report_id,
+            )
+
+    @staticmethod
     async def approve_training_cycle(
         db: AsyncSession,
         report_id: int,
@@ -4664,7 +4904,7 @@ class PersonalizedTrainingService:
         3. Calls Gemini to generate 4 simulation prompts using the FINAL (possibly admin-edited) objectives.
         4. If Gemini fails → keeps status as pending_approval, no partial prompts, raises error.
         5. If Gemini succeeds → creates TrainingSimulationPrompt and TrainingCompletionStatus records.
-        6. Deactivates any previous in_progress cycle for the same agent.
+        6. Applies lifecycle rules for is_current (preserving any earlier active in_progress cycle).
         7. Transitions the report status to 'in_progress'.
         8. Records approval metadata (approved_at, approved_by_user_id).
 
@@ -4713,7 +4953,7 @@ class PersonalizedTrainingService:
             report.status = "in_progress"
             report.approved_at = datetime.now(timezone.utc)
             report.approved_by_user_id = approved_by_user_id
-            report.is_current = True
+            await PersonalizedTrainingService._apply_approval_is_current_rules(db, report)
             await db.commit()
             await db.refresh(report)
             return report
@@ -5075,21 +5315,15 @@ class PersonalizedTrainingService:
             )
             db.add(comp_status)
 
-        # ── Step 3: Deactivate previous cycles (DISABLED) ───────────────────────────────────────
-        # As per the new business rule, approving a new cycle does NOT deactivate, supersede,
-        # or change is_current on previous cycles. Multiple active cycles are allowed to coexist.
-        logger.info("[training] approve_cycle: not deactivating previous cycles for agent %s (multiple active cycles allowed)", report.hubspot_owner_id)
-
-
-        # ── Step 4: Transition to in_progress ───────────────────────────────────────────────────
+        # ── Step 3 & 4: Transition to in_progress and resolve is_current lifecycle ──────────
         report.status = "in_progress"
         report.approved_at = datetime.now(timezone.utc)
         report.approved_by_user_id = approved_by_user_id
-        report.is_current = True
         report.final_report_json = {
             "approved_at": datetime.now(timezone.utc).isoformat(),
             "approved_by_user_id": approved_by_user_id
         }
+        await PersonalizedTrainingService._apply_approval_is_current_rules(db, report)
 
         await db.commit()
         await db.refresh(report)
@@ -5185,7 +5419,7 @@ class PersonalizedTrainingService:
             if eff_service_id is None:
                 eff_service_id = await PersonalizedTrainingService.resolve_agent_service_id(db, hubspot_owner_id=owner_id)
 
-            # Create report
+            # Create report (is_current resolved by approve_training_cycle)
             report = TrainingAgentReport(
                 hubspot_owner_id=owner_id,
                 agent_name=agent_name,
@@ -5199,7 +5433,7 @@ class PersonalizedTrainingService:
                 summary_general=f"Ciclo manual: {cycle_title}",
                 general_objectives_json=gen_objs,
                 specific_objectives_json=spec_objs,
-                is_current=True,
+                is_current=False,
                 calls_count=0,
                 evaluations_count=0,
                 generated_at=now_utc
@@ -6581,6 +6815,33 @@ async def check_and_finalize_training_cycle(db: AsyncSession, cycle_id: int):
             report.final_report_json = parsed_report
             report.status = "completed"
             report.avg_evaluacion_global = Decimal(str(avg_score)).quantize(Decimal("0.01")) if avg_score is not None else None
+
+            # Rule D: If there is a newer approved cycle waiting in 'in_progress'/'running'
+            # with pending simulations, transition is_current from this completed cycle to the next one.
+            next_active = await PersonalizedTrainingService._get_active_in_progress_cycle(
+                db,
+                hubspot_owner_id=report.hubspot_owner_id,
+                exclude_report_id=report.training_report_id,
+            )
+            if next_active is not None:
+                report.is_current = False
+                next_active.is_current = True
+                stmt_other = select(TrainingAgentReport).where(
+                    and_(
+                        TrainingAgentReport.hubspot_owner_id == report.hubspot_owner_id,
+                        TrainingAgentReport.training_report_id != next_active.training_report_id,
+                        TrainingAgentReport.is_current == True,
+                    )
+                )
+                for other_r in (await db.execute(stmt_other)).scalars().all():
+                    other_r.is_current = False
+                logger.info(
+                    "Transitioned is_current from completed cycle %d to next active cycle %d for agent %s.",
+                    report.training_report_id,
+                    next_active.training_report_id,
+                    report.hubspot_owner_id,
+                )
+
             await db.commit()
             logger.info("Successfully finalized training cycle ID %d.", cycle_id)
 

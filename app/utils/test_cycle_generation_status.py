@@ -381,16 +381,18 @@ async def test_cycle_status_logic():
             )
         assert approved_report_3.status == "in_progress"
         
-        # Verify both cycles are in_progress and is_current = True
+        # Verify first cycle remains is_current=True while second cycle is queued with is_current=False
         stmt_rep_1_after = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == report_id)
         res_rep_1_after = await db.execute(stmt_rep_1_after)
         rep_1_after = res_rep_1_after.scalars().first()
         
         assert rep_1_after.status == "in_progress", f"First cycle should remain in_progress, got {rep_1_after.status}"
         assert rep_1_after.is_current == True, f"First cycle is_current should remain True, got {rep_1_after.is_current}"
+        assert approved_report_3.is_current == False, f"Second cycle is_current should be False while first is active, got {approved_report_3.is_current}"
         
-        # Verify both are returned in agent's history and admin's details
+        # Verify both are returned in agent's history and first cycle remains current_report
         detail_agent_coexist = await PersonalizedTrainingService.get_agent_detail(db, hubspot_owner_id=hubspot_owner_id)
+        assert detail_agent_coexist["current_report"]["training_report_id"] == report_id
         history_reports = detail_agent_coexist["history"]
         
         # Both should exist in history (history lists all cycles except archived)
@@ -401,7 +403,7 @@ async def test_cycle_status_logic():
         # Count in_progress cycles in history
         in_progress_history = [r for r in history_reports if r["status"] == "in_progress"]
         assert len(in_progress_history) == 2, f"Expected 2 in_progress cycles in history, got {len(in_progress_history)}"
-        print("[OK] Multiple active (in_progress) cycles coexist without automatic deactivation.")
+        print("[OK] Multiple active (in_progress) cycles coexist without hiding the unfinished current cycle.")
 
         # -------------------------------------------------------------
         # TEST 8: Failure marks status as failed
