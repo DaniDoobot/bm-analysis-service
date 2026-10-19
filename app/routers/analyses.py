@@ -382,3 +382,91 @@ async def get_analysis_recording_audio(
             "Cache-Control": "private, no-store",
         },
     )
+
+
+@router.delete("/analyses/{analysis_id}")
+async def delete_analysis(
+    analysis_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    context: Annotated[TenantContext, Depends(get_tenant_context)],
+):
+    """
+    Securely delete an analysis and clean up dependent records:
+    - Verifies permissions and tenant scope (super_admin, company_admin or user within scope).
+    - Deletes dependent criteria and log records.
+    - Updates or removes CallAnalysisCurrent if pointing to this analysis.
+    - Deletes the main Analysis record.
+    """
+    from sqlalchemy import select, delete, desc
+    from app.models.analyses import Analysis, CallAnalysisCurrent, AnalysisResult, AnalysisCriterionResult
+
+    record = await verify_analysis_read_scope(db, analysis_id, context)
+
+    call_id = record.call_id
+    analysis_type = record.analysis_type
+
+    # 1. Clean up dependent child records in bm_analysis_results and bm_analysis_criterion_results
+    await db.execute(
+        delete(AnalysisResult).where(AnalysisResult.analysis_id == analysis_id)
+    )
+    await db.execute(
+        delete(AnalysisCriterionResult).where(AnalysisCriterionResult.analysis_id == analysis_id)
+    )
+
+    # 2. Handle bm_call_analysis_current
+    if call_id:
+        cur_stmt = select(CallAnalysisCurrent).where(CallAnalysisCurrent.call_id == call_id)
+        if analysis_type:
+            cur_stmt = cur_stmt.where(CallAnalysisCurrent.analysis_type == analysis_type)
+        cur_res = await db.execute(cur_stmt)
+        current_rows = cur_res.scalars().all()
+
+        for cur_row in current_rows:
+            if cur_row.latest_analysis_id == analysis_id:
+                # Find the next most recent analysis for this call_id
+                next_stmt = (
+                    select(Analysis)
+                    .where(Analysis.call_id == call_id)
+                    .where(Analysis.analysis_id != analysis_id)
+                )
+                if cur_row.analysis_type:
+                    next_stmt = next_stmt.where(Analysis.analysis_type == cur_row.analysis_type)
+                next_stmt = next_stmt.order_by(desc(Analysis.analysis_id)).limit(1)
+
+                next_res = await db.execute(next_stmt)
+                prev_analysis = next_res.scalar_one_or_none()
+
+                if prev_analysis:
+                    # Demote to previous analysis
+                    cur_row.latest_analysis_id = prev_analysis.analysis_id
+                    cur_row.company_id = prev_analysis.company_id
+                    cur_row.service_id = prev_analysis.service_id
+                    cur_row.hubspot_url = prev_analysis.hubspot_url
+                    cur_row.call_direction = prev_analysis.call_direction
+                    cur_row.call_timestamp = prev_analysis.call_timestamp
+                    cur_row.source = prev_analysis.source
+                    cur_row.fecha_eval = prev_analysis.fecha_eval
+                    cur_row.agente_telefonico = prev_analysis.agente_telefonico
+                    cur_row.hubspot_owner_id = prev_analysis.hubspot_owner_id
+                    cur_row.prompt_id = prev_analysis.prompt_id
+                    cur_row.prompt_version_id = prev_analysis.prompt_version_id
+                    cur_row.status = prev_analysis.status
+                    cur_row.tipo_llamada = prev_analysis.tipo_llamada
+                    cur_row.evaluacion_global = prev_analysis.evaluacion_global
+                    cur_row.result = prev_analysis.result
+                    cur_row.payload = prev_analysis.payload
+                else:
+                    # No other analysis exists for this call_id -> delete current row
+                    await db.delete(cur_row)
+
+    # 3. Delete the Analysis row itself
+    await db.delete(record)
+    await db.commit()
+
+    logger.info("Successfully deleted analysis_id=%d by user=%s", analysis_id, context.user_id)
+    return {
+        "ok": True,
+        "detail": f"Análisis {analysis_id} eliminado correctamente.",
+        "analysis_id": analysis_id,
+    }
+
