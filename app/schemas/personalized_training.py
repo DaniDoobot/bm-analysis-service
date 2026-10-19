@@ -253,6 +253,7 @@ class AgentOverviewItem(BaseModel):
     team_id: Optional[int] = None
     service_id: Optional[int] = None
     service_name: Optional[str] = None
+    company_id: Optional[int] = None
     company_name: Optional[str] = None
     is_enabled: bool
     include_in_scheduler: bool = True

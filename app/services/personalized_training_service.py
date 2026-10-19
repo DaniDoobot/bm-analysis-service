@@ -119,7 +119,8 @@ class PersonalizedTrainingService:
             await db.commit()
 
         # 4. Also include any remaining settings matching the query filters
-        stmt_all = select(TrainingAgentSetting)
+        from sqlalchemy.orm import joinedload
+        stmt_all = select(TrainingAgentSetting).options(joinedload(TrainingAgentSetting.company))
         if company_ids is not None:
             stmt_all = stmt_all.where(TrainingAgentSetting.company_id.in_(company_ids))
         if allowed_agent_ids is not None:
@@ -135,7 +136,6 @@ class PersonalizedTrainingService:
         # 5. Enrich settings with User organizational context (service, team, company)
         all_hs_ids = [s.hubspot_owner_id for s in settings_list if s.hubspot_owner_id]
         if all_hs_ids:
-            from sqlalchemy.orm import joinedload
             from app.models.teams import Team
             from app.models.services import Service
             from app.services.users_service import get_user_services_info, get_user_teams_info
@@ -143,8 +143,9 @@ class PersonalizedTrainingService:
             stmt_u = (
                 select(User)
                 .options(
-                    joinedload(User.primary_service),
-                    joinedload(User.primary_team).joinedload(Team.service),
+                    joinedload(User.primary_service).joinedload(Service.company),
+                    joinedload(User.primary_team).joinedload(Team.service).joinedload(Service.company),
+                    joinedload(User.primary_team).joinedload(Team.company),
                     joinedload(User.company),
                 )
                 .where(User.hubspot_owner_id.in_(all_hs_ids))
@@ -254,15 +255,27 @@ class PersonalizedTrainingService:
                             resolved_service_id = None
                             resolved_service_name = None
 
+                    resolved_company_obj = (
+                        u.company
+                        or s.company
+                        or (u.primary_service.company if u.primary_service else None)
+                        or (u.primary_team.company if u.primary_team else None)
+                        or (u.primary_team.service.company if (u.primary_team and u.primary_team.service) else None)
+                    )
+                    resolved_company_id = (
+                        u.company_id
+                        or s.company_id
+                        or (resolved_company_obj.company_id if resolved_company_obj else None)
+                    )
+
                     s.service_id = resolved_service_id
                     s.service_name = resolved_service_name
                     s.team_id = resolved_team_id
                     s.team_name = resolved_team_name
-                    s.company_name = (u.company.company_name if u.company else None) or (s.company.company_name if s.company else None)
+                    s.company_id = resolved_company_id
+                    s.company_name = resolved_company_obj.company_name if resolved_company_obj else None
                     s.name = u.name or s.agent_name
                     s.agent_code = u.username
-                    if not s.company_id and u.company_id:
-                        s.company_id = u.company_id
                 else:
                     s.service_id = None
                     s.service_name = None
@@ -1010,6 +1023,7 @@ class PersonalizedTrainingService:
                 "team_id": getattr(s, "team_id", None),
                 "service_id": getattr(s, "service_id", None),
                 "service_name": getattr(s, "service_name", None),
+                "company_id": getattr(s, "company_id", None),
                 "company_name": getattr(s, "company_name", None),
                 "is_enabled": s.is_enabled,
                 "include_in_scheduler": getattr(s, "include_in_scheduler", True),

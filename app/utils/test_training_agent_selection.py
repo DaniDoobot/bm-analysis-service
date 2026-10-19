@@ -301,6 +301,7 @@ class TestTrainingAgentSelection(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(item1["service_name"], "Atención al Cliente")
             self.assertEqual(item1["team_id"], 100)
             self.assertEqual(item1["team_name"], "Equipo Mañana")
+            self.assertEqual(item1["company_id"], 1)
             self.assertEqual(item1["company_name"], "Empresa Principal")
             self.assertTrue(item1["is_enabled"])
             self.assertTrue(item1["include_in_scheduler"])
