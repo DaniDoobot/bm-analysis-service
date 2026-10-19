@@ -142,7 +142,8 @@ async def get_service_manager_agent_ids(db: AsyncSession, context: TenantContext
 
 
 def sanitize_report_for_agent(report: dict) -> dict:
-    """Removes sensitive prompt_text instructions and hides improvement_objectives from simulation prompts for agents."""
+    """Removes sensitive prompt_text instructions and hides improvement_objectives from simulation prompts for agents,
+    and masks technical error messages so internal Python exceptions are never exposed to agents."""
     if not report:
         return report
     
@@ -159,6 +160,8 @@ def sanitize_report_for_agent(report: dict) -> dict:
         for c in report["completion_statuses"]:
             if isinstance(c, dict):
                 c["improvement_objectives"] = None
+    if report.get("error_message"):
+        report["error_message"] = "El informe no pudo completarse. Por favor, contacta con tu coordinador o administrador."
     return report
 
 

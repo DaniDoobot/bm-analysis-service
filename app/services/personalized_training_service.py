@@ -3812,6 +3812,55 @@ class PersonalizedTrainingService:
         }
 
     @staticmethod
+    async def resolve_agent_service_id(
+        db: AsyncSession,
+        hubspot_owner_id: str,
+        run_id: Optional[int] = None,
+    ) -> Optional[int]:
+        """Resolves the canonical service_id for an agent.
+        1. From TrainingRun.service_id if run_id is provided and has a service_id.
+        2. From User associated with hubspot_owner_id:
+           - User.primary_service
+           - User.primary_team.service
+           - User.primary_service_id
+           - Exactly one assigned service in N:M associations
+        """
+        if run_id:
+            stmt_run = select(TrainingRun.service_id).where(TrainingRun.training_run_id == run_id)
+            res_run = await db.execute(stmt_run)
+            run_sid = res_run.scalar()
+            if run_sid is not None:
+                return run_sid
+
+        from app.models.teams import Team
+        from sqlalchemy.orm import joinedload
+        stmt_u = (
+            select(User)
+            .options(
+                joinedload(User.primary_service),
+                joinedload(User.primary_team).joinedload(Team.service),
+            )
+            .where(User.hubspot_owner_id == hubspot_owner_id)
+        )
+        res_u = await db.execute(stmt_u)
+        u = res_u.scalars().first()
+        if u:
+            svc = u.primary_service or (u.primary_team.service if u.primary_team else None)
+            if svc and svc.service_id is not None:
+                return svc.service_id
+            if u.primary_service_id is not None:
+                return u.primary_service_id
+
+            # Check single assigned service in N:M associations
+            from app.services.users_service import get_user_services_info
+            allowed_service_ids_map, _, _ = await get_user_services_info(db, [u.user_id], users=[u])
+            user_services = allowed_service_ids_map.get(u.user_id, [])
+            if len(user_services) == 1:
+                return user_services[0]
+
+        return None
+
+    @staticmethod
     async def generate_report_for_agent(
         db: AsyncSession,
         hubspot_owner_id: str,
@@ -3858,8 +3907,11 @@ class PersonalizedTrainingService:
         existing_report_id = existing_report.training_report_id if existing_report else None
 
         if existing_report and not force_regenerate:
-            logger.info("Report already exists for agent %s in period %s to %s. Returning existing.", hubspot_owner_id, period_start, period_end)
-            return existing_report
+            if existing_report.status != "failed":
+                logger.info("Report already exists for agent %s in period %s to %s. Returning existing.", hubspot_owner_id, period_start, period_end)
+                return existing_report
+            else:
+                logger.info("Existing report for agent %s in period %s to %s is 'failed'. Proceeding with regeneration.", hubspot_owner_id, period_start, period_end)
 
         # Check if there's already a pending_approval report for this period (idempotency)
         if existing_report and existing_report.status == "pending_approval" and not force_regenerate:
@@ -3868,15 +3920,25 @@ class PersonalizedTrainingService:
 
         # Resolve company_id
         resolved_cid = agent_setting.company_id
+        if resolved_cid is None and run_id:
+            stmt_rc = select(TrainingRun.company_id).where(TrainingRun.training_run_id == run_id)
+            res_rc = await db.execute(stmt_rc)
+            resolved_cid = res_rc.scalar()
         if resolved_cid is None:
             stmt_u = select(User.company_id).where(User.hubspot_owner_id == hubspot_owner_id)
             res_u = await db.execute(stmt_u)
             resolved_cid = res_u.scalar()
 
+        # Resolve service_id canonically
+        resolved_sid = await PersonalizedTrainingService.resolve_agent_service_id(
+            db, hubspot_owner_id=hubspot_owner_id, run_id=run_id
+        )
+
         # Create base report in database as 'running'
         new_report = TrainingAgentReport(
             training_run_id=run_id,
             company_id=resolved_cid,
+            service_id=resolved_sid,
             hubspot_owner_id=hubspot_owner_id,
             agent_name=agent_name,
             agent_initials=agent_initials,
@@ -4122,7 +4184,7 @@ class PersonalizedTrainingService:
                     temperature=0.3,
                     response_format="json_object",
                     company_id=resolved_cid,
-                    service_id=agent_setting.service_id,
+                    service_id=resolved_sid,
                     module="cycles",
                 )
                 duration_openai = time.perf_counter() - t_openai_start
@@ -4458,6 +4520,7 @@ class PersonalizedTrainingService:
                 failed_report = TrainingAgentReport(
                     training_run_id=run_id,
                     company_id=resolved_cid,
+                    service_id=resolved_sid,
                     hubspot_owner_id=hubspot_owner_id,
                     agent_name=agent_name,
                     agent_initials=agent_initials,
@@ -5120,9 +5183,7 @@ class PersonalizedTrainingService:
             # Resolve service_id if not provided
             eff_service_id = service_id
             if eff_service_id is None:
-                stmt_us = select(User.primary_service_id).where(User.hubspot_owner_id == owner_id)
-                res_us = await db.execute(stmt_us)
-                eff_service_id = res_us.scalar()
+                eff_service_id = await PersonalizedTrainingService.resolve_agent_service_id(db, hubspot_owner_id=owner_id)
 
             # Create report
             report = TrainingAgentReport(
