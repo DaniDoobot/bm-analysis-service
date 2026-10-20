@@ -134,6 +134,29 @@ def get_lab_model_catalog() -> Dict[str, Dict[str, Any]]:
             ],
             "required_env_vars": ["LAB_GEMINI_API_KEY", "LAB_GEMINI_3_5_FLASH_LITE_MODEL"],
         },
+        "gemini_3_1_flash_lite": {
+            "model_key": "gemini_3_1_flash_lite",
+            "display_name": "Gemini 3.1 Flash-Lite",
+            "provider": "Google",
+            "provider_key": "gemini",
+            "mode": "direct_audio",
+            "model_name": s.lab_gemini_3_1_flash_lite_model or "gemini-3.1-flash-lite",
+            "stt_provider": None,
+            "stt_model": None,
+            "llm_provider": "gemini",
+            "llm_model": s.lab_gemini_3_1_flash_lite_model or "gemini-3.1-flash-lite",
+            "enabled": True,
+            "supports_audio": True,
+            "context_limit": 1048576,
+            "pricing_key": "gemini:gemini-3.1-flash-lite",
+            "pricing_components": [
+                "input_text_tokens",
+                "input_audio_tokens",
+                "cached_input_tokens",
+                "output_text_tokens",
+            ],
+            "required_env_vars": ["LAB_GEMINI_API_KEY", "LAB_GEMINI_3_1_FLASH_LITE_MODEL"],
+        },
         "gemini_2_5_flash_lite": {
             "model_key": "gemini_2_5_flash_lite",
             "display_name": "Gemini 2.5 Flash-Lite",
@@ -453,14 +476,22 @@ async def check_model_availability(
             api_key, _ = _resolve_lab_gemini_credentials(company_id=company_id, service_id=service_id)
             model_name = entry["model_name"]
             from google import genai
+            from google.genai import types
             client = genai.Client(api_key=api_key)
-            await client.aio.models.get(model=model_name)
+            # Perform a minimal REAL inference request with generate_content
+            # to verify actual execution permissions and model availability.
+            # (GET metadata can return 200 while generate_content returns 404).
+            await client.aio.models.generate_content(
+                model=model_name,
+                contents="Responde únicamente OK",
+                config=types.GenerateContentConfig(max_output_tokens=5, temperature=0.0),
+            )
             return {
                 "model_key": model_key,
                 "model_name": model_name,
                 "configured": True,
                 "reachable": True,
-                "detail": "Modelo disponible",
+                "detail": "Modelo disponible y verificado con inferencia real",
             }
 
         elif provider_key == "mistral":
@@ -553,15 +584,20 @@ async def check_model_availability(
     except Exception as exc:
         err_str = str(exc).lower()
         if "not found" in err_str or "404" in err_str:
-            detail = "El modelo solicitado no existe o fue retirado por el proveedor."
+            detail = f"El modelo '{entry.get('model_name', model_key)}' no está disponible o no existe para la API key actual."
+            error_code = "model_not_available"
         elif "permission" in err_str or "403" in err_str or "401" in err_str or "api_key" in err_str or "unauthorized" in err_str:
-            detail = "La cuenta/API key no tiene acceso a este modelo."
+            detail = f"La cuenta/API key no tiene permisos para ejecutar inferencia con '{entry.get('model_name', model_key)}'."
+            error_code = "permission_denied"
         else:
             detail = f"No se pudo verificar disponibilidad del modelo: {str(exc)}"
+            error_code = "inference_check_failed"
         return {
             "model_key": model_key,
+            "model_name": entry.get("model_name"),
             "configured": True,
             "reachable": False,
+            "error_code": error_code,
             "detail": detail,
         }
 

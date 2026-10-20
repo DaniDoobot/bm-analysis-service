@@ -369,6 +369,39 @@ class TestAIPricingService(unittest.IsolatedAsyncioTestCase):
         # Total = 0.006210
         self.assertEqual(res.estimated_cost_usd, Decimal("0.006210"))
 
+    def test_gemini_31_flash_lite_pricing(self):
+        """Gemini 3.1 Flash-Lite official rates: $0.25/1M in text, $0.50/1M in audio, $0.025/1M cached, $1.50/1M out."""
+        pricing = AIModelPricing(
+            provider="gemini",
+            model="gemini-3.1-flash-lite",
+            effective_from=datetime(2025, 6, 1, tzinfo=timezone.utc),
+            pricing_version="gemini-3.1-flash-lite-v1",
+            currency="USD",
+            input_text_price_per_million=Decimal("0.2500"),
+            input_audio_price_per_million=Decimal("0.5000"),
+            output_text_price_per_million=Decimal("1.5000"),
+            output_audio_price_per_million=Decimal("1.5000"),
+            cached_input_price_per_million=Decimal("0.0250"),
+            is_active=True,
+        )
+        res = calculate_event_cost(
+            pricing=pricing,
+            input_text_tokens=10_000,
+            input_audio_tokens=5_000,
+            cached_content_token_count=2_000,
+            output_text_tokens=1_000,
+            thoughts_token_count=500,
+        )
+        self.assertEqual(res.pricing_status, "priced")
+        self.assertEqual(res.pricing_version, "gemini-3.1-flash-lite-v1")
+        # Cached 2,000 deducted from text input first -> 8,000 net text @ 0.25/M = 0.002000
+        # Cached 2,000 @ 0.025/M = 0.000050
+        # Audio 5,000 @ 0.50/M = 0.002500
+        # Output text 1,000 @ 1.50/M = 0.001500
+        # Thoughts 500 @ 1.50/M = 0.000750
+        # Total = 0.002000 + 0.000050 + 0.002500 + 0.001500 + 0.000750 = 0.006800
+        self.assertEqual(res.estimated_cost_usd, Decimal("0.006800"))
+
     def test_voxtral_small_audio_plus_tokens_pricing(self):
         """Voxtral Small: audio ($0.004/min) + input text ($0.10/1M) + output text ($0.40/1M)."""
         pricing = AIModelPricing(

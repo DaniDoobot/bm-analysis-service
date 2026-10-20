@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     lab_gemini_api_key: str = ""
     lab_gemini_3_8_model: str = "gemini-3.8-flash"
     lab_gemini_3_5_flash_lite_model: str = "gemini-3.5-flash-lite"
+    lab_gemini_3_1_flash_lite_model: str = "gemini-3.1-flash-lite"
     lab_gemini_2_5_flash_lite_model: str = "gemini-2.5-flash-lite"
 
     lab_mistral_api_key: str = ""

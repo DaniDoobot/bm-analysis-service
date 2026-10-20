@@ -159,6 +159,18 @@ class TestLaboratoryModelSelector(unittest.IsolatedAsyncioTestCase):
                 is_active=True,
             ),
             AIModelPricing(
+                provider="gemini",
+                model="gemini-3.1-flash-lite",
+                effective_from=dt_from,
+                input_text_price_per_million=Decimal("0.2500"),
+                input_audio_price_per_million=Decimal("0.5000"),
+                output_text_price_per_million=Decimal("1.5000"),
+                output_audio_price_per_million=Decimal("1.5000"),
+                cached_input_price_per_million=Decimal("0.0250"),
+                pricing_version="gemini-3.1-flash-lite-v1",
+                is_active=True,
+            ),
+            AIModelPricing(
                 provider="mistral",
                 model="voxtral-small-latest",
                 effective_from=dt_from,
@@ -224,6 +236,7 @@ class TestLaboratoryModelSelector(unittest.IsolatedAsyncioTestCase):
             "lab_gemini_api_key": s.lab_gemini_api_key,
             "lab_gemini_3_8_model": s.lab_gemini_3_8_model,
             "lab_gemini_3_5_flash_lite_model": s.lab_gemini_3_5_flash_lite_model,
+            "lab_gemini_3_1_flash_lite_model": s.lab_gemini_3_1_flash_lite_model,
             "lab_gemini_2_5_flash_lite_model": s.lab_gemini_2_5_flash_lite_model,
             "lab_mistral_api_key": s.lab_mistral_api_key,
             "lab_mistral_voxtral_small_model": s.lab_mistral_voxtral_small_model,
@@ -239,6 +252,7 @@ class TestLaboratoryModelSelector(unittest.IsolatedAsyncioTestCase):
         s.lab_gemini_api_key = "test-lab-gemini-key"
         s.lab_gemini_3_8_model = "gemini-3.8-flash"
         s.lab_gemini_3_5_flash_lite_model = "gemini-3.5-flash-lite"
+        s.lab_gemini_3_1_flash_lite_model = "gemini-3.1-flash-lite"
         s.lab_gemini_2_5_flash_lite_model = "gemini-2.5-flash-lite"
         s.lab_mistral_api_key = "test-lab-mistral-key"
         s.lab_mistral_voxtral_small_model = "voxtral-small-latest"
@@ -351,6 +365,9 @@ class TestLaboratoryModelSelector(unittest.IsolatedAsyncioTestCase):
     async def test_04_gemini_2_5_flash_lite_direct_audio(self):
         await self._assert_gemini_direct_model("gemini_2_5_flash_lite", "gemini-2.5-flash-lite")
 
+    async def test_04b_gemini_3_1_flash_lite_direct_audio(self):
+        await self._assert_gemini_direct_model("gemini_3_1_flash_lite", "gemini-3.1-flash-lite")
+
     # ── 5. Unknown model_key -> HTTP 400 ─────────────────────────────────────
 
     async def test_05_unknown_model_key_returns_400(self):
@@ -417,6 +434,7 @@ class TestLaboratoryModelSelector(unittest.IsolatedAsyncioTestCase):
                 [
                     "gemini_3_8_flash",
                     "gemini_3_5_flash_lite",
+                    "gemini_3_1_flash_lite",
                     "gemini_2_5_flash_lite",
                     "voxtral_small",
                     "groq_whisper_gpt_luna",
@@ -428,19 +446,37 @@ class TestLaboratoryModelSelector(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(m["configured"])
                 self.assertNotIn("api_key", m)
 
-            # Check reachable Gemini 2.5
+            # Check reachable Gemini 3.1 via generate_content inference check
             mock_client_ok = MagicMock()
-            mock_client_ok.aio.models.get = AsyncMock(return_value=SimpleNamespace(name="models/gemini-2.5-flash-lite"))
+            mock_client_ok.aio.models.generate_content = AsyncMock(
+                return_value=SimpleNamespace(text="OK")
+            )
             with patch("google.genai.Client", return_value=mock_client_ok):
-                r_chk_ok = await ac.post("/bm/test-analysis/models/gemini_2_5_flash_lite/check")
+                r_chk_ok = await ac.post("/bm/test-analysis/models/gemini_3_1_flash_lite/check")
                 self.assertEqual(r_chk_ok.status_code, 200)
                 chk_data = r_chk_ok.json()
                 self.assertTrue(chk_data["configured"])
                 self.assertTrue(chk_data["reachable"])
+                self.assertEqual(chk_data["model_name"], "gemini-3.1-flash-lite")
+                self.assertEqual(mock_client_ok.aio.models.generate_content.call_args.kwargs["model"], "gemini-3.1-flash-lite")
 
-            # Check unreachable Gemini 2.5 when Google returns 403 Permission Denied (NO fallback!)
+            # Check false-positive prevention: generate_content returns 404 Model Not Found/Unsupported
+            # Must return reachable=False with error_code="model_not_available" (NO fallback!)
+            mock_client_not_found = MagicMock()
+            mock_client_not_found.aio.models.generate_content = AsyncMock(
+                side_effect=Exception("404 NOT_FOUND: models/gemini-2.5-flash-lite is not found for api version v1beta")
+            )
+            with patch("google.genai.Client", return_value=mock_client_not_found):
+                r_chk_nf = await ac.post("/bm/test-analysis/models/gemini_2_5_flash_lite/check")
+                self.assertEqual(r_chk_nf.status_code, 200)
+                chk_nf = r_chk_nf.json()
+                self.assertTrue(chk_nf["configured"])
+                self.assertFalse(chk_nf["reachable"])
+                self.assertEqual(chk_nf["error_code"], "model_not_available")
+
+            # Check unreachable Gemini when Google returns 403 Permission Denied (NO fallback!)
             mock_client_denied = MagicMock()
-            mock_client_denied.aio.models.get = AsyncMock(
+            mock_client_denied.aio.models.generate_content = AsyncMock(
                 side_effect=Exception("403 PERMISSION_DENIED: Project does not have access")
             )
             with patch("google.genai.Client", return_value=mock_client_denied):
@@ -449,7 +485,7 @@ class TestLaboratoryModelSelector(unittest.IsolatedAsyncioTestCase):
                 chk_fail = r_chk_fail.json()
                 self.assertTrue(chk_fail["configured"])
                 self.assertFalse(chk_fail["reachable"])
-                self.assertIn("acceso", chk_fail["detail"].lower())
+                self.assertEqual(chk_fail["error_code"], "permission_denied")
 
     # ── 8. Voxtral Small Direct Audio & Context Limit Guard ──────────────────
 
@@ -732,19 +768,30 @@ class TestLaboratoryModelSelector(unittest.IsolatedAsyncioTestCase):
                     model_key="gemini_3_8_flash",
                     audio_bytes=b"AUDIO_AB",
                 )
-            with patch("google.genai.Client", return_value=make_gemini_mock(7)):
+            with patch("google.genai.Client", return_value=make_gemini_mock(8)):
                 res_b = await analyze_transcription_pipeline(
                     db=self.db_session,
                     call_id="CALL_AB_123",
                     prompt_id=76,
                     service_id=1,
-                    model_key="gemini_2_5_flash_lite",
+                    model_key="gemini_3_5_flash_lite",
+                    audio_bytes=b"AUDIO_AB",
+                )
+            with patch("google.genai.Client", return_value=make_gemini_mock(7)):
+                res_c = await analyze_transcription_pipeline(
+                    db=self.db_session,
+                    call_id="CALL_AB_123",
+                    prompt_id=76,
+                    service_id=1,
+                    model_key="gemini_3_1_flash_lite",
                     audio_bytes=b"AUDIO_AB",
                 )
 
         self.assertTrue(res_a["ok"])
         self.assertTrue(res_b["ok"])
+        self.assertTrue(res_c["ok"])
         self.assertNotEqual(res_a["analysis_id"], res_b["analysis_id"])
+        self.assertNotEqual(res_b["analysis_id"], res_c["analysis_id"])
 
         from app.services.analyses_service import list_analyses_history
         from app.core.roles import InternalRole
@@ -765,14 +812,17 @@ class TestLaboratoryModelSelector(unittest.IsolatedAsyncioTestCase):
             call_id="CALL_AB_123",
             context=ctx_company_1,
         )
-        self.assertEqual(len(history_c1), 2)
+        self.assertEqual(len(history_c1), 3)
         by_key = {item.requested_model_key: item for item in history_c1}
         self.assertIn("gemini_3_8_flash", by_key)
-        self.assertIn("gemini_2_5_flash_lite", by_key)
+        self.assertIn("gemini_3_5_flash_lite", by_key)
+        self.assertIn("gemini_3_1_flash_lite", by_key)
         self.assertEqual(by_key["gemini_3_8_flash"].actual_model, "gemini-3.8-flash")
         self.assertEqual(by_key["gemini_3_8_flash"].provider, "gemini")
-        self.assertEqual(by_key["gemini_2_5_flash_lite"].actual_model, "gemini-2.5-flash-lite")
-        self.assertEqual(by_key["gemini_2_5_flash_lite"].provider, "gemini")
+        self.assertEqual(by_key["gemini_3_5_flash_lite"].actual_model, "gemini-3.5-flash-lite")
+        self.assertEqual(by_key["gemini_3_5_flash_lite"].provider, "gemini")
+        self.assertEqual(by_key["gemini_3_1_flash_lite"].actual_model, "gemini-3.1-flash-lite")
+        self.assertEqual(by_key["gemini_3_1_flash_lite"].provider, "gemini")
 
         # Multi-tenant isolation: Company 2 must see 0 rows for Company 1's call
         ctx_company_2 = TenantContext(
