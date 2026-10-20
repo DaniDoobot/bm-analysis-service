@@ -466,8 +466,35 @@ async def enrich_analyses(db: AsyncSession, items: list[Any]) -> list[Any]:
             ))
         )
         if aid and (item_type == 'audio' or has_payload_audio) and (item_call_id or has_payload_audio):
-            setattr(item, 'recording_url', f"/bm/analyses/{aid}/recording-audio")
+            setattr(item, 'recording_url', f'/bm/analyses/{aid}/recording-audio')
         else:
             setattr(item, 'recording_url', None)
+
+        # Laboratory / Multi-Provider Benchmark metadata enrichment
+        payload_dict = getattr(item, 'payload', None)
+        if not isinstance(payload_dict, dict):
+            payload_dict = {}
+        lab_meta = payload_dict.get('lab_model_metadata')
+        if not isinstance(lab_meta, dict):
+            lab_meta = payload_dict
+
+        req_model_key = lab_meta.get('requested_model_key')
+        pipe_mode = lab_meta.get('pipeline_mode')
+        m_prov = lab_meta.get('actual_provider') or getattr(item, 'model_provider', None)
+        m_name = lab_meta.get('actual_model') or getattr(item, 'model_name', None)
+        stt_prov = lab_meta.get('stt_provider') or getattr(item, 'transcription_provider', None)
+        stt_mod = lab_meta.get('stt_model') or getattr(item, 'transcription_model', None)
+        an_prov = lab_meta.get('analysis_provider') or getattr(item, 'model_provider', None)
+        an_mod = lab_meta.get('analysis_model') or getattr(item, 'model_name', None)
+
+        setattr(item, 'requested_model_key', req_model_key)
+        setattr(item, 'actual_model', m_name)
+        setattr(item, 'provider', m_prov)
+        setattr(item, 'actual_provider', m_prov)
+        setattr(item, 'pipeline_mode', pipe_mode)
+        setattr(item, 'stt_provider', stt_prov)
+        setattr(item, 'stt_model', stt_mod)
+        setattr(item, 'analysis_provider', an_prov)
+        setattr(item, 'analysis_model', an_mod)
 
     return items

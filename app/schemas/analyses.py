@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict
 
 
 class AnalysisListItem(BaseModel):
-    """Row from bm_call_analysis_current for listing."""
+    """Row from bm_call_analysis_current or bm_analyses for listing."""
     model_config = ConfigDict(from_attributes=True)
 
     call_id: str
@@ -42,6 +42,17 @@ class AnalysisListItem(BaseModel):
     typology_key: str | None = None
     typology_name: str | None = None
     recording_url: str | None = None
+
+    # Laboratory / Multi-Provider Benchmark metadata
+    requested_model_key: str | None = None
+    actual_model: str | None = None
+    provider: str | None = None
+    actual_provider: str | None = None
+    pipeline_mode: str | None = None
+    stt_provider: str | None = None
+    stt_model: str | None = None
+    analysis_provider: str | None = None
+    analysis_model: str | None = None
 
 
 class AnalysisDetail(BaseModel):
@@ -89,6 +100,17 @@ class AnalysisDetail(BaseModel):
     typology_name: str | None = None
     recording_url: str | None = None
 
+    # Laboratory / Multi-Provider Benchmark metadata
+    requested_model_key: str | None = None
+    actual_model: str | None = None
+    provider: str | None = None
+    actual_provider: str | None = None
+    pipeline_mode: str | None = None
+    stt_provider: str | None = None
+    stt_model: str | None = None
+    analysis_provider: str | None = None
+    analysis_model: str | None = None
+
 
 class AnalysisResultOut(BaseModel):
     """Row from bm_analysis_results."""
@@ -134,6 +156,7 @@ class AnalyzeAudioRequest(BaseModel):
     service_id: int | None = None
     selected_service_id: int | None = None
     company_id: int | None = None
+    model_key: str | None = None
 
     @property
     def effective_service_id(self) -> int | None:
@@ -159,6 +182,7 @@ class AnalyzeTranscriptionRequest(BaseModel):
     service_id: int | None = None
     selected_service_id: int | None = None
     metadata: dict[str, Any] | None = None
+    model_key: str | None = None
 
     @property
     def effective_service_id(self) -> int | None:
@@ -178,6 +202,7 @@ class TestAnalysisByCallIdRequest(BaseModel):
     prompt_id: int | None = None
     structure_id: int | None = None
     evaluation_structure_id: int | None = None
+    model_key: str | None = None
 
     @property
     def effective_service_id(self) -> int | None:
@@ -186,6 +211,3 @@ class TestAnalysisByCallIdRequest(BaseModel):
     @property
     def effective_prompt_id(self) -> int | None:
         return self.prompt_id or self.structure_id or self.evaluation_structure_id
-
-
-

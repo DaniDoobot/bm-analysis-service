@@ -31,6 +31,7 @@ class AIUsageEvent(Base):
     operation: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     provider: Mapped[str] = mapped_column(Text, default="gemini", server_default="'gemini'", nullable=False)
     model: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    model_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     credential_alias: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     request_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -92,6 +93,7 @@ class AIModelPricing(Base):
     output_audio_price_per_million: Mapped[Decimal] = mapped_column(Numeric(10, 4), default=Decimal("0.0000"), nullable=False)
     cached_input_price_per_million: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)
     thoughts_price_per_million: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)
+    audio_price_per_minute: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 6), nullable=True)
 
     pricing_version: Mapped[str] = mapped_column(Text, default="v1", server_default="'v1'", nullable=False)
     is_active: Mapped[bool] = mapped_column(default=True, server_default="true", nullable=False)

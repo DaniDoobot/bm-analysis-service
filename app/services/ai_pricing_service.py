@@ -95,6 +95,7 @@ def calculate_event_cost(
     input_audio_tokens: Optional[int] = None,
     output_text_tokens: Optional[int] = None,
     output_audio_tokens: Optional[int] = None,
+    audio_duration_seconds: Optional[float | Decimal] = None,
 ) -> CostCalculationResult:
     """
     Calculate estimated cost in USD using non-duplicative modality breakdown.
@@ -232,6 +233,38 @@ def calculate_event_cost(
         details["thoughts_tokens"] = eff_thoughts
         details["cost_thoughts_usd"] = float(cost_thoughts)
 
+    # 3. Audio duration / per-minute pricing (for STT models: Groq Whisper, Mistral STT, Deepgram, etc.)
+    audio_min_rate = getattr(pricing, "audio_price_per_minute", None)
+    has_token_rates = any(
+        (val is not None and Decimal(str(val)) > 0)
+        for val in (
+            pricing.input_text_price_per_million,
+            pricing.input_audio_price_per_million,
+            pricing.output_text_price_per_million,
+            pricing.output_audio_price_per_million,
+        )
+    )
+    if audio_min_rate is not None and Decimal(str(audio_min_rate)) > 0:
+        if audio_duration_seconds is not None and float(audio_duration_seconds) >= 0:
+            dur_sec = Decimal(str(audio_duration_seconds))
+            cost_audio_min = (dur_sec / Decimal("60")) * Decimal(str(audio_min_rate))
+            total_cost += cost_audio_min
+            details["audio_duration_seconds"] = float(dur_sec)
+            details["audio_price_per_minute"] = float(audio_min_rate)
+            details["cost_audio_duration_usd"] = float(cost_audio_min)
+            if not has_token_rates:
+                # Pure per-minute model does not require token counts to be fully priced
+                is_partial = False
+        else:
+            if not has_token_rates:
+                return CostCalculationResult(
+                    estimated_cost_usd=None,
+                    pricing_version=pricing.pricing_version,
+                    pricing_status="unpriced",
+                    details={"reason": "Per-minute model missing audio_duration_seconds"},
+                )
+            is_partial = True
+
     # Round to 6 decimal places ($0.000001 precision)
     rounded_cost = total_cost.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
     details["total_cost_usd"] = float(rounded_cost)
@@ -308,6 +341,7 @@ async def backfill_unpriced_events(
                 input_audio_tokens=ev.input_audio_tokens,
                 output_text_tokens=ev.output_text_tokens,
                 output_audio_tokens=ev.output_audio_tokens,
+                audio_duration_seconds=ev.audio_duration_seconds,
             )
 
             ev.estimated_cost_usd = calc.estimated_cost_usd

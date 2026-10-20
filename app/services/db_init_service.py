@@ -666,6 +666,14 @@ async def init_db():
                     )
                     logger.info("Column '%s' added successfully to 'bm_training_completion_status'.", col_name)
 
+                    logger.info("Column '%s' added successfully to 'bm_training_completion_status'.", col_name)
+
+            # 1.6.9 FinOps & Laboratory AI usage/pricing columns
+            if not await check_column_exists_safely(conn, "bm_ai_usage_events", "model_key"):
+                await conn.execute(text("ALTER TABLE bm_ai_usage_events ADD COLUMN model_key TEXT NULL;"))
+            if not await check_column_exists_safely(conn, "bm_ai_model_pricing", "audio_price_per_minute"):
+                await conn.execute(text("ALTER TABLE bm_ai_model_pricing ADD COLUMN audio_price_per_minute NUMERIC(10, 6) NULL;"))
+
             logger.info("Dynamic column migrations completed successfully.")
 
         # Create performance composite indexes safely

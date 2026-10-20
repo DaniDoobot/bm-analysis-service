@@ -20,6 +20,7 @@ class AIUsageMetadata:
     """Normalized usage telemetry data."""
     provider: str = "gemini"
     model: Optional[str] = None
+    model_key: Optional[str] = None
     credential_alias: Optional[str] = None
 
     prompt_token_count: Optional[int] = None
@@ -65,6 +66,8 @@ def parse_usage_metadata(
     audio_duration_seconds: Optional[float] = None,
     status: str = "success",
     attempt_number: int = 1,
+    provider: str = "gemini",
+    model_key: Optional[str] = None,
 ) -> AIUsageMetadata:
     """
     Parse and normalize raw usage metadata from Google GenAI SDK or WebSocket JSON.
@@ -72,8 +75,9 @@ def parse_usage_metadata(
     """
     if raw_usage_metadata is None:
         return AIUsageMetadata(
-            provider="gemini",
+            provider=provider,
             model=model,
+            model_key=model_key,
             credential_alias=credential_alias,
             response_id=response_id,
             execution_latency_ms=execution_latency_ms,
@@ -82,11 +86,11 @@ def parse_usage_metadata(
             attempt_number=attempt_number,
         )
 
-    prompt_token_count = _extract_val(raw_usage_metadata, "prompt_token_count", "promptTokenCount")
-    candidates_token_count = _extract_val(raw_usage_metadata, "candidates_token_count", "candidatesTokenCount")
-    total_token_count = _extract_val(raw_usage_metadata, "total_token_count", "totalTokenCount")
+    prompt_token_count = _extract_val(raw_usage_metadata, "prompt_token_count", "promptTokenCount", "prompt_tokens")
+    candidates_token_count = _extract_val(raw_usage_metadata, "candidates_token_count", "candidatesTokenCount", "completion_tokens")
+    total_token_count = _extract_val(raw_usage_metadata, "total_token_count", "totalTokenCount", "total_tokens")
     cached_content_token_count = _extract_val(raw_usage_metadata, "cached_content_token_count", "cachedContentTokenCount")
-    thoughts_token_count = _extract_val(raw_usage_metadata, "thoughts_token_count", "thoughtsTokenCount")
+    thoughts_token_count = _extract_val(raw_usage_metadata, "thoughts_token_count", "thoughtsTokenCount", "reasoning_tokens")
 
     # Prompt modalities
     raw_prompt_details = _extract_val(raw_usage_metadata, "prompt_tokens_details", "promptTokensDetails")
@@ -94,9 +98,9 @@ def parse_usage_metadata(
     input_audio_tokens = None
 
     if raw_prompt_details is not None:
-        input_text_tokens = 0
-        input_audio_tokens = 0
         if isinstance(raw_prompt_details, (list, tuple)):
+            input_text_tokens = 0
+            input_audio_tokens = 0
             for item in raw_prompt_details:
                 modality = str(_extract_val(item, "modality") or "").upper()
                 count = _extract_val(item, "token_count", "tokenCount") or 0
@@ -104,16 +108,25 @@ def parse_usage_metadata(
                     input_text_tokens += count
                 elif "AUDIO" in modality:
                     input_audio_tokens += count
+        else:
+            cached_from_details = _extract_val(raw_prompt_details, "cached_tokens")
+            if cached_from_details is not None and cached_content_token_count is None:
+                cached_content_token_count = cached_from_details
+            audio_from_details = _extract_val(raw_prompt_details, "audio_tokens")
+            if audio_from_details is not None:
+                input_audio_tokens = audio_from_details
+                if prompt_token_count is not None:
+                    input_text_tokens = max(0, prompt_token_count - audio_from_details)
 
     # Candidates modalities
-    raw_cand_details = _extract_val(raw_usage_metadata, "candidates_tokens_details", "candidatesTokensDetails")
+    raw_cand_details = _extract_val(raw_usage_metadata, "candidates_tokens_details", "candidatesTokensDetails", "completion_tokens_details")
     output_text_tokens = None
     output_audio_tokens = None
 
     if raw_cand_details is not None:
-        output_text_tokens = 0
-        output_audio_tokens = 0
         if isinstance(raw_cand_details, (list, tuple)):
+            output_text_tokens = 0
+            output_audio_tokens = 0
             for item in raw_cand_details:
                 modality = str(_extract_val(item, "modality") or "").upper()
                 count = _extract_val(item, "token_count", "tokenCount") or 0
@@ -121,10 +134,15 @@ def parse_usage_metadata(
                     output_text_tokens += count
                 elif "AUDIO" in modality:
                     output_audio_tokens += count
+        else:
+            reasoning_from_details = _extract_val(raw_cand_details, "reasoning_tokens")
+            if reasoning_from_details is not None and thoughts_token_count is None:
+                thoughts_token_count = reasoning_from_details
 
     return AIUsageMetadata(
-        provider="gemini",
+        provider=provider,
         model=model,
+        model_key=model_key,
         credential_alias=credential_alias,
         prompt_token_count=prompt_token_count,
         candidates_token_count=candidates_token_count,
@@ -150,6 +168,7 @@ async def record_ai_usage_event(
     operation: Optional[str] = None,
     provider: str = "gemini",
     model: Optional[str] = None,
+    model_key: Optional[str] = None,
     credential_alias: Optional[str] = None,
     usage: Optional[AIUsageMetadata] = None,
     request_id: Optional[str] = None,
@@ -161,7 +180,7 @@ async def record_ai_usage_event(
     execution_latency_ms: Optional[int] = None,
     status: str = "success",
     attempt_number: int = 1,
-) -> None:
+) -> Optional[Dict[str, Any]]:
     """
     Persist an AI usage event into bm_ai_usage_events non-blockingly.
     If database insertion fails, logs an error without raising or disrupting the main flow.
@@ -169,6 +188,7 @@ async def record_ai_usage_event(
     try:
         # Extract fields from usage if provided
         u_model = model or (usage.model if usage else None)
+        u_model_key = model_key or (usage.model_key if usage else None)
         u_alias = credential_alias or (usage.credential_alias if usage else None)
         u_req_id = request_id or (usage.response_id if usage else None)
         u_latency = execution_latency_ms if execution_latency_ms is not None else (usage.execution_latency_ms if usage else None)
@@ -201,6 +221,7 @@ async def record_ai_usage_event(
                     input_audio_tokens=usage.input_audio_tokens if usage else None,
                     output_text_tokens=usage.output_text_tokens if usage else None,
                     output_audio_tokens=usage.output_audio_tokens if usage else None,
+                    audio_duration_seconds=u_dur,
                 )
                 est_cost_usd = cost_calc.estimated_cost_usd
                 p_version = cost_calc.pricing_version
@@ -215,6 +236,7 @@ async def record_ai_usage_event(
                 operation=operation,
                 provider=provider,
                 model=u_model,
+                model_key=u_model_key,
                 credential_alias=u_alias,
                 request_id=u_req_id,
                 call_id=call_id,
@@ -241,6 +263,7 @@ async def record_ai_usage_event(
 
             session.add(event)
             await session.commit()
+            event_id = getattr(event, "id", None)
 
         logger.debug(
             "AI usage event recorded: module=%s operation=%s model=%s alias=%s total_tokens=%s cost_usd=%s status=%s",
@@ -248,6 +271,12 @@ async def record_ai_usage_event(
             usage.total_token_count if usage else None,
             est_cost_usd, p_status,
         )
+        return {
+            "event_id": event_id,
+            "estimated_cost_usd": float(est_cost_usd) if est_cost_usd is not None else None,
+            "pricing_version": p_version,
+            "pricing_status": p_status,
+        }
 
     except Exception as exc:
         logger.error(
@@ -255,6 +284,7 @@ async def record_ai_usage_event(
             module, operation, model, exc,
             exc_info=True,
         )
+        return None
 
 
 class LiveSessionUsageTracker:

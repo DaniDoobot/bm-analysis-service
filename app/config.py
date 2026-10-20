@@ -39,6 +39,25 @@ class Settings(BaseSettings):
     gemini_timeout_seconds: int = 120
     ai_provider: str = "gemini"
 
+    # ── Laboratory / Benchmark Models (Exclusively for test_analysis) ─────────
+    lab_gemini_api_key: str = ""
+    lab_gemini_3_8_model: str = "gemini-3.8-flash"
+    lab_gemini_3_5_flash_lite_model: str = "gemini-3.5-flash-lite"
+    lab_gemini_2_5_flash_lite_model: str = "gemini-2.5-flash-lite"
+
+    lab_mistral_api_key: str = ""
+    lab_mistral_voxtral_small_model: str = "voxtral-small-latest"
+    lab_mistral_transcribe_model: str = "voxtral-mini-latest"
+
+    lab_groq_api_key: str = ""
+    lab_groq_whisper_model: str = "whisper-large-v3-turbo"
+
+    lab_deepgram_api_key: str = ""
+    lab_deepgram_model: str = "nova-3"
+
+    lab_openai_api_key: str = ""
+    lab_openai_luna_model: str = "gpt-5.6-luna"
+
     azure_openai_text_endpoint: str = "https://azure-openai-gpt-4-ecustomer.openai.azure.com/"
     azure_openai_text_api_key: str = ""
     azure_openai_text_deployment: str = "gpt-4.1"
