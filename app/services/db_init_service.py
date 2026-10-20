@@ -216,7 +216,7 @@ async def init_db():
                 os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
                 "migrations",
             )
-            for m_filename in ["v018_training_knowledge_documents.sql", "v026_cloudtalk_evaluation_jobs.sql"]:
+            for m_filename in ["v018_training_knowledge_documents.sql", "v026_cloudtalk_evaluation_jobs.sql", "v027_laboratory_models_and_pricing.sql"]:
                 m_path = os.path.join(migrations_dir, m_filename)
                 if os.path.exists(m_path):
                     try:

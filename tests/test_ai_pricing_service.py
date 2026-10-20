@@ -338,6 +338,111 @@ class TestAIPricingService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res_none.pricing_status, "partial")
         self.assertEqual(res_none.estimated_cost_usd, Decimal("0.007500"))
 
+    def test_gemini_35_flash_lite_pricing(self):
+        """Gemini 3.5 Flash-Lite official rates: $0.30/1M in, $0.03/1M cached, $2.50/1M out (including thoughts)."""
+        pricing = AIModelPricing(
+            provider="gemini",
+            model="gemini-3.5-flash-lite",
+            effective_from=datetime(2025, 6, 1, tzinfo=timezone.utc),
+            pricing_version="gemini-3.5-flash-lite-v1",
+            currency="USD",
+            input_text_price_per_million=Decimal("0.3000"),
+            input_audio_price_per_million=Decimal("0.3000"),
+            output_text_price_per_million=Decimal("2.5000"),
+            output_audio_price_per_million=Decimal("2.5000"),
+            cached_input_price_per_million=Decimal("0.0300"),
+            is_active=True,
+        )
+        res = calculate_event_cost(
+            pricing=pricing,
+            prompt_token_count=10_000,
+            cached_content_token_count=2_000,
+            candidates_token_count=1_000,
+            thoughts_token_count=500,
+        )
+        self.assertEqual(res.pricing_status, "priced")
+        self.assertEqual(res.pricing_version, "gemini-3.5-flash-lite-v1")
+        # 8,000 net prompt @ 0.30/M = 0.002400
+        # 2,000 cached @ 0.03/M = 0.000060
+        # 1,000 candidates @ 2.50/M = 0.002500
+        # 500 thoughts @ 2.50/M = 0.001250
+        # Total = 0.006210
+        self.assertEqual(res.estimated_cost_usd, Decimal("0.006210"))
+
+    def test_voxtral_small_audio_plus_tokens_pricing(self):
+        """Voxtral Small: audio ($0.004/min) + input text ($0.10/1M) + output text ($0.40/1M)."""
+        pricing = AIModelPricing(
+            provider="mistral",
+            model="voxtral-small-latest",
+            effective_from=datetime(2025, 6, 1, tzinfo=timezone.utc),
+            pricing_version="mistral-voxtral-small-v1",
+            currency="USD",
+            input_text_price_per_million=Decimal("0.1000"),
+            output_text_price_per_million=Decimal("0.4000"),
+            audio_price_per_minute=Decimal("0.004000"),
+            is_active=True,
+        )
+        res = calculate_event_cost(
+            pricing=pricing,
+            input_text_tokens=5_000,
+            output_text_tokens=1_000,
+            audio_duration_seconds=90.0,
+        )
+        self.assertEqual(res.pricing_status, "priced")
+        self.assertEqual(res.pricing_version, "mistral-voxtral-small-v1")
+        # Audio: (90/60) * 0.004 = 0.006000
+        # Input text: 5,000 @ 0.10/M = 0.000500
+        # Output text: 1,000 @ 0.40/M = 0.000400
+        # Total = 0.006900
+        self.assertEqual(res.estimated_cost_usd, Decimal("0.006900"))
+
+    def test_mistral_voxtral_mini_transcribe_rate_0003(self):
+        """Mistral Voxtral Mini Transcribe: corrected official STT rate $0.003/minute."""
+        pricing = AIModelPricing(
+            provider="mistral",
+            model="voxtral-mini-latest",
+            effective_from=datetime(2025, 7, 1, tzinfo=timezone.utc),
+            pricing_version="mistral-voxtral-mini-stt-v2",
+            currency="USD",
+            audio_price_per_minute=Decimal("0.003000"),
+            is_active=True,
+        )
+        res = calculate_event_cost(
+            pricing=pricing,
+            audio_duration_seconds=120.0,
+        )
+        self.assertEqual(res.pricing_status, "priced")
+        self.assertEqual(res.pricing_version, "mistral-voxtral-mini-stt-v2")
+        # (120/60) * 0.003 = 0.006000
+        self.assertEqual(res.estimated_cost_usd, Decimal("0.006000"))
+
+    def test_openai_gpt_5_6_luna_pricing(self):
+        """OpenAI GPT-5.6 Luna: $0.20/1M input, $0.02/1M cached, $1.20/1M output."""
+        pricing = AIModelPricing(
+            provider="openai",
+            model="gpt-5.6-luna",
+            effective_from=datetime(2025, 6, 1, tzinfo=timezone.utc),
+            pricing_version="openai-gpt-5.6-luna-v1",
+            currency="USD",
+            input_text_price_per_million=Decimal("0.2000"),
+            output_text_price_per_million=Decimal("1.2000"),
+            cached_input_price_per_million=Decimal("0.0200"),
+            is_active=True,
+        )
+        res = calculate_event_cost(
+            pricing=pricing,
+            prompt_token_count=20_000,
+            cached_content_token_count=5_000,
+            candidates_token_count=2_000,
+        )
+        self.assertEqual(res.pricing_status, "priced")
+        self.assertEqual(res.pricing_version, "openai-gpt-5.6-luna-v1")
+        # 15,000 net prompt @ 0.20/M = 0.003000
+        # 5,000 cached @ 0.02/M = 0.000100
+        # 2,000 output @ 1.20/M = 0.002400
+        # Total = 0.005500
+        self.assertEqual(res.estimated_cost_usd, Decimal("0.005500"))
+
     async def test_backfill_unpriced_events_idempotent(self):
         """Verify that backfill processes unpriced events and updates their cost."""
         session = AsyncMock()

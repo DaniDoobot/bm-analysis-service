@@ -142,7 +142,30 @@ class TestLaboratoryModelSelector(unittest.IsolatedAsyncioTestCase):
                 input_audio_price_per_million=Decimal("0.3000"),
                 output_text_price_per_million=Decimal("0.4000"),
                 output_audio_price_per_million=Decimal("0.4000"),
+                cached_input_price_per_million=Decimal("0.0250"),
                 pricing_version="gemini-2.5-lite-v1",
+                is_active=True,
+            ),
+            AIModelPricing(
+                provider="gemini",
+                model="gemini-3.5-flash-lite",
+                effective_from=dt_from,
+                input_text_price_per_million=Decimal("0.3000"),
+                input_audio_price_per_million=Decimal("0.3000"),
+                output_text_price_per_million=Decimal("2.5000"),
+                output_audio_price_per_million=Decimal("2.5000"),
+                cached_input_price_per_million=Decimal("0.0300"),
+                pricing_version="gemini-3.5-flash-lite-v1",
+                is_active=True,
+            ),
+            AIModelPricing(
+                provider="mistral",
+                model="voxtral-small-latest",
+                effective_from=dt_from,
+                input_text_price_per_million=Decimal("0.1000"),
+                output_text_price_per_million=Decimal("0.4000"),
+                audio_price_per_minute=Decimal("0.004000"),
+                pricing_version="mistral-voxtral-small-v1",
                 is_active=True,
             ),
             AIModelPricing(
@@ -165,8 +188,8 @@ class TestLaboratoryModelSelector(unittest.IsolatedAsyncioTestCase):
                 input_audio_price_per_million=Decimal("0.0000"),
                 output_text_price_per_million=Decimal("0.0000"),
                 output_audio_price_per_million=Decimal("0.0000"),
-                audio_price_per_minute=Decimal("0.002000"),
-                pricing_version="mistral-stt-v1",
+                audio_price_per_minute=Decimal("0.003000"),
+                pricing_version="mistral-voxtral-mini-stt-v2",
                 is_active=True,
             ),
             AIModelPricing(
@@ -185,11 +208,10 @@ class TestLaboratoryModelSelector(unittest.IsolatedAsyncioTestCase):
                 provider="openai",
                 model="gpt-5.6-luna",
                 effective_from=dt_from,
-                input_text_price_per_million=Decimal("1.2500"),
-                input_audio_price_per_million=Decimal("1.2500"),
-                output_text_price_per_million=Decimal("5.0000"),
-                output_audio_price_per_million=Decimal("5.0000"),
-                pricing_version="openai-luna-v1",
+                input_text_price_per_million=Decimal("0.2000"),
+                cached_input_price_per_million=Decimal("0.0200"),
+                output_text_price_per_million=Decimal("1.2000"),
+                pricing_version="openai-gpt-5.6-luna-v1",
                 is_active=True,
             ),
         ]
@@ -315,6 +337,9 @@ class TestLaboratoryModelSelector(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(res["provider"], "gemini")
             self.assertEqual(res["pipeline_mode"], "direct_audio")
             self.assertEqual(res["result"]["empatia"], 8)
+            self.assertEqual(res["pricing_status"], "priced")
+            self.assertIsNotNone(res["estimated_cost_usd"])
+            self.assertGreater(res["estimated_cost_usd"], 0)
             self.assertEqual(mock_gen.call_args.kwargs["model"], expected_model_name)
 
     async def test_02_gemini_3_8_flash_direct_audio(self):
@@ -445,7 +470,7 @@ class TestLaboratoryModelSelector(unittest.IsolatedAsyncioTestCase):
             patch("app.services.audio_download_service.AudioDownloadService.download_audio", new_callable=AsyncMock) as mock_dl,
             patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=mock_resp) as mock_post,
         ):
-            mock_hs.return_value = {"call_id": "4001", "recording_url": "https://api.twilio.com/rec4.mp3"}
+            mock_hs.return_value = {"call_id": "4001", "recording_url": "https://api.twilio.com/rec4.mp3", "duration_seconds": 60}
             mock_dl.return_value = b"FAKE_VOXTRAL_AUDIO"
 
             from app.services.transcription_analysis_service import analyze_transcription_pipeline
@@ -463,6 +488,12 @@ class TestLaboratoryModelSelector(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(res["provider"], "mistral")
             self.assertEqual(res["actual_model"], "voxtral-small-latest")
             self.assertEqual(res["result"]["empatia"], 10)
+            self.assertEqual(res["pricing_status"], "priced")
+            # Audio: (60/60)*0.004 = 0.004000
+            # Input: 800 @ 0.10/M = 0.000080
+            # Output: 150 @ 0.40/M = 0.000060
+            # Total = 0.004140
+            self.assertEqual(res["estimated_cost_usd"], 0.00414)
             self.assertEqual(mock_post.await_count, 1)
 
             # Verify context limit guard when prompt is huge (> 32,000 tokens -> > 96,000 chars)
@@ -562,6 +593,9 @@ class TestLaboratoryModelSelector(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(llm_ev.pricing_status, "priced")
             self.assertGreater(llm_ev.estimated_cost_usd, Decimal("0"))
 
+            self.assertEqual(res["pricing_status"], "priced")
+            self.assertAlmostEqual(res["stt_cost_usd"], float(stt_ev.estimated_cost_usd), places=5)
+            self.assertAlmostEqual(res["llm_cost_usd"], float(llm_ev.estimated_cost_usd), places=5)
             expected_total = round(float(stt_ev.estimated_cost_usd) + float(llm_ev.estimated_cost_usd), 6)
             self.assertAlmostEqual(res["estimated_cost_usd"], expected_total, places=5)
 
@@ -574,6 +608,9 @@ class TestLaboratoryModelSelector(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_10_mistral_transcribe_gpt_luna_pipeline(self):
+        # 90s audio @ $0.003/min = $0.004500 STT
+        # 1000 in @ $0.20/M + 200 out @ $1.20/M = $0.000440 LLM
+        # Total = $0.004940
         await self._assert_stt_plus_llm_pipeline(
             "mistral_transcribe_gpt_luna",
             "mistral",
@@ -582,6 +619,9 @@ class TestLaboratoryModelSelector(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_11_deepgram_nova3_gpt_luna_pipeline(self):
+        # 60s audio @ $0.0043/min = $0.004300 STT
+        # 1000 in @ $0.20/M + 200 out @ $1.20/M = $0.000440 LLM
+        # Total = $0.004740
         await self._assert_stt_plus_llm_pipeline(
             "deepgram_nova3_gpt_luna",
             "deepgram",

@@ -496,5 +496,7 @@ async def enrich_analyses(db: AsyncSession, items: list[Any]) -> list[Any]:
         setattr(item, 'stt_model', stt_mod)
         setattr(item, 'analysis_provider', an_prov)
         setattr(item, 'analysis_model', an_mod)
+        setattr(item, 'estimated_cost_usd', lab_meta.get('estimated_cost_usd'))
+        setattr(item, 'pricing_status', lab_meta.get('pricing_status'))
 
     return items

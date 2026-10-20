@@ -809,6 +809,8 @@ async def analyze_transcription_pipeline(
         "analysis_provider": lab_exec_result.analysis_provider if lab_exec_result else analysis_record.model_provider,
         "analysis_model": lab_exec_result.analysis_model if lab_exec_result else analysis_record.model_name,
         "estimated_cost_usd": lab_exec_result.estimated_cost_usd if lab_exec_result else None,
+        "stt_cost_usd": lab_exec_result.stt_cost_usd if lab_exec_result else None,
+        "llm_cost_usd": lab_exec_result.llm_cost_usd if lab_exec_result else None,
         "pricing_status": lab_exec_result.pricing_status if lab_exec_result else None,
         "summary": summary,
         "result": parsed,

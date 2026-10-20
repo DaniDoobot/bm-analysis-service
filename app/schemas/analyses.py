@@ -53,6 +53,8 @@ class AnalysisListItem(BaseModel):
     stt_model: str | None = None
     analysis_provider: str | None = None
     analysis_model: str | None = None
+    estimated_cost_usd: float | None = None
+    pricing_status: str | None = None
 
 
 class AnalysisDetail(BaseModel):
@@ -110,6 +112,8 @@ class AnalysisDetail(BaseModel):
     stt_model: str | None = None
     analysis_provider: str | None = None
     analysis_model: str | None = None
+    estimated_cost_usd: float | None = None
+    pricing_status: str | None = None
 
 
 class AnalysisResultOut(BaseModel):
