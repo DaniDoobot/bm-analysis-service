@@ -508,7 +508,7 @@ async def _insert_results(
         feed_key = criterion.feed_key
 
         is_applicable = True
-        if matched_typology:
+        if criterion.criterion_key != "tipo_llamada" and matched_typology:
             allowed_typologies = assoc_map.get(criterion.criterion_id, set())
             if allowed_typologies:
                 is_applicable = (matched_typology.typology_id in allowed_typologies)

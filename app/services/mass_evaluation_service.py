@@ -1276,6 +1276,26 @@ class MassEvaluationService:
                 prompt_snapshot = v.prompt
                 prompt_version_id = v.id
 
+                # Self-heal/Sync prompt snapshot with active criteria (parity with Laboratorio)
+                if prompt_id and prompt_snapshot:
+                    try:
+                        from app.services.prompts_service import sync_prompt_text_with_active_criteria
+                        prompt_snapshot_healed, changed = await sync_prompt_text_with_active_criteria(
+                            db, prompt_id, prompt_snapshot
+                        )
+                        if changed:
+                            prompt_snapshot = prompt_snapshot_healed
+                            v_obj = await db.get(PromptVersion, prompt_version_id)
+                            if v_obj:
+                                from sqlalchemy import func
+                                v_obj.prompt = prompt_snapshot
+                                v_obj.updated_at = func.now() if hasattr(func, 'now') else datetime.now(timezone.utc)
+                                db.add(v_obj)
+                                await db.commit()
+                                logger.info("Self-healed prompt version ID %s in mass evaluation pipeline.", prompt_version_id)
+                    except Exception as ex_sync:
+                        logger.warning("Error during prompt self-healing in mass evaluation pipeline: %s", ex_sync)
+
                 # Resolve service_id with priority: filters_payload -> run -> job -> prompt -> automation
                 prompt_stmt = select(Prompt).where(Prompt.prompt_id == prompt_id)
                 prompt_res = await db.execute(prompt_stmt)
@@ -1756,6 +1776,15 @@ class MassEvaluationService:
                         # Strip legacy keys from result
                         from app.services.analysis_persistence import _strip_legacy_keys
                         clean_result = _strip_legacy_keys(parsed)
+
+                        # Defensive Keys Guard (parity with Laboratorio)
+                        for crit in criteria_snapshot:
+                            out_k = crit.get("output_key")
+                            if out_k and out_k not in clean_result:
+                                clean_result[out_k] = None
+                            feed_k = crit.get("feed_key")
+                            if feed_k and feed_k not in clean_result:
+                                clean_result[feed_k] = None
                         
                         # 1. Try direct keys in clean_result
                         detected_typology_key_raw = clean_result.get("tipo_llamada")
@@ -1811,7 +1840,7 @@ class MassEvaluationService:
  
                             # Determine if criterion is applicable
                             is_applicable = True
-                            if matched_typology:
+                            if criterion.get("criterion_key") != "tipo_llamada" and matched_typology:
                                 allowed_typologies = assoc_map.get(criterion["criterion_id"], set())
                                 if allowed_typologies:
                                     is_applicable = (matched_typology["typology_id"] in allowed_typologies)

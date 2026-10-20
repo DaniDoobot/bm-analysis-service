@@ -555,42 +555,63 @@ async def analyze_transcription_pipeline(
     # ── 4. Validate AI output ──────────────────────────────────────────────
     tipo_llamada = parsed.get("tipo_llamada")
     
-    # Dynamically fetch active typologies for the prompt's service to avoid validation issues
+    # Dynamically fetch active typologies (base structure priority, fallback to service)
+    # Uses resolve_service_typology for canonical parity with mass evaluations & persistence
+    typology_by_key = {}
     try:
         from sqlalchemy import select
-        from app.models.prompts import Prompt
+        from app.models.prompts import Prompt, BaseStructureTypology
         from app.models.typologies import Typology
+        from app.services.analysis_persistence import resolve_service_typology, normalize_tipo_llamada
         
         prompt_obj = await db.get(Prompt, resolved_prompt_id) if resolved_prompt_id else None
-        if prompt_obj and prompt_obj.service_id:
-            t_stmt = select(Typology.typology_key).where(
+        typology_list = []
+        if prompt_obj and prompt_obj.base_structure_id:
+            t_stmt = (
+                select(Typology)
+                .join(BaseStructureTypology, BaseStructureTypology.typology_id == Typology.typology_id)
+                .where(
+                    BaseStructureTypology.base_structure_id == prompt_obj.base_structure_id,
+                    Typology.is_active == True
+                )
+            )
+            t_res = await db.execute(t_stmt)
+            typology_list = t_res.scalars().all()
+            
+        if not typology_list and prompt_obj and prompt_obj.service_id:
+            t_stmt = select(Typology).where(
                 Typology.service_id == prompt_obj.service_id,
                 Typology.is_active == True
             )
             t_res = await db.execute(t_stmt)
-            active_keys = set(t_res.scalars().all())
-        else:
-            t_stmt = select(Typology.typology_key).where(Typology.is_active == True)
+            typology_list = t_res.scalars().all()
+            
+        if not typology_list:
+            t_stmt = select(Typology).where(Typology.is_active == True)
             t_res = await db.execute(t_stmt)
-            active_keys = set(t_res.scalars().all())
-    except Exception as e:
-        logger.warning("Failed to fetch active typologies from DB for dynamic validation: %s", e)
-        active_keys = set(["cita", "confirmacion", "cancelacion", "reagendo", "falta", "otros"])
-
-    if not active_keys:
-        active_keys = set(["cita", "confirmacion", "cancelacion", "reagendo", "falta", "otros"])
+            typology_list = t_res.scalars().all()
+            
+        typology_by_key = {t.typology_key: t for t in typology_list}
+        matched_typology, resolved_key = resolve_service_typology(tipo_llamada, typology_by_key)
         
-    # Map legacy or inactive typology to "otros" to prevent pipeline crash
-    if tipo_llamada not in active_keys:
-        logger.warning(
-            "tipo_llamada %r is not active or legacy (allowed: %s). Mapping to 'otros' for call_id=%s, prompt_id=%s",
-            tipo_llamada,
-            sorted(active_keys),
-            call_id,
-            resolved_prompt_id
-        )
-        tipo_llamada = "otros"
-        parsed["tipo_llamada"] = "otros"
+        if resolved_key:
+            tipo_llamada = resolved_key
+            parsed["tipo_llamada"] = resolved_key
+        elif tipo_llamada:
+            norm_key = normalize_tipo_llamada(tipo_llamada)
+            if norm_key in typology_by_key:
+                tipo_llamada = norm_key
+                parsed["tipo_llamada"] = norm_key
+            else:
+                tipo_llamada = norm_key or "otros"
+                parsed["tipo_llamada"] = tipo_llamada
+        else:
+            tipo_llamada = "otros"
+            parsed["tipo_llamada"] = "otros"
+    except Exception as e:
+        logger.warning("Failed to resolve dynamic typology in transcription analysis: %s", e)
+        if tipo_llamada is None:
+            parsed["tipo_llamada"] = "otros"
 
     # ── 4.5. Defensive Keys Guard ──────────────────────────────────────────
     try:
@@ -790,6 +811,76 @@ async def analyze_transcription_pipeline(
         "propension": parsed.get("propension"),
     }
 
+    # Build items_json and items_visual for contract parity with Mass Evaluations
+    items_json = []
+    try:
+        from app.services.criteria_service import get_active_criteria
+        from app.models.criteria import PromptCriterionTypology
+        from app.services.analysis_results_mapper import map_criterion_value
+        from app.utils.visual_formatters import build_items_visual
+        from sqlalchemy import select
+        
+        active_crits = await get_active_criteria(db, resolved_prompt_id) if resolved_prompt_id else []
+        c_ids = [c.criterion_id for c in active_crits]
+        assoc_map = {}
+        if c_ids:
+            assoc_res = await db.execute(
+                select(PromptCriterionTypology).where(PromptCriterionTypology.criterion_id.in_(c_ids))
+            )
+            for assoc in assoc_res.scalars().all():
+                if assoc.criterion_id not in assoc_map:
+                    assoc_map[assoc.criterion_id] = set()
+                assoc_map[assoc.criterion_id].add(assoc.typology_id)
+                
+        matched_t = typology_by_key.get(parsed.get("tipo_llamada")) if 'typology_by_key' in locals() and typology_by_key else None
+        
+        for c in active_crits:
+            out_k = c.output_key
+            feed_k = c.feed_key
+            is_app = True
+            if c.criterion_key != "tipo_llamada" and matched_t:
+                allowed_t = assoc_map.get(c.criterion_id, set())
+                if allowed_t:
+                    is_app = (getattr(matched_t, "typology_id", None) in allowed_t)
+            
+            raw_val = parsed.get(out_k) if out_k else None
+            feed_val = parsed.get(feed_k) if feed_k else None
+            typed = map_criterion_value(raw_val, c.criterion_type or "text") if is_app else {
+                "raw_value": None, "value_number": None, "value_text": None,
+                "value_boolean": None, "value_category": None
+            }
+            
+            resolved_val = None
+            if is_app:
+                if c.criterion_type == "number":
+                    resolved_val = float(typed["value_number"]) if typed["value_number"] is not None else None
+                elif c.criterion_type == "boolean":
+                    resolved_val = typed["value_boolean"]
+                else:
+                    resolved_val = typed["value_text"] or typed["value_category"] or typed["raw_value"]
+                    
+            items_json.append({
+                "criterion_id": c.criterion_id,
+                "criterion_key": c.criterion_key,
+                "name": c.criterion_name,
+                "type": c.criterion_type,
+                "output_key": out_k,
+                "value": resolved_val,
+                "feed": str(feed_val) if feed_val is not None else None,
+                "not_applicable": not is_app,
+                "numeric_value": typed["value_number"],
+                "text_value": typed["value_text"],
+                "boolean_value": typed["value_boolean"],
+                "category_value": typed["value_category"],
+                "percentage_value": typed["value_number"] if c.criterion_type == "percentage" else None,
+                "raw_value": typed["raw_value"],
+            })
+    except Exception as e_items:
+        logger.warning("Error building items_json/items_visual in transcription analysis: %s", e_items)
+        items_json = []
+
+    items_visual = build_items_visual(items_json) if items_json else []
+
     response_dict: dict[str, Any] = {
         "ok": True,
         "status": "completed",
@@ -814,6 +905,8 @@ async def analyze_transcription_pipeline(
         "pricing_status": lab_exec_result.pricing_status if lab_exec_result else None,
         "summary": summary,
         "result": parsed,
+        "items_json": items_json,
+        "items_visual": items_visual,
     }
     if transcription is not None:
         response_dict["transcription"] = transcription
