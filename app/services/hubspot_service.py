@@ -287,6 +287,14 @@ class HubSpotService:
         Only is_demo is False (confirmed real) authorizes external HTTP.
         If service_id is provided, also enforces is_hubspot_side_effect_allowed(service_id).
         """
+        # Global kill-switch for HubSpot CRM modifications (Staging / Safe mode)
+        curr_settings = get_settings()
+        if not getattr(curr_settings, "enable_hubspot_writes", True):
+            logger.warning(
+                "[side_effects] HubSpot write blocked because ENABLE_HUBSPOT_WRITES=false (operation=create_ticket, service_id=%s)",
+                service_id,
+            )
+            return {}
         eff_is_demo = self._resolve_is_demo(is_demo)
         if eff_is_demo is not False:
             logger.warning(

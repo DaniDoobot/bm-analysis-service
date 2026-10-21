@@ -12,7 +12,30 @@ import time
 
 import string
 
-SECRET_KEY = "bm-dev-secret-key-for-token-signing-12345"
+HISTORICAL_SECRET_KEY = "bm-dev-secret-key-for-token-signing-12345"
+
+
+def get_secret_key() -> str:
+    """
+    Resolve JWT secret key from environment or app settings.
+    Guarantees 100% backward compatibility by defaulting to HISTORICAL_SECRET_KEY.
+    """
+    import os
+    env_val = os.environ.get("JWT_SECRET_KEY")
+    if env_val and env_val.strip():
+        return env_val.strip()
+    try:
+        from app.config import get_settings
+        s = get_settings()
+        configured = getattr(s, "jwt_secret_key", None)
+        if configured and configured.strip():
+            return configured.strip()
+    except Exception:
+        pass
+    return HISTORICAL_SECRET_KEY
+
+
+SECRET_KEY = get_secret_key()
 
 SPECIAL_CHARACTERS = "!@#$%&*_-."
 
@@ -77,7 +100,7 @@ def verify_password(password: str, hashed: str) -> bool:
         return False
 
 
-def create_access_token(data: dict, expires_in: int = 86400) -> str:
+def create_access_token(data: dict, expires_in: int = 86400, secret_key: str | None = None) -> str:
     """Generate a signed access token (stateless JSON payload)."""
     payload = {
         "sub": json.dumps(data),
@@ -88,20 +111,20 @@ def create_access_token(data: dict, expires_in: int = 86400) -> str:
     
     # Sign signature
     sig = hmac.new(
-        SECRET_KEY.encode("utf-8"), payload_b64.encode("utf-8"), hashlib.sha256
+        (secret_key or get_secret_key() or SECRET_KEY).encode("utf-8"), payload_b64.encode("utf-8"), hashlib.sha256
     ).hexdigest()
     
     return f"{payload_b64}.{sig}"
 
 
-def decode_access_token(token: str) -> dict | None:
+def decode_access_token(token: str, secret_key: str | None = None) -> dict | None:
     """Decode a signed access token and verify its signature and expiration."""
     if not token or "." not in token:
         return None
     try:
         payload_b64, signature = token.split(".", 1)
         expected_sig = hmac.new(
-            SECRET_KEY.encode("utf-8"), payload_b64.encode("utf-8"), hashlib.sha256
+            (secret_key or get_secret_key() or SECRET_KEY).encode("utf-8"), payload_b64.encode("utf-8"), hashlib.sha256
         ).hexdigest()
         
         if not secrets.compare_digest(signature, expected_sig):

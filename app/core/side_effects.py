@@ -187,6 +187,15 @@ async def is_external_side_effect_allowed(
         "hubspot_alarm_ticket",
         "hubspot_rem_ticket",
     ):
+        # Check global HubSpot writes flag (Staging / Safe mode)
+        from app.config import get_settings
+        if not getattr(get_settings(), "enable_hubspot_writes", True):
+            log_side_effect_blocked(
+                resolved_company_id, service_id, integration_norm,
+                reason="hubspot_writes_disabled"
+            )
+            return False
+
         # Compose with existing HubSpot service containment
         from app.services.hubspot_service import is_hubspot_side_effect_allowed
         if not is_hubspot_side_effect_allowed(service_id):

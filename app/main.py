@@ -351,6 +351,12 @@ async def startup_event():
         bool(settings.hubspot_tipo_de_rem and str(settings.hubspot_tipo_de_rem).strip()),
         bool(settings.hubspot_access_token and str(settings.hubspot_access_token).strip()),
     )
+    logger.info(
+        "Staging / Safety flags: mass_eval_scheduler_enabled=%s, hubspot_writes_enabled=%s, custom_jwt_secret=%s",
+        bool(settings.enable_mass_evaluation_scheduler),
+        bool(settings.enable_hubspot_writes),
+        bool(getattr(settings, "jwt_secret_key", "") and settings.jwt_secret_key != "bm-dev-secret-key-for-token-signing-12345"),
+    )
 
     import asyncio
     from app.services.db_init_service import init_db
@@ -358,8 +364,11 @@ async def startup_event():
     # Safely initialize base structures in the background
     asyncio.create_task(init_db())
     
-    # Start mass evaluations background scheduler loop
-    asyncio.create_task(start_mass_evaluations_scheduler())
+    # Start mass evaluations background scheduler loop if enabled
+    if settings.enable_mass_evaluation_scheduler:
+        asyncio.create_task(start_mass_evaluations_scheduler())
+    else:
+        logger.info("Mass evaluations background scheduler is DISABLED (ENABLE_MASS_EVALUATION_SCHEDULER=false).")
 
     # Start automations background scheduler if enabled
     if settings.enable_automation_scheduler:

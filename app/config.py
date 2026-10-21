@@ -113,6 +113,13 @@ class Settings(BaseSettings):
     # ── Structure Permissions Flag ────────────────────────────────────────────
     enable_structure_permissions: bool = False
 
+    # ── Staging & Safety Flags (Defaults preserve 100% production behavior) ──
+    enable_mass_evaluation_scheduler: bool = True
+    enable_hubspot_writes: bool = True
+
+    # ── Security & Authentication ─────────────────────────────────────────────
+    jwt_secret_key: str = "bm-dev-secret-key-for-token-signing-12345"
+
     # ── CORS ──────────────────────────────────────────────────────────────────
     cors_origins: str = "*"
 
