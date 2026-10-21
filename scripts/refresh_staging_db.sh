@@ -135,21 +135,26 @@ TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 DUMP_FILE="/tmp/speech_prod_snapshot_${TIMESTAMP}.dump"
 
 echo ""
-echo "[1/5] Dumping production database (schema, data, views, sequences, indexes)..."
+echo "[1/5] Creating SELECTIVE dump of Speech BM objects (public.bm_* and public.vw_bm_*)..."
+echo "      Excluding all generic n8n and agent execution tables from dump."
 echo "      Output file: ${DUMP_FILE}"
-# Format custom (-Fc) preserves views, indexes, blobs, and custom table constraints
+# Selective custom format dump (-Fc):
+# Only dumps tables matching 'public.bm_*' and views matching 'public.vw_bm_*'.
+# Automatically includes all column sequences, indexes, primary/foreign keys, and constraints.
 pg_dump --format=custom \
         --no-owner \
         --no-privileges \
+        -t 'public.bm_*' \
+        -t 'public.vw_bm_*' \
         --dbname="$PROD_DATABASE_URL" \
         --file="$DUMP_FILE"
 
 DUMP_SIZE="$(du -h "$DUMP_FILE" | cut -f1)"
-echo "      Snapshot generated successfully (Size: ${DUMP_SIZE})."
+echo "      Selective Speech BM snapshot generated successfully (Size: ${DUMP_SIZE})."
 
 echo ""
-echo "[2/5] Restoring snapshot into TARGET STAGING database (${TARGET_DB})..."
-# --clean drops database objects prior to recreating them
+echo "[2/5] Restoring selective snapshot into TARGET STAGING database (${TARGET_DB})..."
+# --clean drops database objects prior to recreating them (ONLY objects contained in the archive!)
 # --if-exists prevents errors on initial empty databases
 # --no-owner & --no-privileges ensure staging user owns all imported tables/views
 pg_restore --clean \

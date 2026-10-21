@@ -30,9 +30,16 @@ BEGIN
 END $$;
 
 -- ------------------------------------------------------------------------------
--- 2. MAIN ENTITY ROW COUNTS (FIDELITY CHECK)
+-- 2. SPEECH BM TABLES INVENTORY (FIDELITY CHECK)
 -- ------------------------------------------------------------------------------
-SELECT '1. Core Entities & Operational Counts' AS section;
+SELECT '1. Speech BM Tables Count & Main Entity Counts' AS section;
+
+SELECT 
+    count(*) AS total_bm_tables,
+    CASE WHEN count(*) >= 55 THEN 'PASS (Full Speech BM Schema Present)' ELSE 'FAIL (Missing bm_* Tables!)' END AS tables_status
+FROM information_schema.tables
+WHERE table_schema = 'public' 
+  AND table_name LIKE 'bm_%';
 
 SELECT 
     'bm_companies' AS table_name, count(*) AS total_rows FROM bm_companies
@@ -167,21 +174,40 @@ SELECT risk_item,
 FROM safety_metrics;
 
 -- ------------------------------------------------------------------------------
--- 4. ANALYTICAL VIEWS AUDIT (EXACTLY 8 VIEWS EXPECTED)
+-- 4. ANALYTICAL VIEWS AUDIT (14 PRODUCTION VIEWS VERIFICATION)
 -- ------------------------------------------------------------------------------
-SELECT '3. PostgreSQL Analytical Views Verification' AS section;
+SELECT '3. PostgreSQL Analytical Views Verification (14 Expected)' AS section;
 
+-- Audit all 14 known production analytical views explicitly
+WITH expected_views AS (
+    SELECT unnest(ARRAY[
+        'vw_bm_all_analysis_criteria_flat',
+        'vw_bm_analysis_criteria_flat',
+        'vw_bm_analysis_full_current',
+        'vw_bm_analysis_full_history',
+        'vw_bm_analysis_results_current',
+        'vw_bm_analysis_results_history',
+        'vw_bm_analysis_results_pivot',
+        'vw_bm_individual_analysis_criteria_flat',
+        'vw_bm_individual_analysis_report_wide',
+        'vw_bm_individual_analysis_summary',
+        'vw_bm_mass_evaluation_calls_summary',
+        'vw_bm_mass_evaluation_criteria_flat',
+        'vw_bm_mass_evaluation_daily_summary',
+        'vw_bm_mass_evaluation_report_wide'
+    ]) AS view_name
+)
 SELECT 
-    table_name AS view_name,
-    'EXISTS' AS status
-FROM information_schema.views 
-WHERE table_schema = 'public' 
-  AND table_name LIKE 'vw_bm_%'
-ORDER BY table_name;
+    ev.view_name,
+    CASE WHEN v.table_name IS NOT NULL THEN 'EXISTS (OK)' ELSE 'MISSING (ERROR)' END AS status
+FROM expected_views ev
+LEFT JOIN information_schema.views v 
+    ON v.table_schema = 'public' AND v.table_name = ev.view_name
+ORDER BY ev.view_name;
 
 SELECT 
     count(*) AS total_analytical_views,
-    CASE WHEN count(*) >= 8 THEN 'PASS (8/8 Views Present)' ELSE 'FAIL (Missing Views!)' END AS views_status
+    CASE WHEN count(*) >= 14 THEN 'PASS (14/14 Views Present)' ELSE 'FAIL (Missing Views!)' END AS views_status
 FROM information_schema.views 
 WHERE table_schema = 'public' 
   AND table_name LIKE 'vw_bm_%';
@@ -211,6 +237,7 @@ DO $$
 DECLARE
     active_risks INTEGER := 0;
     views_count INTEGER := 0;
+    tables_count INTEGER := 0;
 BEGIN
     SELECT count(*) INTO active_risks FROM (
         SELECT 1 FROM bm_mass_evaluation_jobs WHERE schedule_enabled = true
@@ -238,11 +265,16 @@ BEGIN
     FROM information_schema.views
     WHERE table_schema = 'public' AND table_name LIKE 'vw_bm_%';
 
-    IF active_risks = 0 AND views_count >= 8 THEN
+    SELECT count(*) INTO tables_count
+    FROM information_schema.tables
+    WHERE table_schema = 'public' AND table_name LIKE 'bm_%';
+
+    IF active_risks = 0 AND views_count >= 14 AND tables_count >= 55 THEN
         RAISE NOTICE '=======================================================';
         RAISE NOTICE '[VALIDATION SUCCESS] Staging database is 100%% safe, faithful, and ready.';
+        RAISE NOTICE 'Tables (bm_*): %, Views (vw_bm_*): %, Active Risks: %', tables_count, views_count, active_risks;
         RAISE NOTICE '=======================================================';
     ELSE
-        RAISE EXCEPTION '[VALIDATION FAILED] Discrepancies detected: % active risks, % analytical views.', active_risks, views_count;
+        RAISE EXCEPTION '[VALIDATION FAILED] Discrepancies detected: % active risks, % analytical views (expected >= 14), % bm_* tables (expected >= 55).', active_risks, views_count, tables_count;
     END IF;
 END $$;

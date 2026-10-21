@@ -16,10 +16,12 @@ class TestStagingScriptsSafety(unittest.TestCase):
         self.neutralize_sql_path = os.path.join(SCRIPTS_DIR, "neutralize_staging_db.sql")
         self.validate_sql_path = os.path.join(SCRIPTS_DIR, "validate_staging_db.sql")
         self.refresh_sh_path = os.path.join(SCRIPTS_DIR, "refresh_staging_db.sh")
+        self.compare_sql_path = os.path.join(SCRIPTS_DIR, "compare_prod_staging.sql")
 
         self.assertTrue(os.path.isfile(self.neutralize_sql_path), "neutralize_staging_db.sql must exist")
         self.assertTrue(os.path.isfile(self.validate_sql_path), "validate_staging_db.sql must exist")
         self.assertTrue(os.path.isfile(self.refresh_sh_path), "refresh_staging_db.sh must exist")
+        self.assertTrue(os.path.isfile(self.compare_sql_path), "compare_prod_staging.sql must exist")
 
         with open(self.neutralize_sql_path, "r", encoding="utf-8") as f:
             self.neutralize_sql = f.read()
@@ -29,6 +31,9 @@ class TestStagingScriptsSafety(unittest.TestCase):
 
         with open(self.refresh_sh_path, "r", encoding="utf-8") as f:
             self.refresh_sh = f.read()
+
+        with open(self.compare_sql_path, "r", encoding="utf-8") as f:
+            self.compare_sql = f.read()
 
     def test_01_neutralize_sql_transaction_and_database_guard(self):
         """neutralize_staging_db.sql must run inside a transaction and guard current_database()."""
@@ -96,13 +101,34 @@ class TestStagingScriptsSafety(unittest.TestCase):
         # Verify views check
         self.assertIn("vw_bm_%", self.validate_sql)
         self.assertIn("information_schema.views", self.validate_sql)
+        self.assertIn("total_analytical_views", self.validate_sql)
+
+        # Verify all 14 expected production views are explicitly audited
+        expected_14_views = [
+            "vw_bm_all_analysis_criteria_flat",
+            "vw_bm_analysis_criteria_flat",
+            "vw_bm_analysis_full_current",
+            "vw_bm_analysis_full_history",
+            "vw_bm_analysis_results_current",
+            "vw_bm_analysis_results_history",
+            "vw_bm_analysis_results_pivot",
+            "vw_bm_individual_analysis_criteria_flat",
+            "vw_bm_individual_analysis_report_wide",
+            "vw_bm_individual_analysis_summary",
+            "vw_bm_mass_evaluation_calls_summary",
+            "vw_bm_mass_evaluation_criteria_flat",
+            "vw_bm_mass_evaluation_daily_summary",
+            "vw_bm_mass_evaluation_report_wide",
+        ]
+        for v in expected_14_views:
+            self.assertIn(v, self.validate_sql)
 
         # Verify key tables checked
         for tbl in ["bm_companies", "bm_users", "bm_services", "bm_analyses", "bm_mass_evaluation_results"]:
             self.assertIn(tbl, self.validate_sql)
 
     def test_04_refresh_sh_mandatory_confirm_and_safety_checks(self):
-        """refresh_staging_db.sh must require confirmation flag and prevent production overwrites."""
+        """refresh_staging_db.sh must require confirmation flag, selective scope, and prevent production overwrites."""
         # Confirmation parameter required
         self.assertIn("--confirm-refresh-staging", self.refresh_sh)
 
@@ -115,6 +141,14 @@ class TestStagingScriptsSafety(unittest.TestCase):
         self.assertIn("# NEVER DROP PRODUCTION", self.refresh_sh)
         self.assertIn("# TARGET MUST BE STAGING", self.refresh_sh)
 
+        # Selective dump patterns (-t 'public.bm_*' -t 'public.vw_bm_*')
+        self.assertIn("-t 'public.bm_*'", self.refresh_sh)
+        self.assertIn("-t 'public.vw_bm_*'", self.refresh_sh)
+
+        # Must NOT dump n8n or agent execution tables
+        self.assertNotIn("agent_checkpoints", self.refresh_sh)
+        self.assertNotIn("agent_execution", self.refresh_sh)
+
         # Format custom pg_dump
         self.assertIn("pg_dump", self.refresh_sh)
         self.assertIn("--format=custom", self.refresh_sh)
@@ -123,18 +157,36 @@ class TestStagingScriptsSafety(unittest.TestCase):
         self.assertIn("pg_restore", self.refresh_sh)
         self.assertIn("--no-owner", self.refresh_sh)
         self.assertIn("--no-privileges", self.refresh_sh)
+        self.assertIn("--clean", self.refresh_sh)
+        self.assertIn("--if-exists", self.refresh_sh)
 
         # No Dokploy or Docker commands
         self.assertNotIn("dokploy", self.refresh_sh.lower())
         self.assertNotIn("docker restart", self.refresh_sh.lower())
         self.assertNotIn("docker stop", self.refresh_sh.lower())
 
-    def test_05_no_hardcoded_secrets_in_any_file(self):
+    def test_05_compare_prod_staging_sql_read_only(self):
+        """compare_prod_staging.sql must be strictly read-only and compare Speech BM metrics."""
+        normalized_sql = re.sub(r"--[^\n]*", "", self.compare_sql).upper()
+        self.assertNotIn("INSERT INTO", normalized_sql)
+        self.assertNotIn("UPDATE ", normalized_sql)
+        self.assertNotIn("DELETE FROM", normalized_sql)
+        self.assertNotIn("DROP TABLE", normalized_sql)
+        self.assertNotIn("ALTER TABLE", normalized_sql)
+
+        self.assertIn("current_database()", self.compare_sql)
+        self.assertIn("bm_%", self.compare_sql)
+        self.assertIn("vw_bm_%", self.compare_sql)
+        self.assertIn("bm_companies", self.compare_sql)
+        self.assertIn("bm_analyses", self.compare_sql)
+
+    def test_06_no_hardcoded_secrets_in_any_file(self):
         """Ensure no real passwords, API keys, or live production URLs are present in scripts."""
         for path, content in [
             (self.neutralize_sql_path, self.neutralize_sql),
             (self.validate_sql_path, self.validate_sql),
             (self.refresh_sh_path, self.refresh_sh),
+            (self.compare_sql_path, self.compare_sql),
         ]:
             # No hardcoded password strings
             self.assertNotIn("SpeechPruebas2026!", content)
