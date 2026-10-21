@@ -651,9 +651,20 @@ async def start_session_for_prompt(db: AsyncSession, hubspot_owner_id: str, repo
     res_comp = await db.execute(stmt_comp)
     comp = res_comp.scalars().first()
     if comp:
-        comp.status = "in_progress"
-        comp.call_session_id = session.session_id
-        comp.training_call_id = call_sid
+        if comp.status == "completed" or comp.evaluation_id is not None:
+            logger.warning(
+                "start_session_for_prompt: Slot is already completed (cycle_id=%s, prompt_id=%s, "
+                "completion_id=%s, evaluation_id=%s). Preserving completed status for session %s.",
+                report_id, prompt.simulation_prompt_id, comp.completion_id, comp.evaluation_id, session.session_id
+            )
+        else:
+            comp.status = "in_progress"
+            comp.call_session_id = session.session_id
+            comp.training_call_id = call_sid
+            logger.info(
+                "Linked completion slot to session: session_id=%s, cycle_id=%s, prompt_id=%s, completion_id=%s",
+                session.session_id, report_id, prompt.simulation_prompt_id, comp.completion_id
+            )
         
     # Mark cycle report as running
     stmt_rep = select(TrainingAgentReport).where(TrainingAgentReport.training_report_id == report_id)
@@ -683,7 +694,7 @@ async def start_cycle_roleplay(db: AsyncSession, cycle: TrainingAgentReport, hub
     pending_prompt = None
     for p in prompts:
         comp = comps.get(p.simulation_prompt_id)
-        if comp and comp.status in ["pending", "in_progress"]:
+        if comp and comp.status in ["pending", "in_progress"] and comp.evaluation_id is None:
             pending_prompt = p
             break
                 
@@ -1245,7 +1256,10 @@ async def handle_roleplay_hangup(
             
             # Short Call Rule: < 15 seconds is marked as failed, resetting progress status to pending
             if duration_seconds < 15 and reason != "exito_conversacional":
-                logger.warning("Short call duration < 15 seconds. Setting status to failed. Resetting completion progress.")
+                logger.warning(
+                    "Short call duration < 15 seconds (duration=%.2f, reason=%s). Setting session %s to failed.",
+                    duration_seconds, reason, session_id
+                )
                 session.status = "failed"
                 session.error_message = f"Llamada menor a 15 segundos: {int(duration_seconds)} segundos."
                 session.ended_at = datetime.now(timezone.utc)
@@ -1259,10 +1273,30 @@ async def handle_roleplay_hangup(
                 res_comp = await db.execute(stmt_comp)
                 comp = res_comp.scalars().first()
                 if comp:
-                    comp.status = "pending"
-                    comp.completed_at = None
-                    comp.training_call_id = None
-                    comp.call_session_id = None
+                    if comp.status == "completed" or comp.evaluation_id is not None:
+                        logger.warning(
+                            "Short call cleanup: slot is already completed (completion_id=%s, "
+                            "cycle_id=%s, prompt_id=%s, status=%s, evaluation_id=%s). "
+                            "Preserving completed progress despite short session %s.",
+                            comp.completion_id, session.cycle_id, session.conversation_id,
+                            comp.status, comp.evaluation_id, session_id
+                        )
+                    elif comp.call_session_id is not None and comp.call_session_id != session_id:
+                        logger.warning(
+                            "Short call cleanup: slot belongs to another active session (completion_id=%s, "
+                            "cycle_id=%s, comp.call_session_id=%s != session_id=%s). Preserving slot status.",
+                            comp.completion_id, session.cycle_id, comp.call_session_id, session_id
+                        )
+                    else:
+                        logger.info(
+                            "Short call cleanup: Resetting completion progress to pending (completion_id=%s, "
+                            "session_id=%s, cycle_id=%s).",
+                            comp.completion_id, session_id, session.cycle_id
+                        )
+                        comp.status = "pending"
+                        comp.completed_at = None
+                        comp.training_call_id = None
+                        comp.call_session_id = None
             else:
                 session.status = "ended"
                 session.ended_at = datetime.now(timezone.utc)
@@ -1966,12 +2000,49 @@ async def recording_completed(
         logger.error("No active/completed Call Session found for call_sid: %s", call_sid)
         return Response(content="ok", media_type="text/plain")
         
+    session_id_val = session.session_id
+    session_status = session.status
+    session_err = session.error_message
+    session_eval_at = session.evaluation_completed_at
+
     # Update Session recording info
     session.recording_sid = recording_sid
     session.recording_url = recording_url
     session.recording_ready_at = datetime.now(timezone.utc)
     await db.commit()
     
+    # Guard against invalid or duplicate evaluation triggers
+    if session_status == "failed":
+        logger.warning(
+            "Recording completed callback for session %s (call_sid=%s) ignored: session already failed (%s). "
+            "Skipping background evaluation to prevent invalid progress mutations.",
+            session_id_val, call_sid, session_err
+        )
+        return Response(content="ok", media_type="text/plain")
+
+    if session_status == "evaluated" or session_eval_at is not None:
+        logger.info(
+            "Recording completed callback for session %s (call_sid=%s) ignored: session already evaluated. "
+            "Skipping duplicate evaluation.",
+            session_id_val, call_sid
+        )
+        return Response(content="ok", media_type="text/plain")
+
+    # Check if an evaluation already exists in DB for this session
+    from app.models.personalized_training import TrainingCallEvaluation
+    stmt_eval = select(TrainingCallEvaluation.evaluation_id).where(
+        TrainingCallEvaluation.session_id == session_id_val
+    ).limit(1)
+    res_eval = await db.execute(stmt_eval)
+    existing_eval_id = res_eval.scalar()
+    if existing_eval_id:
+        logger.info(
+            "Recording completed callback for session %s (call_sid=%s) ignored: evaluation %s already exists. "
+            "Skipping duplicate evaluation.",
+            session_id_val, call_sid, existing_eval_id
+        )
+        return Response(content="ok", media_type="text/plain")
+
     # Trigger asynchronous background evaluation task
     from fastapi.background import BackgroundTasks
     bg_tasks = BackgroundTasks()

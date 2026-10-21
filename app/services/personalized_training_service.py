@@ -6,7 +6,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple, Set
-from sqlalchemy import select, and_, or_, desc, func, case
+from sqlalchemy import select, and_, or_, desc, func, case, inspect
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_engine
 
@@ -1171,11 +1171,14 @@ class PersonalizedTrainingService:
     def _extract_simulation_evaluation(c: TrainingCompletionStatus) -> Optional[Any]:
         if not c:
             return None
-        if hasattr(c, "evaluation") and c.evaluation is not None:
-            return c.evaluation
         if isinstance(c, dict):
             return c.get("evaluation") or c.get("result_json")
-        return None
+        insp = inspect(c, raiseerr=False)
+        if insp is not None:
+            if "evaluation" in insp.dict:
+                return insp.dict["evaluation"]
+            return None
+        return getattr(c, "evaluation", None) or getattr(c, "result_json", None)
 
     @staticmethod
     def _match_objective(obj_item: dict, obj_evals: List[dict], obj_type: str = None) -> Optional[dict]:
@@ -2347,18 +2350,28 @@ class PersonalizedTrainingService:
         else:
             status_val = "pending"
 
-        # Resolve recording_url if available
-        recording_url = None
-        call_sess = getattr(c, "call_session", None)
+        # Resolve recording_url if available without triggering implicit async lazy loading
+        def _get_loaded_rel(obj: Any, attr: str) -> Any:
+            if obj is None:
+                return None
+            if isinstance(obj, dict):
+                return obj.get(attr)
+            insp = inspect(obj, raiseerr=False)
+            if insp is not None:
+                return insp.dict.get(attr)
+            return getattr(obj, attr, None)
+
+        call_sess = _get_loaded_rel(c, "call_session")
         if not call_sess and evaluation is not None:
-            call_sess = getattr(evaluation, "session", None)
+            call_sess = _get_loaded_rel(evaluation, "session")
 
-        session_id_val = get_val(c, "call_session_id") or (getattr(call_sess, "session_id", None) if call_sess else None)
-        evaluation_id_val = get_val(c, "evaluation_id") or (getattr(evaluation, "evaluation_id", None) if evaluation else None)
+        session_id_val = get_val(c, "call_session_id") or get_val(evaluation, "session_id") or (_get_loaded_rel(call_sess, "session_id") if call_sess else None)
+        evaluation_id_val = get_val(c, "evaluation_id") or get_val(evaluation, "evaluation_id")
 
+        recording_url = None
         has_recording = False
         if call_sess is not None:
-            has_recording = bool(getattr(call_sess, "recording_url", None))
+            has_recording = bool(_get_loaded_rel(call_sess, "recording_url"))
         elif get_val(c, "recording_url"):
             has_recording = True
         elif status_val == "completed" and (session_id_val is not None or evaluation_id_val is not None):
@@ -2875,7 +2888,9 @@ class PersonalizedTrainingService:
 
             # Fetch completion statuses eagerly loading evaluation, prompt, call_session, and report details
             from sqlalchemy.orm import selectinload
+            from app.models.personalized_training import TrainingCallEvaluation
             stmt_comp = select(TrainingCompletionStatus).options(
+                selectinload(TrainingCompletionStatus.evaluation).selectinload(TrainingCallEvaluation.session),
                 selectinload(TrainingCompletionStatus.evaluation),
                 selectinload(TrainingCompletionStatus.prompt),
                 selectinload(TrainingCompletionStatus.call_session),
@@ -2911,7 +2926,9 @@ class PersonalizedTrainingService:
             prompts_h = list(res_prompts_h.scalars().all())
 
             from sqlalchemy.orm import selectinload
+            from app.models.personalized_training import TrainingCallEvaluation
             stmt_comp_h = select(TrainingCompletionStatus).options(
+                selectinload(TrainingCompletionStatus.evaluation).selectinload(TrainingCallEvaluation.session),
                 selectinload(TrainingCompletionStatus.evaluation),
                 selectinload(TrainingCompletionStatus.prompt),
                 selectinload(TrainingCompletionStatus.call_session),
@@ -3769,7 +3786,9 @@ class PersonalizedTrainingService:
 
         # Fetch completion statuses eagerly loading evaluation, prompt, call_session, and report details
         from sqlalchemy.orm import selectinload
+        from app.models.personalized_training import TrainingCallEvaluation
         stmt_comp = select(TrainingCompletionStatus).options(
+            selectinload(TrainingCompletionStatus.evaluation).selectinload(TrainingCallEvaluation.session),
             selectinload(TrainingCompletionStatus.evaluation),
             selectinload(TrainingCompletionStatus.prompt),
             selectinload(TrainingCompletionStatus.call_session),
@@ -6027,6 +6046,19 @@ async def _evaluate_training_session_task_impl(session_id: int):
         if session.status == "evaluated":
             logger.info("Session %d already evaluated. Skipping.", session_id)
             return
+
+        if session.status == "failed":
+            logger.warning("Session %d is already in failed status (%s). Skipping evaluation.", session_id, session.error_message)
+            return
+
+        from app.models.personalized_training import TrainingCallEvaluation
+        stmt_eval_check = select(TrainingCallEvaluation.evaluation_id).where(
+            TrainingCallEvaluation.session_id == session_id
+        ).limit(1)
+        res_eval_check = await db.execute(stmt_eval_check)
+        if res_eval_check.scalar():
+            logger.info("Session %d already has an evaluation recorded in DB. Skipping evaluation.", session_id)
+            return
             
         # Fetch completion status early so we can restore it on failures
         stmt_comp = select(TrainingCompletionStatus).where(
@@ -6037,16 +6069,38 @@ async def _evaluate_training_session_task_impl(session_id: int):
         )
         res_comp = await db.execute(stmt_comp)
         comp = res_comp.scalars().first()
+
+        def _safe_reset_comp(comp_obj: Optional[TrainingCompletionStatus], reason_msg: str):
+            if not comp_obj:
+                return
+            if comp_obj.status == "completed" or comp_obj.evaluation_id is not None:
+                logger.warning(
+                    "Preserving completed slot (completion_id=%s, evaluation_id=%s, status=%s) "
+                    "despite failed/invalid session %d (%s).",
+                    comp_obj.completion_id, comp_obj.evaluation_id, comp_obj.status, session_id, reason_msg
+                )
+            elif comp_obj.call_session_id is not None and comp_obj.call_session_id != session_id:
+                logger.warning(
+                    "Preserving slot belonging to another session (completion_id=%s, call_session_id=%s != %d) "
+                    "despite failed/invalid session (%s).",
+                    comp_obj.completion_id, comp_obj.call_session_id, session_id, reason_msg
+                )
+            else:
+                comp_obj.status = "pending"
+                comp_obj.completed_at = None
+                comp_obj.evaluation_id = None
+                comp_obj.call_session_id = None
+                logger.info(
+                    "Resetting completion progress to pending for session %d (completion_id=%s, reason=%s)",
+                    session_id, comp_obj.completion_id, reason_msg
+                )
             
         recording_url = session.recording_url
         if not recording_url:
             logger.error("Call Session ID %d has no recording_url.", session_id)
             session.status = "failed"
             session.error_message = "No recording URL provided."
-            if comp:
-                comp.status = "pending"
-                comp.completed_at = None
-                comp.evaluation_id = None
+            _safe_reset_comp(comp, "No recording URL provided")
             await db.commit()
             return
 
@@ -6104,10 +6158,7 @@ async def _evaluate_training_session_task_impl(session_id: int):
             logger.error("No active service found in database to evaluate session %d.", session_id)
             session.status = "failed"
             session.error_message = "No active service found to resolve evaluation prompt."
-            if comp:
-                comp.status = "pending"
-                comp.completed_at = None
-                comp.evaluation_id = None
+            _safe_reset_comp(comp, "No active service found")
             await db.commit()
             return
 
@@ -6189,10 +6240,7 @@ async def _evaluate_training_session_task_impl(session_id: int):
             logger.exception("Failed to download recording audio for session %d: %s", session_id, e)
             session.status = "failed"
             session.error_message = f"Audio download failed: {str(e)}"
-            if comp:
-                comp.status = "pending"
-                comp.completed_at = None
-                comp.evaluation_id = None
+            _safe_reset_comp(comp, f"Audio download failed: {str(e)}")
             await db.commit()
             return
             
@@ -6226,10 +6274,7 @@ async def _evaluate_training_session_task_impl(session_id: int):
             logger.exception("Azure OpenAI analysis failed for session %d: %s", session_id, e)
             session.status = "failed"
             session.error_message = f"Azure OpenAI analysis failed: {str(e)}"
-            if comp:
-                comp.status = "pending"
-                comp.completed_at = None
-                comp.evaluation_id = None
+            _safe_reset_comp(comp, f"Azure OpenAI analysis failed: {str(e)}")
             await db.commit()
             return
             
@@ -6284,10 +6329,7 @@ async def _evaluate_training_session_task_impl(session_id: int):
             logger.error("Failed to parse JSON response from Azure OpenAI for session %d after retry: %s", session_id, raw_response[:300])
             session.status = "failed"
             session.error_message = "OpenAI response was not valid JSON."
-            if comp:
-                comp.status = "pending"
-                comp.completed_at = None
-                comp.evaluation_id = None
+            _safe_reset_comp(comp, "OpenAI response was not valid JSON")
             await db.commit()
             return
 
@@ -6508,16 +6550,18 @@ async def _evaluate_training_session_task_impl(session_id: int):
                 comp.status = "completed"
                 comp.completed_at = datetime.now(timezone.utc)
                 comp.evaluation_id = eval_id
-            logger.info("Successfully evaluated session %d (valid roleplay). Saved evaluation ID: %d", session_id, eval_id)
+                comp.call_session_id = session.session_id
+                comp.training_call_id = session.call_sid
+            logger.info(
+                "Successfully evaluated session %d (valid roleplay). Saved evaluation ID: %d, cycle_id=%d, completion_id=%s",
+                session_id, eval_id, cycle_id, comp.completion_id if comp else None
+            )
         else:
             session.status = "failed"
             session.error_message = "El análisis determinó que el juego de rol no fue válido o se cortó prematuramente."
             session.evaluation_completed_at = datetime.now(timezone.utc)
-            if comp:
-                comp.status = "pending"
-                comp.completed_at = None
-                comp.evaluation_id = None
-            logger.info("Successfully evaluated session %d but marked as invalid/incomplete. Resetting completion to pending.", session_id)
+            _safe_reset_comp(comp, "Roleplay marked as invalid/incomplete by evaluation")
+            logger.info("Evaluated session %d but marked as invalid/incomplete.", session_id)
             
         await db.commit()
         
