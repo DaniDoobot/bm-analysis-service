@@ -16,7 +16,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # 1. Create table bm_prompt_snapshots
+    # 1. Create table bm_prompt_snapshots (UniqueConstraint automatically creates required index)
     op.create_table(
         'bm_prompt_snapshots',
         sa.Column('id', sa.BigInteger(), primary_key=True, autoincrement=True),
@@ -25,7 +25,6 @@ def upgrade() -> None:
         sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.UniqueConstraint('hash_sha256', name='uq_bm_prompt_snapshots_hash'),
     )
-    op.create_index('idx_bm_prompt_snapshots_hash', 'bm_prompt_snapshots', ['hash_sha256'])
 
     # 2. Add nullable prompt_snapshot_id to bm_mass_evaluation_results
     op.add_column(
@@ -46,7 +45,15 @@ def upgrade() -> None:
         ondelete='SET NULL'
     )
 
-    # 3. Batch backfill using PostgreSQL native SHA256 aggregation
+    # 3. Ensure legacy prompt_snapshot column allows NULL for new deduplicated evaluations
+    op.alter_column(
+        'bm_mass_evaluation_results',
+        'prompt_snapshot',
+        existing_type=sa.Text(),
+        nullable=True
+    )
+
+    # 4. Batch backfill using PostgreSQL native SHA256 aggregation
     conn = op.get_bind()
     dialect = conn.dialect.name
     if dialect == 'postgresql':
@@ -74,8 +81,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.alter_column(
+        'bm_mass_evaluation_results',
+        'prompt_snapshot',
+        existing_type=sa.Text(),
+        nullable=False
+    )
     op.drop_constraint('fk_bm_mass_eval_res_prompt_snapshot', 'bm_mass_evaluation_results', type_='foreignkey')
     op.drop_index('idx_bm_mass_eval_res_prompt_snapshot_id', table_name='bm_mass_evaluation_results')
     op.drop_column('bm_mass_evaluation_results', 'prompt_snapshot_id')
-    op.drop_index('idx_bm_prompt_snapshots_hash', table_name='bm_prompt_snapshots')
     op.drop_table('bm_prompt_snapshots')

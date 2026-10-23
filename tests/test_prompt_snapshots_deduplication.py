@@ -434,3 +434,81 @@ class TestPromptSnapshotsDeduplication(unittest.IsolatedAsyncioTestCase):
             # Verifying resolved text on the historical result
             resolved = await resolve_prompt_snapshot_text(db, r)
             self.assertEqual(resolved, historical_prompt)
+
+    async def test_11_new_evaluation_stored_with_null_legacy_and_valid_snapshot_id(self):
+        """Verify that new evaluations can be saved with prompt_snapshot=NULL and prompt_snapshot_id IS NOT NULL."""
+        prompt_content = "Prompt clínico para evaluación nueva deduplicada"
+        async with AsyncSession(self.engine, expire_on_commit=False) as db:
+            snap_id = await get_or_create_prompt_snapshot(db, prompt_content)
+
+            # Persist evaluation result directly with prompt_snapshot=None and prompt_snapshot_id
+            new_res = MassEvaluationResult(
+                run_id=1,
+                job_id=1,
+                call_id="call_null_legacy_check",
+                prompt_id=1,
+                status="completed",
+                prompt_snapshot_id=snap_id,
+                _prompt_snapshot=None,
+            )
+            db.add(new_res)
+            await db.commit()
+
+            # Verify in DB via raw SQL that prompt_snapshot is literally NULL in the table
+            row = (await db.execute(
+                text("SELECT prompt_snapshot, prompt_snapshot_id FROM bm_mass_evaluation_results WHERE call_id = 'call_null_legacy_check'")
+            )).first()
+            self.assertIsNone(row[0])
+            self.assertEqual(row[1], snap_id)
+
+            # Verify that ORM property transparently resolves to full prompt_text when loaded with snapshot
+            loaded = await MassEvaluationService.get_result(db, new_res.mass_analysis_id)
+            self.assertEqual(loaded.prompt_snapshot, prompt_content)
+
+            # Also verify via resolve_prompt_snapshot_text fallback service
+            plain_loaded = await db.get(MassEvaluationResult, new_res.mass_analysis_id)
+            resolved = await resolve_prompt_snapshot_text(db, plain_loaded)
+            self.assertEqual(resolved, prompt_content)
+
+    async def test_12_no_redundant_index_on_hash_sha256_and_nullable_model(self):
+        """Verify model has no redundant index on hash_sha256 and legacy column is nullable."""
+        # 1. No redundant index on PromptSnapshot table
+        index_names = [idx.name for idx in PromptSnapshot.__table__.indexes]
+        self.assertNotIn("idx_bm_prompt_snapshots_hash", index_names)
+        self.assertEqual(len(PromptSnapshot.__table__.indexes), 0)
+
+        # Unique constraint is present
+        constraint_names = [c.name for c in PromptSnapshot.__table__.constraints]
+        self.assertIn("uq_bm_prompt_snapshots_hash", constraint_names)
+
+        # 2. Nullable legacy column
+        self.assertTrue(MassEvaluationResult._prompt_snapshot.nullable)
+
+    async def test_13_historical_rows_keep_legacy_prompt_snapshot_intact(self):
+        """Verify that historical rows retain prompt_snapshot text when linked to a snapshot."""
+        historical_text = "Prompt histórico original que no debe borrarse"
+        async with AsyncSession(self.engine, expire_on_commit=False) as db:
+            # Create a legacy record
+            legacy_res = MassEvaluationResult(
+                run_id=1,
+                job_id=1,
+                call_id="call_historical_intact_check",
+                prompt_id=1,
+                status="completed",
+                _prompt_snapshot=historical_text,
+                prompt_snapshot_id=None,
+            )
+            db.add(legacy_res)
+            await db.commit()
+
+            # Backfill linkage
+            snap_id = await get_or_create_prompt_snapshot(db, historical_text)
+            legacy_res.prompt_snapshot_id = snap_id
+            await db.commit()
+
+            # Verify via raw SQL that prompt_snapshot is STILL preserved verbatim in the legacy column!
+            row = (await db.execute(
+                text("SELECT prompt_snapshot, prompt_snapshot_id FROM bm_mass_evaluation_results WHERE call_id = 'call_historical_intact_check'")
+            )).first()
+            self.assertEqual(row[0], historical_text)
+            self.assertEqual(row[1], snap_id)

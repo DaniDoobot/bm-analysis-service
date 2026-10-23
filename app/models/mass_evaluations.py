@@ -27,7 +27,7 @@ class PromptSnapshot(Base):
     __tablename__ = "bm_prompt_snapshots"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    hash_sha256: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    hash_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     prompt_text: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=func.now(), server_default=func.now(), nullable=False
@@ -35,7 +35,6 @@ class PromptSnapshot(Base):
 
     __table_args__ = (
         UniqueConstraint("hash_sha256", name="uq_bm_prompt_snapshots_hash"),
-        Index("idx_bm_prompt_snapshots_hash", "hash_sha256"),
     )
 
 
