@@ -3,7 +3,7 @@ from app.models.analyses import Analysis, AnalysisResult, CallAnalysisCurrent, A
 from app.models.criteria import PromptCriterion, PromptCriterionTypology, CriteriaSyncLog
 from app.models.drafts import PromptDraft
 from app.models.prompts import Prompt, PromptVersion, PromptBaseStructure, StructurePermission, StructurePermissionAudit, BaseStructureTypology
-from app.models.mass_evaluations import MassEvaluationJob, MassEvaluationRun, MassEvaluationResult, MassEvaluationCriterionResult
+from app.models.mass_evaluations import MassEvaluationJob, MassEvaluationRun, MassEvaluationResult, MassEvaluationCriterionResult, PromptSnapshot
 from app.models.services import Service
 from app.models.typologies import Typology
 from app.models.users import User, UserAudit, PasswordResetToken
@@ -60,6 +60,7 @@ __all__ = [
     "MassEvaluationRun",
     "MassEvaluationResult",
     "MassEvaluationCriterionResult",
+    "PromptSnapshot",
     "Service",
     "Typology",
     "User",
@@ -87,6 +88,3 @@ __all__ = [
     "AIUsageEvent",
     "AIModelPricing",
 ]
-
-
-

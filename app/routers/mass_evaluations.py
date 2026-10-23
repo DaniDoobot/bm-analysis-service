@@ -923,7 +923,10 @@ async def get_my_analysis_results(
         items_out = []
         for r in results:
             if include_detail:
-                if "prompt_snapshot" not in r.__dict__:
+                if not r.prompt_snapshot and r.prompt_snapshot_id:
+                    from app.services.prompt_snapshot_service import resolve_prompt_snapshot_text
+                    r.__dict__["prompt_snapshot"] = await resolve_prompt_snapshot_text(db, r)
+                elif "prompt_snapshot" not in r.__dict__:
                     r.__dict__["prompt_snapshot"] = "{}"
                 d = MassEvaluationResultResponse.model_validate(r)
                 d.hubspot_metadata = sanitize_hubspot_metadata(d.hubspot_metadata)
@@ -1206,7 +1209,10 @@ async def list_results(
     response_mode = "list_full" if include_detail else "list_light"
     for r in results:
         if include_detail:
-            if "prompt_snapshot" not in r.__dict__:
+            if not r.prompt_snapshot and r.prompt_snapshot_id:
+                from app.services.prompt_snapshot_service import resolve_prompt_snapshot_text
+                r.__dict__["prompt_snapshot"] = await resolve_prompt_snapshot_text(db, r)
+            elif "prompt_snapshot" not in r.__dict__:
                 r.__dict__["prompt_snapshot"] = "{}"
             d = MassEvaluationResultResponse.model_validate(r)
             d.hubspot_metadata = sanitize_hubspot_metadata(d.hubspot_metadata)
@@ -1346,7 +1352,12 @@ async def get_result(
     from app.utils.visual_formatters import build_items_visual
     result = await verify_mass_result_read_scope(db, mass_analysis_id=mass_analysis_id, context=context)
 
+    from app.services.prompt_snapshot_service import resolve_prompt_snapshot_text
+    prompt_text = await resolve_prompt_snapshot_text(db, result)
+    result.__dict__["prompt_snapshot"] = prompt_text
+
     d = MassEvaluationResultResponse.model_validate(result)
+    d.prompt_snapshot = prompt_text
     d.items_visual = build_items_visual(result.items_json)
     if d.execution_source is None:
         d.execution_source = "on_demand"

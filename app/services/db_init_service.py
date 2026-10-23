@@ -427,6 +427,7 @@ async def init_db():
                         ("idx_bm_mass_eval_res_status", "bm_mass_evaluation_results", ["status"], None),
                         ("idx_bm_mass_eval_res_typo_dir", "bm_mass_evaluation_results", ["typology_key", "direction", "status"], None),
                         ("idx_bm_mass_eval_res_comp_serv_status_ts", "bm_mass_evaluation_results", ["company_id", "service_id", "status", "call_timestamp"], None),
+                        ("idx_bm_mass_eval_res_prompt_snapshot_id", "bm_mass_evaluation_results", ["prompt_snapshot_id"], None),
 
                         ("idx_bm_mass_eval_crit_mass_id_key", "bm_mass_evaluation_criterion_results", ["mass_analysis_id", "criterion_key", "numeric_value"], None),
                         ("idx_bm_mass_eval_crit_service_key", "bm_mass_evaluation_criterion_results", ["service_id", "criterion_key", "numeric_value"], None),
@@ -553,6 +554,7 @@ async def init_db():
                 ("typology_key", "TEXT"),
                 ("typology_name", "TEXT"),
                 ("evaluacion_global", "NUMERIC(5, 2)"),
+                ("prompt_snapshot_id", "BIGINT"),
             ]:
                 if not await check_column_exists_safely(conn, "bm_mass_evaluation_results", col_name):
                     logger.info("Adding column '%s' to 'bm_mass_evaluation_results' table...", col_name)

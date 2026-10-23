@@ -514,7 +514,8 @@ class MassEvaluationResultResponse(BaseModel):
     prompt_name: str | None
     prompt_version_name: str | None
     prompt_version_label: str | None
-    prompt_snapshot: str
+    prompt_snapshot: str | None = ""
+    prompt_snapshot_id: int | None = None
     
     # Service and typology snapshot
     company_id: int | None = None
@@ -754,6 +755,7 @@ class MassEvaluationResultListItemResponse(BaseModel):
     prompt_name: str | None
     prompt_version_name: str | None = None
     prompt_version_label: str | None = None
+    prompt_snapshot_id: int | None = None
     
     # Service and typology snapshot
     company_id: int | None = None

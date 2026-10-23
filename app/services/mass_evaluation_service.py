@@ -1276,6 +1276,10 @@ class MassEvaluationService:
                 prompt_snapshot = v.prompt
                 prompt_version_id = v.id
 
+                # Resolve deduplicated prompt snapshot ID
+                from app.services.prompt_snapshot_service import get_or_create_prompt_snapshot
+                prompt_snapshot_id = await get_or_create_prompt_snapshot(db, prompt_snapshot)
+
                 # Self-heal/Sync prompt snapshot with active criteria (parity with Laboratorio)
                 if prompt_id and prompt_snapshot:
                     try:
@@ -1293,6 +1297,7 @@ class MassEvaluationService:
                                 db.add(v_obj)
                                 await db.commit()
                                 logger.info("Self-healed prompt version ID %s in mass evaluation pipeline.", prompt_version_id)
+                            prompt_snapshot_id = await get_or_create_prompt_snapshot(db, prompt_snapshot)
                     except Exception as ex_sync:
                         logger.warning("Error during prompt self-healing in mass evaluation pipeline: %s", ex_sync)
 
@@ -1692,7 +1697,8 @@ class MassEvaluationService:
                                 "prompt_name": prompt_name,
                                 "prompt_version_name": prompt_version_name,
                                 "prompt_version_label": prompt_version_label,
-                                "prompt_snapshot": prompt_snapshot,
+                                "prompt_snapshot_id": prompt_snapshot_id,
+                                "prompt_snapshot": None,
                                 "status": "skipped",
                                 "is_evaluable": None,
                                 "non_evaluable_reason": None,
@@ -1944,7 +1950,8 @@ class MassEvaluationService:
                                 "prompt_name": prompt_name,
                                 "prompt_version_name": prompt_version_name,
                                 "prompt_version_label": prompt_version_label,
-                                "prompt_snapshot": prompt_snapshot,
+                                "prompt_snapshot_id": prompt_snapshot_id,
+                                "prompt_snapshot": None,
                                 "status": "completed",
                                 "is_evaluable": is_eval,
                                 "non_evaluable_reason": non_eval_reason if is_eval is False else None,
@@ -2047,7 +2054,8 @@ class MassEvaluationService:
                                 "prompt_name": prompt_name,
                                 "prompt_version_name": prompt_version_name,
                                 "prompt_version_label": prompt_version_label,
-                                "prompt_snapshot": prompt_snapshot,
+                                "prompt_snapshot_id": prompt_snapshot_id,
+                                "prompt_snapshot": None,
                                 "status": "failed",
                                 "is_evaluable": None,
                                 "non_evaluable_reason": None,
@@ -2602,7 +2610,12 @@ class MassEvaluationService:
 
     @staticmethod
     async def get_result(db: AsyncSession, mass_analysis_id: int) -> MassEvaluationResult | None:
-        stmt = select(MassEvaluationResult).where(MassEvaluationResult.mass_analysis_id == mass_analysis_id)
+        from sqlalchemy.orm import joinedload
+        stmt = (
+            select(MassEvaluationResult)
+            .options(joinedload(MassEvaluationResult.snapshot_rel))
+            .where(MassEvaluationResult.mass_analysis_id == mass_analysis_id)
+        )
         res = await db.execute(stmt)
         return res.scalars().first()
 
@@ -3273,6 +3286,11 @@ class MassEvaluationService:
         If found, clears its child criteria results, updates the record's fields (audit-aware),
         and returns it. Otherwise, creates and returns a new record.
         """
+        # Automatic content-addressed deduplication if raw prompt text is passed without snapshot_id
+        if ("prompt_snapshot_id" not in defaults or defaults["prompt_snapshot_id"] is None) and defaults.get("prompt_snapshot"):
+            from app.services.prompt_snapshot_service import get_or_create_prompt_snapshot
+            defaults["prompt_snapshot_id"] = await get_or_create_prompt_snapshot(db, defaults["prompt_snapshot"])
+            defaults["prompt_snapshot"] = None
         from app.models.mass_evaluations import MassEvaluationCriterionResult
         
         from sqlalchemy import case

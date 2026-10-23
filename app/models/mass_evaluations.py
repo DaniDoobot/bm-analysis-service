@@ -18,9 +18,25 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, synonym
 
 from app.db import Base
+
+
+class PromptSnapshot(Base):
+    __tablename__ = "bm_prompt_snapshots"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    hash_sha256: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    prompt_text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("hash_sha256", name="uq_bm_prompt_snapshots_hash"),
+        Index("idx_bm_prompt_snapshots_hash", "hash_sha256"),
+    )
 
 
 class MassEvaluationJob(Base):
@@ -175,7 +191,25 @@ class MassEvaluationResult(Base):
     prompt_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     prompt_version_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     prompt_version_label: Mapped[str | None] = mapped_column(Text, nullable=True)
-    prompt_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    _prompt_snapshot: Mapped[str | None] = mapped_column("prompt_snapshot", Text, nullable=True)
+    prompt_snapshot_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("bm_prompt_snapshots.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+    snapshot_rel: Mapped[PromptSnapshot | None] = relationship("PromptSnapshot", foreign_keys=[prompt_snapshot_id], lazy="noload")
+
+    def _get_prompt_snapshot(self) -> str:
+        if "snapshot_rel" in self.__dict__ and self.snapshot_rel is not None:
+            if self.snapshot_rel.prompt_text:
+                return self.snapshot_rel.prompt_text
+        if "_prompt_snapshot" in self.__dict__ and self._prompt_snapshot:
+            return self._prompt_snapshot
+        return ""
+
+    def _set_prompt_snapshot(self, value: str | None):
+        self._prompt_snapshot = value
+
+    prompt_snapshot = synonym("_prompt_snapshot", descriptor=property(_get_prompt_snapshot, _set_prompt_snapshot))
 
     # Service and typology snapshot
     service_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -248,6 +282,7 @@ class MassEvaluationResult(Base):
         UniqueConstraint("run_id", "call_id", name="uq_mass_eval_run_call"),
         UniqueConstraint("call_id", name="uq_mass_eval_call_id"),
         Index("idx_mass_eval_results_run_id", "run_id"),
+        Index("idx_bm_mass_eval_res_prompt_snapshot_id", "prompt_snapshot_id"),
         Index("idx_mass_eval_results_job_id", "job_id"),
         Index("idx_mass_eval_results_call_id", "call_id"),
         Index("idx_mass_eval_results_hubspot_owner_id", "hubspot_owner_id"),
