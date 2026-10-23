@@ -253,6 +253,12 @@ class AutomationConflictError(ValueError):
     pass
 
 
+DEFAULT_HUBSPOT_TIPO_REM_STANDARD = "General Call Center"
+DEFAULT_HUBSPOT_TIPO_REM_NO_SOLICITADO = "Pre 1ª Visita"
+DEFAULT_HUBSPOT_SUBTIPO_REM_NO_SOLICITADO = "Llamada saliente no deseada"
+DEFAULT_HUBSPOT_PROPERTY_SUBTIPO = "subtipo"
+
+
 class MassEvaluationService:
     _running_tasks: set[asyncio.Task] = set()
 
@@ -2009,6 +2015,7 @@ class MassEvaluationService:
                         # Check if Alarm was detected
                         has_alarm, alarma_feed = MassEvaluationService._is_alarm_detected(items)
                         resumen_llamada = MassEvaluationService._extract_call_summary(items)
+                        paciente_no_solicito_info = MassEvaluationService._is_paciente_no_solicito_informacion(items, clean_result)
                         if has_alarm:
                             logger.info(
                                 "[alarm_detected] ALARM_DETECTED: mass_analysis_id=%s, call_id=%s, run_id=%s, job_id=%s, execution_source=%s, company_id=%s, service_id=%s, is_evaluable=%s, has_alarm=True",
@@ -2149,6 +2156,7 @@ class MassEvaluationService:
                                     resumen_llamada=resumen_llamada,
                                     service_id=service_id,
                                     is_demo=run_is_demo,
+                                    paciente_no_solicito_informacion=paciente_no_solicito_info,
                                 )
                             except Exception as e_alarm_outer:
                                 logger.error("[alarm_ticket] Unexpected error executing alarm ticket process: %s", e_alarm_outer)
@@ -2644,6 +2652,51 @@ class MassEvaluationService:
         return False, None
 
     @staticmethod
+    def _is_paciente_no_solicito_informacion(
+        items: list[dict[str, Any]] | None,
+        result_json: dict[str, Any] | None = None,
+    ) -> bool:
+        """
+        Check if the evaluation structured output flags that the patient explicitly
+        stated they did not request information / did not solicit contact.
+
+        Checks criterion_key/output_key in:
+          - 'paciente_no_solicito_informacion'
+          - 'no_solicito_informacion'
+          - 'paciente_no_pidio_informacion'
+
+        Returns True if boolean_value or value is True (or truthy string 'si', 'sí', 'true', '1').
+        Returns False otherwise (including absent, None, false, or legacy evaluations).
+        """
+        target_keys = (
+            "paciente_no_solicito_informacion",
+            "no_solicito_informacion",
+            "paciente_no_pidio_informacion",
+        )
+        if items and isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                crit_key = str(item.get("criterion_key") or item.get("output_key") or "").strip().lower()
+                if crit_key in target_keys:
+                    bool_val = item.get("boolean_value")
+                    val = item.get("value")
+                    raw = item.get("raw_value")
+                    is_true = bool_val is True or val is True or (
+                        isinstance(raw, str) and raw.strip().lower() in ("si", "sí", "true", "1")
+                    )
+                    if is_true:
+                        return True
+
+        if result_json and isinstance(result_json, dict):
+            for k in target_keys:
+                v = result_json.get(k)
+                if v is True or (isinstance(v, str) and v.strip().lower() in ("si", "sí", "true", "1")):
+                    return True
+
+        return False
+
+    @staticmethod
     def _extract_call_summary(items: list[dict[str, Any]] | None) -> str | None:
         """
         Extract the 'Resumen llamada' text from evaluated items.
@@ -2683,6 +2736,7 @@ class MassEvaluationService:
         resumen_llamada: str | None = None,
         service_id: int | None = None,
         is_demo: bool | None = None,
+        paciente_no_solicito_informacion: bool | None = None,
     ) -> None:
         """
         Idempotent, non-blocking creation of HubSpot REM Ticket upon Alarm detection.
@@ -3001,13 +3055,43 @@ class MassEvaluationService:
                 f"{feed_text}"
             )
 
-            properties = {
-                "subject": subject,
-                "content": content,
-                "tipo_de_rem": tipo_de_rem,
-                "hs_pipeline": pipeline,
-                "hs_pipeline_stage": stage,
-            }
+            # Resolve effective paciente_no_solicito_informacion:
+            # 1) Provided argument `paciente_no_solicito_informacion`
+            # 2) Fallback to persisted `rec_items_json` / `rec_result_json`
+            if paciente_no_solicito_informacion is None:
+                effective_no_info = MassEvaluationService._is_paciente_no_solicito_informacion(rec_items_json, rec_result_json)
+            else:
+                effective_no_info = bool(paciente_no_solicito_informacion)
+
+            if effective_no_info:
+                tipo_rem_val = (
+                    getattr(settings, "hubspot_tipo_de_rem_no_solicitado", DEFAULT_HUBSPOT_TIPO_REM_NO_SOLICITADO)
+                    or DEFAULT_HUBSPOT_TIPO_REM_NO_SOLICITADO
+                )
+                subtipo_prop = (
+                    getattr(settings, "hubspot_property_subtipo", DEFAULT_HUBSPOT_PROPERTY_SUBTIPO)
+                    or DEFAULT_HUBSPOT_PROPERTY_SUBTIPO
+                )
+                subtipo_val = (
+                    getattr(settings, "hubspot_subtipo_de_rem_no_solicitado", DEFAULT_HUBSPOT_SUBTIPO_REM_NO_SOLICITADO)
+                    or DEFAULT_HUBSPOT_SUBTIPO_REM_NO_SOLICITADO
+                )
+                properties = {
+                    "subject": subject,
+                    "content": content,
+                    "tipo_de_rem": tipo_rem_val,
+                    subtipo_prop: subtipo_val,
+                    "hs_pipeline": pipeline,
+                    "hs_pipeline_stage": stage,
+                }
+            else:
+                properties = {
+                    "subject": subject,
+                    "content": content,
+                    "tipo_de_rem": tipo_de_rem,
+                    "hs_pipeline": pipeline,
+                    "hs_pipeline_stage": stage,
+                }
 
             # 7. Check if Ticket already exists in HubSpot (reconciliation / crash-safety)
             existing_ticket = None
@@ -3224,6 +3308,7 @@ class MassEvaluationService:
                     logger.info("[alarm_recovery] ALARM_RECOVERY_CLAIMED: mass_analysis_id=%s, call_id=%s, previous_status=%s", mid, cid, prev_status)
 
                     resumen_llamada = MassEvaluationService._extract_call_summary(row.items_json)
+                    paciente_no_info = MassEvaluationService._is_paciente_no_solicito_informacion(row.items_json, row.result_json)
 
                     # 3. Reconcile / Process ticket
                     await MassEvaluationService._process_alarm_hubspot_ticket(
@@ -3244,6 +3329,7 @@ class MassEvaluationService:
                         resumen_llamada=resumen_llamada,
                         service_id=row.service_id,
                         is_demo=company_demo_cache.get(comp_id),
+                        paciente_no_solicito_informacion=paciente_no_info,
                     )
 
                     # Check final outcome in DB

@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     hubspot_ticket_pipeline: str = ""
     hubspot_ticket_stage: str = ""
     hubspot_tipo_de_rem: str = ""
+    hubspot_tipo_de_rem_no_solicitado: str = "Pre 1ª Visita"
+    hubspot_subtipo_de_rem_no_solicitado: str = "Llamada saliente no deseada"
+    hubspot_property_subtipo: str = "subtipo"
     hubspot_alarm_tickets_enabled: bool = False
     hubspot_alarm_company_id: int = 1
 

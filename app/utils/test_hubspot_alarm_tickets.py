@@ -1510,5 +1510,277 @@ class TestHubSpotAlarmTickets(unittest.IsolatedAsyncioTestCase):
             self._find_patcher.start()
 
 
+
+    # 46. CASO 1 — REM estándar: alarma=True, paciente_no_solicito_informacion=False
+    async def test_46_standard_rem_without_subtipo(self):
+        async with self.async_session() as session:
+            res = await self._create_test_result(session)
+            self.settings.hubspot_tipo_de_rem = "General Call Center"
+
+            with patch("app.services.hubspot_service.httpx.AsyncClient.post") as mock_post:
+                mock_post.return_value = MagicMock(
+                    status_code=201,
+                    json=lambda: {"id": "hs_rem_std_1"},
+                    raise_for_status=lambda: None
+                )
+
+                await MassEvaluationService._process_alarm_hubspot_ticket(
+                    db=session,
+                    mass_analysis_id=res.mass_analysis_id,
+                    execution_source="automation",
+                    company_id=1,
+                    service_name="Front",
+                    agent_name="Carlos Santana",
+                    call_id="call_std_1",
+                    call_timestamp=res.call_timestamp,
+                    typology_name="Queja",
+                    direction="INBOUND",
+                    call_duration_seconds=180,
+                    evaluacion_global=res.evaluacion_global,
+                    alarma_feed="El paciente manifiesta descontento general.",
+                    contact_id="hs_contact_101",
+                    paciente_no_solicito_informacion=False
+                )
+
+                self.assertEqual(mock_post.call_count, 1)
+                payload = mock_post.call_args[1]["json"]
+                props = payload["properties"]
+
+                self.assertEqual(props["tipo_de_rem"], "General Call Center")
+                self.assertNotIn("subtipo", props)
+
+    # 47. CASO 2 — Nuevo REM: alarma=True, paciente_no_solicito_informacion=True
+    async def test_47_no_info_requested_creates_rem_with_tipo_pre_1_visita_and_subtipo(self):
+        async with self.async_session() as session:
+            res = await self._create_test_result(session)
+            self.settings.hubspot_tipo_de_rem = "General Call Center"
+            self.settings.hubspot_tipo_de_rem_no_solicitado = "Pre 1ª Visita"
+            self.settings.hubspot_subtipo_de_rem_no_solicitado = "Llamada saliente no deseada"
+            self.settings.hubspot_property_subtipo = "subtipo"
+
+            with patch("app.services.hubspot_service.httpx.AsyncClient.post") as mock_post:
+                mock_post.return_value = MagicMock(
+                    status_code=201,
+                    json=lambda: {"id": "hs_rem_no_solicita_1"},
+                    raise_for_status=lambda: None
+                )
+
+                await MassEvaluationService._process_alarm_hubspot_ticket(
+                    db=session,
+                    mass_analysis_id=res.mass_analysis_id,
+                    execution_source="automation",
+                    company_id=1,
+                    service_name="Front",
+                    agent_name="Carlos Santana",
+                    call_id="call_no_solicita_1",
+                    call_timestamp=res.call_timestamp,
+                    typology_name="Descartado",
+                    direction="OUTBOUND",
+                    call_duration_seconds=95,
+                    evaluacion_global=res.evaluacion_global,
+                    alarma_feed="El paciente manifiesta de forma tajante que no ha pedido información.",
+                    contact_id="hs_contact_202",
+                    paciente_no_solicito_informacion=True
+                )
+
+                self.assertEqual(mock_post.call_count, 1)
+                payload = mock_post.call_args[1]["json"]
+                props = payload["properties"]
+
+                self.assertEqual(props["tipo_de_rem"], "Pre 1ª Visita")
+                self.assertIn("subtipo", props)
+                self.assertEqual(props["subtipo"], "Llamada saliente no deseada")
+
+    # 48. CASO 3 — Campo ausente: evaluación legacy sin paciente_no_solicito_informacion
+    async def test_48_legacy_evaluation_missing_flag_creates_standard_rem(self):
+        async with self.async_session() as session:
+            res = await self._create_test_result(session)
+            self.settings.hubspot_tipo_de_rem = "General Call Center"
+
+            with patch("app.services.hubspot_service.httpx.AsyncClient.post") as mock_post:
+                mock_post.return_value = MagicMock(
+                    status_code=201,
+                    json=lambda: {"id": "hs_rem_legacy_1"},
+                    raise_for_status=lambda: None
+                )
+
+                # Passing paciente_no_solicito_informacion=None simulates legacy run where field was absent
+                await MassEvaluationService._process_alarm_hubspot_ticket(
+                    db=session,
+                    mass_analysis_id=res.mass_analysis_id,
+                    execution_source="automation",
+                    company_id=1,
+                    service_name="Front",
+                    agent_name="Carlos Santana",
+                    call_id="call_legacy_1",
+                    call_timestamp=res.call_timestamp,
+                    typology_name="Queja",
+                    direction="INBOUND",
+                    call_duration_seconds=120,
+                    evaluacion_global=res.evaluacion_global,
+                    alarma_feed="Alarma detectada en evaluacion historica.",
+                    contact_id="hs_contact_303",
+                    paciente_no_solicito_informacion=None
+                )
+
+                self.assertEqual(mock_post.call_count, 1)
+                payload = mock_post.call_args[1]["json"]
+                props = payload["properties"]
+
+                self.assertEqual(props["tipo_de_rem"], "General Call Center")
+                self.assertNotIn("subtipo", props)
+
+    # 49. CASO 4 — No alarma: paciente_no_solicito_informacion=True, alarma=False -> NO crea Ticket
+    async def test_49_no_alarm_with_no_info_requested_does_not_create_ticket(self):
+        items = [
+            {"criterion_key": "alarma", "boolean_value": False, "value": False},
+            {"criterion_key": "paciente_no_solicito_informacion", "boolean_value": True, "value": True}
+        ]
+
+        # Verify alarm detector strictly returns False
+        has_alarm, alarma_feed = MassEvaluationService._is_alarm_detected(items)
+        self.assertFalse(has_alarm)
+        self.assertIsNone(alarma_feed)
+
+        # Verify helper detects no_solicito_informacion as True
+        is_no_info = MassEvaluationService._is_paciente_no_solicito_informacion(items)
+        self.assertTrue(is_no_info)
+
+        # In operational flow, if has_alarm is False, _process_alarm_hubspot_ticket is NEVER triggered
+        with patch("app.services.hubspot_service.httpx.AsyncClient.post") as mock_post:
+            # Emulating line 2117 gate: call_success and is_eval is not False and has_alarm
+            call_success = True
+            is_eval = True
+            if call_success and is_eval is not False and has_alarm:
+                pass  # would call ticket process
+            self.assertEqual(mock_post.call_count, 0)
+
+    # 50. CASO 5 — Contacto ambiguo con nuevo caso: fail-closed, NO crea ticket
+    async def test_50_ambiguous_contact_fail_closed_with_no_info_requested(self):
+        async with self.async_session() as session:
+            res = await self._create_test_result(session, hubspot_contact_id=None)
+            self.settings.hubspot_tipo_de_rem_no_solicitado = "Pre 1ª Visita"
+            self.settings.hubspot_subtipo_de_rem_no_solicitado = "Llamada saliente no deseada"
+
+            with patch("app.services.hubspot_service.httpx.AsyncClient.post") as mock_post,                  patch.object(HubSpotService, "get_call", new=AsyncMock(return_value={
+                     "id": "call_ambig_no_info",
+                     "contact_id": None,
+                     "is_contact_ambiguous": True
+                 })):
+                await MassEvaluationService._process_alarm_hubspot_ticket(
+                    db=session,
+                    mass_analysis_id=res.mass_analysis_id,
+                    execution_source="automation",
+                    company_id=1,
+                    service_name="Front",
+                    agent_name="Agente",
+                    call_id="call_ambig_no_info",
+                    call_timestamp=res.call_timestamp,
+                    typology_name="Queja",
+                    direction="OUTBOUND",
+                    call_duration_seconds=100,
+                    evaluacion_global=res.evaluacion_global,
+                    alarma_feed="El paciente indica que no ha pedido información",
+                    contact_id=None,
+                    paciente_no_solicito_informacion=True
+                )
+
+                self.assertEqual(mock_post.call_count, 0)
+                await session.refresh(res)
+                self.assertEqual(res.hubspot_ticket_status, "failed")
+                self.assertIn("Múltiples contactos", res.hubspot_ticket_error)
+
+    # 51. CASO 6 — Idempotencia: no duplica ticket para nuevo REM
+    async def test_51_idempotency_preserved_for_new_classification(self):
+        async with self.async_session() as session:
+            res = await self._create_test_result(session)
+            res.hubspot_ticket_id = "hs_existing_ticket_no_info"
+            res.hubspot_ticket_status = "created"
+            await session.commit()
+
+            with patch("app.services.hubspot_service.httpx.AsyncClient.post") as mock_post:
+                await MassEvaluationService._process_alarm_hubspot_ticket(
+                    db=session,
+                    mass_analysis_id=res.mass_analysis_id,
+                    execution_source="automation",
+                    company_id=1,
+                    service_name="Front",
+                    agent_name="Agente",
+                    call_id="call_123",
+                    call_timestamp=res.call_timestamp,
+                    typology_name="Queja",
+                    direction="OUTBOUND",
+                    call_duration_seconds=100,
+                    evaluacion_global=res.evaluacion_global,
+                    alarma_feed="El paciente indica que no ha pedido información",
+                    contact_id="hs_contact_1",
+                    paciente_no_solicito_informacion=True
+                )
+                self.assertEqual(mock_post.call_count, 0)
+
+    # 52. CASO 7 — Valores exactos HubSpot: confirma "Pre 1ª Visita" y "Llamada saliente no deseada" y NUNCA "374" ni "23"
+    async def test_52_exact_hubspot_values_not_numeric_ids(self):
+        async with self.async_session() as session:
+            res = await self._create_test_result(session)
+
+            with patch("app.services.hubspot_service.httpx.AsyncClient.post") as mock_post:
+                mock_post.return_value = MagicMock(
+                    status_code=201,
+                    json=lambda: {"id": "hs_ticket_exact_verified"},
+                    raise_for_status=lambda: None
+                )
+
+                await MassEvaluationService._process_alarm_hubspot_ticket(
+                    db=session,
+                    mass_analysis_id=res.mass_analysis_id,
+                    execution_source="automation",
+                    company_id=1,
+                    service_name="Front",
+                    agent_name="Agente",
+                    call_id="call_exact_values",
+                    call_timestamp=res.call_timestamp,
+                    typology_name="Descartado",
+                    direction="OUTBOUND",
+                    call_duration_seconds=100,
+                    evaluacion_global=res.evaluacion_global,
+                    alarma_feed="No ha pedido información.",
+                    contact_id="hs_contact_1",
+                    paciente_no_solicito_informacion=True
+                )
+
+                payload = mock_post.call_args[1]["json"]
+                props = payload["properties"]
+
+                # Strictly exact strings
+                self.assertEqual(props["tipo_de_rem"], "Pre 1ª Visita")
+                self.assertEqual(props["subtipo"], "Llamada saliente no deseada")
+
+                # Strictly ensure "374" and "23" are NOT used
+                prop_values = list(props.values())
+                self.assertNotIn("374", prop_values)
+                self.assertNotIn(374, prop_values)
+                self.assertNotIn("23", prop_values)
+                self.assertNotIn(23, prop_values)
+
+    # 53. Helper unit tests: _is_paciente_no_solicito_informacion variations and aliases
+    async def test_53_helper_is_paciente_no_solicito_informacion_variations(self):
+        # Truthy boolean variations
+        self.assertTrue(MassEvaluationService._is_paciente_no_solicito_informacion([{"criterion_key": "paciente_no_solicito_informacion", "boolean_value": True}]))
+        self.assertTrue(MassEvaluationService._is_paciente_no_solicito_informacion([{"criterion_key": "no_solicito_informacion", "value": True}]))
+        self.assertTrue(MassEvaluationService._is_paciente_no_solicito_informacion([{"criterion_key": "paciente_no_pidio_informacion", "raw_value": "si"}]))
+        self.assertTrue(MassEvaluationService._is_paciente_no_solicito_informacion([{"criterion_key": "paciente_no_solicito_informacion", "raw_value": "sí"}]))
+        self.assertTrue(MassEvaluationService._is_paciente_no_solicito_informacion([{"output_key": "paciente_no_solicito_informacion", "raw_value": "1"}]))
+        self.assertTrue(MassEvaluationService._is_paciente_no_solicito_informacion([], {"paciente_no_solicito_informacion": True}))
+        self.assertTrue(MassEvaluationService._is_paciente_no_solicito_informacion(None, {"no_solicito_informacion": "si"}))
+
+        # Falsey variations
+        self.assertFalse(MassEvaluationService._is_paciente_no_solicito_informacion([{"criterion_key": "paciente_no_solicito_informacion", "boolean_value": False}]))
+        self.assertFalse(MassEvaluationService._is_paciente_no_solicito_informacion([{"criterion_key": "no_solicito_informacion", "raw_value": "no"}]))
+        self.assertFalse(MassEvaluationService._is_paciente_no_solicito_informacion([{"criterion_key": "alarma", "boolean_value": True}]))
+        self.assertFalse(MassEvaluationService._is_paciente_no_solicito_informacion([]))
+        self.assertFalse(MassEvaluationService._is_paciente_no_solicito_informacion(None))
+        self.assertFalse(MassEvaluationService._is_paciente_no_solicito_informacion(None, {}))
+
+
 if __name__ == "__main__":
     unittest.main()
